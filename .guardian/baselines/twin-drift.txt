@@ -1,17 +1,3 @@
 # guardian-snapshot v3
-twin-drift|buildNetClassOverrides|src/drc_session.zig|buildNetClassOverrides|src/wasm_drc.zig
-twin-drift|buildPadLites|src/drc_session.zig|padBoxes|src/placement/drc.zig
-twin-drift|buildPads|src/drc_session.zig|buildPads|src/wasm_drc.zig
-twin-drift|buildParts|src/drc_session.zig|buildParts|src/wasm_drc.zig
-twin-drift|claimDisc|src/placement/lane_reserve.zig|disc|src/placement/rf_shadow.zig
-twin-drift|claimDisc|src/placement/lane_reserve.zig|reserveDisc|src/placement/router.zig
-twin-drift|disc|src/placement/rf_shadow.zig|keepDisc|src/placement/router.zig
-twin-drift|disc|src/placement/rf_shadow.zig|reserveDisc|src/placement/router.zig
-twin-drift|findDive|src/placement/dive_elide.zig|findHop|src/placement/route_cleanup.zig
-twin-drift|keepoutPads|src/placement/drc.zig|padPts|src/placement/router.zig
-twin-drift|parseBoard|src/drc_session.zig|buildBoard|src/wasm_drc.zig
-twin-drift|passBoard|src/placement/dive_elide.zig|dropRedundantViaPairs|src/placement/route_cleanup.zig
 twin-drift|stripUpper|src/placement/module_policy.zig|normalizeIdent|src/placement/pin_roles.zig
-twin-drift|topologyTerminals|src/placement/drc.zig|topologyTerminals|src/placement/route_cleanup.zig
-twin-drift|walk|src/placement/dive_elide.zig|walk|src/placement/route_cleanup.zig
 twin-drift|writeJsonString|src/serve/assembly_debug.zig|writeJsonString|src/serve/route_review.zig

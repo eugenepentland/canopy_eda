@@ -21,6 +21,8 @@ const geometry = @import("geometry.zig");
 const keepout = @import("keepout.zig");
 const land_transit = @import("land_transit.zig");
 const net_identity = @import("net_identity.zig");
+const pad_project = @import("pad_project.zig");
+const pad_world = @import("pad_world.zig");
 const pad_shape = @import("pad_shape.zig");
 const pad_neck = @import("pad_neck.zig");
 const plane_stitch = @import("plane_stitch.zig");
@@ -848,17 +850,6 @@ fn successfulPortFrameBend(routed: router.RouteResult, bend: router.SharpBend) b
     return false;
 }
 
-fn topologyTerminals(arena: std.mem.Allocator, pads: []const PadBox, identity: net_identity.Identity) std.mem.Allocator.Error![]const copper_topology.Terminal {
-    const out = try arena.alloc(copper_topology.Terminal, pads.len);
-    for (pads, out) |pad, *terminal| terminal.* = .{
-        .shape = .{ .x0 = pad.x0, .y0 = pad.y0, .x1 = pad.x1, .y1 = pad.y1, .poly = pad.poly },
-        .net = identity.canonical(pad.net),
-        .layer = pad.layer,
-        .thru = pad.thru,
-    };
-    return out;
-}
-
 fn topologyTracks(arena: std.mem.Allocator, tracks: []const router.Track, identity: net_identity.Identity) std.mem.Allocator.Error![]const copper_topology.Track {
     const out = try arena.alloc(copper_topology.Track, tracks.len);
     for (tracks, out) |track, *topology| topology.* = .{
@@ -919,7 +910,7 @@ fn checkCopperTopology(
     const vias = routed.vias;
     const identity = try net_identity.Identity.init(arena, placement);
     const track_identities = try topologyTrackIdentities(arena, routed, tracks);
-    const terminals = try topologyTerminals(arena, pads, identity);
+    const terminals = try pad_project.topologyTerminals(arena, pads, identity);
     const topology_tracks = try topologyTracks(arena, tracks, identity);
     const topology_vias = try topologyVias(arena, vias, identity);
     const implicit = try copper_topology.implicitJoins(arena, topology_tracks);
@@ -1091,27 +1082,16 @@ fn sharpBendRecorded(recorded: []const router.SharpBend, measured: router.SharpB
 }
 
 /// Project the already-joined pad list into the exact pad geometry and escape
-/// terminals `drc_keepout` needs. Empty when no net declares a keepout, so a
-/// board without one pays no allocation.
+/// terminals `drc_keepout` needs (`pad_project`, the one projection the router
+/// and the client session read the same rule through). Empty when no net
+/// declares a keepout, so a board without one pays no allocation.
 fn keepoutPads(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
     pads: []const PadBox,
 ) std.mem.Allocator.Error![]const keepout.PadPt {
     if (!keepout.anyDeclared(placement)) return &.{};
-    const out = try arena.alloc(keepout.PadPt, pads.len);
-    for (pads, out) |p, *o| o.* = .{
-        .net = p.net,
-        .x = (p.x0 + p.x1) / 2,
-        .y = (p.y0 + p.y1) / 2,
-        .guard = if (!p.npth and p.net >= 0) .{
-            .bounds = .{ p.x0, p.y0, p.x1, p.y1 },
-            .poly = p.poly,
-            .layer = p.layer,
-            .thru = p.thru,
-        } else null,
-    };
-    return out;
+    return pad_project.keepoutPts(arena, pads);
 }
 
 // ── Pairwise copper-clearance checks (grid-culled) ───────────────────────────
@@ -2331,69 +2311,33 @@ fn pointBox(x: f64, y: f64) [4]f64 {
     return .{ x, y, x, y };
 }
 
-/// One (pin-name → net-index) entry in a ref-des's pin list.
-const PinNet = struct { pin: []const u8, net: i32 };
-
-/// The net a pad lands on: the last matching pin in `list` (last-wins, mirroring
-/// the old map's overwrite), or -1 (no net).
-fn lookupNet(list: []const PinNet, pin: []const u8) i32 {
-    var net: i32 = -1;
-    for (list) |e| {
-        if (std.mem.eql(u8, e.pin, pin)) net = e.net;
-    }
-    return net;
-}
-
-/// The world pad-rect list (rotation-aware) with net + part index. The pad→net
-/// join keys on the ref-des slice directly (per-ref pin list) — ZERO formatted
-/// allocations per check call.
+/// The world pad-rect list (rotation-aware) with net + part index, projected
+/// out of the shared `pad_world` pass — the same world copper, net join and
+/// slot bore the client probe session reads, so a probe cannot disagree with
+/// the checker about where a pad is.
 fn padBoxes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error![]PadBox {
-    var by_ref: std.StringHashMapUnmanaged(std.ArrayList(PinNet)) = .empty;
-    for (placement.nets, 0..) |net, ni| {
-        for (net.pins) |pin| {
-            const gop = try by_ref.getOrPut(arena, pin.ref_des);
-            if (!gop.found_existing) gop.value_ptr.* = .empty;
-            try gop.value_ptr.append(arena, .{ .pin = pin.pin, .net = @intCast(ni) });
-        }
-    }
-    var list: std.ArrayList(PadBox) = .empty;
-    for (placement.parts, 0..) |part, pi| {
-        const layer: u8 = if (part.side == .bottom) 1 else 0;
-        const pins: []const PinNet = if (by_ref.get(part.ref_des)) |l| l.items else &.{};
-        for (part.pads) |pad| {
-            const sh = try pad_shape.worldShape(arena, part, pad);
-            const net = lookupNet(pins, pad.number);
-            const c = optimizer.worldPadCenter(&part, pad.x, pad.y);
-            // World half-vector to a slot's arc centres (0 for a round bore).
-            var shx: f64 = 0;
-            var shy: f64 = 0;
-            if (pad.isSlot()) {
-                const e1 = optimizer.worldPadCenter(&part, pad.x + pad.slot_half[0], pad.y + pad.slot_half[1]);
-                shx = e1[0] - c[0];
-                shy = e1[1] - c[1];
-            }
-            try list.append(arena, .{
-                .x0 = sh.x0,
-                .y0 = sh.y0,
-                .x1 = sh.x1,
-                .y1 = sh.y1,
-                .poly = sh.poly,
-                .net = net,
-                .part = pi,
-                .num = pad.number,
-                .layer = layer,
-                .thru = pad.thru,
-                .npth = pad.npth,
-                .drill_oval = pad.isSlot(),
-                .drill = pad.drill,
-                .hx = c[0],
-                .hy = c[1],
-                .shx = shx,
-                .shy = shy,
-            });
-        }
-    }
-    return list.toOwnedSlice(arena);
+    const world = try pad_world.build(arena, placement);
+    const out = try arena.alloc(PadBox, world.len);
+    for (world, out) |w, *box| box.* = .{
+        .x0 = w.shape.x0,
+        .y0 = w.shape.y0,
+        .x1 = w.shape.x1,
+        .y1 = w.shape.y1,
+        .poly = w.shape.poly,
+        .net = w.net,
+        .part = w.part,
+        .num = w.pad.number,
+        .layer = w.layer,
+        .thru = w.pad.thru,
+        .npth = w.pad.npth,
+        .drill_oval = w.pad.isSlot(),
+        .drill = w.pad.drill,
+        .hx = w.bore.x,
+        .hy = w.bore.y,
+        .shx = w.bore.shx,
+        .shy = w.bore.shy,
+    };
+    return out;
 }
 
 /// Every drilled hole (pads + vias with drill>0) unified into one arena list.

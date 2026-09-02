@@ -7,371 +7,35 @@
 //! per-pair distance tests reproduce `placement/drc.zig`'s routing-class checks
 //! byte-for-byte (same pub `pad_shape` / `outline` geometry the engine uses).
 //! It is a SEPARATE file because `drc.zig` is at its file-size cap with its
-//! helpers private, and the pub-api gate forbids a shared cross-file seam — so
-//! the board parser is duplicated (mirroring `wasm_drc.zig`'s schema) and each
-//! file stays self-contained and under the file-size cap. `wasm_drc.zig` and
-//! `main.zig` `@import` this module (wasm exports emitted, native tests run).
+//! helpers private, so the probe geometry lives here rather than there.
+//! `wasm_drc.zig` and `main.zig` `@import` this module (wasm exports emitted,
+//! native tests run).
+//!
+//! The board payload is NOT parsed here. This module's header used to claim the
+//! parser had to be duplicated from `wasm_drc.zig` because "the pub-api gate
+//! forbids a shared cross-file seam" — a misreading: that snapshot is a
+//! reviewed accept, not a prohibition. The copy then drifted, and this session
+//! ran the mid-drag gate with no RF keepout rule and no net-class identity for
+//! two months. Both bridges now read `drc_board_json.zig`, which carries every
+//! field the blob defines; the session asks it for owned strings
+//! (`copy_strings`) because it outlives the buffer its JSON arrived in.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
 const optimizer = @import("placement/optimizer.zig");
 const router = @import("placement/router.zig");
-const geometry = @import("placement/geometry.zig");
 const outline = @import("placement/outline.zig");
 const pad_shape = @import("placement/pad_shape.zig");
+const keepout = @import("placement/keepout.zig");
 const drc = @import("placement/drc.zig");
+const pad_world = @import("placement/pad_world.zig");
+const pad_project = @import("placement/pad_project.zig");
+const drc_board_json = @import("drc_board_json.zig");
 const board_layers = @import("board_layers.zig");
 const numeric = @import("numeric.zig");
-const export_kicad = @import("export_kicad.zig");
 
-const FlatNet = export_kicad.FlatNet;
-const FlatPin = export_kicad.FlatPin;
-
-// ── Board-state JSON parser ──────────────────────────────────────────────────
-// Mirrors wasm_drc.zig's parser (same schema) — duplicated because the pub-api
-// gate forbids a shared cross-file seam. Produces a Placement + RouteResult +
-// base clearance, which the grids build from and the tests feed to `drc.check`.
-
-fn clearanceVal(o: std.json.ObjectMap) ?std.json.Value {
-    return o.get("clearance");
-}
-fn numOr(v: ?std.json.Value, dflt: f64) f64 {
-    const val = v orelse return dflt;
-    if (val == .integer) return @floatFromInt(val.integer);
-    if (val == .float) return val.float;
-    if (val == .number_string) return std.fmt.parseFloat(f64, val.number_string) catch dflt;
-    return dflt;
-}
-fn jNum(v: ?std.json.Value) f64 {
-    return numOr(v, 0);
-}
-fn jStr(v: ?std.json.Value) []const u8 {
-    const val = v orelse return "";
-    return if (val == .string) val.string else "";
-}
-fn jFlag(v: ?std.json.Value) bool {
-    const val = v orelse return false;
-    return val == .bool and val.bool;
-}
-fn objOf(v: ?std.json.Value) ?std.json.ObjectMap {
-    const val = v orelse return null;
-    return if (val == .object) val.object else null;
-}
-fn arrOf(v: ?std.json.Value) ?std.json.Array {
-    const val = v orelse return null;
-    return if (val == .array) val.array else null;
-}
-/// A JSON `l` field → signal-layer index, clamped at the SHARED sidecar
-/// ceiling so this parser, `wasm_drc.zig`'s and the sidecar's own all fold a
-/// corrupt index onto the same layer.
-fn layerOf(v: ?std.json.Value) u8 {
-    const n = jNum(v);
-    if (!(n >= 1)) return 0;
-    if (n >= board_layers.max_sidecar_layer) return board_layers.max_sidecar_layer;
-    return numeric.checkedInt(u8, @floor(n)) orelse 0;
-}
-
-/// Interns net names to dense indices (first-appearance order) + groups pads.
-const NetTable = struct {
-    names: std.ArrayList([]const u8) = .empty,
-    index_of: std.StringHashMapUnmanaged(u32) = .empty,
-    pins: std.ArrayList(std.ArrayList(FlatPin)) = .empty,
-
-    fn intern(self: *NetTable, arena: std.mem.Allocator, name: []const u8) !u32 {
-        if (self.index_of.get(name)) |i| return i;
-        const i: u32 = @intCast(self.names.items.len);
-        try self.names.append(arena, name);
-        try self.pins.append(arena, .empty);
-        try self.index_of.put(arena, name, i);
-        return i;
-    }
-
-    fn addPin(self: *NetTable, arena: std.mem.Allocator, name: []const u8, ref: []const u8, pin: []const u8) !void {
-        if (name.len == 0) return;
-        const i = try self.intern(arena, name);
-        try self.pins.items[i].append(arena, .{ .ref_des = ref, .pin = pin });
-    }
-
-    fn featureNet(self: *NetTable, arena: std.mem.Allocator, name: []const u8) !i32 {
-        if (name.len == 0) return -1;
-        return @intCast(try self.intern(arena, name));
-    }
-
-    fn flatNets(self: *NetTable, arena: std.mem.Allocator) ![]const FlatNet {
-        const out = try arena.alloc(FlatNet, self.names.items.len);
-        for (out, 0..) |*net, i| {
-            net.* = .{ .name = self.names.items[i], .pins = try self.pins.items[i].toOwnedSlice(arena) };
-        }
-        return out;
-    }
-};
-
-fn buildPoly(arena: std.mem.Allocator, v: ?std.json.Value) ![]const [2]f64 {
-    const arr = arrOf(v) orelse return &.{};
-    var list: std.ArrayList([2]f64) = .empty;
-    for (arr.items) |it| {
-        const pair = arrOf(it) orelse continue;
-        if (pair.items.len < 2) continue;
-        try list.append(arena, .{ jNum(pair.items[0]), jNum(pair.items[1]) });
-    }
-    return list.toOwnedSlice(arena);
-}
-
-/// A pad's oval-slot half-vector: `[a,b]`→`{a,b}`, a number→`{n,0}`, else `{0,0}`.
-fn buildSlotHalf(v: ?std.json.Value) [2]f64 {
-    if (arrOf(v)) |a| return .{
-        if (a.items.len > 0) jNum(a.items[0]) else 0,
-        if (a.items.len > 1) jNum(a.items[1]) else 0,
-    };
-    return .{ jNum(v), 0 };
-}
-
-/// One part's `pads` → `geometry.Pad[]`, binding each `ref|pin` to its net. Silk
-/// / roundrect-ratio are dropped: probes ignore them and they cancel in the oracle.
-fn buildPads(arena: std.mem.Allocator, v: ?std.json.Value, ref: []const u8, nettab: *NetTable) ![]const geometry.Pad {
-    var list: std.ArrayList(geometry.Pad) = .empty;
-    const arr = arrOf(v) orelse return &.{};
-    for (arr.items) |it| {
-        const o = objOf(it) orelse continue;
-        const num = jStr(o.get("num"));
-        try nettab.addPin(arena, jStr(o.get("net")), ref, num);
-        try list.append(arena, .{
-            .number = num,
-            .x = jNum(o.get("x")),
-            .y = jNum(o.get("y")),
-            .w = jNum(o.get("w")),
-            .h = jNum(o.get("h")),
-            .poly = try buildPoly(arena, o.get("poly")),
-            .thru = jFlag(o.get("thru")),
-            .npth = jFlag(o.get("npth")),
-            .drill = jNum(o.get("drill")),
-            .slot_half = buildSlotHalf(o.get("slot_half")),
-            .rot = jNum(o.get("rot")),
-        });
-    }
-    return list.toOwnedSlice(arena);
-}
-
-/// The `parts` array → `optimizer.Part[]` (silk omitted — see `buildPads`).
-fn buildParts(arena: std.mem.Allocator, v: ?std.json.Value, nettab: *NetTable) ![]optimizer.Part {
-    var list: std.ArrayList(optimizer.Part) = .empty;
-    const arr = arrOf(v) orelse return &.{};
-    for (arr.items) |it| {
-        const o = objOf(it) orelse continue;
-        const ref = jStr(o.get("ref"));
-        try list.append(arena, .{
-            .ref_des = ref,
-            .kind = if (std.mem.eql(u8, jStr(o.get("kind")), "hub")) .hub else .passive,
-            .hw = jNum(o.get("hw")),
-            .hh = jNum(o.get("hh")),
-            .ccx = jNum(o.get("ccx")),
-            .ccy = jNum(o.get("ccy")),
-            .pads = try buildPads(arena, o.get("pads"), ref, nettab),
-            .fallback = false,
-            .x = jNum(o.get("x")),
-            .y = jNum(o.get("y")),
-            .rot = jNum(o.get("rot")),
-            .side = if (std.mem.eql(u8, jStr(o.get("side")), "bottom")) .bottom else .top,
-        });
-    }
-    return list.toOwnedSlice(arena);
-}
-
-fn buildTracks(arena: std.mem.Allocator, v: ?std.json.Value, nettab: *NetTable) ![]const router.Track {
-    var list: std.ArrayList(router.Track) = .empty;
-    const arr = arrOf(v) orelse return &.{};
-    for (arr.items) |it| {
-        const o = objOf(it) orelse continue;
-        try list.append(arena, .{
-            .x1 = jNum(o.get("x1")),
-            .y1 = jNum(o.get("y1")),
-            .x2 = jNum(o.get("x2")),
-            .y2 = jNum(o.get("y2")),
-            .layer = layerOf(o.get("l")),
-            .width = jNum(o.get("w")),
-            .net = try nettab.featureNet(arena, jStr(o.get("net"))),
-        });
-    }
-    return list.toOwnedSlice(arena);
-}
-
-fn buildVias(arena: std.mem.Allocator, v: ?std.json.Value, nettab: *NetTable) ![]const router.Via {
-    var list: std.ArrayList(router.Via) = .empty;
-    const arr = arrOf(v) orelse return &.{};
-    for (arr.items) |it| {
-        const o = objOf(it) orelse continue;
-        try list.append(arena, .{
-            .x = jNum(o.get("x")),
-            .y = jNum(o.get("y")),
-            .dia = jNum(o.get("d")),
-            .drill = jNum(o.get("drill")),
-            .net = try nettab.featureNet(arena, jStr(o.get("net"))),
-        });
-    }
-    return list.toOwnedSlice(arena);
-}
-
-/// The `rules` object → `optimizer.DesignRules` (absent keys keep defaults).
-///
-/// Shared with `wasm_drc.zig`, which roots this module into the same
-/// `drc.wasm` binary and used to carry a byte-identical copy of this function.
-/// Both bridges read the SAME blob written by one server emitter, so two
-/// readers of it could only ever drift apart — and the pair is the whole
-/// reason the design-rule wire keys want a single home. The rest of each
-/// bridge's board parser stays deliberately private and duplicated (see this
-/// module's header); it is only the rules object, whose key list is the thing
-/// that drifts, that is single-sourced here.
-///
-/// `rules.clearance` is the design's own base clearance — `edgeClearance()`
-/// falls back to it, and it can differ from the top-level `clearance` key
-/// (which mirrors the blob's `clr` and may carry a `?clearance=` override).
-///
-/// Every key the blob carries that `DesignRules` owns is mapped, INCLUDING the
-/// five `drc.check` does not consult today — `pour_clearance`,
-/// `pour.clearance_outer`, `mask.relief_corner_radius`, `pour.min_width`,
-/// `pour.corner_radius`. Their
-/// only readers are the pour solver and the Gerber / mask-relief writers
-/// (`placement/pour.zig`, `export_gerber.zig`, `placement/mask_relief.zig`),
-/// none of which `drc.zig` imports; the checker's board-edge rule is
-/// `edgeClearance()`, which falls back to `clearance` — not the pour's
-/// `pourEdge()`, whose only callers are that same solver and writer. They are
-/// mapped anyway because an unmapped key does not read as ABSENT: it reads as
-/// the compile-time default, a DIFFERENT number (`pour_clearance` defaults to
-/// 0.3), so the struct would quietly misstate a board authoring
-/// `(design-rules (pour-clearance 0.15))` the moment anything consulted it.
-/// Mapping the wire is this function's whole job; which fields a given check
-/// happens to read is not — and cannot be, since one struct serves two bridges.
-///
-/// Nor is a key with no checker consumer dead weight on the wire. The same
-/// object is read by `assets/pcb_board.js`, which paints mask relief with
-/// `mask_relief_corner_radius`, and by `assets/pcb_settings.js`, whose rules
-/// table shows every scalar here as the board's EFFECTIVE value beside the
-/// authored one. It is not the checker's private input, so nothing in it
-/// should be trimmed down to what the checker reads.
-pub fn buildDesignRules(v: ?std.json.Value) optimizer.DesignRules {
-    var r: optimizer.DesignRules = .{};
-    const o = objOf(v) orelse return r;
-    r.clearance = numOr(clearanceVal(o), r.clearance);
-    r.min_drill = numOr(o.get("min_drill"), r.min_drill);
-    r.min_annular = numOr(o.get("min_annular"), r.min_annular);
-    r.hole_to_hole = numOr(o.get("hole_to_hole"), r.hole_to_hole);
-    r.via_to_via = numOr(o.get("via_to_via"), r.via_to_via);
-    r.mask.margin = numOr(o.get("mask_margin"), r.mask.margin);
-    r.mask.web = numOr(o.get("mask_web"), r.mask.web);
-    r.mask.relief_corner_radius = numOr(o.get("mask_relief_corner_radius"), r.mask.relief_corner_radius);
-    r.min_width = numOr(o.get("min_width"), r.min_width);
-    r.pour_clearance = numOr(o.get("pour_clearance"), r.pour_clearance);
-    r.pour.clearance_outer = numOr(o.get("pour_clearance_outer"), r.pour.clearance_outer);
-    r.pour.min_width = numOr(o.get("pour_min_width"), r.pour.min_width);
-    r.pour.corner_radius = numOr(o.get("pour_corner_radius"), r.pour.corner_radius);
-    r.pour.ground_via_max = numOr(o.get("ground_via_max"), r.pour.ground_via_max);
-    r.edge.copper = numOr(o.get("copper_edge"), r.edge.copper);
-    r.edge.component = numOr(o.get("component_edge"), r.edge.component);
-    return r;
-}
-
-const NetClassOverride = struct { idx: u32, rule: optimizer.NetRule };
-fn buildNetClassOverrides(arena: std.mem.Allocator, v: ?std.json.Value, nettab: *NetTable) ![]const NetClassOverride {
-    var list: std.ArrayList(NetClassOverride) = .empty;
-    const arr = arrOf(v) orelse return &.{};
-    for (arr.items) |it| {
-        const o = objOf(it) orelse continue;
-        const name = jStr(o.get("net"));
-        if (name.len == 0) continue;
-        try list.append(arena, .{ .idx = try nettab.intern(arena, name), .rule = .{
-            .width = jNum(o.get("width")),
-            .clearance = jNum(clearanceVal(o)),
-            .via_dia = jNum(o.get("via_dia")),
-            .via_drill = jNum(o.get("via_drill")),
-            .pad_neck = .{
-                .width = jNum(o.get("pad_neck_width")),
-                .max_length = jNum(o.get("pad_neck_max_length")),
-                .taper_length = jNum(o.get("pad_neck_taper_length")),
-            },
-            .rf = .{
-                .max_freq_hz = jNum(o.get("max_freq_hz")),
-                .impedance = .{
-                    .ohms = jNum(o.get("impedance_ohms")),
-                    .diff_ohms = jNum(o.get("diff_impedance_ohms")),
-                },
-            },
-        } });
-    }
-    return list.toOwnedSlice(arena);
-}
-
-/// The index-aligned `NetRule[]` (length `n`) from the collected overrides.
-fn buildNetRules(arena: std.mem.Allocator, overrides: []const NetClassOverride, n: usize) ![]const optimizer.NetRule {
-    if (overrides.len == 0) return &.{};
-    const rules = try arena.alloc(optimizer.NetRule, n);
-    for (rules) |*r| r.* = .{};
-    for (overrides) |ov| if (ov.idx < n) {
-        rules[ov.idx] = ov.rule;
-    };
-    return rules;
-}
-
-fn buildBoardRect(v: ?std.json.Value) ?optimizer.BoardRect {
-    const o = objOf(v) orelse return null;
-    const w = jNum(o.get("w"));
-    const h = jNum(o.get("h"));
-    if (!(w > 0) or !(h > 0)) return null;
-    return .{ .minx = jNum(o.get("x")), .miny = jNum(o.get("y")), .w = w, .h = h };
-}
-
-const Board = struct { placement: optimizer.Placement, routed: router.RouteResult, clearance: f64 };
-
-/// Parse board-state JSON into a `Board`. Strings are copied into `arena`
-/// (`alloc_always`) so the session never references the input buffer, surviving
-/// interleaved `wasm_alloc` / `drc_check` calls that reset the shared input arena.
-fn parseBoard(arena: std.mem.Allocator, input: []const u8) !Board {
-    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, input, .{ .allocate = .alloc_always });
-    const obj = objOf(root) orelse return error.InputNotObject;
-
-    var nettab: NetTable = .{};
-    const parts = try buildParts(arena, obj.get("parts"), &nettab);
-    const tracks = try buildTracks(arena, obj.get("tracks"), &nettab);
-    const vias = try buildVias(arena, obj.get("vias"), &nettab);
-    const overrides = try buildNetClassOverrides(arena, obj.get("netclasses"), &nettab);
-    const nets = try nettab.flatNets(arena);
-    const netrules = try buildNetRules(arena, overrides, nets.len);
-    const design = buildDesignRules(obj.get("rules"));
-
-    const board_poly = blk: {
-        const pts = try buildPoly(arena, obj.get("board_poly"));
-        break :blk if (pts.len >= 3) pts else null;
-    };
-    var board_rect = buildBoardRect(obj.get("board"));
-    if (board_rect == null) {
-        if (board_poly) |p| board_rect = outline.bboxRect(p);
-    }
-
-    const placement = optimizer.Placement{
-        .parts = parts,
-        .links = &.{},
-        .loops = &.{},
-        .stubs = &.{},
-        .instances = &.{},
-        .nets = nets,
-        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
-        .minx = 0,
-        .miny = 0,
-        .maxx = 0,
-        .maxy = 0,
-        .generated = true,
-        .board_rect = board_rect,
-        .board_poly = board_poly,
-        .rules = .{ .net = netrules, .design = design },
-    };
-    const body_clearance = jNum(clearanceVal(obj));
-    const clearance = if (body_clearance > 0) body_clearance else design.clearance;
-    return .{
-        .placement = placement,
-        .routed = .{ .tracks = tracks, .vias = vias, .routed = 0, .total = 0 },
-        .clearance = clearance,
-    };
-}
+const Board = drc_board_json.Board;
 
 // ── Session model ────────────────────────────────────────────────────────────
 const eps_p: f64 = 1e-6;
@@ -402,60 +66,38 @@ const PadLite = struct {
 /// A drilled hole (drilled pad or via): world centre + diameter + slot half-vector.
 const Hole = struct { x: f64, y: f64, drill: f64, shx: f64 = 0, shy: f64 = 0 };
 
-const PinNet = struct { pin: []const u8, net: i32 };
-
-/// The net a pad lands on: the last matching pin in `list` (last-wins), or -1.
-fn lookupNet(list: []const PinNet, pin: []const u8) i32 {
-    var net: i32 = -1;
-    for (list) |e| {
-        if (std.mem.eql(u8, e.pin, pin)) net = e.net;
-    }
-    return net;
-}
-
-/// Rebuild the world pad list (net + layer + hole), mirroring drc.zig's private
-/// `padBoxes` from the same pub geometry (engine-identical boxes).
+// twin-drift-ok: the shared half IS lifted — both this and `drc.padBoxes` get
+// their world copper, net join and slot bore from one `pad_world.build` call,
+// and neither computes anything. What is left in each is its own RECORD: the
+// checker keeps the owning part, the pad number (so a violation names `U3` pad
+// `12`) and the oval-drill flag that exempts a slot from the pad-annular rule,
+// while a probe answers yes or no and never names what it refused for, so its
+// record is trimmed to the fields every grid query walks. Merging the two
+// records would put four unread fields in the probe's hot loop; extracting the
+// two literals into named projections just moves the pair onto them.
+/// The world pad list a probe measures against: `pad_world`'s shared pass —
+/// the SAME world copper, net join and slot bore `drc.padBoxes` projects — cut
+/// down to the fields a probe reads. Sharing that pass is what makes the
+/// session's boxes engine-identical rather than merely intended to be.
 fn buildPadLites(arena: std.mem.Allocator, placement: optimizer.Placement) ![]PadLite {
-    var by_ref: std.StringHashMapUnmanaged(std.ArrayList(PinNet)) = .empty;
-    for (placement.nets, 0..) |net, ni| {
-        for (net.pins) |pin| {
-            const gop = try by_ref.getOrPut(arena, pin.ref_des);
-            if (!gop.found_existing) gop.value_ptr.* = .empty;
-            try gop.value_ptr.append(arena, .{ .pin = pin.pin, .net = @intCast(ni) });
-        }
-    }
-    var list: std.ArrayList(PadLite) = .empty;
-    for (placement.parts) |part| {
-        const layer: u8 = if (part.side == .bottom) 1 else 0;
-        const pins: []const PinNet = if (by_ref.get(part.ref_des)) |l| l.items else &.{};
-        for (part.pads) |pad| {
-            const sh = try pad_shape.worldShape(arena, part, pad);
-            const c = optimizer.worldPadCenter(&part, pad.x, pad.y);
-            var shx: f64 = 0;
-            var shy: f64 = 0;
-            if (pad.isSlot()) {
-                const e1 = optimizer.worldPadCenter(&part, pad.x + pad.slot_half[0], pad.y + pad.slot_half[1]);
-                shx = e1[0] - c[0];
-                shy = e1[1] - c[1];
-            }
-            try list.append(arena, .{
-                .x0 = sh.x0,
-                .y0 = sh.y0,
-                .x1 = sh.x1,
-                .y1 = sh.y1,
-                .poly = sh.poly,
-                .net = lookupNet(pins, pad.number),
-                .layer = layer,
-                .thru = pad.thru,
-                .drill = pad.drill,
-                .hx = c[0],
-                .hy = c[1],
-                .shx = shx,
-                .shy = shy,
-            });
-        }
-    }
-    return list.toOwnedSlice(arena);
+    const world = try pad_world.build(arena, placement);
+    const out = try arena.alloc(PadLite, world.len);
+    for (world, out) |w, *lite| lite.* = .{
+        .x0 = w.shape.x0,
+        .y0 = w.shape.y0,
+        .x1 = w.shape.x1,
+        .y1 = w.shape.y1,
+        .poly = w.shape.poly,
+        .net = w.net,
+        .layer = w.layer,
+        .thru = w.pad.thru,
+        .drill = w.pad.drill,
+        .hx = w.bore.x,
+        .hy = w.bore.y,
+        .shx = w.bore.shx,
+        .shy = w.bore.shy,
+    };
+    return out;
 }
 
 // ── Session spatial grid ─────────────────────────────────────────────────────
@@ -507,6 +149,84 @@ const SessGrid = struct {
     }
 };
 
+/// The RF same-layer keepout as a probe reads it, resolved once at load.
+///
+/// The halo is not a separate check here: it is EXTRA edge-to-edge separation a
+/// foreign obstacle demands over ordinary clearance (`keepout.extraOver`), so
+/// every pair test already in this file applies it by widening its own rule —
+/// the same fold `router.keepLimits` performs for the maze's probes. `classes`
+/// waives it between one class's own members, `exempt` waives it for the
+/// candidate when that is ground/plane copper (the wanted fence, not an
+/// intruder), and `zones`/`pads` carry the net-gated pad-escape carve-out that
+/// `keepout.approachClears` applies at the approach point.
+///
+/// Every field is empty on a board that declares no `(keepout …)`, and each
+/// path short-circuits on that, so such a board probes byte-identically.
+const KeepState = struct {
+    halos: []const f64 = &.{},
+    classes: []const u32 = &.{},
+    zones: keepout.Zones = .{},
+    pads: []const keepout.PadPt = &.{},
+    exempt: []const bool = &.{},
+    /// Which net `zones.ok` currently answers for (`keepout.aimAt`).
+    cur: i32 = -1,
+};
+
+/// Resolve `placement`'s keepout rule into the form a probe reads. A board that
+/// declares none allocates nothing.
+fn buildKeepState(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    pads: []const PadLite,
+) std.mem.Allocator.Error!KeepState {
+    if (!keepout.anyDeclared(placement)) return .{};
+    // The SAME (net, centre, guarded copper) projection the DRC finding and the
+    // maze's own escape gate read, so an approach one excuses is excused by all.
+    const pts = try pad_project.keepoutPts(arena, pads);
+    const exempt = try arena.alloc(bool, placement.nets.len);
+    for (exempt, 0..) |*e, i| e.* = keepout.exempt(placement, i);
+    return .{
+        .halos = try keepout.halos(arena, placement),
+        .classes = try keepout.classIds(arena, placement),
+        .zones = try keepout.buildZones(arena, placement, pts),
+        .pads = pts,
+        .exempt = exempt,
+    };
+}
+
+/// Is copper on `net` never an aggressor — ground or plane-carried?
+fn netExempt(s: *const Session, net: i32) bool {
+    if (net < 0) return false;
+    const i: usize = @intCast(net);
+    return i < s.keep.exempt.len and s.keep.exempt[i];
+}
+
+/// The `{ordinary, ordinary + halo}` gap a candidate on `net` owes copper on
+/// `other`, the plain half already eased by the probe epsilon.
+///
+/// The ordinary clearance is absolute. The surplus above it is the RF keepout
+/// halo `other`'s class declared — zero between two members of ONE class (they
+/// are one signal family, held apart by their shared clearance and not by each
+/// other's halo) and zero when the candidate is exempt ground/plane copper.
+/// `keepout.approachClears` then waives the surplus alone inside an escape zone
+/// that admits this net. Identical to `router.keepLimits`, so the live
+/// hand-draw guard refuses exactly the copper the checker calls
+/// `keepout_violation` instead of letting it land and reporting it afterwards.
+fn clrLimits(s: *const Session, net: i32, other: i32) [2]f64 {
+    const ordinary = s.rules.clearanceBetween(net, other, s.base_clr);
+    const plain = ordinary - eps_p;
+    if (s.keep.halos.len == 0 or keepout.sameClass(s.keep.classes, net, other)) return .{ plain, plain };
+    return .{ plain, plain + keepout.extraOver(s.keep.halos, other, ordinary, netExempt(s, net)) };
+}
+
+/// Where segment a→b passes closest to `p` — the approach point the escape gate
+/// is asked at, through the same `pad_shape` projection the router's own probes
+/// and `drc_keepout`'s findings use, so all three name one point.
+fn nearestOn(a: [2]f64, b: [2]f64, p: [2]f64) [2]f64 {
+    const c = pad_shape.closestOnSeg(a[0], a[1], b[0], b[1], p[0], p[1]);
+    return .{ c.x, c.y };
+}
+
 /// A loaded board: static features, grids, clearance rules, and the net-name
 /// table (index = the probe `net` argument). `scratch` is the grid-query buffer.
 const Session = struct {
@@ -529,6 +249,7 @@ const Session = struct {
     board_rect: ?optimizer.BoardRect,
     board_poly: ?[]const [2]f64,
     net_names: []const []const u8,
+    keep: KeepState,
     scratch: std.ArrayList(u32),
 };
 
@@ -555,7 +276,7 @@ fn holeFeatBox(h: Hole) [4]f64 {
 
 /// Parse `input` into a persistent session (grids over every static feature).
 fn buildSessionCtx(arena: std.mem.Allocator, input: []const u8) !Session {
-    return sessionFromBoard(arena, try parseBoard(arena, input));
+    return sessionFromBoard(arena, try drc_board_json.parse(arena, input, .{ .copy_strings = true }));
 }
 
 fn sessionFromBoard(arena: std.mem.Allocator, board: Board) !Session {
@@ -564,8 +285,14 @@ fn sessionFromBoard(arena: std.mem.Allocator, board: Board) !Session {
     const pads = try buildPadLites(arena, placement);
     const tracks = board.routed.tracks;
     const vias = board.routed.vias;
+    const keep = try buildKeepState(arena, placement, pads);
     var clr_max = @max(board.clearance, design.via_to_via);
     for (placement.rules.net) |nr| clr_max = @max(clr_max, nr.clearance);
+    // A halo-only obstacle must still be a grid CANDIDATE before the per-pair
+    // test applies the rule, so the query reach carries the widest authored
+    // halo on top of the widest clearance — `router.padIndexReach`'s bound.
+    // Zero on a board that declares no keepout, which then queries as before.
+    clr_max += keepout.maxHalo(keep.halos);
 
     var holes_l: std.ArrayList(Hole) = .empty;
     for (pads) |p| if (p.drill > 0) {
@@ -597,6 +324,7 @@ fn sessionFromBoard(arena: std.mem.Allocator, board: Board) !Session {
         .board_rect = placement.board_rect,
         .board_poly = placement.board_poly,
         .net_names = names,
+        .keep = keep,
         .scratch = .empty,
     };
 }
@@ -755,12 +483,13 @@ fn segPadViol(s: *Session, q: SegQ) bool {
     for (candidates(s, &s.pad_grid, segQBox(q), s.clr_max)) |j| {
         const p = s.pads[j];
         if (sameNet(q.net, p.net) or (!p.thru and p.layer != q.layer)) continue;
-        const eff = s.rules.clearanceBetween(q.net, p.net, s.base_clr);
-        const need = q.hw + eff;
+        const lim = clrLimits(s, q.net, p.net);
+        const need = q.hw + lim[1];
         if (@min(q.a[0], q.b[0]) > p.x1 + need or @max(q.a[0], q.b[0]) < p.x0 - need or
             @min(q.a[1], q.b[1]) > p.y1 + need or @max(q.a[1], q.b[1]) < p.y0 - need) continue;
         const gap = segShapeDist(q.a, q.b, p, need) - q.hw;
-        if (gap < eff - eps_p) return true;
+        const at = nearestOn(q.a, q.b, .{ (p.x0 + p.x1) / 2, (p.y0 + p.y1) / 2 });
+        if (!keepout.approachClears(s.keep.zones, p.net, gap, at, lim)) return true;
     }
     return false;
 }
@@ -770,9 +499,10 @@ fn segTrackViol(s: *Session, q: SegQ) bool {
     for (candidates(s, &s.track_grid, segQBox(q), s.clr_max)) |j| {
         const t = s.tracks[j];
         if (t.layer != q.layer or sameNet(q.net, t.net)) continue;
-        const eff = s.rules.clearanceBetween(q.net, t.net, s.base_clr);
+        const lim = clrLimits(s, q.net, t.net);
         const gap = segSegDist(q.a, q.b, .{ t.x1, t.y1 }, .{ t.x2, t.y2 }) - q.hw - t.width / 2;
-        if (gap < eff - eps_p) return true;
+        const at = pad_shape.segSegMid(q.a, q.b, .{ t.x1, t.y1 }, .{ t.x2, t.y2 });
+        if (!keepout.approachClears(s.keep.zones, t.net, gap, at, lim)) return true;
     }
     return false;
 }
@@ -782,16 +512,26 @@ fn segViaViol(s: *Session, q: SegQ) bool {
     for (candidates(s, &s.via_grid, segQBox(q), s.clr_max)) |j| {
         const v = s.vias[j];
         if (sameNet(q.net, v.net)) continue;
-        const eff = s.rules.clearanceBetween(q.net, v.net, s.base_clr);
+        const lim = clrLimits(s, q.net, v.net);
         const gap = segPointDist(q.a, q.b, .{ v.x, v.y }) - v.dia / 2 - q.hw;
-        if (gap < eff - eps_p) return true;
+        const at = nearestOn(q.a, q.b, .{ v.x, v.y });
+        if (!keepout.approachClears(s.keep.zones, v.net, gap, at, lim)) return true;
     }
     return false;
 }
 
 /// Would adding the candidate track `q` create a routing-class violation?
 fn probeSeg(s: *Session, q: SegQ) bool {
+    aimKeepout(s, q.net);
     return segEdgeViol(s, q) or segPadViol(s, q) or segTrackViol(s, q) or segViaViol(s, q);
+}
+
+/// Re-aim the keepout escape gate at the net now probing: a zone admits it only
+/// when that net owns a pad inside the zone (`keepout.admitCurrent`). One
+/// comparison when the net has not changed, and nothing at all on a board that
+/// declares no keepout.
+fn aimKeepout(s: *Session, net: i32) void {
+    keepout.aimAt(s.keep.zones, s.keep.pads, &s.keep.cur, net);
 }
 
 // via's own annular ring / min-drill (position-independent).
@@ -814,9 +554,9 @@ fn viaPadViol(s: *Session, q: ViaQ) bool {
     for (candidates(s, &s.pad_grid, viaQBox(q), s.clr_max)) |j| {
         const p = s.pads[j];
         if (sameNet(q.net, p.net)) continue;
-        const eff = s.rules.clearanceBetween(q.net, p.net, s.base_clr);
-        const gap = pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, q.c[0], q.c[1], q.vr + eff) - q.vr;
-        if (gap < eff - eps_p) return true;
+        const lim = clrLimits(s, q.net, p.net);
+        const gap = pad_shape.pointDist(p.x0, p.y0, p.x1, p.y1, p.poly, q.c[0], q.c[1], q.vr + lim[1]) - q.vr;
+        if (!keepout.approachClears(s.keep.zones, p.net, gap, q.c, lim)) return true;
     }
     return false;
 }
@@ -825,9 +565,10 @@ fn viaTrackViol(s: *Session, q: ViaQ) bool {
     for (candidates(s, &s.track_grid, viaQBox(q), s.clr_max)) |j| {
         const t = s.tracks[j];
         if (sameNet(q.net, t.net)) continue;
-        const eff = s.rules.clearanceBetween(q.net, t.net, s.base_clr);
+        const lim = clrLimits(s, q.net, t.net);
         const gap = segPointDist(.{ t.x1, t.y1 }, .{ t.x2, t.y2 }, q.c) - q.vr - t.width / 2;
-        if (gap < eff - eps_p) return true;
+        const at = nearestOn(.{ t.x1, t.y1 }, .{ t.x2, t.y2 }, q.c);
+        if (!keepout.approachClears(s.keep.zones, t.net, gap, at, lim)) return true;
     }
     return false;
 }
@@ -845,12 +586,16 @@ fn viaSpacingRule(s: *const Session, net: i32) f64 {
 fn viaViaViol(s: *Session, q: ViaQ) bool {
     for (candidates(s, &s.via_grid, viaQBox(q), s.clr_max)) |j| {
         const v = s.vias[j];
-        const eff = if (sameNet(q.net, v.net))
-            viaSpacingRule(s, q.net)
-        else
-            s.rules.clearanceBetween(q.net, v.net, s.base_clr);
         const gap = std.math.hypot(q.c[0] - v.x, q.c[1] - v.y) - q.vr - v.dia / 2;
-        if (gap < eff - eps_p) return true;
+        if (sameNet(q.net, v.net)) {
+            // Its own net's barrels owe each other the via-spacing rule and no
+            // halo — a net never holds itself off.
+            if (gap < viaSpacingRule(s, q.net) - eps_p) return true;
+            continue;
+        }
+        const lim = clrLimits(s, q.net, v.net);
+        const at = [2]f64{ (q.c[0] + v.x) / 2, (q.c[1] + v.y) / 2 };
+        if (!keepout.approachClears(s.keep.zones, v.net, gap, at, lim)) return true;
     }
     return false;
 }
@@ -870,6 +615,7 @@ fn viaHoleViol(s: *Session, q: ViaQ) bool {
 
 /// Would adding the candidate via `q` create a routing-class violation?
 fn probeVia(s: *Session, q: ViaQ) bool {
+    aimKeepout(s, q.net);
     return viaSelfViol(s, q) or viaEdgeViol(s, q) or viaPadViol(s, q) or
         viaTrackViol(s, q) or viaViaViol(s, q) or viaHoleViol(s, q);
 }
@@ -1035,7 +781,7 @@ fn testBoard(arena: std.mem.Allocator, cand_track: []const u8, cand_via: []const
 }
 // The full-check violation count for a board JSON — the probe oracle.
 fn drcCount(arena: std.mem.Allocator, json: []const u8) !usize {
-    const board = try parseBoard(arena, json);
+    const board = try drc_board_json.parse(arena, json, .{ .copy_strings = true });
     const v = try drc.check(arena, board.placement, board.routed, board.clearance);
     var count: usize = 0;
     for (v) |violation| {
@@ -1221,81 +967,109 @@ test "session preserves pad transition fields from net-class JSON" {
     try testing.expectEqual(@as(f64, 50), rule.rf.impedance.ohms);
 }
 
-// spec: Web Server - Both client DRC bridges read the blob's design-rule object through one shared reader, so the stateless check and the session probe resolve identical board rules
-test "the shared design-rule reader maps every design-rule key the blob carries" {
-    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_inst.deinit();
-    const arena = arena_inst.allocator();
+/// An RF trace at y=0 with a 0.5 mm keepout and no escape radius, plus a SIG
+/// pad well clear of it. `%ESCAPE%` and `%PAD%` are spliced per case.
+const keepout_board =
+    \\{"clearance":0.127,
+    \\ "netclasses":[{"net":"RF_IN","class":"rf","width":0.127,"keepout_mm":0.5,"keepout_escape_mm":%ESCAPE%}],
+    \\ "board":{"x":-2,"y":-3,"w":16,"h":8},
+    \\ "parts":[{"ref":"J1","kind":"connector","hw":0.5,"hh":0.5,"x":0,"y":0,"side":"top",
+    \\           "pads":[{"num":"1","x":0,"y":0,"w":0.4,"h":0.4,"net":"RF_IN"}]},
+    \\          {"ref":"R1","kind":"passive","hw":0.3,"hh":0.3,"x":0.5,"y":0.6,"side":"top",
+    \\           "pads":[{"num":"1","x":0,"y":0,"w":0.4,"h":0.4,"net":"%PAD%"}]}],
+    \\ "tracks":[{"x1":0,"y1":0,"x2":10,"y2":0,"l":0,"w":0.127,"net":"RF_IN"}]}
+;
 
-    // Every key set to a distinct non-default value, so a field wired to the
-    // wrong key cannot pass by coincidence. `wasm_drc.zig` calls THIS function,
-    // so this pins both client bridges at once.
-    const src =
-        \\{"clearance":0.2,"min_drill":0.3,"min_annular":0.15,"hole_to_hole":0.35,
-        \\ "via_to_via":0.45,"mask_margin":0.06,"mask_web":0.22,"min_width":0.12,
-        \\ "pour_min_width":0.35,"pour_corner_radius":0.45,"ground_via_max":1.1,"copper_edge":0.55,
-        \\ "component_edge":1.25,"pour_clearance":0.9,"pour_clearance_outer":0.95,"mask_relief_corner_radius":0.8}
-    ;
-    var parsed = try std.json.parseFromSlice(std.json.Value, arena, src, .{});
-    defer parsed.deinit();
-    const r = buildDesignRules(parsed.value);
-
-    try testing.expectEqual(@as(f64, 0.2), r.clearance);
-    try testing.expectEqual(@as(f64, 0.3), r.min_drill);
-    try testing.expectEqual(@as(f64, 0.15), r.min_annular);
-    try testing.expectEqual(@as(f64, 0.35), r.hole_to_hole);
-    try testing.expectEqual(@as(f64, 0.45), r.via_to_via);
-    try testing.expectEqual(@as(f64, 0.06), r.mask.margin);
-    try testing.expectEqual(@as(f64, 0.22), r.mask.web);
-    try testing.expectEqual(@as(f64, 0.12), r.min_width);
-    try testing.expectEqual(@as(f64, 0.35), r.pour.min_width);
-    try testing.expectEqual(@as(f64, 0.45), r.pour.corner_radius);
-    try testing.expectEqual(@as(f64, 1.1), r.pour.ground_via_max);
-    try testing.expectEqual(@as(f64, 0.55), r.edge.copper);
-    try testing.expectEqual(@as(f64, 1.25), r.edge.component);
-
-    // These two were the gap this test pinned when it was written: the server
-    // emits them into the same object and neither reader read them back, so a
-    // design authoring `(design-rules (pour-clearance 0.15))` left the client's
-    // struct holding the compile-time 0.3. Closing it turned out NOT to be the
-    // behaviour change the pin feared — no check on either bridge consults
-    // either field (see `buildDesignRules`) — so it is a struct that stopped
-    // misstating the board, not a client that started reporting differently.
-    try testing.expectEqual(@as(f64, 0.9), r.pour_clearance);
-    // The outer-face twin rides the same wire and the same argument: the server
-    // resolves it (an authored `(pour-clearance …)` sets it, else it defaults
-    // tighter than the inner gap), so a client that failed to read it back
-    // would hold the compile-time 0.2 on a board that authored something else.
-    try testing.expectEqual(@as(f64, 0.95), r.pour.clearance_outer);
-    try testing.expectEqual(@as(f64, 0.8), r.mask.relief_corner_radius);
+/// `keepout_board` with its escape radius and neighbour-pad net filled in.
+fn keepoutBoard(arena: std.mem.Allocator, escape: []const u8, pad_net: []const u8) ![]const u8 {
+    const with_escape = try std.mem.replaceOwned(u8, arena, keepout_board, "%ESCAPE%", escape);
+    return std.mem.replaceOwned(u8, arena, with_escape, "%PAD%", pad_net);
 }
 
-// spec: Web Server - A design-rule key absent from the page blob falls back to its built-in default, so a dropped key cannot read as zero
-test "a design-rule key missing from the blob keeps its built-in default" {
+// spec: Web Server - The WASM DRC session probe enforces an RF net's declared keepout halo, so the mid-drag gate refuses the copper the full check flags
+test "session probe refuses a candidate intruding on an RF keepout halo" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    // With every key the emitter writes now mapped, the test above no longer
-    // exercises the fallback at all — an unread key used to stand in for it.
-    // `pour_clearance` is the one that makes this worth its own test: its
-    // default is a NON-ZERO 0.3, so a fallback that resolved to the zero value
-    // would hand the client a pour gap no fab can hold, and would do it
-    // silently, on exactly the boards that authored no rule of their own.
-    const bare = buildDesignRules(null);
-    try testing.expectEqual(@as(f64, 0.3), bare.pour_clearance);
-    try testing.expectEqual(@as(f64, 0.2), bare.pour.clearance_outer);
-    try testing.expectEqual(@as(f64, 0), bare.mask.relief_corner_radius);
+    // THE REGRESSION. The session's board parser was a hand copy of
+    // `wasm_drc.zig`'s and never gained `keepout_mm`, so this halo did not exist
+    // as far as the mid-drag gate was concerned: it admitted, live, exactly the
+    // copper the post-route check on the same board reported. The oracle is that
+    // full check, run over the board WITH the candidate spliced in.
+    const json = try keepoutBoard(arena, "0", "SIG");
+    var sess = try buildSessionCtx(arena, json);
+    const sig = testNetIdx(sess.net_names, "SIG");
+    const base_n = try drcCount(arena, json);
 
-    // A present-but-partial object takes the same path per absent key, rather
-    // than only the all-or-nothing one above.
-    var partial = try std.json.parseFromSlice(std.json.Value, arena, "{\"clearance\":0.2}", .{});
-    defer partial.deinit();
-    const p = buildDesignRules(partial.value);
-    try testing.expectEqual(@as(f64, 0.2), p.clearance);
-    try testing.expectEqual(@as(f64, 0.3), p.pour_clearance);
-    try testing.expectEqual(@as(f64, 0.2), p.pour.clearance_outer);
-    try testing.expectEqual(@as(f64, 0), p.mask.relief_corner_radius);
+    // A SIG track 0.3 mm off the RF trace: clear of the 0.127 mm ordinary
+    // clearance, well inside the 0.5 mm halo.
+    const intruder = ",{\"x1\":2,\"y1\":0.3,\"x2\":8,\"y2\":0.3,\"l\":0,\"w\":0.127,\"net\":\"SIG\"}";
+    const with_intruder = try std.mem.replaceOwned(u8, arena, json, "\"net\":\"RF_IN\"}]}", "\"net\":\"RF_IN\"}" ++ intruder ++ "]}");
+    try testing.expect((try drcCount(arena, with_intruder)) > base_n);
+    try testing.expectEqual(@as(u32, 1), probeSegResult(&sess, tSeg(2, 0.3, 8, 0.3, sig)));
+
+    // Outside the halo the same candidate is clean, so the guard is the halo and
+    // not a blanket refusal.
+    try testing.expectEqual(@as(u32, 0), probeSegResult(&sess, tSeg(2, 0.7, 8, 0.7, sig)));
+    // A through via owes the halo on every layer, its barrel being on all of them.
+    try testing.expectEqual(@as(u32, 1), probeViaResult(&sess, tVia(5, 0.4, 0.4, 0.2, sig)));
+    // And the clip stops the drag AT the halo instead of letting it land: a leg
+    // driving from clear air into the corridor keeps only its clean prefix.
+    const t = clipSegResult(&sess, tSeg(5, 2, 5, 0, sig));
+    try testing.expect(t > 0 and t < 1);
+    const y_stop = 2 - 2 * t;
+    // It stops OUTSIDE the halo rather than at the ordinary clearance ring: the
+    // 0.5 mm halo plus both half-widths is 0.6635 mm of centre-to-centre.
+    try testing.expect(y_stop > 0.6);
+    try testing.expectEqual(@as(u32, 0), probeSegResult(&sess, tSeg(5, 2, 5, y_stop, sig)));
+
+    // Drop the halo to zero and the identical candidate is admitted — proof the
+    // refusal came through the marshalled `keepout_mm` and not from elsewhere.
+    const no_halo = try std.mem.replaceOwned(u8, arena, json, "\"keepout_mm\":0.5", "\"keepout_mm\":0");
+    var bare = try buildSessionCtx(arena, no_halo);
+    try testing.expectEqual(@as(u32, 0), probeSegResult(&bare, tSeg(2, 0.3, 8, 0.3, testNetIdx(bare.net_names, "SIG"))));
+}
+
+// spec: Web Server - The WASM DRC session probe reads each net's class identity, waiving the keepout halo between one class's own members and inside a pad-escape zone
+test "session probe waives the halo for a class member and inside an escape zone" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // Same class as the guard: one signal family, so the halo they share is not
+    // one they owe each other. The session parser never carried `class`, so it
+    // could not have applied this exemption even once it had the halo.
+    const json = try keepoutBoard(arena, "0", "SIG");
+    const with_peer = try std.mem.replaceOwned(
+        u8,
+        arena,
+        json,
+        "\"keepout_escape_mm\":0}]",
+        "\"keepout_escape_mm\":0},{\"net\":\"SIG\",\"class\":\"rf\",\"width\":0.127}]",
+    );
+    var peer = try buildSessionCtx(arena, with_peer);
+    const peer_rule = peer.rules.net[@intCast(testNetIdx(peer.net_names, "SIG"))];
+    try testing.expectEqualStrings("rf", peer_rule.class.name);
+    try testing.expectEqual(@as(u32, 0), probeSegResult(&peer, tSeg(2, 0.3, 8, 0.3, testNetIdx(peer.net_names, "SIG"))));
+
+    // The escape carve-out, net-gated: R1's pad belongs to SIG and sits inside
+    // the 1 mm escape radius of the RF pad at the origin, so SIG's own breakout
+    // past that pad is admitted — halo-only, the ordinary clearance still held.
+    const escaping = try keepoutBoard(arena, "1.0", "SIG");
+    var out = try buildSessionCtx(arena, escaping);
+    const sig = testNetIdx(out.net_names, "SIG");
+    try testing.expectEqual(@as(u32, 0), probeSegResult(&out, tSeg(0.5, 0.35, 0.9, 0.35, sig)));
+    // … while the same copper further along the trace, outside every zone, is
+    // still refused.
+    try testing.expectEqual(@as(u32, 1), probeSegResult(&out, tSeg(4, 0.35, 6, 0.35, sig)));
+
+    // Give the neighbouring pad to a THIRD net and SIG is merely passing through
+    // the zone: the exemption is for the pin escaping past the RF pad, nobody else.
+    const passer = try keepoutBoard(arena, "1.0", "I2C_SDA");
+    var through = try buildSessionCtx(arena, passer);
+    const idx = testNetIdx(through.net_names, "SIG");
+    try testing.expectEqual(@as(u32, 1), probeSegResult(&through, tSeg(0.5, 0.35, 0.9, 0.35, idx)));
 }
 
 // spec: Web Server - A WASM DRC probe with no loaded session returns the no-session sentinel

@@ -67,6 +67,7 @@ test {
     _ = @import("drc_reconcile.zig");
     _ = @import("drc_sweep.zig");
     _ = @import("drc_session.zig");
+    _ = @import("drc_board_json.zig");
     _ = @import("emit.zig");
     _ = @import("erc.zig");
     _ = @import("escape.zig");
@@ -263,6 +264,7 @@ test {
     _ = @import("placement/module_policy.zig");
     _ = @import("placement/near_bind.zig");
     _ = @import("placement/net_identity.zig");
+    _ = @import("placement/net_rewrite_pass.zig");
     _ = @import("placement/net_open.zig");
     _ = @import("placement/net_rules.zig");
     _ = @import("placement/net_topology.zig");
@@ -279,7 +281,10 @@ test {
     _ = @import("placement/path_copper.zig");
     _ = @import("placement/variable_width_copper.zig");
     _ = @import("pad_neck_shape.zig");
+    _ = @import("placement/disc_stamp.zig");
+    _ = @import("placement/pad_project.zig");
     _ = @import("placement/pad_shape.zig");
+    _ = @import("placement/pad_world.zig");
     _ = @import("placement/perimeter_fence.zig");
     _ = @import("placement/pin_roles.zig");
     _ = @import("placement/plan_resolve.zig");
@@ -337,6 +342,7 @@ test {
     _ = @import("placement/via_centre.zig");
     _ = @import("placement/via_fence.zig");
     _ = @import("placement/via_guide.zig");
+    _ = @import("placement/via_hop_scan.zig");
     _ = @import("placement/via_merge.zig");
     _ = @import("png.zig");
     _ = @import("preflight.zig");

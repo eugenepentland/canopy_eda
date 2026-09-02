@@ -648,6 +648,12 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - the closing gloss leaves immutable caller copper byte-identical
 - a cancelled run still ships deduplicated, tail-free copper instead of raw maze output
 - a net-scoped branch fold folds a caller's accumulated parallel legs and hands back unfoldable copper verbatim
+- one shared pass resolves every placed pad's world copper, net and bore, so the DRC and the client probe read identical pad geometry
+- one shared projection turns a world pad list into the keepout escape terminals, guarding only netted plated copper
+- the shared topology projection canonicalises pad nets only for the caller that asks for it
+- one shared raster stamps every routing halo disc, covering exactly the lattice nodes within its radius
+- a halo swept along a segment samples it at half-grid steps, so consecutive discs always overlap
+- a cleanup pass never rewrites copper outside the route's own scope, and never one leg of a differential pair alone
 
 ## serve/subcircuit-route
 
@@ -7542,6 +7548,10 @@ is what makes the predicate exact rather than approximately right.
 - The 3D viewer validates its `:footprint` route param after percent-decoding, so a decoded name carrying traversal or markup reaches neither a read path nor the page
 - The staged-upload temp path is minted from a timestamp and a process-unique counter with no request input in it, so an uploaded archive cannot steer where it is written
 - A library import ignores the client's X-Filename header entirely, so two uploads of one archive under different filenames produce identical results
+- One shared parser reads the client DRC board payload, so the stateless check and the session probe see identical parts, pads and net rules
+- The session parse copies every string out of the payload buffer so a loaded board survives the buffer being reused
+- The WASM DRC session probe enforces an RF net's declared keepout halo, so the mid-drag gate refuses the copper the full check flags
+- The WASM DRC session probe reads each net's class identity, waiving the keepout halo between one class's own members and inside a pad-escape zone
 - completeness-waiver: concurrent access (httpz owns request threading and each handler answers from its own response arena; the two pieces of state that really are shared — the live scene graph and a design's layout sidecar — are specified where they live, under the push and layout-backfill sections, rather than restated per endpoint)
 
 ## fab_readiness

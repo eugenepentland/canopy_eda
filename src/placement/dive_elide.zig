@@ -29,6 +29,12 @@
 
 const std = @import("std");
 const router = @import("router.zig");
+const via_hop_scan = @import("via_hop_scan.zig");
+const net_rewrite_pass = @import("net_rewrite_pass.zig");
+
+/// This pass's own name for the shared RF-discipline guard (see
+/// `net_rewrite_pass.netIsRfDisciplined`): an RF net keeps its dives.
+const netIsRfDisciplined = net_rewrite_pass.netIsRfDisciplined;
 const optimizer = @import("optimizer.zig");
 const route_policy = @import("route_policy.zig");
 const pad_shape = @import("pad_shape.zig");
@@ -38,14 +44,12 @@ const Track = router.Track;
 const Via = router.Via;
 const Board = router.CleanupBoard;
 
-/// "This track end sits on that via" tolerance — the router emits both from the
-/// same grid node, so this only absorbs float drift.
-const snap_mm: f64 = 1e-6;
-/// Most incident track ends recorded at a point; past this it is a junction and
-/// no dive through it is considered.
-const max_legs: usize = 3;
-/// Longest run (in segments) the walk follows between two vias.
-const max_run_segs: usize = 24;
+/// "This track end sits on that via" tolerance — the scan's own, so the search
+/// and the detector answer "same point" identically.
+const snap_mm: f64 = via_hop_scan.snap_mm;
+/// Do two points coincide within that tolerance? Also the scan's, for the same
+/// reason.
+const ptEq = via_hop_scan.ptEq;
 /// Elisions attempted per net. Each success deletes two vias.
 const max_dives_per_net: usize = 32;
 /// Below this the two via sites coincide and there is nothing to redraw.
@@ -73,20 +77,11 @@ const removed_net: i32 = std.math.minInt(i32);
 /// `vertical` = a constant-x line (swept in x).
 pub const Axis = enum { horizontal, vertical };
 
-/// One dive found in a net's copper: two pure transition vias (`v1`, `v2`)
-/// joined by a single-layer `run`, where the copper on the FAR side of both
-/// vias sits on one other layer (`outer`) — so the run can be redrawn there and
-/// both vias deleted. `away` is where each via's outer leg heads (the direction
-/// a replacement must not run back over) and `run_mm` is the copper being
-/// removed, which bounds what the replacement may cost.
-pub const Dive = struct {
-    v1: usize,
-    v2: usize,
-    run: []const usize,
-    outer: u8,
-    away: [2][2]f64,
-    run_mm: f64,
-};
+/// One dive found in a net's copper — `via_hop_scan.Hop`, the same shape the
+/// elbow pass detects. Two pure transition vias joined by a single-layer run
+/// whose far ends share one other layer, plus that run's length, which bounds
+/// what a replacement corridor may cost.
+const Dive = via_hop_scan.Hop;
 
 /// Where a replacement must start and end, what it must not run back over, and
 /// how much copper it is allowed to replace (see `Dive`).
@@ -171,10 +166,6 @@ fn doublesBack(from: [2]f64, toward: [2]f64, away: [2]f64) bool {
     return u[0] * v[0] + u[1] * v[1] > back_cos_max;
 }
 
-fn ptEq(a: [2]f64, b: [2]f64) bool {
-    return std.math.hypot(a[0] - b[0], a[1] - b[1]) <= snap_mm;
-}
-
 /// Total length of the three-segment path a→p→q→b.
 fn pathLen(a: [2]f64, path: Path, b: [2]f64) f64 {
     return std.math.hypot(path.p[0] - a[0], path.p[1] - a[1]) +
@@ -207,104 +198,6 @@ fn layerIn(mask: u64, layer: u8) bool {
     if (layer >= @bitSizeOf(u64)) return false;
     return (mask & (@as(u64, 1) << @intCast(layer))) != 0;
 }
-
-// ── Dive topology (plain data) ───────────────────────────────────────────────
-
-/// One track end seen from a point it touches, pointing away from it.
-const Leg = struct { track: usize, layer: u8, far: [2]f64 };
-
-/// The legs found at a point; `n` keeps counting past `max_legs` so a junction
-/// is still recognised as one.
-const Legs = struct {
-    n: usize = 0,
-    items: [max_legs]Leg = @splat(.{ .track = 0, .layer = 0, .far = .{ 0, 0 } }),
-};
-
-/// One net's copper, for the dive scan. Pure reads — the caller applies.
-pub const Scan = struct {
-    arena: std.mem.Allocator,
-    tracks: []const Track,
-    vias: []const Via,
-    net: i32,
-
-    /// Every track end of this net incident on `p`.
-    fn legsAt(self: Scan, p: [2]f64) Legs {
-        var out = Legs{};
-        for (self.tracks, 0..) |t, i| {
-            if (t.net != self.net) continue;
-            const a = [2]f64{ t.x1, t.y1 };
-            const b = [2]f64{ t.x2, t.y2 };
-            const far: [2]f64 = if (ptEq(a, p)) b else if (ptEq(b, p)) a else continue;
-            if (out.n < max_legs) out.items[out.n] = .{ .track = i, .layer = t.layer, .far = far };
-            out.n += 1;
-        }
-        return out;
-    }
-
-    fn viaAt(self: Scan, p: [2]f64) ?usize {
-        for (self.vias, 0..) |v, i| {
-            if (v.net == self.net and ptEq(.{ v.x, v.y }, p)) return i;
-        }
-        return null;
-    }
-
-    /// The two legs of via `vi` when it is a pure TRANSITION via: exactly two
-    /// track ends meet it, on two different layers, so it exists only to change
-    /// layer. Null for a terminal via, a junction, or a stub.
-    fn transition(self: Scan, vi: usize) ?[2]Leg {
-        const v = self.vias[vi];
-        const legs = self.legsAt(.{ v.x, v.y });
-        if (legs.n != 2 or legs.items[0].layer == legs.items[1].layer) return null;
-        return .{ legs.items[0], legs.items[1] };
-    }
-
-    /// Follow `start` away from a via along its own layer, collecting the run
-    /// and its length, until another via of this net is reached. Null when the
-    /// run branches, dead-ends, or would need a layer change to continue — that
-    /// is what proves the copper about to be deleted serves nothing else.
-    fn walk(self: Scan, start: Leg, run: *std.ArrayList(usize), mm: *f64) std.mem.Allocator.Error!?usize {
-        var leg = start;
-        var steps: usize = 0;
-        while (steps < max_run_segs) : (steps += 1) {
-            try run.append(self.arena, leg.track);
-            const t = self.tracks[leg.track];
-            mm.* += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
-            if (self.viaAt(leg.far)) |vj| return vj;
-            const legs = self.legsAt(leg.far);
-            if (legs.n != 2) return null; // branch or dead end
-            const cont = if (legs.items[0].track == leg.track) legs.items[1] else legs.items[0];
-            if (cont.layer != leg.layer) return null; // no layer change without a via
-            leg = cont;
-        }
-        return null;
-    }
-
-    /// The dive through via `vi`, if it is one. Both run directions are tried:
-    /// either of the via's two layers may be the detour.
-    pub fn findDive(self: Scan, vi: usize) std.mem.Allocator.Error!?Dive {
-        const pair = self.transition(vi) orelse return null;
-        for (0..2) |k| {
-            const run_leg = pair[k];
-            const outer = pair[1 - k].layer;
-            var run: std.ArrayList(usize) = .empty;
-            var mm: f64 = 0;
-            const vj = (try self.walk(run_leg, &run, &mm)) orelse continue;
-            if (vj == vi) continue;
-            const far = self.transition(vj) orelse continue;
-            const far_outer = if (far[0].layer == run_leg.layer) far[1] else far[0];
-            if (far_outer.layer != outer) continue;
-            return Dive{
-                .v1 = vi,
-                .v2 = vj,
-                .run = run.items,
-                .outer = outer,
-                .away = .{ pair[1 - k].far, far_outer.far },
-                .run_mm = mm,
-            };
-        }
-        return null;
-    }
-};
 
 // ── Search ───────────────────────────────────────────────────────────────────
 
@@ -349,33 +242,6 @@ fn pathClears(probe: router.TautProbe, span: Span, path: Path) bool {
 /// May this pass rewrite `net`'s copper? With no selection every net is fair
 /// game (the whole-board route). In a SCOPED route an unselected net's copper
 /// is the caller's retained board and must come back verbatim.
-fn mayRewrite(selected_nets: []const bool, net: i32) bool {
-    if (selected_nets.len == 0) return true;
-    if (net < 0) return false;
-    const i: usize = @intCast(net);
-    return i < selected_nets.len and selected_nets[i];
-}
-
-fn netIsDiffPairLeg(placement: optimizer.Placement, net_i: usize) bool {
-    for (placement.diff_pairs) |dp| {
-        if (dp.p == net_i or dp.n == net_i) return true;
-    }
-    return false;
-}
-
-/// Does this net declare RF discipline (`(net-class … (max-freq …))`)?
-///
-/// Such a net's corners are ARCS by declaration: `bend_smooth` reshaped them
-/// the moment it routed and recorded the arc metadata the result carries, and a
-/// via fence may already flank the copper. Redrawing a span of it as three
-/// octilinear segments would contradict the geometry the design asked for and
-/// orphan that metadata, so an RF net keeps its dives — the one net class where
-/// a layer change is a considered choice rather than a lattice artefact.
-fn netIsRfDisciplined(placement: optimizer.Placement, net_i: usize) bool {
-    if (net_i >= placement.rules.net.len) return false;
-    return placement.rules.net[net_i].rf.max_freq_hz > 0;
-}
-
 /// Was a feature joined to a via's LAND but left out of reach of the thinner
 /// trace that replaces it?
 ///
@@ -495,11 +361,11 @@ fn apply(board: Board, net: i32, dive: Dive, a: [2]f64, path: Path, b: [2]f64) s
 /// Elide ONE dive of `net`, or report that none is left.
 fn elideOne(board: Board, net: i32, policy: route_policy.NetPolicy) std.mem.Allocator.Error!bool {
     const ctx = board.ctx;
-    const scan = Scan{ .arena = ctx.arena, .tracks = board.tracks.items, .vias = board.vias.items, .net = net };
+    const scan = via_hop_scan.Scan{ .arena = ctx.arena, .tracks = board.tracks.items, .vias = board.vias.items, .net = net };
     const probe = router.TautProbe{ .run = .{ .ctx = ctx, .net = net, .tracks = board.tracks, .vias = board.vias } };
     for (board.vias.items, 0..) |v, vi| {
         if (v.net != net) continue;
-        const dive = (try scan.findDive(vi)) orelse continue;
+        const dive = (try scan.find(vi)) orelse continue;
         if (!policyAdmits(policy, dive.outer)) continue;
         if (!viaRemovable(board, net, dive.v1, dive) or !viaRemovable(board, net, dive.v2, dive)) continue;
         const far = board.vias.items[dive.v2];
@@ -519,6 +385,18 @@ fn elideOne(board: Board, net: i32, policy: route_policy.NetPolicy) std.mem.Allo
     return false;
 }
 
+/// The route policy declared for `net`, or the empty one for a net past the
+/// table (an unauthored net constrains nothing).
+fn netPolicy(board: Board, net: i32) route_policy.NetPolicy {
+    const i: usize = @intCast(net);
+    return if (i < board.ctx.net_policy.len) board.ctx.net_policy[i] else .{};
+}
+
+/// Elide one dive of `net` under its own route policy — the driver's per-net step.
+fn elideOneNet(board: Board, net: i32) std.mem.Allocator.Error!bool {
+    return elideOne(board, net, netPolicy(board, net));
+}
+
 /// Elide every needless dive the board still carries.
 ///
 /// Runs after `route_cleanup.dropRedundantViaPairs`, so the dives an ordinary
@@ -526,29 +404,11 @@ fn elideOne(board: Board, net: i32, policy: route_policy.NetPolicy) std.mem.Allo
 /// residue: dives whose replacement needs a corridor the elbow cannot bend to,
 /// plus (on a board whose waves name their layers, which is every net on
 /// barracuda) the ones E10's coarser "layers are authored" guard skipped
-/// wholesale. Both vias and the whole detour run go, or nothing does.
+/// wholesale — which is why this pass leaves `skip_layer_authored` off and
+/// applies its own finer `policyAdmits` test per dive instead.
 pub fn passBoard(board: Board) std.mem.Allocator.Error!void {
-    const placement = board.placement;
-    for (0..placement.nets.len) |net_i| {
-        const ni: i32 = @intCast(net_i);
-        if (!mayRewrite(board.ctx.selected_nets, ni)) continue;
-        if (netIsDiffPairLeg(placement, net_i)) continue; // pairs move in lock-step
-        if (netIsRfDisciplined(placement, net_i)) continue; // its corners are authored arcs
-        const policy = if (net_i < board.ctx.net_policy.len)
-            board.ctx.net_policy[net_i]
-        else
-            route_policy.NetPolicy{};
-        router.setNetParams(board.ctx, placement, net_i); // probe + width read this net's rule
-        // Restamp for THIS net: an earlier net's elision packed the lists down
-        // (aliasing every entry) and the index's insertion reach derives from
-        // the params just set — the same restamp `dropRedundantViaPairs` makes
-        // at the head of its own per-net loop.
-        router.rebuildCopperIndex(board.ctx, board.tracks.items, board.vias.items);
-        var guard: usize = 0;
-        while (guard < max_dives_per_net) : (guard += 1) {
-            if (!try elideOne(board, ni, policy)) break;
-        }
-    }
+    const opts = net_rewrite_pass.Options{ .max_steps = max_dives_per_net, .skip_rf_disciplined = true };
+    return net_rewrite_pass.run(board, opts, board, elideOneNet);
 }
 
 const testing = std.testing;
@@ -667,34 +527,4 @@ test "policyAdmits keeps an authored transition and allows a plain outer-face ma
     const wp = [_]route_policy.Waypoint{.{ .x = 0, .y = 0, .layer = 0 }};
     try testing.expect(!policyAdmits(.{ .allowed_layers = outer_faces, .waypoints = &wp }, 0));
     try testing.expect(!policyAdmits(.{ .replay_reference_copper = true }, 0));
-}
-
-// spec: placement/router - a dive scan pairs two pure transition vias through a single-layer run and refuses a run that branches
-test "the dive scan finds a two-via layer detour and rejects a branching run" {
-    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_inst.deinit();
-    const arena = arena_inst.allocator();
-    // F.Cu in → via → B.Cu across (two segments) → via → F.Cu out.
-    const vias = [_]Via{
-        .{ .x = 1, .y = 0, .dia = 0.4, .net = 0 },
-        .{ .x = 3, .y = 0, .dia = 0.4, .net = 0 },
-    };
-    var tracks = [_]Track{
-        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
-        .{ .x1 = 1, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 1, .width = 0.2, .net = 0 },
-        .{ .x1 = 2, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 1, .width = 0.2, .net = 0 },
-        .{ .x1 = 3, .y1 = 0, .x2 = 4, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
-    };
-    const scan = Scan{ .arena = arena, .tracks = &tracks, .vias = &vias, .net = 0 };
-    const dive = (try scan.findDive(0)).?;
-    try testing.expectEqual(@as(usize, 1), dive.v2);
-    try testing.expectEqual(@as(u8, 0), dive.outer); // both ends already use F.Cu
-    try testing.expectEqual(@as(usize, 2), dive.run.len);
-    try testing.expectApproxEqAbs(@as(f64, 2), dive.run_mm, 1e-9);
-    // A third leg hanging off the run's midpoint makes it a branch, not a dive.
-    const branched = tracks ++ [_]Track{
-        .{ .x1 = 2, .y1 = 0, .x2 = 2, .y2 = 1, .layer = 1, .width = 0.2, .net = 0 },
-    };
-    const scan2 = Scan{ .arena = arena, .tracks = &branched, .vias = &vias, .net = 0 };
-    try testing.expect((try scan2.findDive(0)) == null);
 }

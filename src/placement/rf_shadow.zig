@@ -47,6 +47,7 @@
 const std = @import("std");
 const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
+const disc_stamp = @import("disc_stamp.zig");
 const pad_shape = @import("pad_shape.zig");
 const numeric = @import("../numeric.zig");
 
@@ -134,25 +135,7 @@ pub const State = struct {
     /// pays), and each net still routes freely through the part it owns.
     pub fn disc(self: State, grid: router.Grid, layer: usize, at_pt: [2]f64, dist: f64, net: i32) void {
         if (layer >= self.layers.len or !(dist > 0)) return;
-        const x = at_pt[0];
-        const y = at_pt[1];
-        const lane = self.layers[layer];
-        const radius: i64 = numeric.checkedInt(i64, @ceil(dist / grid.g)) orelse return;
-        const center = grid.nearest(x, y);
-        var dy: i64 = -radius;
-        while (dy <= radius) : (dy += 1) {
-            var dx: i64 = -radius;
-            while (dx <= radius) : (dx += 1) {
-                const ix = @as(i64, @intCast(center[0])) + dx;
-                const iy = @as(i64, @intCast(center[1])) + dy;
-                if (ix < 0 or iy < 0 or ix >= grid.nx or iy >= grid.ny) continue;
-                const wx = grid.worldX(@intCast(ix));
-                const wy = grid.worldY(@intCast(iy));
-                if (std.math.hypot(wx - x, wy - y) > dist) continue;
-                const node = @as(usize, @intCast(iy)) * grid.nx + @as(usize, @intCast(ix));
-                if (lane[node] == empty) lane[node] = net;
-            }
-        }
+        disc_stamp.claimFree(grid, self.layers[layer], at_pt, dist, net);
     }
 
     /// Stamp `net`'s corridor along the segment a→b on EVERY signal layer — the
@@ -163,8 +146,7 @@ pub const State = struct {
     pub fn stampSeg(self: State, grid: router.Grid, a: [2]f64, b: [2]f64, half: f64, net: i32) void {
         if (self.layers.len == 0 or !(self.width > 0)) return;
         const dist = half + self.width;
-        const len = std.math.hypot(b[0] - a[0], b[1] - a[1]);
-        const steps: usize = @max(1, numeric.toCount(@ceil(len / (grid.g * 0.5))));
+        const steps = disc_stamp.segSteps(grid, a, b);
         for (0..self.layers.len) |layer| {
             for (0..steps + 1) |step| {
                 const t = @as(f64, @floatFromInt(step)) / @as(f64, @floatFromInt(steps));
