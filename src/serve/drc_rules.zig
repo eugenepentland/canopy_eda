@@ -788,7 +788,20 @@ test "viewer consolidates net-open findings by exact net" {
     try std.testing.expect(std.mem.indexOf(u8, js, "var nearest=drcPads(first),nearGap=drcOpenGap(first);") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "nearest '+(Math.round(nearGap*1000)/1000)+' mm") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "var sum=drcSummary(),err=sum.err,warn=sum.warn,bits=[];") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "open net\"+(sum.open>1?\"s\":\"\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "openLabel=sum.open?(sum.open+\" open net\"+(sum.open>1?\"s\":\"\"))") != null);
+}
+
+// spec: Web Server - The DRC summary's open-net count reveals and locates the nearest missing connection instead of acting as inert text
+test "viewer open-net summary reveals and locates its first connection" {
+    const js = @embedFile("assets/pcb_board.js");
+    const css = @embedFile("assets/pcb_layout.css");
+    try std.testing.expect(std.mem.indexOf(u8, js, "id=\"drc-open-summary\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drcShowFirstOpen(){var idxs=[];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drcCollapsed[\"net open\"]=false;drcOpenExpanded[first.name]=true;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "renderDrcList();drcGoto(first.idxs[0]);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "openSummary.addEventListener(\"click\",drcShowFirstOpen)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".drc-summary-link{appearance:none") != null);
+    try std.testing.expect(std.mem.indexOf(u8, css, ".drc-summary-link:focus-visible") != null);
 }
 
 // spec: Web Server - Net-open DRC rows and their expanded missing connections sort by shortest gap first

@@ -7159,6 +7159,7 @@ is what makes the predicate exact rather than approximately right.
 - The /pcb-layout left dock tabs Properties, Autorouter, DRC, and Sub-circuits, showing one pane at a time
 - The /pcb-layout DRC pane docks the violations list under a previous/next step-through
 - Net-open DRC reporting groups every island gap by full net name and counts each open net once while retaining expandable per-gap details
+- The DRC summary's open-net count reveals and locates the nearest missing connection instead of acting as inert text
 - Net-open DRC rows and their expanded missing connections sort by shortest gap first
 - Selecting a grouped net-open row or one of its gaps frames and draws a net-coloured line between that finding's nearest island probes
 - The selected net-open bridge uses a screen-space hairline and hollow endpoint rings that shrink for short gaps

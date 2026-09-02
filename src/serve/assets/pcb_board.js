@@ -9334,6 +9334,15 @@ function drcSummary(){var v=PCB.drc||[],openIdx=[],otherErr=0,otherWarn=0;
  nets.forEach(function(g){if(grpSev(g.idxs))openWarn++;else openErr++;});
  return {open:nets.length,openGaps:openIdx.length,otherErr:otherErr,otherWarn:otherWarn,
   err:otherErr+openErr,warn:otherWarn+openWarn};}
+// The summary's open-net count is the shortest route from "the board is open"
+// to the copper that needs attention. Reveal the first net and its nearest gap
+// before locating it, so drcMarkCur can scroll the selected connection row into
+// view instead of leaving the user at a non-interactive tally.
+function drcShowFirstOpen(){var idxs=[];
+ (PCB.drc||[]).forEach(function(d,i){if(d.k==="net open")idxs.push(i);});
+ var nets=drcOpenNetGroups(idxs);if(!nets.length)return;
+ var first=nets[0];drcCollapsed["net open"]=false;drcOpenExpanded[first.name]=true;
+ renderDrcList();drcGoto(first.idxs[0]);}
 // Grouped by type: each type gets a collapsible header row with a count badge,
 // then its own violations underneath. Net-open gets one extra level by exact
 // net name, collapsed by default; expanding a net reveals the original rows.
@@ -9345,10 +9354,11 @@ function renderDrcList(){drcTabBadge();var lst=ensureDrcList();if(!lst)return;
  var power=powerWidthStatus(),classes=PCB.netclasses||[],
   powerClasses=classes.some(function(c){return +c.power_branch_width>0;}),
   adaptiveClasses=classes.some(function(c){return +c.adaptive_power_width>0;}),
+  openLabel=sum.open?(sum.open+" open net"+(sum.open>1?"s":"")):"",
   actions=(powerClasses?'<button id="drc-power-width" class="btn"'+(power.changed?'':' disabled')+' title="Widen only current-aware power segments that the latest post-route current check found undersized. Unsolved branches use the conservative full-rail width. Undoable.">'+(power.changed?('Widen power ('+power.tracks+')'):'Power widths ✓')+'</button>':'')+
    (adaptiveClasses?'<button id="drc-adaptive-width" class="btn" title="Re-evaluate every adaptive-width power trace against the clearance it has now, widening newly open stretches and narrowing newly constrained ones without moving centre lines. Undoable.">↻ Recheck adaptive</button>':'');
  var h='<div class="drc-row" style="cursor:default;font-weight:600"><span class="drc-k">'+
-  (v.length?((sum.open?(sum.open+" open net"+(sum.open>1?"s":"")+(other?(" · "+other+" other issue"+(other>1?"s":"")):"")):
+  (v.length?((sum.open?('<button type="button" id="drc-open-summary" class="drc-summary-link" title="Show and locate the first open net">'+pEsc(openLabel)+'</button>'+(other?(" · "+other+" other issue"+(other>1?"s":"")):"")):
    (issues+" issue"+(issues>1?"s":"")))+(nt>1?" · "+nt+" types":"")):"No DRC violations")+'</span>'+
   '<button id="drc-cog" class="btn" style="font-size:11px" title="Choose which checks count as errors or warnings, or are ignored — saved with the design, honoured by the APIs and the fab gate too">\u2699 Rules</button></div>'+
   (actions?'<div class="drc-actions">'+actions+'</div>':'');
@@ -9374,6 +9384,8 @@ function renderDrcList(){drcTabBadge();var lst=ensureDrcList();if(!lst)return;
    ng.idxs.forEach(function(i){h+=drcViolationRow(v[i],i);});});return;}
   idxs.forEach(function(i){h+=drcViolationRow(v[i],i);});});
  lst.innerHTML=h;
+ var openSummary=document.getElementById("drc-open-summary");
+ if(openSummary)openSummary.addEventListener("click",drcShowFirstOpen);
  var cog=document.getElementById("drc-cog");
  if(cog)cog.addEventListener("click",function(){drcRulesOpen=!drcRulesOpen;renderDrcList();});
  var widen=document.getElementById("drc-power-width");
