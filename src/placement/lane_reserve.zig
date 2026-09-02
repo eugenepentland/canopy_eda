@@ -40,6 +40,7 @@
 const std = @import("std");
 const route_policy = @import("route_policy.zig");
 const router = @import("router.zig");
+const disc_stamp = @import("disc_stamp.zig");
 const pad_shape = @import("pad_shape.zig");
 const numeric = @import("../numeric.zig");
 
@@ -90,8 +91,7 @@ fn stampOne(
     grid: router.Grid,
 ) void {
     const dist = radiusOf(lane, grid);
-    const len = std.math.hypot(lane.x2 - lane.x1, lane.y2 - lane.y1);
-    const steps: usize = @max(1, numeric.toCount(@ceil(len / (grid.g * 0.5))));
+    const steps = disc_stamp.segSteps(grid, .{ lane.x1, lane.y1 }, .{ lane.x2, lane.y2 });
     for (0..steps + 1) |s| {
         const t = @as(f64, @floatFromInt(s)) / @as(f64, @floatFromInt(steps));
         claimDisc(all, lane, layer, grid, .{
@@ -102,7 +102,9 @@ fn stampOne(
 }
 
 /// Claim every free node within `dist` of world point `at` for `lane.net`,
-/// skipping any node a lane of a different net also covers.
+/// skipping any node a lane of a different net also covers. The raster itself
+/// is `disc_stamp`'s, shared with every other halo writer; the contest test is
+/// this module's own.
 fn claimDisc(
     all: []const route_policy.ReservedLane,
     lane: route_policy.ReservedLane,
@@ -111,24 +113,20 @@ fn claimDisc(
     at: [2]f64,
     dist: f64,
 ) void {
-    const radius: i64 = numeric.checkedInt(i64, @ceil(dist / grid.g)) orelse return;
-    const center = grid.nearest(at[0], at[1]);
-    var dy: i64 = -radius;
-    while (dy <= radius) : (dy += 1) {
-        var dx: i64 = -radius;
-        while (dx <= radius) : (dx += 1) {
-            const ix = @as(i64, @intCast(center[0])) + dx;
-            const iy = @as(i64, @intCast(center[1])) + dy;
-            if (ix < 0 or iy < 0 or ix >= grid.nx or iy >= grid.ny) continue;
-            const wx = grid.worldX(@intCast(ix));
-            const wy = grid.worldY(@intCast(iy));
-            if (std.math.hypot(wx - at[0], wy - at[1]) > dist) continue;
-            const node = grid.node(@intCast(ix), @intCast(iy));
-            if (layer[node] != router.empty_cell) continue;
-            if (contested(all, lane, grid, .{ wx, wy })) continue;
-            layer[node] = lane.net;
+    const Claim = struct {
+        all: []const route_policy.ReservedLane,
+        lane: route_policy.ReservedLane,
+        layer: []i32,
+        grid: router.Grid,
+
+        fn stamp(self: @This(), node: disc_stamp.Node) void {
+            if (self.layer[node.at] != router.empty_cell) return;
+            if (contested(self.all, self.lane, self.grid, .{ node.x, node.y })) return;
+            self.layer[node.at] = self.lane.net;
         }
-    }
+    };
+    const claim = Claim{ .all = all, .lane = lane, .layer = layer, .grid = grid };
+    disc_stamp.forEach(grid, at, dist, claim, Claim.stamp);
 }
 
 /// True when a lane of a DIFFERENT net on the same layer also covers world

@@ -60,6 +60,8 @@ const plane_stitch = @import("plane_stitch.zig");
 const implicit_plane = @import("implicit_plane.zig");
 const perimeter_fence = @import("perimeter_fence.zig");
 const keepout = @import("keepout.zig");
+const pad_project = @import("pad_project.zig");
+const disc_stamp = @import("disc_stamp.zig");
 const lane_reserve = @import("lane_reserve.zig");
 const rf_shadow = @import("rf_shadow.zig");
 const pad_exit = @import("pad_exit.zig");
@@ -1366,7 +1368,9 @@ fn buildRouteCtx(
     const obs = try buildObstacles(arena, placement.parts, placement.nets);
     var keep_state = KeepState{ .nets = try keepout.halos(arena, placement) };
     if (keep_state.nets.len > 0) {
-        keep_state.pads = try padPts(arena, obs);
+        // The escape gate reads the same (net, centre, guarded copper) points the
+        // DRC finding and the client session do — `pad_project` is that projection.
+        keep_state.pads = try pad_project.keepoutPts(arena, obs);
         keep_state.zones = try keepout.buildZones(arena, placement, keep_state.pads);
         keep_state.class = .{ .ids = try keepout.classIds(arena, placement) };
     }
@@ -5899,24 +5903,10 @@ fn stampTrackResv(ctx: *Ctx, a: [2]f64, b: [2]f64, net: i32, layer: u8) void {
     }
 }
 
+/// Reserve every free `resv` node within `dist` of (x, y) on `layer` for `net`
+/// — `disc_stamp`'s shared raster, first writer owning the node.
 fn reserveDisc(ctx: *Ctx, x: f64, y: f64, net: i32, dist: f64, layer: u8) void {
-    const grid = ctx.grid;
-    const radius: i64 = numeric.checkedInt(i64, @ceil(dist / grid.g)) orelse return;
-    const center = grid.nearest(x, y);
-    var dy: i64 = -radius;
-    while (dy <= radius) : (dy += 1) {
-        var dx: i64 = -radius;
-        while (dx <= radius) : (dx += 1) {
-            const ix = @as(i64, @intCast(center[0])) + dx;
-            const iy = @as(i64, @intCast(center[1])) + dy;
-            if (ix < 0 or iy < 0 or ix >= grid.nx or iy >= grid.ny) continue;
-            const wx = grid.worldX(@intCast(ix));
-            const wy = grid.worldY(@intCast(iy));
-            if (std.math.hypot(wx - x, wy - y) > dist) continue;
-            const node = @as(usize, @intCast(iy)) * grid.nx + @as(usize, @intCast(ix));
-            if (ctx.resv[layer][node] == empty_cell) ctx.resv[layer][node] = net;
-        }
-    }
+    disc_stamp.claimFree(ctx.grid, ctx.resv[layer], .{ x, y }, dist, net);
 }
 
 // ── RF same-layer keepout (see `KeepState` and `placement/keepout.zig`) ──────
@@ -5967,25 +5957,6 @@ fn padSegmentClears(ctx: *const Ctx, p: PadObs, a: [2]f64, b: [2]f64, ordinary: 
     const distance = pad_shape.segmentDist(shape, a, b, lim[1]);
     const at = closestOnLine(a, b, (p.x0 + p.x1) / 2, (p.y0 + p.y1) / 2);
     return keepout.approachClears(ctx.keep.zones, p.net, distance, at, lim);
-}
-
-/// Project the pad obstacles into the (net, centre) form the escape gate reads,
-/// so the router answers "does this net own a pad in that zone" from the same
-/// points `drc_keepout` does (`drc.keepoutPads` projects its own pad list alike).
-fn padPts(arena: std.mem.Allocator, obs: []const PadObs) std.mem.Allocator.Error![]const keepout.PadPt {
-    const out = try arena.alloc(keepout.PadPt, obs.len);
-    for (obs, out) |p, *o| o.* = .{
-        .net = p.net,
-        .x = (p.x0 + p.x1) / 2,
-        .y = (p.y0 + p.y1) / 2,
-        .guard = if (p.net >= 0) .{
-            .bounds = .{ p.x0, p.y0, p.x1, p.y1 },
-            .poly = p.poly,
-            .layer = p.layer,
-            .thru = p.thru,
-        } else null,
-    };
-    return out;
 }
 
 /// Is node `n` inside a FOREIGN net's stamped keepout halo — on `layer`, or (null
@@ -6050,24 +6021,17 @@ fn keepStamp(ctx: *const Ctx, net: i32, layer: u8, half: f64) KeepStamp {
 /// left wide open.
 fn keepDisc(ctx: *Ctx, x: f64, y: f64, st: KeepStamp) void {
     if (st.layer >= ctx.keep.layers.len) return;
-    const grid = ctx.grid;
-    const lane = ctx.keep.layers[st.layer];
-    const radius: i64 = numeric.checkedInt(i64, @ceil(st.dist / grid.g)) orelse return;
-    const center = grid.nearest(x, y);
-    var dy: i64 = -radius;
-    while (dy <= radius) : (dy += 1) {
-        var dx: i64 = -radius;
-        while (dx <= radius) : (dx += 1) {
-            const ix = @as(i64, @intCast(center[0])) + dx;
-            const iy = @as(i64, @intCast(center[1])) + dy;
-            if (ix < 0 or iy < 0 or ix >= grid.nx or iy >= grid.ny) continue;
-            const wx = grid.worldX(@intCast(ix));
-            const wy = grid.worldY(@intCast(iy));
-            if (std.math.hypot(wx - x, wy - y) > st.dist) continue;
-            const node = @as(usize, @intCast(iy)) * grid.nx + @as(usize, @intCast(ix));
-            keepClaim(ctx, lane, node, wx, wy, st);
+    const Claim = struct {
+        ctx: *Ctx,
+        lane: []i32,
+        st: KeepStamp,
+
+        fn stamp(self: @This(), node: disc_stamp.Node) void {
+            keepClaim(self.ctx, self.lane, node.at, node.x, node.y, self.st);
         }
-    }
+    };
+    const claim = Claim{ .ctx = ctx, .lane = ctx.keep.layers[st.layer], .st = st };
+    disc_stamp.forEach(ctx.grid, .{ x, y }, st.dist, claim, Claim.stamp);
 }
 
 /// Claim one node for `st`, preserving first-stamp ownership and recording the

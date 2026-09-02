@@ -423,6 +423,10 @@ src/docgen.zig::SectionIterator struct_
 src/docgen.zig::extractSection | fn extractSection(doc: []const u8, title: []const u8) ?[]const u8
 src/docgen.zig::next | fn next(self: *SectionIterator) ?Section
 src/docgen.zig::renderLanguageReference | fn renderLanguageReference(allocator: std.mem.Allocator) std.mem.Allocator.Error![]const u8
+src/drc_board_json.zig::Board struct_
+src/drc_board_json.zig::Error value
+src/drc_board_json.zig::Options struct_
+src/drc_board_json.zig::parse | fn parse(arena: std.mem.Allocator, input: []const u8, opts: Options) Error!Board
 src/drc_dump.zig::DumpError value
 src/drc_dump.zig::Mutation enum_
 src/drc_dump.zig::cmdDrcDump | fn cmdDrcDump(allocator: std.mem.Allocator, args: []const []const u8) DumpError!void
@@ -461,7 +465,6 @@ src/drc_reconcile.zig::snapshotFor | fn snapshotFor(store: *Store, name: []const
 src/drc_reconcile.zig::sweepTurn | fn sweepTurn(store: *Store, name: []const u8, sub: ?[]const u8, now_ns: i128) Turn
 src/drc_reconcile.zig::sweep_debounce_ns value
 src/drc_reconcile.zig::zonesKey | fn zonesKey(zones: []const pour.UserZone) u64
-src/drc_session.zig::buildDesignRules | fn buildDesignRules(v: ?std.json.Value) optimizer.DesignRules
 src/drc_sweep.zig::Direction enum_
 src/drc_sweep.zig::Discrepancy struct_
 src/drc_sweep.zig::Outcome struct_
@@ -2004,15 +2007,16 @@ src/placement/diff_route.zig::tightestOpposite | fn tightestOpposite(legs: Legs)
 src/placement/diff_route.zig::viaSpread | fn viaSpread(off: f64, via_dia: f64, clearance: f64, width: f64) f64
 src/placement/diff_shape.zig::Channel struct_
 src/placement/diff_shape.zig::envelopeChannel | fn envelopeChannel( run: router.CoupledRun, pair: diff_pairs.DiffPair, ends: diff_route.Ends, ) std.mem.Allocator.Error!Channel
+src/placement/disc_stamp.zig::Node struct_
+src/placement/disc_stamp.zig::claimFree | fn claimFree(grid: route_grid.Grid, lane: []i32, centre: [2]f64, dist: f64, net: i32) void
+src/placement/disc_stamp.zig::forEach | fn forEach( grid: route_grid.Grid, centre: [2]f64, dist: f64, ctx: anytype, comptime claim: fn (@TypeOf(ctx), Node) void, ) void
+src/placement/disc_stamp.zig::segSteps | fn segSteps(grid: route_grid.Grid, a: [2]f64, b: [2]f64) usize
 src/placement/dive_elide.zig::Axis enum_
-src/placement/dive_elide.zig::Dive struct_
 src/placement/dive_elide.zig::Path struct_
-src/placement/dive_elide.zig::Scan struct_
 src/placement/dive_elide.zig::Span struct_
 src/placement/dive_elide.zig::candidateCoord | fn candidateCoord(a: [2]f64, b: [2]f64, axis: Axis, k: usize) ?f64
 src/placement/dive_elide.zig::channelPath | fn channelPath(probe: router.TautProbe, span: Span) ?Path
 src/placement/dive_elide.zig::channelPoints | fn channelPoints(a: [2]f64, b: [2]f64, axis: Axis, coord: f64) ?Path
-src/placement/dive_elide.zig::findDive | fn findDive(self: Scan, vi: usize) std.mem.Allocator.Error!?Dive
 src/placement/dive_elide.zig::passBoard | fn passBoard(board: Board) std.mem.Allocator.Error!void
 src/placement/dive_elide.zig::policyAdmits | fn policyAdmits(policy: route_policy.NetPolicy, layer: u8) bool
 src/placement/dive_elide.zig::strandedAt | fn strandedAt(d: f64, other_reach: f64, via_r: f64, trace_w: f64) bool
@@ -2506,6 +2510,11 @@ src/placement/net_open.zig::checkWithConnectivity | fn checkWithConnectivity( ar
 src/placement/net_open.zig::checkWithConnectivityScoped | fn checkWithConnectivityScoped( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, prepared: Prepared, scope: ?Scope, ) std.mem.Allocator.Error!ScopedReport
 src/placement/net_open.zig::zoneFills | fn zoneFills( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, base: ?pour.EdgeField, ) std.mem.Allocator.Error![]const pour.Fill
 src/placement/net_open.zig::zoneFillsMemo | fn zoneFillsMemo( arena: std.mem.Allocator, placement: optimizer.Placement, copper: routed_copper.Copper, base: ?pour.EdgeField, memo: ?pour.FillMemo, ) std.mem.Allocator.Error![]const pour.Fill
+src/placement/net_rewrite_pass.zig::Options struct_
+src/placement/net_rewrite_pass.zig::mayRewrite | fn mayRewrite(selected_nets: []const bool, net: i32) bool
+src/placement/net_rewrite_pass.zig::netIsDiffPairLeg | fn netIsDiffPairLeg(placement: optimizer.Placement, net_i: usize) bool
+src/placement/net_rewrite_pass.zig::netIsRfDisciplined | fn netIsRfDisciplined(placement: optimizer.Placement, net_i: usize) bool
+src/placement/net_rewrite_pass.zig::run | fn run( board: Board, opts: Options, ctx: anytype, comptime stepOne: fn (@TypeOf(ctx), i32) std.mem.Allocator.Error!bool, ) std.mem.Allocator.Error!void
 src/placement/net_rules.zig::FenceRule struct_
 src/placement/net_rules.zig::ImpedanceRule value
 src/placement/net_rules.zig::NetRule struct_
@@ -2682,6 +2691,8 @@ src/placement/pad_neck.zig::allowsTrack | fn allowsTrack( arena: std.mem.Allocat
 src/placement/pad_neck.zig::judgePowerNeck | fn judgePowerNeck( arena: std.mem.Allocator, board: PowerNeckBoard, seed: usize, ) std.mem.Allocator.Error!PowerNeckVerdict
 src/placement/pad_neck.zig::passBoard | fn passBoard(board: router.CleanupBoard) std.mem.Allocator.Error!void
 src/placement/pad_neck.zig::shapeGeneratedTracks | fn shapeGeneratedTracks( arena: std.mem.Allocator, placement: optimizer.Placement, selected_nets: []const bool, vias: []const router.Via, tracks: *std.ArrayList(router.Track), ) std.mem.Allocator.Error!bool
+src/placement/pad_project.zig::keepoutPts | fn keepoutPts(arena: std.mem.Allocator, pads: anytype) std.mem.Allocator.Error![]const keepout.PadPt
+src/placement/pad_project.zig::topologyTerminals | fn topologyTerminals( arena: std.mem.Allocator, pads: anytype, identity: net_identity.Identity, ) std.mem.Allocator.Error![]const copper_topology.Terminal
 src/placement/pad_shape.zig::SegClosest struct_
 src/placement/pad_shape.zig::Shape struct_
 src/placement/pad_shape.zig::closestOnSeg | fn closestOnSeg(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) SegClosest
@@ -2694,6 +2705,9 @@ src/placement/pad_shape.zig::segmentDist | fn segmentDist(shape: Shape, a: [2]f6
 src/placement/pad_shape.zig::shapeGap | fn shapeGap(a: Shape, b: Shape, slack: f64) f64
 src/placement/pad_shape.zig::worldCourtyardCorners | fn worldCourtyardCorners(part: optimizer.Part) [4][2]f64
 src/placement/pad_shape.zig::worldShape | fn worldShape(arena: std.mem.Allocator, part: optimizer.Part, pad: geometry.Pad) std.mem.Allocator.Error!Shape
+src/placement/pad_world.zig::Bore struct_
+src/placement/pad_world.zig::WorldPad struct_
+src/placement/pad_world.zig::build | fn build(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error![]const WorldPad
 src/placement/pair_pinch.zig::Log struct_
 src/placement/pair_pinch.zig::Report struct_
 src/placement/pair_pinch.zig::Side enum_
@@ -3474,6 +3488,11 @@ src/placement/via_guide.zig::isEmpty | fn isEmpty(self: Union) bool
 src/placement/via_guide.zig::max_nodes value
 src/placement/via_guide.zig::perimeter | fn perimeter(c: Contour) f64
 src/placement/via_guide.zig::trace | fn trace(arena: std.mem.Allocator, u: Union, dist: f64) std.mem.Allocator.Error!Guide
+src/placement/via_hop_scan.zig::Hop struct_
+src/placement/via_hop_scan.zig::Scan struct_
+src/placement/via_hop_scan.zig::find | fn find(self: Scan, vi: usize) std.mem.Allocator.Error!?Hop
+src/placement/via_hop_scan.zig::ptEq | fn ptEq(a: [2]f64, b: [2]f64) bool
+src/placement/via_hop_scan.zig::snap_mm value
 src/placement/via_merge.zig::Merge struct_
 src/placement/via_merge.zig::ViaPt struct_
 src/placement/via_merge.zig::plan | fn plan(arena: std.mem.Allocator, vias: []const ViaPt) std.mem.Allocator.Error![]const Merge

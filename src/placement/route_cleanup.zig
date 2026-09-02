@@ -40,6 +40,9 @@ const octilinear = @import("octilinear.zig");
 const dive_elide = @import("dive_elide.zig");
 const copper_support = @import("copper_support.zig");
 const copper_topology = @import("copper_topology.zig");
+const pad_project = @import("pad_project.zig");
+const via_hop_scan = @import("via_hop_scan.zig");
+const net_rewrite_pass = @import("net_rewrite_pass.zig");
 const plane_stitch = @import("plane_stitch.zig");
 const copper_contact = @import("copper_contact.zig");
 const land_transit = @import("land_transit.zig");
@@ -120,19 +123,13 @@ pub fn removeNetVias(list: *std.ArrayList(Via), net: i32) void {
     list.shrinkRetainingCapacity(w);
 }
 
-/// May a cleanup pass rewrite `net`'s copper? With no selection every net is
-/// fair game (the whole-board route). In a SCOPED route every unselected net's
-/// copper is the caller's retained board (`stampExistingCopper` echoes it into
-/// the result "unchanged") — so rewriting it here would return a different
-/// board than the caller submitted, and did: a scoped barracuda re-route
-/// straightened/amputated out-of-scope copper and reopened six connected nets.
-/// Foreign copper (net < 0) is likewise retained caller copper in a scoped run.
-fn mayRewrite(selected_nets: []const bool, net: i32) bool {
-    if (net < 0) return false;
-    if (selected_nets.len == 0) return true;
-    const i: usize = @intCast(net);
-    return i < selected_nets.len and selected_nets[i];
-}
+/// May a cleanup pass rewrite `net`'s copper? The scope guard every such pass
+/// shares — see `net_rewrite_pass.mayRewrite`.
+const mayRewrite = net_rewrite_pass.mayRewrite;
+
+/// Is this net one leg of a declared differential pair? Also the shared guard:
+/// every pass that edits copper per net owes the pair the same answer.
+const netIsDiffPairLeg = net_rewrite_pass.netIsDiffPairLeg;
 
 /// Drop every degenerate (sub-micron) track from the finished copper. See
 /// `min_emit_seg_mm`. Compacts the list in place. `selected_nets` is the run's
@@ -780,15 +777,12 @@ test "adjacent own lands reanchor through both centres" {
     try expectNoLandTransit(&pair, tracks.items, 0);
 }
 
+/// The board's pad obstacles as connectivity terminals. Exact identity (no
+/// `net_identity` fold): this pass rewrites the copper it is reading, and two
+/// nets it may not merge must stay two — the DRC's own audit passes an identity
+/// through the same projection because its question is different.
 fn topologyTerminals(board: Board) std.mem.Allocator.Error![]const copper_topology.Terminal {
-    const out = try board.ctx.arena.alloc(copper_topology.Terminal, board.ctx.obs.len);
-    for (board.ctx.obs, out) |pad, *terminal| terminal.* = .{
-        .shape = .{ .x0 = pad.x0, .y0 = pad.y0, .x1 = pad.x1, .y1 = pad.y1, .poly = pad.poly },
-        .net = pad.net,
-        .layer = pad.layer,
-        .thru = pad.thru,
-    };
-    return out;
+    return pad_project.topologyTerminals(board.ctx.arena, board.ctx.obs, .{});
 }
 
 fn fillTopologyTracks(out: []copper_topology.Track, tracks: []const Track) []const copper_topology.Track {
@@ -1108,13 +1102,6 @@ fn samePhysicalVia(a: Via, b: Via) bool {
     if (a.net != b.net) return false;
     if (@abs(a.x - b.x) > coincident_via_eps_mm) return false;
     return @abs(a.y - b.y) <= coincident_via_eps_mm;
-}
-
-fn netIsDiffPairLeg(placement: optimizer.Placement, net_i: usize) bool {
-    for (placement.diff_pairs) |dp| {
-        if (dp.p == net_i or dp.n == net_i) return true;
-    }
-    return false;
 }
 
 fn padObsCenter(o: PadObs) [2]f64 {
@@ -2026,133 +2013,24 @@ test "parallel branch across one intervening lane still fuses" {
 // ── Redundant layer hops (E10) ───────────────────────────────────────────────
 
 /// "This track end sits on that via" tolerance — the router emits both from the
-/// same grid node, so this only absorbs float drift.
-const hop_snap_mm: f64 = 1e-6;
-/// Longest run (in segments) the hop walk will follow between two vias before
-/// giving up. A genuine layer hop is a handful of segments; the bound just caps
-/// a pathological chain.
-const max_hop_run_segs: usize = 24;
+/// same grid node, so this only absorbs float drift. The hop scan's own copy of
+/// the tolerance, so the two never disagree about what "on" means.
+const hop_snap_mm: f64 = via_hop_scan.snap_mm;
 /// Removals attempted per net. Each success deletes two vias, so this is far
 /// above any real net's via count.
 const max_hops_per_net: usize = 64;
 /// Below this the two vias are effectively the same point and there is no
 /// replacement copper to draw.
 const min_hop_span_mm: f64 = 1e-3;
-/// Most incident track ends the leg scan records; past this the point is a
-/// junction and no hop through it is considered.
-const max_legs: usize = 3;
 /// Widest agreement (as a cosine) between the replacement elbow's leg and the
 /// copper already leaving that via before the replacement counts as doubling
 /// back over it. cos 45°, so a leg must turn at least one octilinear step away
 /// from the existing chain.
 const back_cos_max: f64 = 0.7071;
 
-fn ptEq(a: [2]f64, b: [2]f64) bool {
-    return std.math.hypot(a[0] - b[0], a[1] - b[1]) <= hop_snap_mm;
-}
-
-/// One track end seen from a point it touches, pointing away from it.
-const Leg = struct { track: usize, layer: u8, far: [2]f64 };
-
-/// The legs found at a point, plus how many there really were (`n` keeps
-/// counting past `max_legs` so a junction is recognised as one).
-const Legs = struct {
-    n: usize = 0,
-    items: [max_legs]Leg = @splat(.{ .track = 0, .layer = 0, .far = .{ 0, 0 } }),
-};
-
-/// A redundant layer hop: two transition vias joined by a single-layer run,
-/// where the copper on the far side of BOTH vias sits on one other layer. The
-/// run can be redrawn on that layer and both vias deleted. `away` is the point
-/// each via's OUTER leg heads to, which the replacement must not run back over.
-const Hop = struct {
-    v1: usize,
-    v2: usize,
-    run: []const usize,
-    outer: u8,
-    away: [2][2]f64,
-};
-
-/// One net's copper, for the via-hop scan. Pure reads — the caller applies.
-const HopScan = struct {
-    arena: std.mem.Allocator,
-    tracks: []const Track,
-    vias: []const Via,
-    net: i32,
-
-    /// Every track end of this net incident on `p`.
-    fn legsAt(self: HopScan, p: [2]f64) Legs {
-        var out = Legs{};
-        for (self.tracks, 0..) |t, i| {
-            if (t.net != self.net) continue;
-            const a = [2]f64{ t.x1, t.y1 };
-            const b = [2]f64{ t.x2, t.y2 };
-            const far: [2]f64 = if (ptEq(a, p)) b else if (ptEq(b, p)) a else continue;
-            if (out.n < max_legs) out.items[out.n] = .{ .track = i, .layer = t.layer, .far = far };
-            out.n += 1;
-        }
-        return out;
-    }
-
-    fn viaAt(self: HopScan, p: [2]f64) ?usize {
-        for (self.vias, 0..) |v, i| {
-            if (v.net == self.net and ptEq(.{ v.x, v.y }, p)) return i;
-        }
-        return null;
-    }
-
-    /// The two legs of via `vi` when it is a pure TRANSITION via: exactly two
-    /// track ends meet it, on two different layers, so it exists only to change
-    /// layer. Null for a terminal via, a junction, or a stub.
-    fn transition(self: HopScan, vi: usize) ?[2]Leg {
-        const v = self.vias[vi];
-        const legs = self.legsAt(.{ v.x, v.y });
-        if (legs.n != 2 or legs.items[0].layer == legs.items[1].layer) return null;
-        return .{ legs.items[0], legs.items[1] };
-    }
-
-    /// Follow `start` away from a via along its own layer, collecting the run,
-    /// until another via of this net is reached. Null when the run branches,
-    /// dead-ends, or would need a layer change to continue.
-    fn walk(self: HopScan, start: Leg, run: *std.ArrayList(usize)) std.mem.Allocator.Error!?usize {
-        var leg = start;
-        var steps: usize = 0;
-        while (steps < max_hop_run_segs) : (steps += 1) {
-            try run.append(self.arena, leg.track);
-            if (self.viaAt(leg.far)) |vj| return vj;
-            const legs = self.legsAt(leg.far);
-            if (legs.n != 2) return null; // branch or dead end
-            const cont = if (legs.items[0].track == leg.track) legs.items[1] else legs.items[0];
-            if (cont.layer != leg.layer) return null; // no layer change without a via
-            leg = cont;
-        }
-        return null;
-    }
-
-    /// The hop through via `vi`, if it is one. Both run directions are tried:
-    /// either of the via's two layers may be the detour.
-    fn findHop(self: HopScan, vi: usize) std.mem.Allocator.Error!?Hop {
-        const pair = self.transition(vi) orelse return null;
-        for (0..2) |k| {
-            const run_leg = pair[k];
-            const outer = pair[1 - k].layer;
-            var run: std.ArrayList(usize) = .empty;
-            const vj = (try self.walk(run_leg, &run)) orelse continue;
-            if (vj == vi) continue;
-            const far = self.transition(vj) orelse continue;
-            const far_outer = if (far[0].layer == run_leg.layer) far[1] else far[0];
-            if (far_outer.layer != outer) continue;
-            return Hop{
-                .v1 = vi,
-                .v2 = vj,
-                .run = run.items,
-                .outer = outer,
-                .away = .{ pair[1 - k].far, far_outer.far },
-            };
-        }
-        return null;
-    }
-};
+/// Do two points coincide within the hop tolerance? The scan's own predicate,
+/// so this pass and the detector answer "same point" identically.
+const ptEq = via_hop_scan.ptEq;
 
 /// May this via be deleted by the hop pass, given the replacement will be drawn
 /// on layer `outer`? Not when it lands on one of the net's pads (a terminal
@@ -2201,7 +2079,7 @@ fn clearingElbow(probe: anytype, layer: u8, a: [2]f64, b: [2]f64, away: [2][2]f6
 }
 
 /// Swap a hop's two vias and its detour run for one elbow on the outer layer.
-fn applyHop(board: Board, net: i32, hop: Hop, a: [2]f64, mid: [2]f64, b: [2]f64) std.mem.Allocator.Error!void {
+fn applyHop(board: Board, net: i32, hop: via_hop_scan.Hop, a: [2]f64, mid: [2]f64, b: [2]f64) std.mem.Allocator.Error!void {
     for (hop.run) |ti| board.tracks.items[ti].net = cleanup_removed_net;
     board.vias.items[hop.v1].net = cleanup_removed_net;
     board.vias.items[hop.v2].net = cleanup_removed_net;
@@ -2231,11 +2109,11 @@ fn applyHop(board: Board, net: i32, hop: Hop, a: [2]f64, mid: [2]f64, b: [2]f64)
 /// Remove ONE redundant hop of `net`, or report that none is left.
 fn removeOneHop(board: Board, net: i32) std.mem.Allocator.Error!bool {
     const ctx = board.ctx;
-    const scan = HopScan{ .arena = ctx.arena, .tracks = board.tracks.items, .vias = board.vias.items, .net = net };
+    const scan = via_hop_scan.Scan{ .arena = ctx.arena, .tracks = board.tracks.items, .vias = board.vias.items, .net = net };
     const probe = router.TautProbe{ .run = .{ .ctx = ctx, .net = net, .tracks = board.tracks, .vias = board.vias } };
     for (board.vias.items, 0..) |v, vi| {
         if (v.net != net) continue;
-        const hop = (try scan.findHop(vi)) orelse continue;
+        const hop = (try scan.find(vi)) orelse continue;
         const far = board.vias.items[hop.v2];
         if (!hopViaRemovable(board, net, v, hop.outer)) continue;
         if (!hopViaRemovable(board, net, far, hop.outer)) continue;
@@ -2280,24 +2158,12 @@ fn removeOneHop(board: Board, net: i32) std.mem.Allocator.Error!bool {
 /// swept three-segment corridor search, under its own (finer) policy gate — so
 /// it runs on the nets the `netLayerAuthored` guard above skips wholesale.
 pub fn dropRedundantViaPairs(board: Board) std.mem.Allocator.Error!void {
-    const placement = board.placement;
-    for (0..placement.nets.len) |net_i| {
-        const ni: i32 = @intCast(net_i);
-        if (!mayRewrite(board.ctx.selected_nets, ni)) continue; // retained copper echoes verbatim
-        if (netIsDiffPairLeg(placement, net_i)) continue; // pairs move in lock-step
-        // A net whose policy authors its layers (a preferred/allowed mask, or
-        // waypoints requesting an exact transition) means its hops ON PURPOSE.
-        if (router.netLayerAuthored(board.ctx, net_i)) continue;
-        router.setNetParams(board.ctx, placement, net_i); // probe + width read this net's rule
-        // Restamp the copper index for this net: an earlier net's hop removal
-        // packed the lists down (aliasing every entry) and the index's
-        // insertion reach derives from the params just set.
-        router.rebuildCopperIndex(board.ctx, board.tracks.items, board.vias.items);
-        var guard: usize = 0;
-        while (guard < max_hops_per_net) : (guard += 1) {
-            if (!try removeOneHop(board, ni)) break;
-        }
-    }
+    // `skip_layer_authored`: a net whose policy authors its layers (a
+    // preferred/allowed mask, or waypoints requesting an exact transition)
+    // means its hops ON PURPOSE. `dive_elide` then revisits those nets under
+    // its own finer per-dive policy test.
+    const opts = net_rewrite_pass.Options{ .max_steps = max_hops_per_net, .skip_layer_authored = true };
+    try net_rewrite_pass.run(board, opts, board, removeOneHop);
     try dive_elide.passBoard(board);
 }
 
@@ -3322,8 +3188,8 @@ test "findHop pairs two transition vias and names the layer their ends share" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
     const fx = v12vHopFixture();
-    const scan = HopScan{ .arena = arena, .tracks = &fx.tracks, .vias = &fx.vias, .net = 0 };
-    const hop = (try scan.findHop(0)) orelse return testing.expect(false);
+    const scan = via_hop_scan.Scan{ .arena = arena, .tracks = &fx.tracks, .vias = &fx.vias, .net = 0 };
+    const hop = (try scan.find(0)) orelse return testing.expect(false);
     try testing.expectEqual(@as(usize, 1), hop.v2);
     try testing.expectEqual(@as(u8, 1), hop.outer); // both ends continue on B.Cu
     try testing.expectEqual(@as(usize, 1), hop.run.len); // the single F.Cu detour
@@ -3347,16 +3213,16 @@ test "findHop refuses a branching run and a hop whose ends leave on different la
     // Far end leaves on F.Cu instead of B.Cu: the two ends no longer share a
     // layer, so no single-layer redraw can replace the hop.
     fx.tracks[2].layer = 0;
-    const split = HopScan{ .arena = arena, .tracks = &fx.tracks, .vias = &fx.vias, .net = 0 };
-    try testing.expect((try split.findHop(0)) == null);
+    const split = via_hop_scan.Scan{ .arena = arena, .tracks = &fx.tracks, .vias = &fx.vias, .net = 0 };
+    try testing.expect((try split.find(0)) == null);
     // A third track hanging off the first via makes it a junction, not a pure
     // transition — deleting it would strand that branch.
     const branched = [_]Track{
         fx.tracks[0],                                                                                        fx.tracks[1],
         .{ .x1 = 163.610, .y1 = 100.024, .x2 = 165.807, .y2 = 99.585, .layer = 1, .width = 0.25, .net = 0 }, .{ .x1 = 162.731, .y1 = 99.146, .x2 = 162.731, .y2 = 96.0, .layer = 1, .width = 0.25, .net = 0 },
     };
-    const scan = HopScan{ .arena = arena, .tracks = &branched, .vias = &fx.vias, .net = 0 };
-    try testing.expect((try scan.findHop(0)) == null);
+    const scan = via_hop_scan.Scan{ .arena = arena, .tracks = &branched, .vias = &fx.vias, .net = 0 };
+    try testing.expect((try scan.find(0)) == null);
 }
 
 // spec: placement/router - keeps a layer hop whose replacement would double back over the copper already leaving a via

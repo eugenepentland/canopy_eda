@@ -893,13 +893,25 @@ reason = "fab-output extensions belong to the Gerber/Excellon writers — a file
 # emitters), assets/pcb_settings.js (11, the client's editor), static_assets.zig
 # (5, a full key list), and wasm_drc.zig / drc_session.zig (3 each, two
 # hand-written JSON readers).
+#
+# Those two hand-written readers are now ONE, `src/drc_board_json.zig`, which
+# both client bridges parse through — so it joins the owner list rather than the
+# frozen ledger: it is the single place the client side spells these keys, which
+# is exactly what the rule asks for. (It is the only client-side reader, so a
+# rename in the owner table still has to reach it; nothing here is exempt from
+# that, only from being counted as drift.)
 [[concept]]
 name = "design-rule-field-names"
 literals = [
   "pour_clearance", "pour_min_width", "pour_corner_radius",
   "mask_relief_corner_radius", "mask_web",
 ]
-owner = ["src/design_rule_fields.zig", "src/serve/design_rules_edit.zig", "src/serve/assets/pcb_3d_surface.js"]
+owner = [
+  "src/design_rule_fields.zig",
+  "src/serve/design_rules_edit.zig",
+  "src/serve/assets/pcb_3d_surface.js",
+  "src/drc_board_json.zig",
+]
 files = ["src/*.zig", "src/*.js"]
 reason = "design-rule wire keys belong to the design_rules_edit key table — the editor, the board blob, the wasm DRC and the fab gate must judge a board by one spelling"
 
