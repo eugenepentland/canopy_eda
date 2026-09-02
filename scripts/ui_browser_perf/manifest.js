@@ -286,6 +286,7 @@ const pcbToolstripControls = {
   "pcb-outline-poly": { excluded: "Multi-click polygon-outline authoring needs a dedicated disposable geometry fixture before it can be timed safely." },
   "pcb-backing": { excluded: "Backing-region authoring needs a dedicated disposable geometry fixture and semantic shape oracle." },
   "pcb-heatsink": { excluded: "Heatsink authoring opens a multi-field editor and needs a dedicated thermal geometry fixture and oracle." },
+  "pcb-fan": { excluded: "Fan authoring opens a multi-field editor and needs a dedicated thermal airflow fixture and operating-point oracle." },
   "pcb-outline-dxf": { excluded: "DXF import requires a user-selected file and belongs to the explicit import fixture rather than normal board gestures." },
   "pcb-pour-zone": { scenario: "pour_zone_cancel" },
   "pcb-text": { excluded: "Silkscreen text placement opens a prompt and needs a dedicated disposable text-edit fixture and oracle." },

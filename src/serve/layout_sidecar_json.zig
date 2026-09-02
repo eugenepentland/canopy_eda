@@ -561,10 +561,31 @@ fn strictTexts(v: ?std.json.Value) bool {
     return true;
 }
 
+fn strictFan(v: ?std.json.Value) bool {
+    const value = v orelse return true;
+    if (value != .object) return false;
+    if (!objectHasOnlyKeys(value, .{ "model", "x", "y", "w", "h", "side", "distance_mm", "free_air_flow_m3_s", "max_static_pressure_pa", "operating_flow_fraction" })) return false;
+    if (!strictString(value.object.get("model"), false)) return false;
+    if (strictNumber(value.object.get("x")) == null or strictNumber(value.object.get("y")) == null) return false;
+    const w = strictNumber(value.object.get("w")) orelse return false;
+    const h = strictNumber(value.object.get("h")) orelse return false;
+    if (!(w > 0) or !(h > 0)) return false;
+    const distance = strictNumber(value.object.get("distance_mm")) orelse return false;
+    const flow = strictNumber(value.object.get("free_air_flow_m3_s")) orelse return false;
+    if (!(distance >= 0) or !(flow > 0)) return false;
+    const pressure = strictNumber(value.object.get("max_static_pressure_pa")) orelse return false;
+    const fraction = strictNumber(value.object.get("operating_flow_fraction")) orelse return false;
+    if (!(pressure > 0) or !(fraction > 0)) return false;
+    if (fraction > 1) return false;
+    const side = value.object.get("side") orelse return false;
+    if (side != .string) return false;
+    return std.mem.eql(u8, side.string, "top") or std.mem.eql(u8, side.string, "bottom");
+}
+
 fn strictSelectedRow(alloc: std.mem.Allocator, value: std.json.Value) bool {
     if (value != .object) return false;
     if (!objectHasOnlyKeys(value, .{
-        "name", "kind", "ts",   "rough",     "routes", "outline", "fabrication_layers", "heatsink", "texts", "dimensions",
+        "name", "kind", "ts",   "rough",     "routes", "outline", "fabrication_layers", "heatsink", "fan", "texts", "dimensions",
         "hpwl", "loop", "caps", "objective", "parts",  "default",
     })) return false;
     if (!strictString(value.object.get("name"), false)) return false;
@@ -584,6 +605,7 @@ fn strictSelectedRow(alloc: std.mem.Allocator, value: std.json.Value) bool {
     if (!strictRoutes(alloc, value.object.get("routes"))) return false;
     if (!strictOutline(alloc, value.object.get("outline"))) return false;
     if (!strictFabricationLayers(alloc, value.object.get("fabrication_layers"))) return false;
+    if (!strictFan(value.object.get("fan"))) return false;
     return strictTexts(value.object.get("texts"));
 }
 
@@ -1394,6 +1416,20 @@ pub fn writeSavedHeatsinkJson(w: *std.Io.Writer, sink: page.SavedHeatsink) std.I
     try w.print(",\"pad_thickness_mm\":{d},\"pad_k_w_mk\":{d}}}", .{ sink.pad_thickness_mm, sink.pad_k_w_mk });
 }
 
+/// Serialize one saved axial fan assembly.
+pub fn writeSavedFanJson(w: *std.Io.Writer, fan: page.SavedFan) std.Io.Writer.Error!void {
+    try w.writeAll("{\"model\":");
+    try writeJsonStr(w, fan.model);
+    try w.print(",\"x\":{d},\"y\":{d},\"w\":{d},\"h\":{d},\"side\":", .{ fan.rect.x, fan.rect.y, fan.rect.w, fan.rect.h });
+    try writeJsonStr(w, fan.side);
+    try w.print(",\"distance_mm\":{d},\"free_air_flow_m3_s\":{d},\"max_static_pressure_pa\":{d},\"operating_flow_fraction\":{d}}}", .{
+        fan.distance_mm,
+        fan.curve.free_air_flow_m3_s,
+        fan.curve.max_static_pressure_pa,
+        fan.operating_flow_fraction,
+    });
+}
+
 /// Serialize one board-level fabrication text label.
 pub fn writeBoardTextJson(w: *std.Io.Writer, text: font5x7.BoardText) std.Io.Writer.Error!void {
     try w.print("{{\"x\":{d},\"y\":{d},\"rot\":{d},\"side\":\"{s}\",\"size\":{d},\"text\":", .{ text.x, text.y, text.rot, if (text.bottom) "bottom" else "top", text.size });
@@ -1697,6 +1733,36 @@ pub fn parseSavedHeatsink(v: ?std.json.Value) ?page.SavedHeatsink {
         .fin_axis = fin_axis,
         .pad_thickness_mm = pad_thickness,
         .pad_k_w_mk = pad_k,
+    };
+}
+
+/// Parse one saved axial fan. All physical and catalog fields are required so
+/// an editor override can never silently change the thermal operating point.
+pub fn parseSavedFan(v: ?std.json.Value) ?page.SavedFan {
+    const value = v orelse return null;
+    if (value != .object) return null;
+    const obj = value.object;
+    const model = obj.get("model") orelse return null;
+    if (model != .string or model.string.len == 0) return null;
+    const x = jsonOptNum(obj.get("x")) orelse return null;
+    const y = jsonOptNum(obj.get("y")) orelse return null;
+    const w = jsonOptNum(obj.get("w")) orelse return null;
+    const h = jsonOptNum(obj.get("h")) orelse return null;
+    const distance = jsonOptNum(obj.get("distance_mm")) orelse return null;
+    const flow = jsonOptNum(obj.get("free_air_flow_m3_s")) orelse return null;
+    const pressure = jsonOptNum(obj.get("max_static_pressure_pa")) orelse return null;
+    const fraction = jsonOptNum(obj.get("operating_flow_fraction")) orelse return null;
+    if (!(w > 0) or !(h > 0)) return null;
+    if (!(distance >= 0) or !(flow > 0)) return null;
+    if (!(pressure > 0) or !(fraction > 0)) return null;
+    if (fraction > 1) return null;
+    return .{
+        .model = model.string,
+        .rect = .{ .x = x, .y = y, .w = w, .h = h },
+        .side = stringChoice(obj.get("side"), &.{ "top", "bottom" }, "top"),
+        .distance_mm = distance,
+        .curve = .{ .free_air_flow_m3_s = flow, .max_static_pressure_pa = pressure },
+        .operating_flow_fraction = fraction,
     };
 }
 

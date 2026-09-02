@@ -1,0 +1,39 @@
+<div id="heatsink-modal" class="court-modal" hidden><div class="court-dialog heatsink-dialog">
+<div class="court-h"><span id="hs-title">Physical heatsink</span><button id="hs-x" class="court-x" title="Close">×</button></div>
+<div class="hs-grid">
+<label>PCB face<select id="hs-side"><option value="top">Top</option><option value="bottom">Bottom</option></select></label>
+<label>Target package<select id="hs-target"></select></label>
+<label>Material<select id="hs-material"><option value="aluminum_6063">Aluminum 6063</option><option value="aluminum_6061">Aluminum 6061</option><option value="copper_c110">Copper C110</option><option value="steel">Steel</option></select></label>
+<label>Fin direction<select id="hs-axis"><option value="length">Along length</option><option value="width">Along width</option></select></label>
+<label>X (mm)<input id="hs-x-mm" type="number" step="0.1"></label>
+<label>Y (mm)<input id="hs-y-mm" type="number" step="0.1"></label>
+<label>Width (mm)<input id="hs-w" type="number" step="0.1" min="0.1"></label>
+<label>Length (mm)<input id="hs-h" type="number" step="0.1" min="0.1"></label>
+<label>Base thickness (mm)<input id="hs-base" type="number" step="0.1" min="0.1"></label>
+<label>Fin height (mm)<input id="hs-fin-h" type="number" step="0.1" min="0"></label>
+<label>Fin thickness (mm)<input id="hs-fin-t" type="number" step="0.1" min="0.1"></label>
+<label>Fin count<input id="hs-fin-count" type="number" step="1" min="1" max="512"></label>
+<label>Fin gap (mm)<input id="hs-fin-g" type="number" step="0.1" min="0"></label>
+<label>Pad thickness (mm)<input id="hs-pad-t" type="number" step="0.1" min="0"></label>
+<label>Pad conductivity (W/m·K)<input id="hs-pad-k" type="number" step="0.1" min="0.1"></label>
+</div><div class="hs-result" id="hs-result"></div>
+<div class="court-note">The thermal solver derives fin count and an estimated still-air θSA from this extrusion. For package-top contact, the selected component must have published θJC(top); the opposite PCB face uses its board/exposed-pad path.</div>
+<div class="court-actions"><button id="hs-save" class="btn">Use heatsink</button><button id="hs-delete" class="btn fab-danger">Remove</button><button id="hs-cancel" class="btn">Cancel</button></div>
+</div></div>
+<div id="fan-modal" class="court-modal" hidden><div class="court-dialog fan-dialog">
+<div class="court-h"><span id="fan-title">Axial cooling fan</span><button id="fan-x" class="court-x" title="Close">×</button></div>
+<div class="hs-grid">
+<label>Fan model<input id="fan-model" type="text" placeholder="Manufacturer part number"></label>
+<label>PCB face<select id="fan-side"><option value="top">Top</option><option value="bottom">Bottom</option></select></label>
+<label>X (mm)<input id="fan-x-mm" type="number" step="0.1"></label>
+<label>Y (mm)<input id="fan-y-mm" type="number" step="0.1"></label>
+<label>Outlet width (mm)<input id="fan-w" type="number" step="0.1" min="0.1"></label>
+<label>Outlet height (mm)<input id="fan-h" type="number" step="0.1" min="0.1"></label>
+<label>Outlet-to-board distance (mm)<input id="fan-distance" type="number" step="0.1" min="0"></label>
+<label>Free-air flow (m³/s)<input id="fan-flow" type="number" step="0.0001" min="0.000001"></label>
+<label>Maximum static pressure (Pa)<input id="fan-pressure" type="number" step="0.1" min="0.1"></label>
+<label>Installed-flow fraction<input id="fan-fraction" type="number" step="0.05" min="0.01" max="1"></label>
+</div><div class="hs-result" id="fan-result"></div>
+<div class="court-note">The rectangle is the fan outlet projected onto the PCB; the circle is its movable target. Distance is measured from the outlet face to the board. Installed-flow fraction accounts for enclosure and flow restriction until a measured system operating point is available.</div>
+<div class="court-actions"><button id="fan-save" class="btn">Use fan</button><button id="fan-delete" class="btn fab-danger">Remove</button><button id="fan-cancel" class="btn">Cancel</button></div>
+</div></div>

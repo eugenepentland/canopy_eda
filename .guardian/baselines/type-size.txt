@@ -46,7 +46,7 @@
 10 src/kicad_pcb/snapshot.zig|Zone
 10 src/kicad_pcb/writer.zig|ApplyStats
 14 src/layout_sidecar_types.zig|SavedHeatsink
-13 src/layout_sidecar_types.zig|SavedLayout
+14 src/layout_sidecar_types.zig|SavedLayout
 8 src/layout_sidecar_types.zig|SavedOutline
 12 src/layout_sidecar_types.zig|SavedTrack
 10 src/layout_sidecar_types.zig|SavedVia

@@ -54,6 +54,23 @@ pub const SavedHeatsink = struct {
     pad_k_w_mk: f64 = 6,
 };
 
+/// One axial fan aimed normal to a PCB face. The rectangle is the outlet
+/// footprint projected into board coordinates; `distance_mm` is the clear
+/// outlet-to-board standoff.
+pub const SavedFan = struct {
+    /// Projected outlet rectangle in absolute board coordinates.
+    pub const Rect = struct { x: f64, y: f64, w: f64, h: f64 };
+    /// Manufacturer free-air-flow and shutoff-pressure endpoints.
+    pub const Curve = struct { free_air_flow_m3_s: f64, max_static_pressure_pa: f64 };
+
+    model: []const u8,
+    rect: Rect,
+    side: []const u8 = "top",
+    distance_mm: f64 = 0,
+    curve: Curve,
+    operating_flow_fraction: f64 = 0.6,
+};
+
 /// Canonical creator tags persisted on saved tracks and vias.
 pub const route_source_human = "human";
 pub const route_source_agent = "agent";
@@ -145,6 +162,7 @@ pub const SavedLayout = struct {
     outline: ?SavedOutline = null,
     fabrication_layers: []const SavedFabricationLayer = &.{},
     heatsink: ?SavedHeatsink = null,
+    fan: ?SavedFan = null,
     texts: []const font5x7.BoardText = &.{},
     dimensions: []const SavedPartEdgeDimension = &.{},
 };

@@ -299,6 +299,12 @@ Local dev still uses `http://localhost:7050`.
   package-direction mapping when the `heatsink` scenario is selected. The
   estimate assumes open straight fins and a 10 W/m²K still-air film; it is a
   comparative screening model, not enclosure or fan-curve CFD.
+  A named layout can likewise override its board-authored axial fan. Choose
+  the ◉ fan tool, drag the outlet footprint, then drag the circular body to
+  position it or click it to edit the PCB face and outlet-to-board distance.
+  The same dialog retains model, outlet size, free-air flow, maximum static
+  pressure, and installed-flow fraction. Save/Update persists those values;
+  the Thermal tab's `fan` scenario then uses that exact footprint and standoff.
 - **Live push**: `POST /api/push/:name` — rebuild and push update. On eval failure the JSON (and the schematic page, and the CLI `build` tool) carries a structured `diagnostic` `{file,line,col,message,source_line}` rendered compiler-style with a caret (`src/serve/diag_format.zig`).
 - **Version history + diff**: `GET /api/history/:name` — stored snapshot ids (file copies under `<project>/history/<name>/<timestamp>/`, written before every mutation); `GET /api/diff/:name?from=<id>&to=<id|current>` — request-local netlist diff (instances added/removed, value/footprint changes, net membership changes; `src/serve/design_diff.zig`). Schematic header's History panel renders it. Caveat: snapshots capture the design file only, so an old revision re-evaluates against today's lib/ modules.
 - **Datasheet attach**: `POST /api/attach-datasheet` `{component,file}` — splices an uploaded PDF filename or an HTTP(S) URL into `lib/components/<name>.sexp` (idempotent and scheme/path-safe); the library page has a per-card attach control. `GET /api/datasheets` lists uploaded local candidates. The CLI twin is the `attach_datasheet` tool (below), which an agent pairs with `fetch_datasheet` to go from a manufacturer URL to a declared `(datasheet "…")` without a browser.

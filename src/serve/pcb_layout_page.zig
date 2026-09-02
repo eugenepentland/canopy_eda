@@ -129,6 +129,7 @@ pub const parseSavedRoutes = sidecar_json.parseSavedRoutes;
 const parseSavedOutline = sidecar_json.parseSavedOutline;
 const parseSavedFabricationLayers = sidecar_json.parseSavedFabricationLayers;
 const parseSavedHeatsink = sidecar_json.parseSavedHeatsink;
+const parseSavedFan = sidecar_json.parseSavedFan;
 const parseSavedTexts = sidecar_json.parseSavedTexts;
 const parseOutlinePts = sidecar_json.parseOutlinePts;
 pub const writeJsonStr = sidecar_json.writeJsonStr;
@@ -245,6 +246,7 @@ const LayoutScore = sidecar_types.LayoutScore;
 /// PCB face, not a package-relative direction. `target_ref` binds that face to
 /// the package whose directional theta-JC path the thermal solver must use.
 pub const SavedHeatsink = sidecar_types.SavedHeatsink;
+pub const SavedFan = sidecar_types.SavedFan;
 
 /// A named saved layout: name, kind, capture time (unix s, 0 = unknown),
 /// optional score, and the placement itself (newest first within a file).
@@ -968,6 +970,7 @@ pub fn renderLayoutPage(
         .saved_outline = rv.outline,
         .saved_fabrication_layers = rv.fabrication_layers,
         .saved_heatsink = rv.heatsink,
+        .saved_fan = rv.fan,
         .saved_dimensions = rv.dimensions,
         .base_edge = rv.base_edge,
         .scratch_allocator = ctx.scratch_allocator,
@@ -1051,7 +1054,7 @@ pub fn renderLayoutPage(
     // WebGL 3D-view stage — hidden until the "3D View" tab is opened, then the
     // body gets `.mode-3d` (CSS swaps the SVG out for this). Built lazily.
     if (!embed) try w.writeAll(pcb_3d_stage_html);
-    if (!embed) try w.writeAll(courtyard_modal ++ heatsink_modal ++ fp_card_modal ++ fab_modal);
+    if (!embed) try w.writeAll(courtyard_modal ++ cooling_modals ++ fp_card_modal ++ fab_modal);
     try w.writeAll("</main>");
     try writeRightDock(w, ctx.allocator, embed, edit_embed, .{ .panel = .{ .name = name, .sub = sub }, .layouts = layouts, .auto = auto_score, .placement = placement });
     try w.writeAll("</div>");
@@ -2893,7 +2896,7 @@ const ShownZones = struct {
 
 const SolvedCooling = struct {
     heatsink: ?SavedHeatsink = null,
-    fan: ?thermal_scenarios.Fan = null,
+    fan: ?SavedFan = null,
 };
 
 /// A solved placement plus the request context the PNG and describe endpoints
@@ -2950,7 +2953,7 @@ pub fn thermalHeatsink(solved: SolvedRequest, bt: thermal.BoardThermal) ?thermal
 
 /// Return the board-authored fan already lowered into this solved placement.
 pub fn thermalFan(solved: SolvedRequest) ?thermal_scenarios.Fan {
-    return solved.cooling.fan;
+    return authored_heatsink.fanThermalInput(solved.cooling.fan orelse return null);
 }
 
 /// Resolve `name` and apply the request's placement-selection rules: a named
@@ -3106,7 +3109,7 @@ pub fn solveForRequest(
         },
         .cooling = .{
             .heatsink = authored_heatsink.resolve(placement, shownHeatsink(sub_doc.layouts, shown_name), eff_block.board.thermal.heatsink),
-            .fan = authored_heatsink.lowerFan(placement, eff_block.board.thermal.fan),
+            .fan = authored_heatsink.resolveFan(placement, shownFan(sub_doc.layouts, shown_name), eff_block.board.thermal.fan),
         },
     };
 }
@@ -5288,6 +5291,7 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
         .outline = saved_outline,
         .fabrication_layers = parseSavedFabricationLayers(req.arena, root.object.get("fabrication_layers")),
         .heatsink = parseSavedHeatsink(root.object.get("heatsink")),
+        .fan = parseSavedFan(root.object.get("fan")),
         .texts = parseSavedTexts(req.arena, root.object.get("texts")),
         .dimensions = parsePartEdgeDimensions(req.arena, root.object.get("dimensions")),
     };
@@ -6329,6 +6333,11 @@ pub const parseLayouts = sidecar_store.parseLayouts;
 const writeSavedOutlineJson = sidecar_json.writeSavedOutlineJson;
 const writePartEdgeDimensionsJson = sidecar_json.writePartEdgeDimensionsJson;
 const writeSavedHeatsinkJson = sidecar_json.writeSavedHeatsinkJson;
+const writeSavedFanJson = sidecar_json.writeSavedFanJson;
+fn writeOptionalSavedFanJson(w: *std.Io.Writer, fan: ?SavedFan) std.Io.Writer.Error!void {
+    if (fan) |value| return writeSavedFanJson(w, value);
+    return w.writeAll("null");
+}
 const writeBoardTextJson = sidecar_json.writeBoardTextJson;
 const writeOptionalBoardTextJson = sidecar_json.writeOptionalBoardTextJson;
 const writeSavedTextsJson = sidecar_json.writeSavedTextsJson;
@@ -6494,6 +6503,7 @@ const ShownView = struct {
     fabrication_layers: []const SavedFabricationLayer = &.{},
     /// Physical heatsink authored on the shown saved layout.
     heatsink: ?SavedHeatsink = null,
+    fan: ?SavedFan = null,
     /// The SavedRoutes the shown copper was restored from (null when the
     /// copper is a fresh ?route=1 result) — index-aligned with `routed`, so
     /// the blob writer can re-emit per-segment stamp group tags (`g`).
@@ -6604,7 +6614,7 @@ fn resolveShownView(ctx: *Server, req: ?*httpz.Request, in: ShownInputs) ShownVi
             .base_edge = base_edge,
             .check_drc = in.check_drc,
         });
-    var view = ShownView{ .ro = ro, .routed = routed, .tally = deferred.tally, .violations = deferred.violations, .outline_drawn = outline_drawn, .base_edge = base_edge, .outline = shownOutline(in.layouts, in.shown), .fabrication_layers = fabrication_layers, .heatsink = authored_heatsink.resolve(in.placement.*, shownHeatsink(in.layouts, in.shown), in.block.board.thermal.heatsink), .saved = saved, .texts = texts, .dimensions = shownDimensions(in.layouts, in.shown) };
+    var view = ShownView{ .ro = ro, .routed = routed, .tally = deferred.tally, .violations = deferred.violations, .outline_drawn = outline_drawn, .base_edge = base_edge, .outline = shownOutline(in.layouts, in.shown), .fabrication_layers = fabrication_layers, .heatsink = authored_heatsink.resolve(in.placement.*, shownHeatsink(in.layouts, in.shown), in.block.board.thermal.heatsink), .fan = authored_heatsink.resolveFan(in.placement.*, shownFan(in.layouts, in.shown), in.block.board.thermal.fan), .saved = saved, .texts = texts, .dimensions = shownDimensions(in.layouts, in.shown) };
     deferred.reconcile(&view.routed);
     return view;
 }
@@ -6663,6 +6673,15 @@ fn shownHeatsink(layouts: []const SavedLayout, shown: ?[]const u8) ?SavedHeatsin
     }
     const blessed = blessedLayout(layouts) orelse return null;
     return blessed.heatsink;
+}
+
+fn shownFan(layouts: []const SavedLayout, shown: ?[]const u8) ?SavedFan {
+    if (shown) |sn| {
+        for (layouts) |layout| if (std.mem.eql(u8, layout.name, sn)) return layout.fan;
+        return null;
+    }
+    const blessed = blessedLayout(layouts) orelse return null;
+    return blessed.fan;
 }
 
 /// Replace only the positive regions of matching authored layers. The source
@@ -7798,6 +7817,7 @@ const tip_text = "Silkscreen text (T): click on the board to place a label " ++
 const tip_backing = "Edit fabrication backing regions with the shared shape-sketch palette: lines/arcs, dimensions, constraints, fillet, chamfer, offset and mirror. " ++
     "The authored side, material, thickness, and automatic footprint cutouts remain unchanged. Saved with the layout and emitted in its named Gerber.";
 const tip_heatsink = "Draw or edit a physical heatsink. Drag its body to move it, drag corner handles to resize it, or click it to edit its face, target, material, fin count/dimensions, and thermal pad. Saved with the layout; the thermal ladder and 3D view use it.";
+const tip_fan = "Place or edit an axial fan. Drag its circular footprint to move it, drag corner handles to resize its outlet, or click it to edit the PCB face, outlet-to-board distance, and airflow specifications. Saved with the layout and used by the fan thermal scenario.";
 const tip_ruler = "Ruler / dimension (D): drag to measure, or select a footprint first and drag its origin to a straight board edge to create a driving dimension.";
 const tip_move = "Move the selection by an X/Y distance (M): select footprints, tracks, vias, or outline-sketch geometry, then press M (or this button) and type how far to move it; one undo step.";
 const pad_align_tool_html = @embedFile("assets/pcb_pad_align_tool.html");
@@ -7816,6 +7836,7 @@ const toolstrip_html =
     "<button class=\"ts-btn\" id=\"pcb-outline-poly\" title=\"" ++ tip_poly ++ "\">\u{2B21}</button>" ++
     "<button class=\"ts-btn\" id=\"pcb-backing\" title=\"" ++ tip_backing ++ "\">\u{25A7}</button>" ++
     "<button class=\"ts-btn\" id=\"pcb-heatsink\" title=\"" ++ tip_heatsink ++ "\">\u{2668}</button>" ++
+    "<button class=\"ts-btn\" id=\"pcb-fan\" title=\"" ++ tip_fan ++ "\">\u{25C9}</button>" ++
     "<button class=\"ts-btn\" id=\"pcb-outline-dxf\" title=\"" ++ tip_dxf ++ "\">\u{2912}</button>" ++
     "<button class=\"ts-btn\" id=\"pcb-pour-zone\" title=\"" ++ tip_pour_zone ++ "\">\u{25A9}</button>" ++
     "<button class=\"ts-btn\" id=\"pcb-text\" title=\"" ++ tip_text ++ "\">T</button>" ++
@@ -9001,6 +9022,8 @@ const PcbDataOpts = struct {
     saved_fabrication_layers: []const SavedFabricationLayer = &.{},
     /// Physical heatsink authored on the shown saved layout.
     saved_heatsink: ?SavedHeatsink = null,
+    /// Axial fan authored on the shown saved layout.
+    saved_fan: ?SavedFan = null,
     /// Footprint-origin dimensions driven from the shown outline sketch.
     saved_dimensions: []const SavedPartEdgeDimension = &.{},
     /// This page is a whole top-level DESIGN (not a module page, not a `?sub`
@@ -9804,6 +9827,8 @@ fn writeBlobHead(
     }
     try w.writeAll("\"heatsink\":");
     if (opts.saved_heatsink) |sink| try writeSavedHeatsinkJson(w, sink) else try w.writeAll("null");
+    try w.writeAll(",\"fan\":");
+    try writeOptionalSavedFanJson(w, opts.saved_fan);
     try w.writeAll(",\"dimensions\":");
     try writePartEdgeDimensionsJson(w, opts.saved_dimensions);
     try w.writeAll(",");
@@ -10042,6 +10067,10 @@ fn writeLayoutsJson(w: *std.Io.Writer, layouts: []const SavedLayout, shown: ?[]c
             try w.writeAll(",\"heatsink\":");
             try writeSavedHeatsinkJson(w, sink);
         }
+        if (L.fan) |fan| {
+            try w.writeAll(",\"fan\":");
+            try writeSavedFanJson(w, fan);
+        }
         if (L.texts.len > 0) {
             try w.writeAll(texts_open);
             try writeSavedTextsJson(w, L.texts);
@@ -10203,30 +10232,7 @@ const courtyard_modal =
     \\</div></div>
 ;
 
-const heatsink_modal =
-    \\<div id="heatsink-modal" class="court-modal" hidden><div class="court-dialog heatsink-dialog">
-    \\<div class="court-h"><span id="hs-title">Physical heatsink</span><button id="hs-x" class="court-x" title="Close">×</button></div>
-    \\<div class="hs-grid">
-    \\<label>PCB face<select id="hs-side"><option value="top">Top</option><option value="bottom">Bottom</option></select></label>
-    \\<label>Target package<select id="hs-target"></select></label>
-    \\<label>Material<select id="hs-material"><option value="aluminum_6063">Aluminum 6063</option><option value="aluminum_6061">Aluminum 6061</option><option value="copper_c110">Copper C110</option><option value="steel">Steel</option></select></label>
-    \\<label>Fin direction<select id="hs-axis"><option value="length">Along length</option><option value="width">Along width</option></select></label>
-    \\<label>X (mm)<input id="hs-x-mm" type="number" step="0.1"></label>
-    \\<label>Y (mm)<input id="hs-y-mm" type="number" step="0.1"></label>
-    \\<label>Width (mm)<input id="hs-w" type="number" step="0.1" min="0.1"></label>
-    \\<label>Length (mm)<input id="hs-h" type="number" step="0.1" min="0.1"></label>
-    \\<label>Base thickness (mm)<input id="hs-base" type="number" step="0.1" min="0.1"></label>
-    \\<label>Fin height (mm)<input id="hs-fin-h" type="number" step="0.1" min="0"></label>
-    \\<label>Fin thickness (mm)<input id="hs-fin-t" type="number" step="0.1" min="0.1"></label>
-    \\<label>Fin count<input id="hs-fin-count" type="number" step="1" min="1" max="512"></label>
-    \\<label>Fin gap (mm)<input id="hs-fin-g" type="number" step="0.1" min="0"></label>
-    \\<label>Pad thickness (mm)<input id="hs-pad-t" type="number" step="0.1" min="0"></label>
-    \\<label>Pad conductivity (W/m·K)<input id="hs-pad-k" type="number" step="0.1" min="0.1"></label>
-    \\</div><div class="hs-result" id="hs-result"></div>
-    \\<div class="court-note">The thermal solver derives fin count and an estimated still-air θSA from this extrusion. For package-top contact, the selected component must have published θJC(top); the opposite PCB face uses its board/exposed-pad path.</div>
-    \\<div class="court-actions"><button id="hs-save" class="btn">Use heatsink</button><button id="hs-delete" class="btn fab-danger">Remove</button><button id="hs-cancel" class="btn">Cancel</button></div>
-    \\</div></div>
-;
+const cooling_modals = @embedFile("assets/pcb_cooling_modals.html");
 
 // ── Library-card modal ────────────────────────────────────────────────
 
@@ -13619,6 +13625,7 @@ test "CLI persist refreshes the auto cache poses so a default read sees the muta
     try std.testing.expectEqual(@as(f64, 7.5), slot.params.loop_w);
 }
 
+// spec: Web Server - The PCB editor draws a movable circular axial-fan target and outlet footprint, edits its PCB face and outlet-to-board distance with its catalog airflow/pressure and installed-flow assumption, and persists the exact fan assembly with each saved layout for the thermal fan scenario
 // spec: Web Server - physical board navigation exposes stable 3D and a read-only assembly workspace
 // spec: serve/board-review - the PCB header exposes Review only for board designs and preserves a selected saved layout
 test "PCB header links board designs to assembly and keeps modules scoped" {
@@ -13640,12 +13647,19 @@ test "PCB header links board designs to assembly and keeps modules scoped" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-t-surface\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-t-heatsink\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, @embedFile("assets/pcb_board.js"), "function hsModalOpen(rect)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, heatsink_modal, "id=\"hs-fin-count\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cooling_modals, "id=\"hs-fin-count\"") != null);
     const board_js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, board_js, "function hsDragMove(m)") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "heatsink moved/resized") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "function hsCountToGap()") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "hsModalOpen(PCB.heatsink)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, toolstrip_html, "id=\"pcb-fan\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cooling_modals, "id=\"fan-distance\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cooling_modals, "id=\"fan-flow\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "function drawFan()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "function fanDragMove(m)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "fanModalOpen(PCB.fan)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "fan:savedFan") != null);
     try std.testing.expect(std.mem.indexOf(u8, @embedFile("assets/pcb_3d_viewer.js"), "function rebuildHeatsink()") != null);
     const surface_asset = std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_3d_surface.js") orelse return error.TestUnexpectedResult;
     const step_export_asset = std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_step_export.js") orelse return error.TestUnexpectedResult;
@@ -15511,6 +15525,7 @@ test "layouts sidecar round-trips a physical heatsink assembly" {
             .pad_thickness_mm = 0.5,
             .pad_k_w_mk = 6,
         },
+        .fan = .{ .model = "Sanyo Denki 9A0812G4D011", .rect = .{ .x = 0.5, .y = -27.6, .w = 80, .h = 80 }, .side = "top", .distance_mm = 10, .curve = .{ .free_air_flow_m3_s = 0.025, .max_static_pressure_pa = 80.4 }, .operating_flow_fraction = 0.6 },
     }};
     var aw: std.Io.Writer.Allocating = .init(alloc);
     try writeLayoutsFileJson(&aw.writer, &layouts, null);
@@ -15523,6 +15538,12 @@ test "layouts sidecar round-trips a physical heatsink assembly" {
     try std.testing.expectEqual(@as(f64, 24), sink.w);
     try std.testing.expectEqual(@as(f64, 0.8), sink.fin_thickness_mm);
     try std.testing.expectEqual(@as(f64, 0.5), sink.pad_thickness_mm);
+    const fan = got[0].fan orelse return error.TestParseFailed;
+    try std.testing.expectEqualStrings("Sanyo Denki 9A0812G4D011", fan.model);
+    try std.testing.expectEqual(@as(f64, 0.5), fan.rect.x);
+    try std.testing.expectEqual(@as(f64, 10), fan.distance_mm);
+    try std.testing.expectEqual(@as(f64, 0.025), fan.curve.free_air_flow_m3_s);
+    try std.testing.expectEqual(@as(f64, 0.6), fan.operating_flow_fraction);
 }
 
 // spec: Web Server - applyShownOutline folds a saved layout's drawn outline (rect or polygon) onto the placement, and is a no-op for a layout without one

@@ -4316,6 +4316,7 @@ coupling through the air.
 - the rise field is linear in the injected power, so two sources solved together equal the two solved apart added cell by cell
 - more airflow strictly lowers the board's maximum rise, and the heatsink scenario strictly lowers its target part's junction rise
 - an authored fan adds a spatial cooling rung whose selected face, projected position, standoff and installed-flow assumption drive the per-cell film coefficient
+- a saved layout can override the authored fan's projected position, PCB face and outlet-to-board standoff without changing how the thermal field consumes its operating point
 - one scenario can be solved on its own and matches the ladder's answer for it, and the heatsink asked for alone still bolts its sink to the part the still-air solve names
 - a drawn straight-fin heatsink derives its fin count and theta-SA from material and geometry, and applies that sink over the exact authored contact rectangle
 - a part with no pose is reported as skipped instead of placed, a part hanging off the board docks onto the nearest cell, and neither panics
@@ -6999,6 +7000,7 @@ is what makes the predicate exact rather than approximately right.
 - The PCB editor overlays source-declared fabrication backing, edits every region with the outline sketch palette and undo, and persists compiled polygons plus index-aligned native sketches without changing side or material
 - The PCB editor draws one physical heatsink base rectangle on either board face, reopens it for parameter edits, drags it to reposition, resizes it with corner handles, directly edits fin count or gap, target package, material, base/fins and thermal pad, persists the assembly with the named layout, previews its pad/base/fins in 3D, and feeds the same exact contact and derived theta-SA to built-in and Elmer thermal solves
 - The PCB editor offers a persistent display-only heatsink visibility toggle in Appearance > Objects, without changing saved geometry or thermal simulations, and entering the heatsink edit tool reveals a hidden heatsink
+- The PCB editor draws a movable circular axial-fan target and outlet footprint, edits its PCB face and outlet-to-board distance with its catalog airflow/pressure and installed-flow assumption, and persists the exact fan assembly with each saved layout for the thermal fan scenario
 - Selecting a board outline exposes editable dimensions, slides horizontal/vertical edges only perpendicular to themselves, and uses Shift to constrain non-axis-aligned edge slides to their dominant axis
 - The PCB passive inspector offers compatible footprint families from the project library
 - PCB passive footprint edits update the exact owning schematic source

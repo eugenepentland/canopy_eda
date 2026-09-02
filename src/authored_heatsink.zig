@@ -40,23 +40,40 @@ pub fn lower(placement: optimizer.Placement, spec: ?env.BoardHeatsinkSpec) ?side
 
 /// Lift a board-authored axial fan from board-local coordinates into the
 /// absolute placement frame consumed by thermal fields and renderers.
-pub fn lowerFan(placement: optimizer.Placement, spec: ?env.BoardFanSpec) ?scenarios.Fan {
+pub fn lowerFanSaved(placement: optimizer.Placement, spec: ?env.BoardFanSpec) ?sidecar.SavedFan {
     const fan = spec orelse return null;
     const board = placement.board_rect orelse return null;
     return .{
         .model = fan.model,
-        .footprint = .{
-            .x_mm = board.minx + fan.rect.x,
-            .y_mm = board.miny + fan.rect.y,
-            .w_mm = fan.rect.w,
-            .h_mm = fan.rect.h,
-        },
-        .face = if (fan.side == .top) .top else .bottom,
+        .rect = .{ .x = board.minx + fan.rect.x, .y = board.miny + fan.rect.y, .w = fan.rect.w, .h = fan.rect.h },
+        .side = @tagName(fan.side),
         .distance_mm = fan.distance_mm,
-        .free_air_flow_m3_s = fan.free_air_flow_m3_s,
-        .max_static_pressure_pa = fan.max_static_pressure_pa,
+        .curve = .{ .free_air_flow_m3_s = fan.free_air_flow_m3_s, .max_static_pressure_pa = fan.max_static_pressure_pa },
         .operating_flow_fraction = fan.operating_flow_fraction,
     };
+}
+
+/// Resolve a saved layout override over the source-authored fan defaults.
+pub fn resolveFan(placement: optimizer.Placement, saved: ?sidecar.SavedFan, spec: ?env.BoardFanSpec) ?sidecar.SavedFan {
+    return saved orelse lowerFanSaved(placement, spec);
+}
+
+/// Convert the persisted/editor shape into the thermal kernel input.
+pub fn fanThermalInput(saved: sidecar.SavedFan) scenarios.Fan {
+    return .{
+        .model = saved.model,
+        .footprint = .{ .x_mm = saved.rect.x, .y_mm = saved.rect.y, .w_mm = saved.rect.w, .h_mm = saved.rect.h },
+        .face = if (std.mem.eql(u8, saved.side, "bottom")) .bottom else .top,
+        .distance_mm = saved.distance_mm,
+        .free_air_flow_m3_s = saved.curve.free_air_flow_m3_s,
+        .max_static_pressure_pa = saved.curve.max_static_pressure_pa,
+        .operating_flow_fraction = saved.operating_flow_fraction,
+    };
+}
+
+/// Backward-compatible direct lowering for non-layout callers.
+pub fn lowerFan(placement: optimizer.Placement, spec: ?env.BoardFanSpec) ?scenarios.Fan {
+    return fanThermalInput(lowerFanSaved(placement, spec) orelse return null);
 }
 
 /// Apply a saved layout's physical override while keeping an authored target
@@ -164,7 +181,8 @@ test "authored target follows source identity across ref-des renumbering" {
     try std.testing.expectEqual(@as(?sidecar.SavedHeatsink, null), missing);
 }
 
-test "authored fan footprint is lifted from board-local to placement coordinates" {
+// spec: placement/thermal_field - a saved layout can override the authored fan's projected position, PCB face and outlet-to-board standoff without changing how the thermal field consumes its operating point
+test "authored fan footprint is lifted from board-local and accepts a saved override" {
     const placement = optimizer.Placement{
         .parts = &.{},
         .links = &.{},
@@ -193,4 +211,17 @@ test "authored fan footprint is lifted from board-local to placement coordinates
     try std.testing.expectEqual(@as(f64, 100.5), fan.footprint.?.x_mm);
     try std.testing.expectEqual(@as(f64, 22.5), fan.footprint.?.y_mm);
     try std.testing.expectEqual(scenarios.Side.top, fan.face);
+
+    const overridden = resolveFan(placement, .{
+        .model = "9A0812G4D011",
+        .rect = .{ .x = 120, .y = 40, .w = 80, .h = 80 },
+        .side = "bottom",
+        .distance_mm = 25,
+        .curve = .{ .free_air_flow_m3_s = 0.025, .max_static_pressure_pa = 80.4 },
+        .operating_flow_fraction = 0.5,
+    }, null) orelse return error.TestUnexpectedResult;
+    const thermal_fan = fanThermalInput(overridden);
+    try std.testing.expectEqual(@as(f64, 120), thermal_fan.footprint.?.x_mm);
+    try std.testing.expectEqual(@as(f64, 25), thermal_fan.distance_mm);
+    try std.testing.expectEqual(scenarios.Side.bottom, thermal_fan.face);
 }

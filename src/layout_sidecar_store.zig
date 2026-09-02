@@ -212,6 +212,7 @@ fn layoutsFromRoot(alloc: std.mem.Allocator, root: std.json.Value) ?[]const Save
             .outline = codec.parseSavedOutline(alloc, item.object.get("outline")),
             .fabrication_layers = codec.parseSavedFabricationLayers(alloc, item.object.get("fabrication_layers")),
             .heatsink = codec.parseSavedHeatsink(item.object.get("heatsink")),
+            .fan = codec.parseSavedFan(item.object.get("fan")),
             .texts = codec.parseSavedTexts(alloc, item.object.get("texts")),
             .dimensions = codec.parsePartEdgeDimensions(alloc, item.object.get("dimensions")),
         }) catch return list.items;
@@ -589,6 +590,10 @@ pub fn writeLayoutsFileJsonRev(
         if (layout.heatsink) |heatsink| {
             try w.writeAll(",\"heatsink\":");
             try codec.writeSavedHeatsinkJson(w, heatsink);
+        }
+        if (layout.fan) |fan| {
+            try w.writeAll(",\"fan\":");
+            try codec.writeSavedFanJson(w, fan);
         }
         if (layout.texts.len > 0) {
             try w.writeAll(",\"texts\":");

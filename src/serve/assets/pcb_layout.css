@@ -641,12 +641,12 @@ a.sub-name:hover,a.grp-name:hover{color:#6ba1e8;text-decoration:underline}
 .fab-body .fab-stats{color:#9b9ca3;font-size:11.5px;margin-top:8px;border-top:1px solid #2c2d31;padding-top:6px}
 .court-dialog .btn.fab-danger{border-color:#e05b4b;color:#ff9d95}
 .court-dialog .btn.fab-danger:hover{background:#3d1417;border-color:#e05b4b;color:#ffb3ab}
-.heatsink-dialog{width:min(620px,94vw)}
+.heatsink-dialog,.fan-dialog{width:min(620px,94vw)}
 .hs-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px;margin:8px 0 10px}
 .hs-grid label{display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:#9b9ca3}
 .hs-grid input,.hs-grid select{width:100%;box-sizing:border-box;font:inherit;background:#1a1b1e;border:1px solid #3a3b40;color:#d6d7db;border-radius:4px;padding:5px 6px}
 .hs-result{margin:4px 0 10px;padding:7px 9px;border:1px solid #315b43;border-radius:5px;background:#14241b;color:#8ee6a8;font:12px ui-monospace,monospace}
-.heatsink-box,.heatsink-handle{pointer-events:none}
+.heatsink-box,.heatsink-handle,.fan-box,.fan-handle{pointer-events:none}
 @media(max-width:620px){.hs-grid{grid-template-columns:1fr}.heatsink-dialog{max-height:90vh;overflow:auto}}
 .pcb-3d-stage{display:none;position:relative;width:100%;flex:1;min-height:320px;
   background:var(--pcb-bg,#001023);border:1px solid #2c2d31;border-radius:8px;overflow:hidden}

@@ -4,9 +4,12 @@ src/allocating_writer.zig::print | fn print(self: AllocatingWriter, comptime for
 src/allocating_writer.zig::writeAll | fn writeAll(self: AllocatingWriter, bytes: []const u8) std.mem.Allocator.Error!void
 src/allocating_writer.zig::writeByte | fn writeByte(self: AllocatingWriter, byte: u8) std.mem.Allocator.Error!void
 src/asserted_fns.zig::buildMap | fn buildMap(allocator: Allocator, block: *const DesignBlock) Allocator.Error!Map
+src/authored_heatsink.zig::fanThermalInput | fn fanThermalInput(saved: sidecar.SavedFan) scenarios.Fan
 src/authored_heatsink.zig::lower | fn lower(placement: optimizer.Placement, spec: ?env.BoardHeatsinkSpec) ?sidecar.SavedHeatsink
 src/authored_heatsink.zig::lowerFan | fn lowerFan(placement: optimizer.Placement, spec: ?env.BoardFanSpec) ?scenarios.Fan
+src/authored_heatsink.zig::lowerFanSaved | fn lowerFanSaved(placement: optimizer.Placement, spec: ?env.BoardFanSpec) ?sidecar.SavedFan
 src/authored_heatsink.zig::resolve | fn resolve( placement: optimizer.Placement, saved: ?sidecar.SavedHeatsink, spec: ?env.BoardHeatsinkSpec, ) ?sidecar.SavedHeatsink
+src/authored_heatsink.zig::resolveFan | fn resolveFan(placement: optimizer.Placement, saved: ?sidecar.SavedFan, spec: ?env.BoardFanSpec) ?sidecar.SavedFan
 src/authored_heatsink.zig::thermalInput | fn thermalInput( placement: optimizer.Placement, bt: thermal.BoardThermal, saved: sidecar.SavedHeatsink, ) ?scenarios.Heatsink
 src/bench_args.zig::Common struct_
 src/bench_args.zig::parse | fn parse( self: *Common, arena: std.mem.Allocator, args: []const []const u8, extra: anytype, comptime takeExtra: anytype, ) std.mem.Allocator.Error!void
@@ -1636,9 +1639,12 @@ src/layout_sidecar_store.zig::writeLayoutsFileJson | fn writeLayoutsFileJson(w: 
 src/layout_sidecar_store.zig::writeLayoutsFileJsonRev | fn writeLayoutsFileJsonRev( w: *std.Io.Writer, layouts: []const SavedLayout, cache: ?CacheSlot, rev: i64, ) std.Io.Writer.Error!void
 src/layout_sidecar_store.zig::writeLayoutsSub | fn writeLayoutsSub( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, layouts: []const SavedLayout, ) void
 src/layout_sidecar_store.zig::writeLayoutsSubRev | fn writeLayoutsSubRev( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, layouts: []const SavedLayout, rev: i64, ) void
+src/layout_sidecar_types.zig::Curve struct_
 src/layout_sidecar_types.zig::LayoutScore struct_
 src/layout_sidecar_types.zig::PartPose struct_
+src/layout_sidecar_types.zig::Rect struct_
 src/layout_sidecar_types.zig::SavedFabricationLayer struct_
+src/layout_sidecar_types.zig::SavedFan struct_
 src/layout_sidecar_types.zig::SavedHeatsink struct_
 src/layout_sidecar_types.zig::SavedLayout struct_
 src/layout_sidecar_types.zig::SavedOutline struct_
@@ -4229,6 +4235,7 @@ src/serve/layout_sidecar_json.zig::parseOutlineRadii | fn parseOutlineRadii(allo
 src/serve/layout_sidecar_json.zig::parsePartEdgeDimensions | fn parsePartEdgeDimensions(alloc: std.mem.Allocator, v: ?std.json.Value) []const page.SavedPartEdgeDimension
 src/serve/layout_sidecar_json.zig::parsePartPoses | fn parsePartPoses(alloc: std.mem.Allocator, v: ?std.json.Value) ?[]const page.PartPose
 src/serve/layout_sidecar_json.zig::parseSavedFabricationLayers | fn parseSavedFabricationLayers(alloc: std.mem.Allocator, v: ?std.json.Value) []const page.SavedFabricationLayer
+src/serve/layout_sidecar_json.zig::parseSavedFan | fn parseSavedFan(v: ?std.json.Value) ?page.SavedFan
 src/serve/layout_sidecar_json.zig::parseSavedHeatsink | fn parseSavedHeatsink(v: ?std.json.Value) ?page.SavedHeatsink
 src/serve/layout_sidecar_json.zig::parseSavedOutline | fn parseSavedOutline(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.SavedOutline
 src/serve/layout_sidecar_json.zig::parseSavedRoutes | fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.SavedRoutes
@@ -4242,6 +4249,7 @@ src/serve/layout_sidecar_json.zig::writeJsonStr value
 src/serve/layout_sidecar_json.zig::writeOptionalBoardTextJson | fn writeOptionalBoardTextJson(w: *std.Io.Writer, text: ?font5x7.BoardText) std.Io.Writer.Error!void
 src/serve/layout_sidecar_json.zig::writePartEdgeDimensionsJson | fn writePartEdgeDimensionsJson(w: *std.Io.Writer, dimensions: []const page.SavedPartEdgeDimension) std.Io.Writer.Error!void
 src/serve/layout_sidecar_json.zig::writeSavedFabricationLayersJson | fn writeSavedFabricationLayersJson(w: *std.Io.Writer, layers: []const page.SavedFabricationLayer) std.Io.Writer.Error!void
+src/serve/layout_sidecar_json.zig::writeSavedFanJson | fn writeSavedFanJson(w: *std.Io.Writer, fan: page.SavedFan) std.Io.Writer.Error!void
 src/serve/layout_sidecar_json.zig::writeSavedHeatsinkJson | fn writeSavedHeatsinkJson(w: *std.Io.Writer, sink: page.SavedHeatsink) std.Io.Writer.Error!void
 src/serve/layout_sidecar_json.zig::writeSavedOutlineJson | fn writeSavedOutlineJson(w: *std.Io.Writer, outline: page.SavedOutline) std.Io.Writer.Error!void
 src/serve/layout_sidecar_json.zig::writeSavedRfPathsJson | fn writeSavedRfPathsJson(w: *std.Io.Writer, saved_paths: []const SavedRfPath) std.Io.Writer.Error!void
@@ -4453,6 +4461,7 @@ src/serve/pcb_layout_page.zig::RoutePrep struct_
 src/serve/pcb_layout_page.zig::RoutePrepError value
 src/serve/pcb_layout_page.zig::RoutePrepInputs struct_
 src/serve/pcb_layout_page.zig::SavedFabricationLayer value
+src/serve/pcb_layout_page.zig::SavedFan value
 src/serve/pcb_layout_page.zig::SavedHeatsink value
 src/serve/pcb_layout_page.zig::SavedLayout value
 src/serve/pcb_layout_page.zig::SavedOutline value
