@@ -20,6 +20,7 @@ const doc_f_cu = "\"" ++ board_layers.f_cu ++ "\"";
 pub const SpecialForm = enum {
     let,
     repeat,
+    for_,
     if_,
     import,
     defmodule,
@@ -49,6 +50,7 @@ pub const SpecialForm = enum {
 const atom_to_form = std.StaticStringMap(SpecialForm).initComptime(.{
     .{ "let", .let },
     .{ "repeat", .repeat },
+    .{ "for", .for_ },
     .{ "if", .if_ },
     .{ "import", .import },
     .{ "defmodule", .defmodule },
@@ -117,6 +119,7 @@ pub const ScopeForm = enum {
     instance,
     port,
     bus_port,
+    diff_port,
     note,
     section,
     decouple,
@@ -172,6 +175,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "instance", .instance },
     .{ "port", .port },
     .{ "bus-port", .bus_port },
+    .{ "diff-port", .diff_port },
     .{ "note", .note },
     .{ "section", .section },
     .{ "decouple", .decouple },
@@ -243,6 +247,7 @@ pub const special_form_schema = blk: {
     const pairs = [_]Pair{
         .{ .let, .{ .min_args = 2, .max_args = 2 } },
         .{ .repeat, .{ .min_args = 4, .max_args = null } },
+        .{ .for_, .{ .min_args = 3, .max_args = null } },
         .{ .if_, .{ .min_args = 3, .max_args = 3 } },
         .{ .import, .{ .min_args = 1, .max_args = null } },
         .{ .defmodule, .{ .min_args = 2, .max_args = null } },
@@ -329,6 +334,13 @@ pub const special_form_docs = blk: {
         .summary = "Evaluate `body` once per integer from `start` through `end`, inclusive, " ++
             "with `name` bound in a fresh lexical scope for each iteration. The optional IDs sidecar " ++
             "pins migrated child identities; otherwise they derive from origin key + index.",
+    };
+    t[@backingInt(SpecialForm.for_)] = .{
+        .syntax = "(for name (item…) body… [(id hex8)] [(ids (\"origin@ordinal\" hex8)…)])",
+        .summary = "Evaluate `body` once per listed item — strings, numbers, or expressions — " ++
+            "with `name` bound in a fresh lexical scope for each. The list sibling of `repeat`, " ++
+            "so a channel letter can drive `(fmt …)` names; child identities derive from " ++
+            "origin key + 0-based ordinal unless the IDs sidecar pins them.",
     };
     t[@backingInt(SpecialForm.if_)] = .{
         .syntax = "(if cond then else)",
@@ -440,6 +452,13 @@ pub const scope_form_docs = blk: {
     t[@backingInt(ScopeForm.bus_port)] = .{ .scope = all, .doc = .{
         .syntax = "(bus-port \"prefix\" width dir …)",
         .summary = "Declare a multi-bit boundary bus that expands to one port per lane.",
+    } };
+    t[@backingInt(ScopeForm.diff_port)] = .{ .scope = all, .doc = .{
+        .syntax = "(diff-port \"BASE\" [net] dir [kind] [optional] [(rated lo hi)] [(side …)] [(suffixes P N)])",
+        .summary = "Declare a differential boundary pair as one line: expands to the `BASE_P`/`BASE_N` " ++
+            "ports (override the suffixes with `(suffixes …)`), replays every modifier onto both lanes, " ++
+            "defaults their kind to `differential`, and records the pairing so ERC holds the two lanes " ++
+            "to a both-or-neither connection rule.",
     } };
     t[@backingInt(ScopeForm.note)] = .{ .scope = all, .doc = .{
         .syntax = "(note \"id\" \"text\" [(ref …)])",

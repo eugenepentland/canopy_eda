@@ -470,7 +470,9 @@ src/eval/builders.zig::buildSubBlock | fn buildSubBlock(self: *Evaluator, form_c
 src/eval/builders.zig::emitBulkDecouples | fn emitBulkDecouples( self: *Evaluator, component_node: Node, count_node: Node, net_name: []const u8, env: *Env, ctx: DecoupleEmitContext, ) EvalError!void
 src/eval/builders.zig::emitDecoupleItems | fn emitDecoupleItems( self: *Evaluator, items: []const Node, net_name: []const u8, env: *Env, instances: *std.ArrayList(Instance), all_pin_nets: *std.ArrayList(PinNetDecl), form_id: []const u8, sidecar: *ids.ChildIdSidecar, ) EvalError!void
 src/eval/builders.zig::expandSectionBusPort | fn expandSectionBusPort( self: *Evaluator, bp_children: []const Node, env: *env_mod.Env, out: *std.ArrayList(env_mod.SectionPort), ) EvalError!void
+src/eval/builders.zig::expandSectionDiffPort | fn expandSectionDiffPort( self: *Evaluator, dp_children: []const Node, env: *env_mod.Env, out: *std.ArrayList(env_mod.SectionPort), ) EvalError!void
 src/eval/builders.zig::expandTopLevelBusPort | fn expandTopLevelBusPort( self: *Evaluator, bp_children: []const Node, env: *Env, out: *std.ArrayList(Port), ) EvalError!void
+src/eval/builders.zig::expandTopLevelDiffPort | fn expandTopLevelDiffPort( self: *Evaluator, dp_children: []const Node, env: *Env, out: *std.ArrayList(Port), ) EvalError!void
 src/eval/builders.zig::findPinFuncMap | fn findPinFuncMap(self: *Evaluator, inst_items: []const Instance, pins_ref: []const u8) ?*const std.StringHashMapUnmanaged([]const u8)
 src/eval/builders.zig::isKnownPinsChild | fn isKnownPinsChild(node: Node) bool
 src/eval/builders.zig::loadDesignFile | fn loadDesignFile(self: *Evaluator, path: []const u8) ?[]const Node
@@ -766,6 +768,7 @@ src/eval/rails.zig::schematic_supply_prefixes value
 src/eval/rails.zig::supply_pad_prefixes value
 src/eval/rails.zig::system_rail value
 src/eval/section_maturity.zig::creditSections | fn creditSections( sections: []env_mod.Section, sub_blocks: []const env_mod.SubBlock, groups: []const env_mod.Group, layout_groups: []const env_mod.LayoutGroup, body_forms: []const Node, ) void
+src/eval/special_forms.zig::ForSpec struct_
 src/eval/special_forms.zig::RepeatIterator struct_
 src/eval/special_forms.zig::RepeatSpec struct_
 src/eval/special_forms.zig::checkArity | fn checkArity(self: *Evaluator, sf: forms.SpecialForm, args: []const Node) EvalError!void
@@ -773,11 +776,13 @@ src/eval/special_forms.zig::checkAritySpan | fn checkAritySpan(self: *Evaluator,
 src/eval/special_forms.zig::evalAssert | fn evalAssert(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalAssertRange | fn evalAssertRange(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalFmt | fn evalFmt(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
+src/eval/special_forms.zig::evalFor | fn evalFor(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalIf | fn evalIf(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalLet | fn evalLet(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalRepeat | fn evalRepeat(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::iterator | fn iterator(self: RepeatSpec) RepeatIterator
 src/eval/special_forms.zig::next | fn next(self: *RepeatIterator) ?i64
+src/eval/special_forms.zig::parseFor | fn parseFor(self: *Evaluator, args: []const Node) EvalError!ForSpec
 src/eval/special_forms.zig::parseRepeat | fn parseRepeat(self: *Evaluator, args: []const Node, env: *Env) EvalError!RepeatSpec
 src/eval/stackup_presets.zig::resolve | fn resolve(allocator: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!?env.StackupSpec
 src/eval/stackup_presets.zig::writeCatalogJson | fn writeCatalogJson(w: *std.Io.Writer, current: env.StackupSpec) std.Io.Writer.Error!void

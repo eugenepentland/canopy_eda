@@ -655,3 +655,82 @@ one-time board re-stamp — adopt deliberately, not casually.
 ;; Long form when net differs from name:
 (port "VOUT" vout-str  out  (rated 0.6 16.0))
 ```
+
+### Differential port pairs: `(diff-port …)`
+
+A differential boundary signal is two ports that must stay identical apart
+from one suffix. `(diff-port …)` writes the pair once — it expands to
+`BASE_P` and `BASE_N`, replays every trailing modifier (direction, kind,
+`optional`, `(rated …)`, `(side …)`, `(electrical …)`, a long-form net base)
+onto both lanes, and defaults their kind to `differential`, so the result is
+indistinguishable from the two hand-written lines it replaces.
+
+```scheme
+;; lib/modules/ad7380-channel.sexp declares its four analog inputs as eight
+;; lines that differ only in one letter:
+(port "AINA_EXT_P" in differential)
+(port "AINA_EXT_N" in differential)
+(port "AINB_EXT_P" in differential)
+(port "AINB_EXT_N" in differential)
+(port "AINC_EXT_P" in differential)
+(port "AINC_EXT_N" in differential)
+(port "AIND_EXT_P" in differential)
+(port "AIND_EXT_N" in differential)
+
+;; The same eight ports, as four paired declarations:
+(diff-port "AINA_EXT" in)
+(diff-port "AINB_EXT" in)
+(diff-port "AINC_EXT" in)
+(diff-port "AIND_EXT" in)
+```
+
+Unlike two hand-written ports, the expansion **records the pairing** on both
+lanes. ERC reads it as a both-or-neither contract: wiring `AINA_EXT_P` and
+leaving `AINA_EXT_N` open — inside the module, or from a parent that ties only
+one lane of a sub-block — is reported as `diff_pair_half_connected`. A
+hand-written `_P`/`_N` pair carries no pairing and is never second-guessed.
+
+Two spellings beyond the default:
+
+```scheme
+;; Non-default lane suffixes (the corpus also uses "+"/"-" and bare P/N):
+(diff-port "RFIN1" in rf (suffixes "+" "-"))     ;; → RFIN1+ / RFIN1-
+
+;; Long form — the net base is suffixed per lane, like the name:
+(diff-port "RFIN1" "LNA_IN" in)                  ;; RFIN1_P on net LNA_IN_P
+```
+
+An explicit signal-type word (`rf`, `clock`, …) wins over the `differential`
+default; the pairing lives in its own field, not in that word.
+
+### Iterating a list: `(for name (item…) body…)`
+
+`(repeat name start end body…)` counts integers. `(for …)` walks a literal
+list, so a loop variable can be a channel letter, a lane suffix, or any
+expression — including `(let …)`-bound values. Each item is evaluated in the
+enclosing scope, then bound in a fresh child scope for one pass over the body.
+Both forms work in expression position and in a `(design-block …)` body.
+
+```scheme
+;; The anti-alias filter block of lib/modules/ad7380-channel.sexp — sixteen
+;; hand-copied instance lines, four per channel — as one loop nest:
+(for ch ("A" "B" "C" "D")
+  (for leg ("P" "N")
+    (instance (fmt "R_F~a~a" ch leg) (res-0201 "33R")
+      (pin 1 (fmt "AIN~a_EXT_~a" ch leg)) (pin 2 (fmt "AIN~a_~a" ch leg)))
+    (instance (fmt "C_F~a~a" ch leg) (cap-0201 "68pF")
+      (pin 1 (fmt "AIN~a_~a" ch leg)) (pin 2 "GND"))))
+
+;; A string item composes ref-des names through (fmt …) and drops straight
+;; into a net name:
+(for ch ("A" "B" "C" "D")
+  (instance (fmt "R_SD~a" ch) (res-0201 "100R")
+    (pin 1 (fmt "SDO~a_RAW" ch)) (pin 2 (fmt "SDO~a" ch))))
+```
+
+Identity works exactly as it does for `repeat`: the `(for …)` form owns one
+source-resident `(id …)` anchor, and each generated child's id derives from
+that anchor plus its `origin_key` and the item's **0-based ordinal**, so ids
+are stable across rebuilds without minting an impossible `(id …)` per
+iteration. A `(ids ("R_FAP@0" <hex8>) …)` sidecar on the loop form pins
+migrated identities when a hand-unrolled block is folded into a `for`.

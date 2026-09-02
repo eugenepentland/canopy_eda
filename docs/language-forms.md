@@ -18,6 +18,7 @@ Arguments are passed un-evaluated; each form decides what to evaluate.
 | --- | --- | --- |
 | `(let name expr)` | 2 | Bind `name` to the evaluated value of `expr` in the current scope. |
 | `(repeat name start end body… [(id hex8)] [(ids ("origin@index" hex8)…)])` | 4+ | Evaluate `body` once per integer from `start` through `end`, inclusive, with `name` bound in a fresh lexical scope for each iteration. The optional IDs sidecar pins migrated child identities; otherwise they derive from origin key + index. |
+| `(for name (item…) body… [(id hex8)] [(ids ("origin@ordinal" hex8)…)])` | 3+ | Evaluate `body` once per listed item — strings, numbers, or expressions — with `name` bound in a fresh lexical scope for each. The list sibling of `repeat`, so a channel letter can drive `(fmt …)` names; child identities derive from origin key + 0-based ordinal unless the IDs sidecar pins them. |
 | `(if cond then else)` | 3 | Short-circuit conditional. Only the matching branch is evaluated. |
 | `(import name…)` | 1+ | Load library components or modules by name. Searches `lib/components/` then `lib/modules/`. |
 | `(defmodule name (param \| (param default)…) ["docstring"] body…)` | 2+ | Define a parameterised module that closes over the surrounding env. A `(param default)` pair makes the argument optional — its default evaluates at call time when omitted, so a fully-defaulted module also renders standalone. |
@@ -99,6 +100,7 @@ where each is accepted: **D** = design-block top level,
 | `(instance "REF" component pin… [(power WATTS \| (typ WATTS) (max WATTS))])` | DSs | Place a component with inline pin-to-net bindings. `(power …)` states what this part dissipates, for the thermal screening — see “Thermal declarations”. |
 | `(port "name" [net] dir [kind] [(rated lo hi)] [(side left\|right\|top\|bottom)])` | DSs | Declare a block boundary signal. A power/rf port's direction (or an explicit (side …)) tells the PCB rough placer where the net enters/leaves the module — in → left, out → right. |
 | `(bus-port "prefix" width dir …)` | DSs | Declare a multi-bit boundary bus that expands to one port per lane. |
+| `(diff-port "BASE" [net] dir [kind] [optional] [(rated lo hi)] [(side …)] [(suffixes P N)])` | DSs | Declare a differential boundary pair as one line: expands to the `BASE_P`/`BASE_N` ports (override the suffixes with `(suffixes …)`), replays every modifier onto both lanes, defaults their kind to `differential`, and records the pairing so ERC holds the two lanes to a both-or-neither connection rule. |
 | `(note "id" "text" [(ref …)])` | DSs | Attach a design-time note to the surrounding scope. |
 | `(section "name" ["subtitle"] form…)` | DSs | Functional subsystem card. Inside `(section …)` nests one level into a sub-section. |
 | `(decouple "NET" [(comp "val")] COUNT per-pin [REF\|auto] PIN…)` | DSs | Emit COUNT decoupling caps per listed host pin. Component and REF may come from (decouple-defaults …); a trailing `auto` expands to the pins already declared on the net. |

@@ -363,43 +363,90 @@ fn evalBlockRepeat(
     build: *BlockBuildState,
 ) EvalError!void {
     const spec = try special_forms.parseRepeat(self, form_children[1..], env);
-    const repeat_id = try ids.getOrCreateFormId(self, form_children);
-    const sidecar = ids.parseChildIdSidecar(self, form_children);
+    const loop = try beginBlockLoop(self, form_children);
     var it = spec.iterator();
     while (it.next()) |index| {
         var loop_env = Env.init(self.allocator, env);
         defer loop_env.deinit();
         try loop_env.put(spec.name, .{ .number = @floatFromInt(index) });
+        try evalBlockLoopIteration(self, spec.body, &loop_env, build, loop, index);
+    }
+}
 
-        const first_instance = build.instances.items.len;
-        const first_sub_block = build.sub_blocks.items.len;
-        const first_section = build.sections.items.len;
-        // Child forms share one source location across every iteration. Drop
-        // their normal pending writes and retain only the repeat form's anchor.
-        const pending_id_len = self.pending_ids.items.len;
-        const pending_child_id_len = self.pending_child_ids.items.len;
-        evalBlockBodyForms(self, spec.body, &loop_env, build) catch |err| {
-            self.pending_ids.items.len = pending_id_len;
-            self.pending_child_ids.items.len = pending_child_id_len;
-            return err;
-        };
+/// Expand a design-scope `(for name (item…) body…)`. Same machinery as
+/// `evalBlockRepeat` — one source-resident anchor, children derived from it
+/// plus their `origin_key` — with the lexical index being the item's 0-based
+/// ordinal rather than a loop counter, so `(ids ("C_A@0" token) …)` migrates a
+/// hand-unrolled block exactly as it does for `repeat`.
+fn evalBlockFor(
+    self: *Evaluator,
+    form_children: []const Node,
+    env: *Env,
+    build: *BlockBuildState,
+) EvalError!void {
+    const spec = try special_forms.parseFor(self, form_children[1..]);
+    const loop = try beginBlockLoop(self, form_children);
+    for (spec.items, 0..) |item, ordinal| {
+        const value = try self.evalNode(item, env);
+        var loop_env = Env.init(self.allocator, env);
+        defer loop_env.deinit();
+        try loop_env.put(spec.name, value);
+        try evalBlockLoopIteration(self, spec.body, &loop_env, build, loop, @intCast(ordinal));
+    }
+}
+
+/// The identity anchor a design-scope loop form owns: one source-resident
+/// `(id …)` plus its optional `(ids …)` migration sidecar.
+const BlockLoopIdentity = struct {
+    anchor: []const u8,
+    sidecar: ids.ChildIdSidecar,
+};
+
+fn beginBlockLoop(self: *Evaluator, form_children: []const Node) EvalError!BlockLoopIdentity {
+    return .{
+        .anchor = try ids.getOrCreateFormId(self, form_children),
+        .sidecar = ids.parseChildIdSidecar(self, form_children),
+    };
+}
+
+/// Materialize one loop iteration's body and stamp every child it produced
+/// with an identity derived from the loop's anchor and this lexical index.
+fn evalBlockLoopIteration(
+    self: *Evaluator,
+    body: []const Node,
+    loop_env: *Env,
+    build: *BlockBuildState,
+    loop: BlockLoopIdentity,
+    index: i64,
+) EvalError!void {
+    const first_instance = build.instances.items.len;
+    const first_sub_block = build.sub_blocks.items.len;
+    const first_section = build.sections.items.len;
+    // Child forms share one source location across every iteration. Drop
+    // their normal pending writes and retain only the loop form's anchor.
+    const pending_id_len = self.pending_ids.items.len;
+    const pending_child_id_len = self.pending_child_ids.items.len;
+    evalBlockBodyForms(self, body, loop_env, build) catch |err| {
         self.pending_ids.items.len = pending_id_len;
         self.pending_child_ids.items.len = pending_child_id_len;
+        return err;
+    };
+    self.pending_ids.items.len = pending_id_len;
+    self.pending_child_ids.items.len = pending_child_id_len;
 
-        const new_instances = build.instances.items[first_instance..];
-        for (new_instances) |*inst| {
-            const origin = if (inst.origin_key.len > 0) inst.origin_key else inst.ref_des;
-            inst.id = try repeatChildId(self, repeat_id, &sidecar, origin, index);
-        }
-        for (build.sub_blocks.items[first_sub_block..]) |*sb| {
-            const subblock_uuid = try repeatChildId(self, repeat_id, &sidecar, sb.name, index);
-            try ids.reassignSubBlockIdsV4(self, sb.block, subblock_uuid);
-        }
-        // Sections retain value copies of their member instances. Mirror the
-        // freshly-derived IDs into those copies so every renderer/export path
-        // observes the same identity as the top-level instance slice.
-        syncRepeatedSectionIds(build.sections.items[first_section..], new_instances);
+    const new_instances = build.instances.items[first_instance..];
+    for (new_instances) |*inst| {
+        const origin = if (inst.origin_key.len > 0) inst.origin_key else inst.ref_des;
+        inst.id = try repeatChildId(self, loop.anchor, &loop.sidecar, origin, index);
     }
+    for (build.sub_blocks.items[first_sub_block..]) |*sb| {
+        const subblock_uuid = try repeatChildId(self, loop.anchor, &loop.sidecar, sb.name, index);
+        try ids.reassignSubBlockIdsV4(self, sb.block, subblock_uuid);
+    }
+    // Sections retain value copies of their member instances. Mirror the
+    // freshly-derived IDs into those copies so every renderer/export path
+    // observes the same identity as the top-level instance slice.
+    syncRepeatedSectionIds(build.sections.items[first_section..], new_instances);
 }
 
 fn repeatChildId(
@@ -452,6 +499,10 @@ fn evalBlockBodyForm(
             try evalBlockRepeat(self, form_children, env, build);
             return;
         },
+        .for_ => {
+            try evalBlockFor(self, form_children, env, build);
+            return;
+        },
         else => {},
     };
 
@@ -474,6 +525,7 @@ fn evalBlockBodyForm(
             try build.ports.append(self.allocator, port);
         },
         .bus_port => try builders.expandTopLevelBusPort(self, form_children, env, build.ports),
+        .diff_port => try builders.expandTopLevelDiffPort(self, form_children, env, build.ports),
         .note => try build.notes.append(self.allocator, try builders.buildNote(self, form_children[1..], env)),
         .group => {
             const group = try builders.buildGroup(self, form_children[1..], env);
@@ -1198,6 +1250,7 @@ fn evalSection(
                 if (sf_children.len >= 2) sec_category = sf_children[1].asText() orelse "";
             },
             .bus_port => try builders.expandSectionBusPort(self, sf_children, env, &sec_ports),
+            .diff_port => try builders.expandSectionDiffPort(self, sf_children, env, &sec_ports),
             .instance => {
                 const result = try instance_mod.buildInstance(self, sf_children, env);
                 ids.registerRefDes(self, result.instance.ref_des);
@@ -1390,6 +1443,7 @@ fn evalSubSection(
 
         switch (sft) {
             .bus_port => try builders.expandSectionBusPort(self, ssf_children, env, &sub_ports),
+            .diff_port => try builders.expandSectionDiffPort(self, ssf_children, env, &sub_ports),
             .instance => {
                 const result = try instance_mod.buildInstance(self, ssf_children, env);
                 ids.registerRefDes(self, result.instance.ref_des);
@@ -6518,4 +6572,95 @@ test "decouple per-pin children carry a first-class host ref and pad" {
     // The function name resolved to EN's pad, and the binding survives even
     // though this child's origin key is the label `C_EN`, not `100nF@5#0`.
     try testing.expectEqual(@as(usize, 1), by_function);
+}
+
+// spec: eval/design_block - for materializes its design-scope body once per listed item, composing ref-des and net names from a string item
+test "for materializes one instance per string item" {
+    const alloc = std.heap.page_allocator;
+    const source =
+        \\(design-block "Anti-alias filters"
+        \\  (hierarchical-ids)
+        \\  (for ch ("A" "B" "C" "D")
+        \\    (instance (fmt "R_F~aP" ch) (cap-0402 "33R")
+        \\      (pin 1 (fmt "AIN~a_EXT_P" ch))
+        \\      (pin 2 (fmt "AIN~a_P" ch)))
+        \\    (id abcd1234)))
+    ;
+    var eval: Evaluator = undefined;
+    const block = try evalRepeatFixture(alloc, &eval, source);
+    defer eval.deinit();
+
+    // `origin_key` is the authored name (ref-des renumbering runs afterwards),
+    // so it is what proves the item drove the (fmt …) instance name.
+    try testing.expectEqual(@as(usize, 4), block.instances.len);
+    try testing.expectEqualStrings("R_FAP", block.instances[0].origin_key);
+    try testing.expectEqualStrings("R_FDP", block.instances[3].origin_key);
+    // A string item is usable directly as a net-name fragment.
+    try testing.expect(hasNetNamed(block.nets, "AINA_EXT_P"));
+    try testing.expect(hasNetNamed(block.nets, "AIND_P"));
+    // One source-resident anchor for the whole loop, no per-item id writes.
+    try testing.expectEqual(@as(usize, 0), eval.pending_ids.items.len);
+}
+
+// spec: eval/design_block - for derives distinct stable child ids from its anchor origin key and the item ordinal
+test "for hierarchical ids are stable across evaluations" {
+    const alloc = std.heap.page_allocator;
+    const source =
+        \\(design-block "Anti-alias filters"
+        \\  (hierarchical-ids)
+        \\  (for ch ("A" "B" "C")
+        \\    (instance (fmt "C_F~a" ch) (cap-0402 "68pF")
+        \\      (pin 1 (fmt "AIN~a" ch)) (pin 2 "GND"))
+        \\    (id bcde2345)))
+    ;
+    var eval_a: Evaluator = undefined;
+    const block_a = try evalRepeatFixture(alloc, &eval_a, source);
+    defer eval_a.deinit();
+    var eval_b: Evaluator = undefined;
+    const block_b = try evalRepeatFixture(alloc, &eval_b, source);
+    defer eval_b.deinit();
+
+    try testing.expectEqual(@as(usize, 3), block_a.instances.len);
+    try testing.expect(!std.mem.eql(u8, block_a.instances[0].id, block_a.instances[1].id));
+    for (block_a.instances, block_b.instances) |a, b| {
+        try testing.expectEqualStrings(a.ref_des, b.ref_des);
+        try testing.expectEqualStrings(a.id, b.id);
+    }
+}
+
+// spec: eval/design_block - a for nested inside a repeat expands the whole product with the outer loop still owning every child identity
+test "for nested inside repeat expands the index x item product" {
+    const alloc = std.heap.page_allocator;
+    const source =
+        \\(design-block "Channel matrix"
+        \\  (hierarchical-ids)
+        \\  (repeat idx 1 2
+        \\    (for leg ("P" "N")
+        \\      (instance (fmt "C_~a~a" idx leg) (cap-0402 "68pF")
+        \\        (pin 1 (fmt "AIN~a_~a" idx leg)) (pin 2 "GND")))
+        \\    (id cdef3456)))
+    ;
+    var eval_a: Evaluator = undefined;
+    const block_a = try evalRepeatFixture(alloc, &eval_a, source);
+    defer eval_a.deinit();
+    var eval_b: Evaluator = undefined;
+    const block_b = try evalRepeatFixture(alloc, &eval_b, source);
+    defer eval_b.deinit();
+
+    try testing.expectEqual(@as(usize, 4), block_a.instances.len);
+    try testing.expectEqualStrings("C_1P", block_a.instances[0].origin_key);
+    try testing.expectEqualStrings("C_1N", block_a.instances[1].origin_key);
+    try testing.expectEqualStrings("C_2N", block_a.instances[3].origin_key);
+    // The outer repeat re-stamps every child the inner for produced, so all
+    // four identities are distinct and reproduce across evaluations.
+    try expectDistinctInstanceIds(block_a.instances);
+    for (block_a.instances, block_b.instances) |a, b| {
+        try testing.expectEqualStrings(a.id, b.id);
+    }
+}
+
+fn expectDistinctInstanceIds(instances: []const Instance) !void {
+    for (instances, 0..) |a, i| {
+        for (instances[i + 1 ..]) |b| try testing.expect(!std.mem.eql(u8, a.id, b.id));
+    }
 }

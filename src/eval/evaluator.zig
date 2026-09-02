@@ -461,6 +461,7 @@ pub const Evaluator = struct {
         if (SpecialForm.fromAtom(head_name)) |sf| return switch (sf) {
             .let => special_forms.evalLet(self, args, env),
             .repeat => special_forms.evalRepeat(self, args, env),
+            .for_ => special_forms.evalFor(self, args, env),
             .if_ => special_forms.evalIf(self, args, env),
             .import => modules.evalImport(self, args, env),
             .defmodule => modules.evalDefmodule(self, args, env),
@@ -1150,4 +1151,56 @@ test {
     _ = builders;
     _ = forms;
     _ = suggest;
+}
+
+// spec: eval/evaluator - for evaluates its body once per listed item, binding strings and let-bound values in a fresh scope
+// spec: eval/evaluator - for binds its item lexically without replacing an enclosing binding
+test "eval for iterates a literal item list and binds each item lexically" {
+    // page_allocator: each iteration's fmt/assert strings intentionally live
+    // for the evaluator lifetime (project allocation convention).
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    const nodes = try parser.parse(alloc,
+        \\(let tail "IF")
+        \\(let ch 99)
+        \\(for ch ("A" "B" tail)
+        \\  (assert (!= ch "") (fmt "lane ~a" ch))
+        \\  (fmt "R_F~aP" ch))
+        \\ch
+    );
+    defer parser.freeNodes(alloc, nodes);
+
+    _ = try eval.evalNode(nodes[0], &env);
+    _ = try eval.evalNode(nodes[1], &env);
+    const result = try eval.evalNode(nodes[2], &env);
+    try std.testing.expectEqualStrings("R_FIFP", result.asString().?);
+    try std.testing.expectEqual(@as(usize, 3), eval.assertions.items.len);
+    try std.testing.expectEqualStrings("lane A", eval.assertions.items[0].message);
+    try std.testing.expectEqualStrings("lane IF", eval.assertions.items[2].message);
+    // The loop scope is a child env, so the enclosing `ch` survives untouched.
+    try std.testing.expectEqual(@as(f64, 99.0), (try eval.evalNode(nodes[3], &env)).asNumber().?);
+}
+
+// spec: eval/evaluator - for rejects a second argument that is not a parenthesised item list
+test "eval for requires a parenthesised item list" {
+    // page_allocator: the source-located diagnostic intentionally owns its
+    // formatted message for the evaluator lifetime.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    const nodes = try parser.parse(alloc, "(for ch \"A\" (fmt \"~a\" ch))");
+    defer parser.freeNodes(alloc, nodes);
+
+    try std.testing.expectError(EvalError.InvalidForm, eval.evalNode(nodes[0], &env));
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try std.testing.expect(std.mem.indexOf(u8, diag.message, "parenthesised item list") != null);
 }

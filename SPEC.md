@@ -4472,6 +4472,9 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - repeat evaluates every integer in its inclusive range and composes with arithmetic and fmt
 - repeat binds its index lexically without replacing an enclosing binding
 - repeat rejects fractional bounds instead of silently rounding them
+- for evaluates its body once per listed item, binding strings and let-bound values in a fresh scope
+- for binds its item lexically without replacing an enclosing binding
+- for rejects a second argument that is not a parenthesised item list
 - reassignSubBlockIds takes a pinned child id from the (ids …) sidecar and seeds+queues a miss with the legacy derivation
 - reassignSubBlockIdsV4 derives each child id from the sub-block uuid and the child's stable origin_key
 - reassignSubBlockIdsV4 composes nested sub-blocks via the parent uuid and the nested name (sheet-path identity)
@@ -5091,6 +5094,9 @@ Public functions: renderSchematic
 ## erc
 
 - a net pinned by (module-policy (net-class …)) is not reported as an inferred layout class
+- a declared differential pair with exactly one wired lane is reported as half-connected, naming the wired lane and the open one
+- a declared differential pair wired on both lanes, or on neither, is not reported
+- a sub-block's differential pair tied on only one lane by the parent is reported as half-connected
 - a module-local supply node whose name carries a supply token counts as the IC's power connection
 - EMI coupling intent must bridge its declared domain to ground and cannot also claim supply decoupling
 - an explicitly signal-typed rated input is not a supply rail and does not require decoupling
@@ -5235,6 +5241,11 @@ Public functions: analyze
 - a sub-block module's own decouple-defaults bypass wins over the parent's
 - the bypass default cascades transitively through nested sub-blocks while the ic ref stays local
 - bus-port expands one port per index times optional suffix list
+- diff-port expands one base name into a paired _P and _N port carrying the differential kind
+- diff-port replays every trailing port modifier onto both lanes
+- a diff-port suffixes override renames both lanes and a long-form net base is suffixed per lane
+- a section-scope diff-port expands two section ports typed differential
+- a diff-port missing its direction is an arity error naming the form
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
 - kicad-pcb form captures the literal path on the design block
 - stackup form captures layer count and plane assignments on the design block
@@ -5295,6 +5306,9 @@ Public functions: analyze
 - repeat derives distinct stable child ids from its anchor origin key and lexical index
 - repeat ids sidecars override indexed child derivation for UUID-preserving migrations
 - repeat composes with sub-block calls and gives each repeated module a distinct stable hierarchy
+- for materializes its design-scope body once per listed item, composing ref-des and net names from a string item
+- for derives distinct stable child ids from its anchor origin key and the item ordinal
+- a for nested inside a repeat expands the whole product with the outer loop still owning every child identity
 - a bus-port index range whose lane span would overflow the i64 subtraction is diagnosed and expands nothing
 - a zero-based bus-port range still expands and the lane cap admits a span of exactly 4095
 - a frequency-plan declaration is collected during the block body and evaluated after it, publishing its typed report on the evaluator beside the loop-filter ones

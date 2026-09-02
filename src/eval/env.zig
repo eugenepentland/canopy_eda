@@ -155,6 +155,11 @@ pub const Port = struct {
     /// (e.g. "this mezzanine pin is 3.3 V CMOS") show up in ERC even when the
     /// far-side device lives in a different design.
     electrical: ?ElectricalDecl = null,
+    /// Pair key shared by the two lanes a `(diff-port "BASE" …)` expands to —
+    /// the form's base name, identical on the `_P` and `_N` port. Empty on a
+    /// hand-written `(port …)`, so it is also the "this port was declared as
+    /// half of a differential pair" flag ERC's both-or-neither rule keys on.
+    diff_pair_of: []const u8 = "",
 
     /// True when this port carries supply-rail specs — a nominal voltage, a
     /// rated range, a current capacity, or an efficiency. Declared once here
