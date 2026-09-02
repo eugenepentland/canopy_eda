@@ -292,6 +292,7 @@ Public functions: solve
 - (rough …) anchor/group tokens match by ref-des or origin name
 - an authored rough critical-loop parses as a named closed-chain member set and contributes whole-loop compactness to placement ranking
 - partial apply locks every covered part and leaves the rest free
+- an authored board keepout region refuses a component pose on the face it reserves, leaves the other face alone, and charges the guidance hinge for a courtyard that settles inside
 - legalization never moves a locked part; the free side absorbs the push
 - a locked anchor keeps its pose and the ring transforms into its frame
 - a pinned block pushes free blocks aside and never moves
@@ -3190,6 +3191,9 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - component-edge clearance follows the exact rounded outline rather than its rectangular bounding box
 - a pad inside the board rectangle but in a concave notch is measured against the outline polygon
 - a typed perimeter keepout flags only its blocked feature families, admits named nets, and exempts generated fence vias
+- an authored board keepout flags the courtyards, tracks and vias inside it on the face it reserves, admits its allowed nets, and leaves the opposite face alone
+- an authored board keepout blocking only some families ignores the others, and a both-sides region also reserves the inner copper layers
+- a board declaring no authored keepout region runs no region geometry at all
 - flags same-layer track crossings and sub-clearance pairs between nets
 - flags a track crossing a foreign pad on its layer; other-layer SMD pads don't clash
 - parent-rail copper may touch a structurally proven generated per-pin bypass pad, while dotted lookalike nets remain foreign
@@ -5331,6 +5335,8 @@ Public functions: analyze
 - bare top-level pins forms attach electrical pins instead of silently no-oping
 - board form parses outline size, corner radius, edge lists, corners, and typed perimeter keepouts
 - board form accepts an outline-approved digest only in the exact hex shape the drift finding prints, warning and dropping anything else
+- board form parses repeatable authored keepout regions with their side, blocked families, allowed nets, and reason
+- an authored board keepout with a rectangle outside the outline, a non-positive size, an unknown side or blocks word, or a missing rect or side is an evaluation error
 - board-role form sets the explicit board/subcircuit role
 - board-role defaults to subcircuit when the form is absent
 - board-role remains authoritative whether it appears before or after the board geometry form
@@ -7020,6 +7026,8 @@ is what makes the predicate exact rather than approximately right.
 - Every /pcb-layout client reads the page's lexical PCB blob directly, so no board read is gated on the undefined window.PCB
 - The PCB blob carries the resolved board design-rule scalars for a byte-identical client DRC
 - PCB blobs carry fixed perimeter keepout geometry together with its clearance, blocked feature families, and allowed nets
+- PCB blobs carry each authored board keepout region as a solid named rectangle beside the derived perimeter band
+- the pcb-describe board facts list every authored keepout region in world millimetres with its side, blocked families, allowed nets and reason
 - The PCB blob emits each pad's rotation, roundrect ratio, oval slot, and through-hole flag
 - The layout sidecar is snapshotted into history and listed newest-first
 - Layout snapshots are pruned to the newest retention cap
@@ -7189,6 +7197,7 @@ is what makes the predicate exact rather than approximately right.
 - the viewer strokes footprint silk as one pass above the copper pass, and under the assembly review's package bodies
 - one canonical stage list names the board paint order for every renderer
 - the viewer's paint stages mirror the canonical order name for name
+- the board PNG washes and names each authored board keepout region, leaving the rest of the board bare
 - the board PNG paints the canonical stages in order
 - the board PNG fills inner planes from the same pour engine the fabrication outputs use
 - the board PNG strokes a routed arc as a curve and drops the chords it owns

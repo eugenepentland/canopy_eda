@@ -804,6 +804,70 @@ The two schemes coexist per-design. Switching an existing design to
 `(hierarchical-ids)` changes its child ids (different derivation), so it is a
 one-time board re-stamp — adopt deliberately, not casually.
 
+### Board keepout regions
+
+`(board … (keepout "NAME" …))` reserves a rectangle of board. It is the
+*authored* keepout, as opposed to the two derived ones: `(perimeter-fence …
+(keepout CLEARANCE …))` is a band computed from the outline, and
+`(net-class … (keepout MM))` is an RF halo computed from copper. This form
+states a mechanical fact instead — a heatsink plate's footprint, a shield can,
+a bracket, a connector's mating shroud — so nothing about the outline, the
+fence, or the routing can move it.
+
+```scheme
+(keepout "NAME"
+  (rect X Y W H)                     ;; board-local mm from the outline's top-left
+  (side top|bottom|both)
+  [(blocks components tracks vias)]  ;; default: all three
+  [(allow-nets "GND" …)]
+  [(reason "why the space is reserved")])
+```
+
+The form is repeatable — a board may declare as many regions as it has
+obstructions.
+
+- **Frame.** `(rect X Y W H)` is board-local millimetres measured from the
+  outline's top-left, the same frame `(heatsink (rect …))` uses, because both
+  are read off the same mechanical drawing. The rectangle must lie wholly
+  inside the declared `(size W H)` outline.
+- **Face.** `top` / `bottom` reserve one assembly face and that face's copper
+  (`F.Cu` / `B.Cu`); `both` reserves the whole board thickness, inner copper
+  layers included. A through via crosses every layer, so it is measured
+  against a region whatever face that region names.
+- **What it enforces.** The placer refuses to put a component courtyard inside
+  a region on a face it reserves (and the force solve is pushed out of one),
+  DRC reports a fab-blocking `board keepout` violation for any courtyard,
+  track segment, or via that lands there, and `(allow-nets …)` admits named
+  copper anyway — a plate bonded to ground still wants its stitching.
+- **What it shows.** The region is drawn and labelled on `/pcb-layout` and in
+  the PCB PNG, and `/api/pcb-describe` lists it under `board.keepouts` in world
+  millimetres with its side, blocked families, allowed nets, and reason.
+- **Errors, not warnings.** A rectangle outside the outline, a non-positive
+  size, an unknown side or `blocks` word, an unknown sub-form, or a missing
+  `(rect …)` / `(side …)` stops the build with `file:line:col`. The derived
+  keepouts degrade to a warning because there is something to fall back to;
+  a silently dropped authored region reads on every surface exactly like a
+  board that never reserved the space.
+
+The motivating case is the Barracuda RF board, whose bottom frontend face
+carries a conduction plate. Its outline is 81.0 × 24.8 mm, and the plate
+occupies `x = 174.0 … 189.0`, `y = 89.6 … 98.5` in that board's layout frame
+(outline `x 126.5 … 207.5`, `y 89.6 … 114.4`) — board-local `x = 47.5`,
+`y = 0`, `w = 15.0`, `h = 8.9`:
+
+```scheme
+(board
+  (part-number "BARRACUDA-RF")
+  (size 81.0 24.8)
+  (corner-radius 2.0)
+  (keepout "bottom frontend heatsink plate"
+    (rect 47.5 0.0 15.0 8.9)
+    (side bottom)
+    (allow-nets "GND")
+    (reason "bottom-side heatsink plate over the frontend/LNA region must stay part-free"))
+  …)
+```
+
 ### Ports
 
 ```scheme

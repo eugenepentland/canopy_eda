@@ -1377,6 +1377,34 @@ pub const PerimeterKeepoutSpec = struct {
     allow_nets: []const []const u8 = &.{},
 };
 
+/// Board face(s) an authored `(board … (keepout …))` region reserves. `both`
+/// is the honest default for a mechanical obstruction that owns the whole
+/// board thickness there; `top`/`bottom` reserve one assembly face only.
+pub const BoardKeepoutSide = enum { top, bottom, both };
+
+/// One author-declared board-interior keepout region — the mechanical
+/// counterpart of the perimeter band. Its rectangle is board-local mm from the
+/// outline's top-left, the SAME frame `BoardHeatsinkSpec.rect` uses, because
+/// the regions these describe (a heatsink plate's footprint, a shield can, a
+/// bracket) are read off the same mechanical drawing. Unlike the perimeter
+/// keepout it is not derived from anything: the author states the rectangle,
+/// so nothing about the outline or the fence can move it.
+pub const BoardKeepoutSpec = struct {
+    /// Author's label, printed by DRC, the describe endpoint and the renderers.
+    name: []const u8,
+    rect: struct { x: f64, y: f64, w: f64, h: f64 },
+    side: BoardKeepoutSide,
+    /// Which physical families the region excludes. Defaults to all three; an
+    /// explicit `(blocks …)` narrows it.
+    blocks: PerimeterKeepoutBlocks = .{ .components = true, .tracks = true, .vias = true },
+    /// Copper admitted through anyway, by net name (a heatsink plate that is
+    /// bonded to GND still wants its stitching).
+    allow_nets: []const []const u8 = &.{},
+    /// Optional `(reason "…")` — why the space is reserved, carried to every
+    /// surface that names the region so a reader never has to find the commit.
+    reason: []const u8 = "",
+};
+
 /// A plated-through via fence generated continuously around the board outline.
 /// Dimensions are millimetres. `edge_offset` is measured from the finished
 /// edge to each via centre; `mask_width` is the solder-mask-free band measured
@@ -1443,6 +1471,8 @@ pub const BoardSpec = struct {
     corners: []const PlacementItem = &.{},
     /// Optional board-edge via fence and exposed-mask band.
     perimeter_fence: PerimeterFenceSpec = .{},
+    /// Author-declared interior keepout regions, in authored order.
+    keepouts: []const BoardKeepoutSpec = &.{},
     /// Authored default heatsink. A saved layout may override this assembly;
     /// deleting/rebuilding the sidecar falls back here.
     heatsink: ?BoardHeatsinkSpec = null,
