@@ -350,14 +350,19 @@ const invariants = [
           const group = document.querySelector('.drc-grp[data-drcg="net open"]');
           if (group && !group.classList.contains("coll")) group.click();
           const button = document.getElementById("drc-open-summary");
-          return { exists: !!button, text: button && button.textContent,
+          const snapshot = { exists: !!button, text: button && button.textContent,
             collapsed: !!document.querySelector('.drc-grp[data-drcg="net open"].coll') };
+          // PCBDrcRulesApply deliberately starts a fresh authoritative check.
+          // Exercise the bound click in this same browser task, before that
+          // real response can replace the injected rows; renderer work must
+          // not turn this invariant into a race against its 300 ms timer.
+          if (button) button.click();
+          return snapshot;
         });
         c.eq(before.exists, true, "the open-net count is a button");
         c.eq(before.text, "1 open net", "the button retains the summary wording");
         c.eq(before.collapsed, true, "the fixture starts with the open-net group hidden");
 
-        await clickBound(page, "#drc-open-summary");
         const after = await page.evaluate(() => ({
           groupCollapsed: !!document.querySelector('.drc-grp[data-drcg="net open"].coll'),
           netExpanded: !!document.querySelector('.drc-net[data-drcnet="OPEN_NET"]:not(.coll)'),

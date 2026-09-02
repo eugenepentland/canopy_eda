@@ -1326,7 +1326,7 @@ var PAINT_STAGES=[
   if(ovExclusive())return;
   if(s.only&&!s.cop)return;   // the movers own only the copper a rigid group drags
   paintTracks(c,s.cop,s.only);}},
- {n:"parts",gpu:"fill",rv:7,sp:1,m2:1,f:function(c,k,s){paintParts(c,k,s.mov,s.only);}},
+ {n:"parts",gpu:"fill",rv:7,sp:1,m2:1,f:function(c,k,s){paintParts(c,k,s.mov,s.only);paintViaHoles(c,s.cop,s.only);}},
  {n:"pad_labels",gpu:"",rv:9,q:1,f:function(c,k,s){paintPadLabels(c,k,s.mov,s.only);}},
  {n:"footprint_silk",gpu:"",rv:6,sp:1,f:function(c,k,s){paintFootprintSilk(c,k,s.mov,s.only);}},
  {n:"board_silk",gpu:"",rv:10,sp:1,f:function(c,k,s){paintBoardSilk(c,k,s.movG,s.mov,s.only);}},
@@ -2676,8 +2676,9 @@ function trackLength(t){var g=trackArcGeom(t);return g?g.r*Math.abs(g.sweep):Mat
 //    layer is the norm, where there is no difference at all. One stroke() per
 //    bucket also paints each pixel once, so same-net junction overlaps stop
 //    double-compositing at alpha<1: it reads closer to solid copper.
-//  · via barrels batch ahead of the hole punches rather than interleaving
-//    barrel+hole per via. Vias never overlap each other (DRC forbids it).
+//  · via barrels batch independently of the final bore-punch pass rather
+//    than interleaving barrel+hole per via. Vias never overlap each other
+//    (DRC forbids it).
 // cuBatchOn refuses the batch — today's per-item loop runs instead — wherever a
 // per-object decision or a live coordinate mutation applies: the fab preview,
 // review focus, a copper-carrying drag (its own `cop` split), and the segment /
@@ -2836,7 +2837,7 @@ function cuBatchGet(){
  // backstop under the explicit cuGeomDrop() calls.
  if(cuBatch&&cuBatch.ts===ts&&cuBatch.tn===ts.length&&cuBatch.vs===vs&&cuBatch.vn===vs.length
   &&cuBatch.nc===netColOn&&cuBatch.ncm===PCB.netcolor&&cuBatch.vgd===vgd)return cuBatch;
- var byL={},barrel=[],fence=[],holes=new Path2D(),nb=0;
+ var byL={},barrel=[],fence=[],holes=new Path2D();
  ts.forEach(function(t){if(rfOwnsTrack(t))return;var L=t.l||0;
   var c=(netColOn&&netColorOf(netCollapse(t.net)))||layerColor(L);
   var w=Math.max(t.w*S,1.2),m=byL[L]||(byL[L]=[]);
@@ -2846,7 +2847,7 @@ function cuBatchGet(){
   var rr=viaRenderRadius(v.d),dr=(v.drill>0)?v.drill:vgd;
   var rh=viaRenderRadius(dr);
   var c=(netColOn&&netColorOf(netCollapse(v.net)))||TH.via,x=X(v.x),y=Y(v.y);
-  holes.moveTo(x+rh,y);holes.arc(x,y,rh,0,6.2832);nb++;
+  holes.moveTo(x+rh,y);holes.arc(x,y,rh,0,6.2832);
   if(routeFenceVia(v)){var fw=rr-rh,fr=(rr+rh)/2;
    if(fw>0){var fb=cuBucket(fence,c+"|"+fw,function(){return {c:c,w:fw,p:new Path2D()};});
     for(var fa=0;fa<3;fa++){var a0=fa*2*Math.PI/3,a1=a0+Math.PI/3;
@@ -2854,7 +2855,7 @@ function cuBatchGet(){
   var bb=cuBucket(barrel,c,function(){return {c:c,p:new Path2D()};});
   bb.p.moveTo(x+rr,y);bb.p.arc(x,y,rr,0,6.2832);});
  cuBatch={ts:ts,tn:ts.length,vs:vs,vn:vs.length,nc:netColOn,ncm:PCB.netcolor,vgd:vgd,
-  t:byL,v:barrel,f:fence,h:holes,nb:nb};
+  t:byL,v:barrel,f:fence,h:holes};
  return cuBatch;}
 // Generated RF-fence vias are intentionally temporary routing furniture. Draw
 // their copper annulus as three brown/net-colour dashes so it remains obvious
@@ -2938,7 +2939,6 @@ function paintTracks(ctx,cop,only){
  if(selCu.v.length)selCuViaFringe(ctx,cop,only);
  if(CB){ctx.globalAlpha=1;
   for(var vi=0;vi<CB.v.length;vi++){ctx.fillStyle=CB.v[vi].c;ctx.fill(CB.v[vi].p);}
-  if(CB.nb){ctx.fillStyle=TH.viaHole;ctx.fill(CB.h);}
   paintFenceVias(ctx,CB.f);
   if(PHYSICAL_REVIEW)paintMaskRelief(ctx);
   ctx.globalAlpha=1;return;}
@@ -2951,10 +2951,23 @@ function paintTracks(ctx,cop,only){
   var col=hit?"#8be9ff":(PHYSICAL_REVIEW?PH.viaMask:(netColOn&&netColorOf(netCollapse(v.net))||TH.via));
   if(routeFenceVia(v))paintFenceVia(ctx,X(v.x),Y(v.y),rr,rh,col);
   else{ctx.fillStyle=col;ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rr,0,6.2832);ctx.fill();}
-  ctx.globalAlpha=1;
-  ctx.fillStyle=PHYSICAL_REVIEW?PH.hole:TH.viaHole;ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rh,0,6.2832);ctx.fill();});
+  if(PHYSICAL_REVIEW){ctx.globalAlpha=1;
+   ctx.fillStyle=PH.hole;ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rh,0,6.2832);ctx.fill();}});
  if(PHYSICAL_REVIEW)paintMaskRelief(ctx);
  ctx.globalAlpha=1;}
+// Via bores are punched after component pads. Pads deliberately paint above
+// routed copper, but a via-in-pad is still a drilled feature through that land:
+// letting the pad fill win would turn it into a misleading solid disc. Quiet
+// frames use one retained Path2D; live copper gestures keep the exact per-via
+// loop so the hole follows the barrel without waiting for cache invalidation.
+function paintViaHoles(ctx,cop,only){
+ if(PHYSICAL_REVIEW||ovExclusive()||(!anyCopperVisible()&&!reviewFocusActive())||only&&!cop)return;
+ ctx.globalAlpha=1;ctx.fillStyle=TH.viaHole;
+ if(cuBatchOn(cop)){
+  ctx.fill(cuBatchGet().h);return;}
+ (PCB.vias||[]).forEach(function(v){if(cop&&cop.has(v)!==(only||false))return;
+  var dr=(v.drill>0)?v.drill:viaGeo().drill,rh=viaRenderRadius(dr);
+  ctx.beginPath();ctx.arc(X(v.x),Y(v.y),rh,0,6.2832);ctx.fill();});}
 // mov/only/cop: drag-cache split — moving parts' halos are dynamic; via/track
 // halos follow the copper the drag carries (cop, a Set of live objects).
 function paintClr(ctx,mov,only,cop){

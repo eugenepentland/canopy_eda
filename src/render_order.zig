@@ -45,8 +45,9 @@
 //! KiCad paints pads ABOVE tracks, which is also the only safe physical-review
 //! order: an ordinary masked trace may begin inside a land, but its green
 //! under-mask wash must never cover the land's exposed-copper rendering. All
-//! three surfaces now agree on that order. Courtyards still sit below copper;
-//! the ratsnest and clearance halos likewise sit under copper.
+//! three surfaces now agree on that order. Via bores are re-punched at the end
+//! of the parts stage so a via-in-pad still reads as drilled. Courtyards still
+//! sit below copper; the ratsnest and clearance halos likewise sit under copper.
 
 const std = @import("std");
 
@@ -119,13 +120,13 @@ pub const stages = [_]Stage{
     },
     .{
         .name = "copper",
-        .what = "routed tracks and arcs by layer (active layer last), then via barrels and their bores",
+        .what = "routed tracks and arcs by layer (active layer last), then via barrels",
         .gpu = .fill,
         .review = 5,
     },
     .{
         .name = "parts",
-        .what = "part bodies: courtyard, pad copper and drilled bores",
+        .what = "part bodies: courtyard, pad copper and drilled pad bores, then a final via-bore punch",
         .gpu = .fill,
         .review = 7,
     },
@@ -195,6 +196,19 @@ test "the canonical order is a named sequence with a review permutation" {
 // spec: Web Server - every board renderer paints exposed pad copper above routed traces, so a normally masked trace entering a land cannot visually coat that component pad with solder mask
 test "component lands paint above masked routed copper" {
     try std.testing.expect(indexOf("copper").? < indexOf("parts").?);
+}
+
+// Viewer-side half of the via-in-pad regression; the rendered-pixel test in
+// render_pcb_png.zig owns the linked specification requirement.
+test "the viewer re-punches via bores in the parts stage" {
+    const js = @embedFile("serve/assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        js,
+        "paintParts(c,k,s.mov,s.only);paintViaHoles(c,s.cop,s.only);",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function paintViaHoles(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "ctx.fill(cuBatchGet().h)") != null);
 }
 
 // spec: Web Server - the viewer's paint stages mirror the canonical order name for name
