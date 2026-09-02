@@ -702,7 +702,7 @@ pub fn ladderAt(
         sink_face = result.cooling.heatsink.face;
         break;
     }
-    if (sink_ref.len == 0 and results.len > 0) sink_ref = thermal_field.heatsinkTarget(results[0].parts) orelse "";
+    if (sink_ref.len == 0 and sink_face == null and results.len > 0) sink_ref = thermal_field.heatsinkTarget(results[0].parts) orelse "";
     return .{ .ambient_c = ambient_c, .rows = rows, .heatsink_ref = sink_ref, .heatsink_side = sink_side, .heatsink_face = sink_face };
 }
 
@@ -1208,6 +1208,7 @@ test "each scenario carries a printable label naming the heatsink's target" {
     try testing.expectEqualStrings("2 m/s airflow", try scenarioLabel(arena, .airflow_2ms, .{ .ref = "U1" }));
     try testing.expectEqualStrings("Heatsink on U5 (board backside)", try scenarioLabel(arena, .heatsink, .{ .ref = "U5" }));
     try testing.expectEqualStrings("Specified fan + passive heatsink on U5 (PCB bottom)", try scenarioLabel(arena, .fan_heatsink, .{ .ref = "U5", .face = .bottom }));
+    try testing.expectEqualStrings("Specified fan + passive heatsink (PCB bottom)", try scenarioLabel(arena, .fan_heatsink, .{ .face = .bottom }));
     // A board with nothing placed has no part to bolt a sink to, and says so by
     // dropping the clause rather than naming the empty string.
     try testing.expectEqualStrings("Heatsink (board backside)", try scenarioLabel(arena, .heatsink, .{}));

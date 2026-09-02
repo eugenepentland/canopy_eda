@@ -243,8 +243,8 @@ const LayoutScore = sidecar_types.LayoutScore;
 
 /// One physical finned heatsink authored on a saved PCB layout. The rectangle
 /// is the base/contact footprint in board coordinates; `side` is the physical
-/// PCB face, not a package-relative direction. `target_ref` binds that face to
-/// the package whose directional theta-JC path the thermal solver must use.
+/// PCB face, not a package-relative direction. Its thermal pad couples every
+/// covered board cell to the passive sink; no component target is required.
 pub const SavedHeatsink = sidecar_types.SavedHeatsink;
 pub const SavedFan = sidecar_types.SavedFan;
 
@@ -2947,7 +2947,13 @@ pub fn thermalCopper(solved: SolvedRequest) thermal_scenarios.Copper {
 /// thermal kernel consumes. A sink on the component's own face is a package-
 /// top path; the opposite physical PCB face is the board/exposed-pad path.
 pub fn thermalHeatsink(solved: SolvedRequest, bt: thermal.BoardThermal) ?thermal_scenarios.Heatsink {
-    const resolved = authored_heatsink.resolve(solved.placement, solved.cooling.heatsink, solved.block.board.thermal.heatsink) orelse return null;
+    const authored = solved.block.board.thermal.heatsink;
+    var resolved = authored_heatsink.resolve(solved.placement, solved.cooling.heatsink, authored) orelse return null;
+    // A layout-drawn assembly is bonded to its PCB footprint. Old sidecars
+    // carried a nearest-part hint; clear it at this boundary so they migrate
+    // without rewriting user data. Source-authored package sinks retain their
+    // stable target and the directional theta-JC model.
+    if (authored == null) resolved.target_ref = "";
     return authored_heatsink.thermalInput(solved.placement, bt, resolved);
 }
 
@@ -7816,7 +7822,7 @@ const tip_text = "Silkscreen text (T): click on the board to place a label " ++
     "Gerber.";
 const tip_backing = "Edit fabrication backing regions with the shared shape-sketch palette: lines/arcs, dimensions, constraints, fillet, chamfer, offset and mirror. " ++
     "The authored side, material, thickness, and automatic footprint cutouts remain unchanged. Saved with the layout and emitted in its named Gerber.";
-const tip_heatsink = "Draw or edit a physical heatsink. Drag its body to move it, drag corner handles to resize it, or click it to edit its face, target, material, fin count/dimensions, and thermal pad. Saved with the layout; the thermal ladder and 3D view use it.";
+const tip_heatsink = "Draw or edit a PCB-mounted physical heatsink. Drag its body to move it, drag corner handles to resize it, or click it to edit its face, material, fin count/dimensions, and thermal pad. Every board cell under its base is thermally coupled; no component target is needed. Saved with the layout; the thermal ladder and 3D view use it.";
 const tip_fan = "Place or edit an axial fan. Drag its circular footprint to move it, drag corner handles to resize its outlet, or click it to edit the PCB face, outlet-to-board distance, and airflow specifications. Saved with the layout and used by the fan thermal scenario.";
 const tip_ruler = "Ruler / dimension (D): drag to measure, or select a footprint first and drag its origin to a straight board edge to create a driving dimension.";
 const tip_move = "Move the selection by an X/Y distance (M): select footprints, tracks, vias, or outline-sketch geometry, then press M (or this button) and type how far to move it; one undo step.";
@@ -15504,7 +15510,7 @@ test "layouts sidecar round-trips a drawn outline" {
     try std.testing.expect(parseSavedOutline(alloc, null) == null);
 }
 
-// spec: Web Server - The PCB editor draws one physical heatsink base rectangle on either board face, reopens it for parameter edits, drags it to reposition, resizes it with corner handles, directly edits fin count or gap, target package, material, base/fins and thermal pad, persists the assembly with the named layout, previews its pad/base/fins in 3D, and feeds the same exact contact and derived theta-SA to built-in and Elmer thermal solves
+// spec: Web Server - The PCB editor draws one target-free board-contact heatsink rectangle on either PCB face, reopens it for parameter edits, drags it to reposition, resizes it with corner handles, directly edits fin count or gap, material, base/fins and thermal pad, persists the assembly with the named layout, previews its pad/base/fins in 3D, and feeds every covered PCB thermal cell plus the same derived theta-SA to built-in and Elmer thermal solves
 test "layouts sidecar round-trips a physical heatsink assembly" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -15523,7 +15529,6 @@ test "layouts sidecar round-trips a physical heatsink assembly" {
             .w = 24,
             .h = 18,
             .side = "bottom",
-            .target_ref = "U15",
             .material = "aluminum_6061",
             .base_mm = 2.5,
             .fin_height_mm = 12,
@@ -15539,13 +15544,18 @@ test "layouts sidecar round-trips a physical heatsink assembly" {
     try writeLayoutsFileJson(&aw.writer, &layouts, null);
     const got = parseLayouts(alloc, aw.written()) orelse return error.TestParseFailed;
     const sink = got[0].heatsink orelse return error.TestParseFailed;
-    try std.testing.expectEqualStrings("U15", sink.target_ref);
+    try std.testing.expectEqualStrings("", sink.target_ref);
     try std.testing.expectEqualStrings("bottom", sink.side);
     try std.testing.expectEqualStrings("aluminum_6061", sink.material);
     try std.testing.expectEqualStrings("width", sink.fin_axis);
     try std.testing.expectEqual(@as(f64, 24), sink.w);
     try std.testing.expectEqual(@as(f64, 0.8), sink.fin_thickness_mm);
     try std.testing.expectEqual(@as(f64, 0.5), sink.pad_thickness_mm);
+    // Layouts saved before board contact became target-free carried a nearest-
+    // package hint. They remain readable and no longer depend on that part
+    // having a thermal-power row when lowered at the thermal boundary.
+    const legacy = parseSavedHeatsink(try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"x\":0,\"y\":0,\"w\":10,\"h\":10,\"side\":\"bottom\",\"target_ref\":\"U99\"}", .{})) orelse return error.TestParseFailed;
+    try std.testing.expectEqualStrings("U99", legacy.target_ref);
     const fan = got[0].fan orelse return error.TestParseFailed;
     try std.testing.expectEqualStrings("Sanyo Denki 9A0812G4D011", fan.model);
     try std.testing.expectEqual(@as(f64, 0.5), fan.rect.x);

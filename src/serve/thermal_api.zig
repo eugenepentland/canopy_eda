@@ -651,6 +651,18 @@ fn writeThermalFixture(dir: std.Io.Dir) !void {
         \\    (pin 2 "GND")
         \\    (power 1.0)))
     });
+    // The obsolete nearest-package hint is deliberately invalid. A layout-
+    // drawn sink is PCB contact, so the thermal boundary must ignore U99 and
+    // use the whole saved rectangle without a component target.
+    try dir.writeFile(std.testing.io, .{ .sub_path = "src/fan-heater.layouts.json", .data =
+        \\{"rev":1,"default":"board sink","layouts":[
+        \\{"name":"board sink","kind":"manual","ts":1,"parts":[
+        \\{"ref":"U1","x":20,"y":10,"rot":0}],"heatsink":
+        \\{"x":0,"y":0,"w":40,"h":20,"side":"bottom","target_ref":"U99",
+        \\"material":"aluminum_6063","base_mm":2,"fin_height_mm":10,
+        \\"fin_thickness_mm":1,"fin_gap_mm":1.5,"fin_axis":"length",
+        \\"pad_thickness_mm":0.5,"pad_k_w_mk":6}}]}
+    });
     try dir.writeFile(std.testing.io, .{ .sub_path = "src/fan-sink-heater.sexp", .data =
         \\(import hot-ic)
         \\
@@ -998,7 +1010,7 @@ test "the thermal endpoint carries the authored fan operating point" {
     const got = try serve(alloc, project, "fan-heater", null);
     try testing.expectEqual(@as(u16, 200), got.status);
     const rows = try scenarioRows(alloc, got.body);
-    try testing.expectEqual(@as(usize, 5), rows.len);
+    try testing.expectEqual(@as(usize, 6), rows.len);
     try testing.expectEqualStrings("natural", rows[0].object.get("scenario").?.string);
     try testing.expectEqualStrings("fan", rows[1].object.get("scenario").?.string);
     try testing.expect(rows[1].object.get("heatsink").? == .null);
@@ -1009,6 +1021,9 @@ test "the thermal endpoint carries the authored fan operating point" {
     try testing.expect(try num(fan.get("velocity_m_s").?) > 0);
     try testing.expect(try num(fan.get("estimated_pressure_pa").?) > 0);
     try testing.expect(try num(rows[1].object.get("board_max_c").?) < try num(rows[0].object.get("board_max_c").?));
+    const board_sink = rows[5].object.get("heatsink").?.object;
+    try testing.expectEqualStrings("", board_sink.get("ref").?.string);
+    try testing.expectEqualStrings("bottom", board_sink.get("face").?.string);
 }
 
 // spec: serve/thermal - a board with an explicit fan and heatsink adds a simultaneous row carrying both assemblies after their standalone rows

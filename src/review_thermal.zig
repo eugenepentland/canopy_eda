@@ -532,7 +532,7 @@ fn writeScenarioRow(w: anytype, row: thermal_scenarios.Row) json_writer.WriteErr
     try w.writeAll(",\"ref\":");
     try writeStringOrNull(w, row.max_ambient.ref);
     try w.writeAll("},\"heatsink\":");
-    if (row.cooling.heatsink.ref.len == 0) {
+    if (row.cooling.heatsink.ref.len == 0 and row.cooling.heatsink.face == null) {
         try w.writeAll("null");
     } else {
         try w.writeAll("{\"ref\":");

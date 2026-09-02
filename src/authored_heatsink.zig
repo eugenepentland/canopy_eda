@@ -88,7 +88,9 @@ pub fn resolve(
     if (spec != null and authored == null) return null;
     if (saved) |value| {
         var merged = value;
-        if (authored) |fallback| merged.target_ref = fallback.target_ref;
+        if (authored) |fallback| {
+            merged.target_ref = fallback.target_ref;
+        }
         return merged;
     }
     return authored;
@@ -101,8 +103,24 @@ pub fn thermalInput(
     bt: thermal.BoardThermal,
     saved: sidecar.SavedHeatsink,
 ) ?scenarios.Heatsink {
-    const mounted = scenarios.resolveMountedTarget(bt, placement, saved.target_ref) orelse return null;
     const physical = optimizer.Side.fromStr(saved.side);
+    if (saved.target_ref.len == 0) return .{
+        .side = .board_backside,
+        .physical_face = if (physical == .top) .top else .bottom,
+        .geometry = .{
+            .width_mm = saved.w,
+            .length_mm = saved.h,
+            .base_mm = saved.base_mm,
+            .fin_height_mm = saved.fin_height_mm,
+            .fin_thickness_mm = saved.fin_thickness_mm,
+            .fin_gap_mm = saved.fin_gap_mm,
+            .fin_axis = std.meta.stringToEnum(scenarios.FinAxis, saved.fin_axis) orelse .length,
+        },
+        .material = std.meta.stringToEnum(scenarios.HeatsinkMaterial, saved.material) orelse .aluminum_6063,
+        .contact = .{ .x_mm = saved.x, .y_mm = saved.y, .w_mm = saved.w, .h_mm = saved.h },
+        .pad = .{ .thickness_mm = saved.pad_thickness_mm, .conductivity_w_mk = saved.pad_k_w_mk },
+    };
+    const mounted = scenarios.resolveMountedTarget(bt, placement, saved.target_ref) orelse return null;
     return .{
         .ref_des = mounted.ref_des,
         .side = if (physical == mounted.side) .package_top else .board_backside,

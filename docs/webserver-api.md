@@ -291,12 +291,15 @@ Local dev still uses `http://localhost:7050`.
 - **Layout state**: one sidecar per design — `<design>.layouts.json` `{default, cache, layouts[]}`. `layouts[]` = named snapshots (manual saves + auto-recorded optimizer runs), `default` = the starred (★) / KiCad-sync seed, `cache` = the single-slot optimizer cache (tuning params + poses, overwritten each solve). Precedence the `/pcb-layout` viewer shows as a scorebar chip: explicit `?refine=<snapshot>` > starred (★) default > cache > fresh solve > plain grid. (The old source-authored `(placement …)` spec once sat at the top of this chain; that DSL form is retired — layout is seeded from saved snapshots / the `?rough=1` seed now, not from a spec form in the `.sexp`.) Legacy standalone `<design>.autolayout.json` is still read as a fallback and deleted on the next solve; `.placement.json` migration was dropped (all designs migrated).
   A named layout may also carry one physical finned heatsink assembly. In the
   PCB editor choose the ♨ tool, drag its base/contact rectangle, then select
-  the physical top/bottom face and target part and enter material, base
+  the physical top/bottom face and enter material, base
   thickness, fin height/thickness/gap/direction, and thermal-pad thickness and
   conductivity. The editor derives fin count and a still-air plate-fin
   theta-SA estimate, the 3D tab renders the pad/base/fins at those dimensions,
-  and both the built-in field and Elmer export use that exact rectangle and
-  package-direction mapping when the `heatsink` scenario is selected. The
+  and both the built-in field and Elmer export couple every PCB thermal cell
+  beneath that exact rectangle through the pad when the `heatsink` scenario is
+  selected. No component target is required; heat from every part can spread
+  through the board into the contacted region. Source/CLI package-top sinks
+  remain a distinct targeted-component model. The
   estimate assumes open straight fins and a 10 W/m²K still-air film; it is a
   comparative screening model, not enclosure or fan-curve CFD.
   A named layout can likewise override its board-authored axial fan. Choose

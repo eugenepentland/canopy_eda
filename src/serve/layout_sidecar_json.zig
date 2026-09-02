@@ -1716,15 +1716,17 @@ pub fn parseSavedHeatsink(v: ?std.json.Value) ?page.SavedHeatsink {
     const side = stringChoice(obj.get("side"), &.{ "top", "bottom" }, "bottom");
     const material = stringChoice(obj.get("material"), &.{ "aluminum_6063", "aluminum_6061", "copper_c110", "steel" }, "aluminum_6063");
     const fin_axis = stringChoice(obj.get("fin_axis"), &.{ "length", "width" }, "length");
-    const target = obj.get("target_ref") orelse return null;
-    if (target != .string or target.string.len == 0) return null;
+    const target_ref = if (obj.get("target_ref")) |target| blk: {
+        if (target != .string) return null;
+        break :blk target.string;
+    } else "";
     return .{
         .x = x,
         .y = y,
         .w = w,
         .h = h,
         .side = side,
-        .target_ref = target.string,
+        .target_ref = target_ref,
         .material = material,
         .base_mm = base,
         .fin_height_mm = fin_height,

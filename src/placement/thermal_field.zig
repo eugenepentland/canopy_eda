@@ -301,9 +301,9 @@ pub const ThermalPad = struct {
     conductivity_w_mk: f64 = default_pad_k_w_mk,
 };
 
-/// One explicit heatsink assembly. Empty `ref_des` preserves the historical
-/// automatic target selection; every physical dimension remains visible to
-/// export/report surfaces instead of hiding behind a single theta-SA number.
+/// One explicit heatsink assembly. For component attachment, empty `ref_des`
+/// preserves the historical automatic target selection. Board attachment is
+/// instead located entirely by `contact` and `physical_face`.
 pub const Heatsink = struct {
     ref_des: []const u8 = "",
     side: HeatsinkSide = .board_backside,
@@ -390,7 +390,11 @@ fn usesHeatsink(scenario: Scenario) bool {
 }
 
 fn heatsinkConfigured(heatsink: Heatsink) bool {
-    return heatsink.ref_des.len > 0;
+    return heatsink.ref_des.len > 0 or boardMountedHeatsink(heatsink);
+}
+
+fn boardMountedHeatsink(heatsink: Heatsink) bool {
+    return heatsink.ref_des.len == 0 and heatsink.contact != null and heatsink.physical_face != null;
 }
 
 /// An axis-aligned rectangle in board millimetres — the outline, or one part's
@@ -684,11 +688,13 @@ pub fn solveScenario(
     scenario: Scenario,
 ) std.mem.Allocator.Error!ScenarioResult {
     if (!usesHeatsink(scenario)) return runScenario(allocator, inputs, scenario, null);
+    if (boardMountedHeatsink(inputs.cooling.heatsink)) return runScenario(allocator, inputs, scenario, null);
     const still = try runScenario(allocator, inputs, .natural, null);
     return runScenario(allocator, inputs, scenario, configuredHeatsinkTarget(inputs, still.parts));
 }
 
 fn configuredHeatsinkTarget(inputs: Inputs, parts: []const PartField) ?[]const u8 {
+    if (boardMountedHeatsink(inputs.cooling.heatsink)) return null;
     if (inputs.cooling.heatsink.ref_des.len == 0) return heatsinkTarget(parts);
     for (parts) |part| {
         if (std.mem.eql(u8, part.ref_des, inputs.cooling.heatsink.ref_des)) return part.ref_des;
@@ -763,8 +769,8 @@ fn summarizeScenario(
         .cooling = .{
             .heatsink = .{
                 .ref = if (usesHeatsink(scenario)) target orelse "" else "",
-                .side = if (usesHeatsink(scenario) and target != null) inputs.cooling.heatsink.side else null,
-                .face = if (usesHeatsink(scenario) and target != null) inputs.cooling.heatsink.physical_face else null,
+                .side = if (usesHeatsink(scenario) and (target != null or boardMountedHeatsink(inputs.cooling.heatsink))) inputs.cooling.heatsink.side else null,
+                .face = if (usesHeatsink(scenario) and (target != null or boardMountedHeatsink(inputs.cooling.heatsink))) inputs.cooling.heatsink.physical_face else null,
             },
             .fan = .{
                 .model = if (usesFan(scenario)) inputs.cooling.fan.model else "",
@@ -1059,7 +1065,9 @@ pub fn discretize(
     const grid = try makeAdaptiveGrid(allocator, inputs);
     var target: ?[]const u8 = null;
     if (usesHeatsink(scenario)) {
-        if (inputs.cooling.heatsink.ref_des.len > 0) {
+        if (boardMountedHeatsink(inputs.cooling.heatsink)) {
+            target = null;
+        } else if (inputs.cooling.heatsink.ref_des.len > 0) {
             target = inputs.cooling.heatsink.ref_des;
         } else {
             const still = try runScenario(allocator, inputs, .natural, null);
@@ -1142,6 +1150,18 @@ fn fillDiscretizedFaces(
             }
         }
     }
+    if (boardHeatsinkEffect(inputs, grid, scenario)) |effect| {
+        const share: f64 = @floatFromInt(spanCells(effect.spans));
+        const extra_h = effect.conductance_w_per_k / share / face_area;
+        var row = effect.spans[1].lo;
+        while (row <= effect.spans[1].hi) : (row += 1) {
+            var col = effect.spans[0].lo;
+            while (col <= effect.spans[0].hi) : (col += 1) {
+                const i = row * grid.cols + col;
+                if (effect.face == .top) faces_out.top[i] += extra_h else faces_out.bottom[i] += extra_h;
+            }
+        }
+    }
 }
 
 const HeatsinkEffect = struct {
@@ -1160,6 +1180,7 @@ fn heatsinkEffect(
     scenario: Scenario,
     target: ?[]const u8,
 ) ?HeatsinkEffect {
+    if (boardMountedHeatsink(inputs.cooling.heatsink)) return null;
     if (!isTarget(scenario, target, part.ref_des)) return null;
     const part_box = part.mount.box orelse return null;
     const hs = inputs.cooling.heatsink;
@@ -1195,6 +1216,26 @@ fn heatsinkEffect(
                 .face = opposite(part.mount.side),
             };
         },
+    };
+}
+
+/// One target-free PCB-face sink path. Its thermal interface and total
+/// sink-to-ambient resistance are distributed over the exact clipped contact
+/// footprint, so every covered cell can reject heat through the assembly.
+fn boardHeatsinkEffect(inputs: Inputs, grid: FieldGrid, scenario: Scenario) ?HeatsinkEffect {
+    if (!usesHeatsink(scenario)) return null;
+    const hs = inputs.cooling.heatsink;
+    if (!boardMountedHeatsink(hs)) return null;
+    const face = hs.physical_face orelse return null;
+    const contact = clippedRect(hs.contact orelse return null, inputs.board) orelse return null;
+    const area_m2 = contact.w_mm * contact.h_mm * square_mm_to_m2;
+    const resistance = padResistance(hs, area_m2) + sinkToAmbient(hs);
+    if (!(resistance > 0) or !std.math.isFinite(resistance)) return null;
+    return .{
+        .spans = boxSpans(grid, contact),
+        .conductance_w_per_k = 1.0 / resistance,
+        .source_fraction = 1.0,
+        .face = face,
     };
 }
 
@@ -1318,6 +1359,11 @@ fn buildWork(
     try fillFaces(allocator, &work, grid, inputs, scenario);
     @memset(work.power, 0);
 
+    if (boardHeatsinkEffect(inputs, grid, scenario)) |effect| {
+        const sink_share: f64 = @floatFromInt(spanCells(effect.spans));
+        sink(&work, effect.spans, effect.conductance_w_per_k / sink_share);
+    }
+
     for (inputs.parts) |part| {
         const box = part.mount.box orelse continue;
         const spans = boxSpans(grid, box);
@@ -1374,6 +1420,10 @@ fn buildSolver(
             const share: f64 = @floatFromInt(spanCells(effect.spans));
             addSolverSink(to_ambient, grid.cols, effect.spans, effect.conductance_w_per_k / share);
         }
+    }
+    if (boardHeatsinkEffect(inputs, grid, scenario)) |effect| {
+        const share: f64 = @floatFromInt(spanCells(effect.spans));
+        addSolverSink(to_ambient, grid.cols, effect.spans, effect.conductance_w_per_k / share);
     }
 
     // During these two passes `scale` temporarily holds the sheet conductance.
@@ -1507,6 +1557,19 @@ fn configurePackedSolver(
     if (config.sink_lane) |lane| {
         for (inputs.parts) |part| {
             const effect = heatsinkEffect(part, inputs, grid, .heatsink, config.target) orelse continue;
+            const share: f64 = @floatFromInt(spanCells(effect.spans));
+            var r = effect.spans[1].lo;
+            while (r <= effect.spans[1].hi) : (r += 1) {
+                var c = effect.spans[0].lo;
+                while (c <= effect.spans[0].hi) : (c += 1) {
+                    const i = r * work.cols + c;
+                    var lanes: [simd_scenarios]f32 = work.to_ambient[i];
+                    lanes[lane] += @floatCast(effect.conductance_w_per_k / share);
+                    work.to_ambient[i] = lanes;
+                }
+            }
+        }
+        if (boardHeatsinkEffect(inputs, grid, .heatsink)) |effect| {
             const share: f64 = @floatFromInt(spanCells(effect.spans));
             var r = effect.spans[1].lo;
             while (r <= effect.spans[1].hi) : (r += 1) {
@@ -2416,6 +2479,42 @@ test "drawn heatsink geometry drives resistance and exact contact" {
     try testing.expect(model.bottom_face_h_w_m2k[contact_i] > model.top_face_h_w_m2k[contact_i]);
 }
 
+// spec: placement/thermal_field - a PCB-mounted heatsink needs no component target and couples its passive path once across every active board cell beneath its exact contact rectangle
+test "board-mounted heatsink cools through its footprint without a target" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const parts = [_]PartInput{
+        .{ .ref_des = "U1", .watts = 2, .theta_jb = 5, .mount = mountSquare(8, 10, 4) },
+        .{ .ref_des = "U2", .watts = 2, .theta_jb = 5, .mount = mountSquare(22, 10, 4) },
+    };
+    const inputs = Inputs{
+        .board = .{ .x_mm = 0, .y_mm = 0, .w_mm = 30, .h_mm = 20 },
+        .parts = &parts,
+        .cooling = .{ .heatsink = .{
+            .physical_face = .bottom,
+            .geometry = .{ .width_mm = 30, .length_mm = 20 },
+            .theta_sa_c_per_w = 4,
+            .contact = .{ .x_mm = 0, .y_mm = 0, .w_mm = 30, .h_mm = 20 },
+        } },
+    };
+
+    const still = try solveScenario(arena, inputs, .natural);
+    const sunk = try solveScenario(arena, inputs, .heatsink);
+    try testing.expectEqualStrings("", sunk.cooling.heatsink.ref);
+    try testing.expectEqual(Side.bottom, sunk.cooling.heatsink.face.?);
+    try testing.expect(sunk.parts[0].tj_rise_c.? < still.parts[0].tj_rise_c.?);
+    try testing.expect(sunk.parts[1].tj_rise_c.? < still.parts[1].tj_rise_c.?);
+    try testing.expectEqual(JunctionPath.board, sunk.parts[0].junction_path);
+    try testing.expectEqual(JunctionPath.board, sunk.parts[1].junction_path);
+
+    const model = try discretize(arena, inputs, .heatsink);
+    for (model.top_face_h_w_m2k, model.bottom_face_h_w_m2k, model.active) |top_h, bottom_h, active| {
+        if (active != 0) try testing.expect(bottom_h > top_h);
+    }
+}
+
 // spec: placement/thermal_field - a single centered source is hottest at the source, decays monotonically along a ray to the edge, and is symmetric about the board centre
 test "a centered source spreads symmetrically and decays outward" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2573,7 +2672,6 @@ test "opposite-face fan and heatsink solve together without forcing air over the
         .operating_flow_fraction = 0.6,
     };
     const bottom_sink = Heatsink{
-        .ref_des = "U1",
         .side = .board_backside,
         .physical_face = .bottom,
         .theta_sa_c_per_w = 8,
@@ -2596,7 +2694,8 @@ test "opposite-face fan and heatsink solve together without forcing air over the
     try testing.expectEqual(Scenario.heatsink, ladder[4].scenario);
     try testing.expectEqual(Scenario.fan_heatsink, ladder[5].scenario);
     try testing.expectEqualStrings(fan.model, ladder[5].cooling.fan.model);
-    try testing.expectEqualStrings(bottom_sink.ref_des, ladder[5].cooling.heatsink.ref);
+    try testing.expectEqualStrings("", ladder[5].cooling.heatsink.ref);
+    try testing.expectEqual(Side.bottom, ladder[5].cooling.heatsink.face.?);
     try testing.expect(ladder[5].hotspot.rise_c < ladder[1].hotspot.rise_c);
     try testing.expect(ladder[5].hotspot.rise_c < ladder[4].hotspot.rise_c);
     const one = try solveScenario(arena, inputs, .fan_heatsink);

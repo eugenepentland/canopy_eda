@@ -43,6 +43,8 @@ pub const SavedHeatsink = struct {
     w: f64,
     h: f64,
     side: []const u8 = "bottom",
+    /// Source-authored package sinks use this binding. Layout-drawn board
+    /// sinks ignore legacy values and couple through the whole rectangle.
     target_ref: []const u8 = "",
     material: []const u8 = "aluminum_6063",
     base_mm: f64 = 2,
