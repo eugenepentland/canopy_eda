@@ -642,6 +642,12 @@ fn tryOrders(request: OrderRun) std.mem.Allocator.Error!void {
     const ctx = core.ctx;
     const routable = core.result.routable;
     const snap = try router.saveSnapshot(scratch, ctx, core.tracks, core.vias, routable);
+    // The `before` board's own native arcs. Live `net_smooth` describes the
+    // board a cluster re-route just left, not this one, so weighing the
+    // snapshot against it would carve the pre-state's pours with the curved
+    // envelope of copper that is not on the pre-state at all.
+    var snap_arcs: std.ArrayList(router.Arc) = .empty;
+    for (snap.smooth) |entry| try snap_arcs.appendSlice(scratch, entry.v.arcs);
     var best_score = snap.score;
     var best: ?@TypeOf(snap) = null;
     const members = try scratch.alloc(Member, picked.len + 1);
@@ -657,12 +663,23 @@ fn tryOrders(request: OrderRun) std.mem.Allocator.Error!void {
         if (closesANet(now.routed, snap.score.routed)) {
             if (router.ripScoreBetter(now, best_score)) {
                 if (!router.routeCancelled(ctx)) {
-                    won_now = try accept_gate.acceptsReplacement(
-                        snap.tracks,
-                        snap.vias,
-                        core.tracks.items,
-                        core.vias.items,
-                    );
+                    // Read after the re-route: this cluster's rip dropped some
+                    // nets' arcs and its reroute minted others.
+                    const curves = try router.liveCurves(scratch, ctx, core.placement.nets.len);
+                    // RF paths are the same on both boards: a rip never drops a
+                    // port outcome, and none exists this early anyway.
+                    const was: fine_accept.Board = .{
+                        .tracks = snap.tracks,
+                        .vias = snap.vias,
+                        .arcs = snap_arcs.items,
+                        .rf_paths = curves.rf_paths,
+                    };
+                    won_now = try accept_gate.acceptsReplacement(was, .{
+                        .tracks = core.tracks.items,
+                        .vias = core.vias.items,
+                        .arcs = curves.arcs,
+                        .rf_paths = curves.rf_paths,
+                    });
                     // An oracle pass can itself carry us across the absolute
                     // deadline. Never commit fresh speculative copper after
                     // that boundary; the snapshot below remains authoritative.

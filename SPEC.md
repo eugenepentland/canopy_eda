@@ -1030,6 +1030,7 @@ oracle evaluations per route.
 - a declared-resolution rescue window that closes its net without costing another is kept
 - the accept gate spends a bounded number of oracle evaluations per route and refuses, rather than admits, an attempt arriving past that ceiling
 - the connectivity accept gate can judge ONE net's island merge, so a hop that joins two islands without yet closing the net is a measurable gain
+- the accept gate weighs a board's swept RF paths and native arcs too, so copper duplicating a net an RF taper already joins buys nothing
 - a net whose only legal corridor lands on no raster the rescue builds by itself routes once its class declares that raster, and stays unrouted without the declaration
 - completeness-waiver: empty inputs (a board with no declared resolution takes the unchanged adaptive path, unit-tested)
 - completeness-waiver: large inputs (a declared window is budgeted by the same cell cap as every other tier, so a huge net yields no window rather than a huge search)
@@ -1741,6 +1742,7 @@ trace lives in the commit message and `docs/autorouter-audit-2026-08.md`.
 - the present-congestion factor ramps geometrically between iterations and is clamped, so late rounds insist on legality without becoming an unreachable wall
 - a cell a victim takes over is charged to the congestion history and names the net it was taken from, and a later round in which nobody takes a cell over reports the round legal
 - the sandbox's board survives only when the round converged, the connectivity oracle strictly improved, and the fab-blocking DRC count did not rise
+- the end-state measurement reads the live context's arcs and swept RF paths, so a net joined only by a taper is not counted open
 - a cell a victim took from a net still on the board is handed back when the victim's copper comes off, so a board where two nets' copper coincides can never read as legal
 - the negotiated set is laid down legally in the router's own priority order, not in the order the negotiation happened to pull nets in
 - inside an armed sandbox a cell another re-routable net's copper holds stops walling the maze out, and the same cell walls it out again the moment the sandbox closes

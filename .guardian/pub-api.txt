@@ -2154,7 +2154,7 @@ src/placement/fine_accept.zig::Connectivity struct_
 src/placement/fine_accept.zig::Gate struct_
 src/placement/fine_accept.zig::accepts | fn accepts(self: *Gate, net_i: usize, a: Attempt) std.mem.Allocator.Error!bool
 src/placement/fine_accept.zig::acceptsIslandMerge | fn acceptsIslandMerge( self: *Gate, net_i: usize, before: Board, after: Board, ) std.mem.Allocator.Error!bool
-src/placement/fine_accept.zig::acceptsReplacement | fn acceptsReplacement( self: *Gate, before_tracks: []const router.Track, before_vias: []const router.Via, after_tracks: []const router.Track, after_vias: []const router.Via, ) std.mem.Allocator.Error!bool
+src/placement/fine_accept.zig::acceptsReplacement | fn acceptsReplacement( self: *Gate, before: Board, after: Board, ) std.mem.Allocator.Error!bool
 src/placement/fine_accept.zig::deinit | fn deinit(self: *Gate) void
 src/placement/fine_accept.zig::init | fn init( home: std.mem.Allocator, placement: optimizer.Placement, zones: []const route_policy.ExistingZone, ) std.mem.Allocator.Error!Gate
 src/placement/fine_accept.zig::max_evaluations value
@@ -3140,6 +3140,7 @@ src/placement/router.zig::Arc value
 src/placement/router.zig::CleanupBoard struct_
 src/placement/router.zig::CoreOutcome union_
 src/placement/router.zig::CoupledRun struct_
+src/placement/router.zig::Curves struct_
 src/placement/router.zig::DirectPath struct_
 src/placement/router.zig::DirectRun struct_
 src/placement/router.zig::EscalateRun struct_
@@ -3221,6 +3222,7 @@ src/placement/router.zig::keepoutExtra | fn keepoutExtra(ctx: *const Ctx, obstac
 src/placement/router.zig::layer | fn layer(self: VisionMask, index: usize) []const u8
 src/placement/router.zig::layerInMask | fn layerInMask(mask: u64, layer: u8) bool
 src/placement/router.zig::legLen | fn legLen(self: *LoopRouter, cap_c: [2]f64, hub_c: [2]f64, net_id: i32) std.mem.Allocator.Error!?f64
+src/placement/router.zig::liveCurves | fn liveCurves(arena: std.mem.Allocator, ctx: *const Ctx, net_count: usize) std.mem.Allocator.Error!Curves
 src/placement/router.zig::localSupplyBonds value
 src/placement/router.zig::netEnabled | fn netEnabled(ctx: *const Ctx, net_i: usize) bool
 src/placement/router.zig::netHasPlane value

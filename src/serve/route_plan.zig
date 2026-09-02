@@ -4851,14 +4851,23 @@ fn unblockGapAccepted(
     if (!target_unblock.transactionClosed(candidate.failed, named)) return .{};
     if (!try run.accept.acceptsIslandMerge(
         target.net_i,
-        .{ .tracks = run.baseline.tracks, .vias = run.baseline.vias },
-        .{ .tracks = candidate.tracks, .vias = candidate.vias },
+        unblockBoard(run.baseline),
+        unblockBoard(candidate),
     )) return .{};
     if (routeStopped(run.options)) return .{};
     const measured = try unblockMeasure(run.alloc, run.placement, run.params, candidate);
     if (measured.errors > run.measured.errors) return .{};
     if (!unblockPairsHeld(run, picked, measured)) return .{};
     return .{ .kept = true, .measured = measured };
+}
+
+/// A finished route result as the connectivity gate weighs it. All four copper
+/// kinds: a native arc's chords are handles whose curved envelope is what carves
+/// a pour, and an RF path's compact centreline is a handle whose swept polygon
+/// is what lands on the pads — so a projection that keeps only tracks and vias
+/// hands the oracle a board on which a net joined by either reads OPEN.
+fn unblockBoard(r: router.RouteResult) target_unblock.Board {
+    return .{ .tracks = r.tracks, .vias = r.vias, .arcs = r.arcs, .rf_paths = r.rf_port_outcomes };
 }
 
 fn unblockAccepted(
@@ -4870,10 +4879,7 @@ fn unblockAccepted(
     if (!strictResidualGain(candidate, run.baseline) or routeStopped(run.options)) return .{};
     const named = try unblockNamed(run, target, picked);
     if (!target_unblock.transactionClosed(candidate.failed, named)) return .{};
-    if (!try run.accept.accepts(
-        .{ .tracks = run.baseline.tracks, .vias = run.baseline.vias },
-        .{ .tracks = candidate.tracks, .vias = candidate.vias },
-    )) return .{};
+    if (!try run.accept.accepts(unblockBoard(run.baseline), unblockBoard(candidate))) return .{};
     if (routeStopped(run.options)) return .{};
     const measured = try unblockMeasure(run.alloc, run.placement, run.params, candidate);
     if (measured.errors > run.measured.errors) return .{};

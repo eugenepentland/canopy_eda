@@ -39,6 +39,7 @@ const route_policy = @import("route_policy.zig");
 const fine_window = @import("fine_window.zig");
 const pour = @import("pour.zig");
 const fab_readiness = @import("../fab_readiness.zig");
+const rf_port_report = @import("rf_port_report.zig");
 const routed_copper = @import("routed_copper.zig");
 
 /// A board's per-net connectivity, as the oracle counts it.
@@ -56,9 +57,23 @@ pub const Connectivity = struct {
 };
 
 /// One board's copper, as the gate weighs it.
+///
+/// All four copper kinds, because the oracle reads all four (`routed_copper
+/// .Copper`) and a projection that drops one reports a joined net as OPEN: a
+/// native arc's persisted chords are handles whose curved envelope is what
+/// carves a pour, and an RF path's compact centreline is a handle whose swept
+/// polygon is what actually lands on the pads. Both default empty — a board
+/// weighed mid-route carries whichever of them EXISTS at that point in the
+/// pipeline (RF port finishing runs in `router.finishRoute`, after every rescue
+/// tier, so the in-router callers legitimately hand over none), and a caller
+/// holding a finished `router.RouteResult` hands over both.
 pub const Board = struct {
     tracks: []const router.Track = &.{},
     vias: []const router.Via = &.{},
+    /// Native routed arcs whose exact curve, not their chords, is authoritative.
+    arcs: []const router.Arc = &.{},
+    /// Successful variable-width RF paths, each swept as one copper region.
+    rf_paths: []const rf_port_report.Outcome = &.{},
 };
 
 /// Is `now` a STRICTLY better board than `before`? Both halves matter: the
@@ -95,9 +110,14 @@ pub fn mergesIslands(now: Connectivity, before: Connectivity) bool {
 /// One rescue attempt as the board lists hold it: the whole copper plus the
 /// marks the attempt began at, so the gate can weigh the board with and without
 /// the tail without the caller having to copy either.
+/// The curved copper rides both halves unsplit: a window rescue only ever
+/// APPENDS tracks and vias, so the arcs and RF paths already on the board belong
+/// to the prefix and are part of the board with and without the tail alike.
 pub const Attempt = struct {
     tracks: []const router.Track,
     vias: []const router.Via,
+    arcs: []const router.Arc = &.{},
+    rf_paths: []const rf_port_report.Outcome = &.{},
     keep_t: usize,
     keep_v: usize,
 };
@@ -163,10 +183,8 @@ pub const Gate = struct {
     pub fn accepts(self: *Gate, net_i: usize, a: Attempt) std.mem.Allocator.Error!bool {
         if (fine_window.declaredPitch(self.placement, net_i) == null) return true;
         return self.acceptsReplacement(
-            a.tracks[0..a.keep_t],
-            a.vias[0..a.keep_v],
-            a.tracks,
-            a.vias,
+            .{ .tracks = a.tracks[0..a.keep_t], .vias = a.vias[0..a.keep_v], .arcs = a.arcs, .rf_paths = a.rf_paths },
+            .{ .tracks = a.tracks, .vias = a.vias, .arcs = a.arcs, .rf_paths = a.rf_paths },
         );
     }
 
@@ -178,15 +196,10 @@ pub const Gate = struct {
     /// and disconnects none that the snapshot connected.
     pub fn acceptsReplacement(
         self: *Gate,
-        before_tracks: []const router.Track,
-        before_vias: []const router.Via,
-        after_tracks: []const router.Track,
-        after_vias: []const router.Via,
+        before: Board,
+        after: Board,
     ) std.mem.Allocator.Error!bool {
-        const pair = (try self.weigh(.{
-            .before = .{ .tracks = before_tracks, .vias = before_vias },
-            .after = .{ .tracks = after_tracks, .vias = after_vias },
-        })) orelse return false;
+        const pair = (try self.weigh(.{ .before = before, .after = after })) orelse return false;
         return strictlyBetter(pair.after, pair.before);
     }
 
@@ -234,7 +247,13 @@ pub const Gate = struct {
         focus: ?usize,
     ) std.mem.Allocator.Error!Connectivity {
         defer _ = self.scratch.reset(.retain_capacity);
-        const copper = routed_copper.Copper{ .tracks = board.tracks, .vias = board.vias, .zones = self.zones };
+        const copper = routed_copper.Copper{
+            .tracks = board.tracks,
+            .arcs = board.arcs,
+            .rf_paths = board.rf_paths,
+            .vias = board.vias,
+            .zones = self.zones,
+        };
         const conn = try fab_readiness.netConnectivity(self.scratch.allocator(), self.placement, copper);
         var result = Connectivity{ .connected = out };
         for (conn, 0..) |ns, i| {
@@ -287,6 +306,7 @@ test "the island rule credits a merge and still refuses a swap" {
 
 const geometry = @import("geometry.zig");
 const flat_netlist = @import("../flat_netlist.zig");
+const rf_path_solver = @import("rf_path_solver.zig");
 
 /// One-pad passive at (x, y) on the top face, for the gate fixtures below.
 fn testPart(ref: []const u8, x: f64, y: f64, pads: []const geometry.Pad) optimizer.Part {
@@ -429,9 +449,58 @@ test "the replacement gate refuses a router gain that disconnects a poured net" 
         .width = 0.5,
         .net = 0,
     }};
-    try testing.expect(!try gate.acceptsReplacement(&.{}, &.{}, &cutting, &.{}));
+    try testing.expect(!try gate.acceptsReplacement(.{}, .{ .tracks = &cutting }));
     try testing.expect(gate.after[0] and !gate.before[0]);
     try testing.expect(gate.before[1] and !gate.after[1]);
+}
+
+/// A swept RF taper joining `SIG`'s two lands, narrow enough to carry its full
+/// cross-section on the 0.6 mm terminals. The compact centreline a save would
+/// keep is a HANDLE; this sampled path is the copper actually on the board.
+const taper_samples = [_]rf_path_solver.Sample{
+    .{ .at = .{ 5, 12 }, .s_mm = 0, .curvature = 0, .width_mm = 0.2 },
+    .{ .at = .{ 8, 12 }, .s_mm = 3, .curvature = 0, .width_mm = 0.2 },
+};
+const taper = [_]rf_port_report.Outcome{.{
+    .net = 0,
+    .chosen = 0,
+    .feasible = true,
+    .success = true,
+    .metrics = .{},
+    .trials = &.{},
+    .physical = .{ .sample_count = taper_samples.len, .samples = &taper_samples, .layer = 0 },
+}};
+
+// spec: placement/route-resolution - the accept gate weighs a board's swept RF paths and native arcs too, so copper duplicating a net an RF taper already joins buys nothing
+test "the gate sees a net joined only by its RF taper and credits no gain for duplicating it" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    var parts: [4]optimizer.Part = undefined;
+    const placement = gateBoard(&parts, .{ 5, 12 }, .{ 8, 12 });
+    var gate = try Gate.init(arena, placement, &.{});
+    defer gate.deinit();
+
+    // Wider than the taper, so it is a track in its own right rather than one of
+    // the path's own handles (`path_copper.ownsTrack` keeps only the narrower).
+    const duplicate = [_]router.Track{.{ .x1 = 5, .y1 = 12, .x2 = 8, .y2 = 12, .layer = 0, .width = 0.5, .net = 0 }};
+
+    // SIG is already joined — by the taper and by nothing else — so the second
+    // path across the same gap connects no net that was not connected.
+    const before = Board{ .rf_paths = &taper };
+    const after = Board{ .tracks = &duplicate, .rf_paths = &taper };
+    try testing.expect(!try gate.acceptsReplacement(before, after));
+    try testing.expect(gate.before[0] and gate.after[0]);
+
+    // …and that verdict is the taper's doing: hand the same pair of boards over
+    // with the swept path dropped and the duplicate looks like the copper that
+    // closed SIG, which is exactly the gain a partial projection invents.
+    try testing.expect(try gate.acceptsReplacement(
+        .{ .tracks = before.tracks },
+        .{ .tracks = after.tracks },
+    ));
+    try testing.expect(!gate.before[0] and gate.after[0]);
 }
 
 // spec: placement/route-resolution - the accept gate spends a bounded number of oracle evaluations per route and refuses, rather than admits, an attempt arriving past that ceiling
