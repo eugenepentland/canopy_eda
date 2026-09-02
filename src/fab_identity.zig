@@ -250,6 +250,29 @@ test "adopted fabrication identity preserves position and digest" {
     try std.testing.expect(relocated.text.?.x != preferred.x or relocated.text.?.y != preferred.y or relocated.text.?.rot != preferred.rot);
 }
 
+// Regression: changing manufactured geometry changes the ID contents, but a
+// still-clear adopted editor anchor remains the source of its physical pose.
+// spec: export_gerber - an adopted fabrication identity keeps its editable position when board changes produce a new ID
+test "adopted fabrication identity preserves position when ID changes" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const before_placement = testPlacement(40);
+    const before = try build(arena, before_placement, .{}, &.{}, export_fab.frameFor(before_placement), null);
+    var preferred = before.text.?;
+    preferred.x = 20;
+    preferred.y = 5;
+
+    const after_placement = testPlacement(41);
+    const after = try build(arena, after_placement, .{}, &.{preferred}, export_fab.frameFor(after_placement), null);
+    try std.testing.expect(!std.mem.eql(u8, &before.short_hex, &after.short_hex));
+    try std.testing.expect(!std.mem.eql(u8, before.text.?.text, after.text.?.text));
+    try std.testing.expectEqual(preferred.x, after.text.?.x);
+    try std.testing.expectEqual(preferred.y, after.text.?.y);
+    try std.testing.expectEqual(preferred.rot, after.text.?.rot);
+    try std.testing.expectEqual(preferred.bottom, after.text.?.bottom);
+}
+
 // spec: export_gerber - an adopted fabrication identity is replaced, not duplicated, when composing the final silkscreen texts
 test "fabricated texts replace adopted identity with one current mark" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);

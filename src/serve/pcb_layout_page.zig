@@ -14801,6 +14801,14 @@ test "Select mode directly drags visible board silkscreen text" {
     try std.testing.expect(std.mem.indexOf(u8, js, "if(!fabTextOverridden()&&PCB.fab_text)") != null);
 }
 
+// spec: Web Server - a deferred PCB load retains an adopted fabrication-ID position and refreshes its derived text before Update persists it
+test "deferred fabrication ID retains and refreshes its saved anchor" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "fabTextResolve(PCB.fab_text,!PCB.analysis_deferred)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "fabTextResolve(j.fab_text||null,true)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "t.text=PCB.fab_text.text;t.fabrication_id=true") != null);
+}
+
 test "PCB viewer replaces detected footprint pin-one circles with live collision-aware dots" {
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "var PIN_ONE_LIMIT=0.5,PIN_ONE_DIA=0.3") != null);

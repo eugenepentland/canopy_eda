@@ -555,6 +555,50 @@ fn appendPadObstacles(
             .bottom = s.layer == 1,
         });
     }
+
+    // A perimeter-fence mask opening is another exposed-copper region, but it
+    // is authored from the finished board edge rather than routed RF copper,
+    // so it is absent from `mask_relief.Relief`. Reserve its complete band on
+    // each face that actually carries the matching GND pour. The mask writer
+    // may restore small local islands over foreign copper; treating the whole
+    // band as unavailable is deliberately conservative and prevents an
+    // automatically placed fabrication ID from straddling exposed copper and
+    // one of those narrow islands.
+    const perimeter_width = placement.rules.perimeter_fence.mask_width;
+    if (!(perimeter_width > 0)) return;
+    const top = perimeter_fence.maskPourNetForFace(placement, .top) != null;
+    const bottom = perimeter_fence.maskPourNetForFace(placement, .bottom) != null;
+    if (!top and !bottom) return;
+    const edge = try perimeter_fence.outlinePoints(shape_arena, placement);
+    if (edge.len < 3) return;
+    for (edge, 0..) |a, i| {
+        const b = edge[(i + 1) % edge.len];
+        if (std.math.hypot(b[0] - a[0], b[1] - a[1]) <= 1e-12) continue;
+        const opening = mask_relief.Stroke{
+            .x1 = a[0],
+            .y1 = a[1],
+            .x2 = b[0],
+            .y2 = b[1],
+            .layer = 0,
+            .widths = .{ .opening = 2 * perimeter_width, .copper = 0 },
+        };
+        const poly = try shape_arena.dupe([2]f64, &mask_relief.strokePoly(opening));
+        var x0 = poly[0][0];
+        var y0 = poly[0][1];
+        var x1 = x0;
+        var y1 = y0;
+        for (poly[1..]) |pt| {
+            x0 = @min(x0, pt[0]);
+            y0 = @min(y0, pt[1]);
+            x1 = @max(x1, pt[0]);
+            y1 = @max(y1, pt[1]);
+        }
+        try pads.append(alloc, .{
+            .shape = .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1, .poly = poly },
+            .top = top,
+            .bottom = bottom,
+        });
+    }
 }
 
 fn pinOnePad(part: optimizer.Part) ?geometry.Pad {
@@ -1670,6 +1714,37 @@ test "fabrication ID prefers exact bottom-right top silk" {
     try std.testing.expectApproxEqAbs(board.minx + board.w - labelBoardInset(p), expected.x1, 1e-9);
     try std.testing.expectApproxEqAbs(board.miny + board.h - labelBoardInset(p), expected.y1, 1e-9);
     try std.testing.expectApproxEqAbs(fabrication_id_cap_height_mm, textHeight(got.size), 1e-9);
+}
+
+// spec: export_gerber - automatic fabrication-ID placement stays clear of a face's perimeter solder-mask opening
+test "fabrication ID avoids the exposed perimeter mask band" {
+    var p = labelTestPlacement();
+    const planes = [_]optimizer.PlaneAt{
+        .{ .index = 1, .net = "GND" },
+        .{ .index = 2, .net = "GND" },
+    };
+    p.rules.copper_layers = 2;
+    p.rules.plane_nets = &.{"GND"};
+    p.rules.planes.declared = &planes;
+    p.rules.perimeter_fence = .{
+        .via_dia = 0.4,
+        .via_drill = 0.2,
+        .spacing = 1,
+        .edge_offset = 0.5,
+        .mask_width = 0.7,
+    };
+
+    const got = (try placeFabricationId(std.testing.allocator, p, .{
+        .keepouts = &.{},
+        .relief = .{},
+        .annotations = &.{},
+        .reserved_texts = &.{},
+    }, "ID 01234567")).?;
+    const box = textBox(got);
+    const board = p.board_rect.?;
+    try std.testing.expect(!got.bottom);
+    try std.testing.expect(box.x1 <= board.minx + board.w - 0.7 - label_clearance_mm + 1e-9);
+    try std.testing.expect(box.y1 <= board.miny + board.h - 0.7 - label_clearance_mm + 1e-9);
 }
 
 // spec: export_gerber - a fabrication ID that is too wide for a narrow board rotates along its long axis instead of aborting page and CAM rendering

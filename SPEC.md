@@ -4948,11 +4948,13 @@ Public functions: planLayers, writeLayer
 - the viewer strokes board silkscreen text from the same glyph table the Gerber writer fabricates
 - silkscreen text scales with its nominal size (2x size gives 2x glyph extent)
 - every fabrication package prints its eight-hex content ID at the bottom-right of top silk when that exact slot is clear
+- automatic fabrication-ID placement stays clear of a face's perimeter solder-mask opening
 - a blocked top-side bottom-right fabrication ID retries that exact slot on bottom silk before moving along the bottom edge
 - a fabrication ID that is too wide for a narrow board rotates along its long axis instead of aborting page and CAM rendering
 - when both bottom-right silk faces are blocked, fabrication-ID placement scans the bottom edge right-to-left before using another row
 - fabrication identity is the deterministic eight-hex prefix of the full pre-mark Gerber and Excellon SHA-256
 - an adopted fabrication identity keeps its editable position without entering the identity digest
+- an adopted fabrication identity keeps its editable position when board changes produce a new ID
 - an adopted fabrication identity is replaced, not duplicated, when composing the final silkscreen texts
 - a physical fabrication-geometry change produces a different printed identity
 - Gerber read-back preserves ordered polarity operations, filled contours, and native arcs for the Assembly CAM preview
@@ -7149,6 +7151,7 @@ is what makes the predicate exact rather than approximately right.
 - Footprint preview reports exact geometry bounds separately from its padded SVG viewport
 - Footprint preview carries a pad's own (pos X Y ROT) rotation so the library SVG draws it turned
 - A saved layout round-trips a polygon board outline; the rect fields are re-derived as its bbox
+- a deferred PCB load retains an adopted fabrication-ID position and refreshes its derived text before Update persists it
 - applyShownOutline folds a saved layout's drawn outline (rect or polygon) onto the placement, and is a no-op for a layout without one
 - outlineForBody prefers a submitted outline, else the blessed drawn outline (the default layout's first, else the first layout carrying one), else authored-only
 - the outline write paths reject a self-intersecting or zero-area polygon but accept a concave one

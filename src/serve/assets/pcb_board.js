@@ -6,10 +6,22 @@ const OS=window.PCBShapeSketch||window.PCBOutlineSketch||null;
 const P=PCB.parts,PED=PCB.part_edits||{};
 PCB.dimensions=Array.isArray(PCB.dimensions)?PCB.dimensions:[];
 P.forEach(function(p){var e=PED[p.ref];if(e){p.src=e.src;p.srcName=e.srcName;p.srcRef=e.srcRef;}});
-// A null generated fabrication mark is deliberate for reusable sub-circuits.
-// Drop any older adopted copy from the live artwork too; ordinary authored
-// board text remains untouched, and complete boards receive PCB.fab_text.
-if(!PCB.fab_text)PCB.texts=(PCB.texts||[]).filter(function(t){return !t.fabrication_id;});
+PCB.texts=PCB.texts||[];
+// Reconcile the derived fabrication mark with its persisted editor anchor.
+// During a normal page load fab_text is temporarily null while the deferred
+// analysis runs; that pending null must NOT erase the saved anchor, or Update
+// will write the layout back without it. Once resolved, copy the current ID
+// and any safety relocation into the one persisted entry while retaining it
+// as editable layout state. A resolved null is meaningful only for reusable
+// sub-circuits, whose stale board-level mark really should disappear.
+function fabTextResolve(mark,resolved){PCB.fab_text=mark||null;if(!resolved)return;
+ var found=-1,next=[];for(var i=0;i<PCB.texts.length;i++){var t=PCB.texts[i];
+  if(!t||!t.fabrication_id){next.push(t);continue;}
+  if(found>=0||!PCB.fab_text)continue;
+  t.x=PCB.fab_text.x;t.y=PCB.fab_text.y;t.rot=PCB.fab_text.rot||0;t.side=PCB.fab_text.side||"top";
+  t.size=PCB.fab_text.size||1;t.text=PCB.fab_text.text;t.fabrication_id=true;found=next.length;next.push(t);}
+ PCB.texts=next;}
+fabTextResolve(PCB.fab_text,!PCB.analysis_deferred);
 const orig=P.map(function(p){return {x:p.x,y:p.y,rot:p.rot||0,side:p.side||"top"};});
 var RO=!!PCB.ro;
 var MOBILE_MQ=window.matchMedia?window.matchMedia("(max-width: 920px)"):{matches:false};
@@ -232,7 +244,7 @@ function loadDeferredAnalysis(){
     PCB.drc=drawRfRetrofitDrcMerge(j.drc||[]);
     PCB.mask_relief=j.mask_relief||{openings:[],strokes:[],joints:[]};PCB.mask_merges=j.mask_merges||[];
     PCB.antipads=j.antipads||[];PCB.trace_em=j.trace_em||{analyses:[]};
-    PCB.power_integrity=j.power_integrity||{nets:[]};PCB.fab_text=j.fab_text||null;
+    PCB.power_integrity=j.power_integrity||{nets:[]};fabTextResolve(j.fab_text||null,true);
     if(PCB.power_integrity.ac===null)loadPdnSweep();
     PCB.analysis_deferred=false;traceEmIdx=null;powerIntegrityIdx=null;traceEmDirty=false;powerIntegrityDirty=false;
     routeSummaryFrom(j);pourGeomDrop();dragCacheDrop();paintSoon();drawDrc();drcChip(PCB.drc.length);poursFresh();drawRfRetrofitSchedule();
