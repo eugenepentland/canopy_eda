@@ -650,6 +650,8 @@ src/eval/fmt.zig::DirectiveArg enum_
 src/eval/fmt.zig::FmtError value
 src/eval/fmt.zig::directives value
 src/eval/fmt.zig::format | fn format(allocator: std.mem.Allocator, template: []const u8, args: []const Value) FmtError![]const u8
+src/eval/footprint_pads.zig::PadIds value
+src/eval/footprint_pads.zig::get | fn get(self: *Evaluator, fp_name: []const u8) ?*const PadIds
 src/eval/forms.zig::ArityViolation struct_
 src/eval/forms.zig::Builtin enum_
 src/eval/forms.zig::FormDoc struct_
@@ -694,6 +696,7 @@ src/eval/ids.zig::reassignSubBlockIdsV4 | fn reassignSubBlockIdsV4(self: *Evalua
 src/eval/ids.zig::registerRefDes | fn registerRefDes(self: *Evaluator, ref_des: []const u8) void
 src/eval/ids.zig::renameSectionRefs | fn renameSectionRefs(sections: []env_mod.Section, rename_map: *std.StringHashMapUnmanaged([]const u8)) void
 src/eval/instance.zig::InstanceResult struct_
+src/eval/instance.zig::PartPads struct_
 src/eval/instance.zig::PinMatch struct_
 src/eval/instance.zig::PinTail struct_
 src/eval/instance.zig::ResolvedComponent struct_
@@ -705,7 +708,7 @@ src/eval/instance.zig::evalSeriesForm | fn evalSeriesForm( self: *Evaluator, for
 src/eval/instance.zig::instanceFromValue | fn instanceFromValue(self: *Evaluator, val: Value, ref_des: []const u8, source_offset: u32, id: []const u8) ?Instance
 src/eval/instance.zig::matchPinName | fn matchPinName(pinout: *const std.StringHashMapUnmanaged([]const u8), name: []const u8) ?PinMatch
 src/eval/instance.zig::mergeInstanceProperties | fn mergeInstanceProperties( self: *Evaluator, inst: *Instance, overrides: []const env_mod.Property, ) std.mem.Allocator.Error!void
-src/eval/instance.zig::parsePinForm | fn parsePinForm( self: *Evaluator, form: Node, ref_des: []const u8, env: *Env, pin_nets: *std.ArrayList(PinNetDecl), pinout: ?*const std.StringHashMapUnmanaged([]const u8), ) EvalError!void
+src/eval/instance.zig::parsePinForm | fn parsePinForm( self: *Evaluator, form: Node, ref_des: []const u8, env: *Env, pin_nets: *std.ArrayList(PinNetDecl), pads: PartPads, ) EvalError!void
 src/eval/instance.zig::parsePinTail | fn parsePinTail(self: *Evaluator, pin_children: []const Node, env: *Env) EvalError!PinTail
 src/eval/instance.zig::parseTrailingArgs | fn parseTrailingArgs(self: *Evaluator, children: []const Node, env: *Env) EvalError!TrailingArgs
 src/eval/instance.zig::resolveComponent | fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent
@@ -781,6 +784,8 @@ src/eval/special_forms.zig::next | fn next(self: *RepeatIterator) ?i64
 src/eval/special_forms.zig::parseRepeat | fn parseRepeat(self: *Evaluator, args: []const Node, env: *Env) EvalError!RepeatSpec
 src/eval/stackup_presets.zig::resolve | fn resolve(allocator: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!?env.StackupSpec
 src/eval/stackup_presets.zig::writeCatalogJson | fn writeCatalogJson(w: *std.Io.Writer, current: env.StackupSpec) std.Io.Writer.Error!void
+src/eval/suggest.zig::Budget enum_
+src/eval/suggest.zig::nearestOf | fn nearestOf(name: []const u8, candidates: []const []const u8, budget: Budget) ?[]const u8
 src/eval/suggest.zig::unboundMessage | fn unboundMessage(self: *Evaluator, name: []const u8, env: *const Env) []const u8
 src/eval/test_point.zig::EvalContext struct_
 src/eval/test_point.zig::evalForm | fn evalForm( self: *Evaluator, form_children: []const Node, env: *Env, ctx: EvalContext, ) EvalError!?Instance
@@ -808,6 +813,8 @@ src/eval/thermal.zig::thermal_field_docs value
 src/eval/validate.zig::trackNetFormSource | fn trackNetFormSource(self: *Evaluator, form_children: []const Node, env: *Env, sources: *std.StringHashMapUnmanaged(u32)) void
 src/eval/validate.zig::validateDesign | fn validateDesign(self: *Evaluator, block: *const DesignBlock) EvalError!void
 src/eval/validate.zig::warnCombinableNets | fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged(u32)) EvalError!void
+src/eval/value_kind.zig::accepts | fn accepts(param_type: []const u8, value: []const u8) bool
+src/eval/value_kind.zig::mismatchMessage | fn mismatchMessage( allocator: std.mem.Allocator, family: []const u8, param_type: []const u8, value: []const u8, ) []const u8
 src/exit.zig::failure | fn failure() noreturn
 src/exit.zig::failure_status value
 src/exit.zig::fatal | fn fatal(comptime fmt: []const u8, args: anytype) noreturn

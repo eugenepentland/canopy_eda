@@ -604,13 +604,47 @@ matches every module-local net of that name. A pinned class is final — the
 hub-plus-inductor switch-node upgrade does not apply — and a pinned net is no
 longer reported as inferred. Unknown class atoms are warned and dropped.
 
-### Lint warnings
+### Lint warnings and authoring errors
 
 Unknown sub-forms / enum words inside known forms (e.g. `(role inptu)`, a
 section-only form at top level) no longer vanish silently — `netlisp build`
 prints `file:line:col: warning: …` to stderr. Eval errors now name the form
 with expected arity, suggest `(import …)` or nearest-name for unbound
 components, and print the module call stack.
+
+Three `(instance …)` mistakes that used to build clean are **errors**, each
+pointing at `file:line:col`:
+
+- **A typo'd body sub-form.** Any head this parser does not dispatch on
+  becomes an inline BOM property `(key "value")`, so `(decuples "U1" 1)` used
+  to build a property named `decuples` and declare no decoupling at all. A
+  head within two edits of a real sub-form (`pin`, `part`, `note`, `bus`,
+  `id`, `as`, `dnp`, `decouples`, `near`, `strap-ok`, `nc-ok`, `power`, `row`,
+  `col`) is now rejected with a did-you-mean. Property keys that are not
+  near-misses — `(module-bypass "…")`, `(emi-couples "…")` — keep working.
+
+- **A value that is not the family's declared kind.** A `component-family`
+  declares `(parameter "value" capacitance | resistance | inductance |
+  impedance | string)`, and the value is now checked against it, so
+  `(cap-0402 "4.7k")` is rejected. The rule is one-sided: a value is refused
+  only when it positively parses as *another* quantity — a number plus a unit
+  (`F` / `H` / `R` / `Ω`) or a bare SI prefix that cannot belong to the
+  declared kind (`k`, `M`, `G` are resistance; `f`, `p`, `n`, `u` are
+  capacitance or inductance; `m` is plausible for all three). Anything else is
+  accepted in silence: a bare number (`10`, `0.01`), a sentinel (`DNP`), a
+  part number, a `(fmt "~R" …)` result, a trailing rating (`"10uF 25V"`), a
+  bead's `"600R@100MHz"`, and a letter used as a decimal point (`24R9`). A
+  family declaring `string` (or no kind at all) is never checked.
+
+- **A pad the part does not have.** `(pin 99 "X")` on an 11-pad part used to
+  produce only a downstream floating-net warning while the pad itself reached
+  the netlist and the KiCad export. The pad set now comes from the part's
+  `lib/pinouts/<name>.sexp` and its `lib/footprints/<name>.sexp` `(pad …)`
+  ids; a token outside both is an error naming the pad count, with a
+  did-you-mean when it looks like a misspelled pin function. The same check
+  covers `(strap-ok PAD …)`, `(nc-ok PAD …)` and `(near … (own PAD))`. A part
+  with **neither** record has an unknown pad set and every token on it passes,
+  so newly imported parts and pinout-less passives are unaffected.
 
 ### Sub-block identity: legacy sidecar vs. hierarchical (opt-in)
 

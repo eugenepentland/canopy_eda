@@ -20,6 +20,8 @@ const frequency_plan = @import("../frequency_plan.zig");
 const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
 const forms = @import("forms.zig");
+const footprint_pads = @import("footprint_pads.zig");
+const value_kind = @import("value_kind.zig");
 const SpecialForm = forms.SpecialForm;
 const Builtin = forms.Builtin;
 pub const ids = @import("ids.zig");
@@ -159,6 +161,12 @@ pub const Evaluator = struct {
     symbol_pin_cache: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged([]const u8)),
     /// Cache of per-pin alternate functions: symbol_name -> (pin_id -> []AltFunc)
     symbol_alt_cache: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged([]const AltFunc)),
+    /// Cache of footprint pad ids: footprint_name -> set of pad ids. Filled
+    /// lazily by `footprint_pads.get` — the pad-existence check reads it for
+    /// parts that have no `lib/pinouts` file, so a footprint is read at most
+    /// once per build however many instances place it. An empty entry means
+    /// "pads unknown" (file missing / not a footprint form), never "no pads".
+    footprint_pad_cache: std.StringHashMapUnmanaged(footprint_pads.PadIds),
     /// Auto ref-des counter per prefix letter
     auto_refdes: std.AutoHashMapUnmanaged(u8, u32),
     /// Auto ref-des counter for test points. They carry a 2-letter "TP" prefix
@@ -306,6 +314,7 @@ pub const Evaluator = struct {
             .component_cache = .empty,
             .symbol_pin_cache = .empty,
             .symbol_alt_cache = .empty,
+            .footprint_pad_cache = .empty,
             .auto_refdes = .empty,
             .pending_ids = .empty,
             .pending_child_ids = .empty,
@@ -337,6 +346,7 @@ pub const Evaluator = struct {
         self.component_cache.deinit(self.allocator);
         self.symbol_pin_cache.deinit(self.allocator);
         self.symbol_alt_cache.deinit(self.allocator);
+        self.footprint_pad_cache.deinit(self.allocator);
         self.auto_refdes.deinit(self.allocator);
         self.pending_ids.deinit(self.allocator);
         self.pending_child_ids.deinit(self.allocator);
@@ -517,6 +527,10 @@ pub const Evaluator = struct {
                     self.setErrorFmt(args[0].span, "({s} …) value must be a string, e.g. ({s} \"100nF\")", .{ head_name, head_name });
                     return EvalError.TypeError;
                 };
+                if (!value_kind.accepts(comp.param_type, val_str)) {
+                    self.setError(args[0].span, value_kind.mismatchMessage(self.allocator, head_name, comp.param_type, val_str));
+                    return EvalError.TypeError;
+                }
                 // Collect additional args as schematic attributes
                 var attrs: std.ArrayList([]const u8) = .empty;
                 for (args[1..]) |attr_node| {
@@ -985,6 +999,38 @@ test "evaluator releases owned assertion messages" {
         .message_owned = true,
     });
     try std.testing.expectEqualStrings("owned result 42", eval.assertions.items[0].message);
+}
+
+// spec: eval/evaluator - a component-family value contradicting the declared parameter kind is rejected at the call site
+test "a family call rejects a value of the wrong declared kind" {
+    // page_allocator: the diagnostic string is allocated and never freed
+    // (project memory convention), so a checked allocator would report it.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    try eval.component_cache.put(alloc, "cap-0402", .{
+        .name = "cap-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "capacitance",
+    });
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    const bad = try parser.parse(alloc, "(cap-0402 \"4.7k\")");
+    defer parser.freeNodes(alloc, bad);
+    try std.testing.expectError(EvalError.TypeError, eval.evalNode(bad[0], &env));
+    const msg = eval.last_error.?.message;
+    try std.testing.expect(std.mem.indexOf(u8, msg, "\"4.7k\" is not a capacitance value") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "(parameter \"value\" capacitance)") != null);
+
+    // The declared kind's own spellings still evaluate to a component instance.
+    const good = try parser.parse(alloc, "(cap-0402 \"100nF\")");
+    defer parser.freeNodes(alloc, good);
+    const val = try eval.evalNode(good[0], &env);
+    try std.testing.expectEqualStrings("100nF", val.component_instance.value);
 }
 
 // ── Passives-prelude fixtures ─────────────────────────────────────────

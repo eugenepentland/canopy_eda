@@ -112,6 +112,53 @@ fn considerLibraryStems(self: *Evaluator, name: []const u8, best: *?[]const u8, 
     }
 }
 
+/// How much editing may still count as the same word. The two settings exist
+/// because a suggestion's cost depends entirely on what the caller does with
+/// it — see each variant.
+pub const Budget = enum {
+    /// Two edits regardless of length. For a hint attached to a diagnostic
+    /// that has already fired on other grounds, where an off-target
+    /// suggestion costs the reader a glance and nothing else.
+    advisory,
+    /// One edit while either spelling is short, two once both reach
+    /// `min_len_for_two_edits`. For a check whose verdict IS the error: at
+    /// three or four characters a two-edit budget spans unrelated words —
+    /// `mpn` is two edits from `pin` and `color` two from `col`, and both are
+    /// real property keys that must keep working.
+    strict,
+};
+
+/// Shortest spelling for which two edits still mean "the same word".
+const min_len_for_two_edits: usize = 5;
+
+/// Best candidate within `budget` of `name` drawn from a FIXED vocabulary —
+/// the caller's own list of legal spellings, rather than the evaluator's
+/// env/library universe `nearestName` walks. Used by the `(instance …)` body
+/// parser to tell a typo'd sub-form (`decuples`) apart from a deliberate
+/// inline property key. An exact match is never a suggestion, so a legal
+/// spelling can never suggest itself.
+pub fn nearestOf(name: []const u8, candidates: []const []const u8, budget: Budget) ?[]const u8 {
+    if (name.len > max_name_len) return null;
+    var best: ?[]const u8 = null;
+    var best_dist: usize = max_edit_distance + 1;
+    for (candidates) |candidate| {
+        var found: ?[]const u8 = null;
+        var dist: usize = max_edit_distance + 1;
+        considerCandidate(name, candidate, &found, &dist);
+        if (found == null or dist > allowedDistance(budget, name, candidate)) continue;
+        if (dist >= best_dist) continue;
+        best_dist = dist;
+        best = found;
+    }
+    return best;
+}
+
+/// The edit budget for one (name, candidate) pair under `budget`.
+fn allowedDistance(budget: Budget, name: []const u8, candidate: []const u8) usize {
+    if (budget == .advisory) return max_edit_distance;
+    return if (@min(name.len, candidate.len) < min_len_for_two_edits) 1 else max_edit_distance;
+}
+
 /// Update the running best candidate with `candidate` if it is closer.
 fn considerCandidate(name: []const u8, candidate: []const u8, best: *?[]const u8, best_dist: *usize) void {
     if (candidate.len > max_name_len) return;
@@ -197,6 +244,22 @@ test "unboundMessage suggests nearest known name" {
 
     const msg = unboundMessage(&eval, "cap-0420", &env);
     try testing.expectEqualStrings("unknown name 'cap-0420' — did you mean 'cap-0402'?", msg);
+}
+
+// spec: eval/suggest - a fixed vocabulary yields the nearest spelling and never suggests an exact match
+test "nearestOf ranks a fixed vocabulary" {
+    const vocab = [_][]const u8{ "pin", "part", "note", "col", "decouples", "strap-ok" };
+    try testing.expectEqualStrings("decouples", nearestOf("decuples", &vocab, .strict).?);
+    try testing.expectEqualStrings("strap-ok", nearestOf("strapok", &vocab, .strict).?);
+    try testing.expectEqualStrings("pin", nearestOf("pins", &vocab, .strict).?);
+    // An exact spelling never suggests itself, and a distant key is untouched.
+    try testing.expect(nearestOf("pin", &vocab, .strict) == null);
+    try testing.expect(nearestOf("module-bypass", &vocab, .strict) == null);
+    // Two edits on a short word reach unrelated real property keys, so the
+    // strict budget stops at one — the advisory budget still offers them.
+    try testing.expect(nearestOf("mpn", &vocab, .strict) == null);
+    try testing.expect(nearestOf("color", &vocab, .strict) == null);
+    try testing.expectEqualStrings("pin", nearestOf("mpn", &vocab, .advisory).?);
 }
 
 // spec: eval/suggest - a name with no close candidate reports a plain unknown-name message
