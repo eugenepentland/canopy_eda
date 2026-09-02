@@ -536,6 +536,7 @@ fn isPositionalPin(pad_id: []const u8, fn_name: []const u8) bool {
 }
 
 /// Upper-cases `s` into `buf` with separators removed; returns the written slice.
+// twin-drift-ok: Pin-function aliases also discard grouping punctuation that module-policy identifiers preserve.
 fn normalizeIdent(s: []const u8, buf: []u8) []const u8 {
     var n: usize = 0;
     for (s) |c| switch (c) {
