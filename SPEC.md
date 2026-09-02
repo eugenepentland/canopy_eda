@@ -7890,6 +7890,7 @@ export never invents them.
 ## review-audit
 
 - the rendered audit parses as safe review Markdown with no raw HTML
+- regenerating into an existing audit keeps the reviewer's disposition cells for rows that are still rendered
 - completeness-waiver: empty inputs (a design with no active parts, no findings and no layout renders the placeholder rows)
 - completeness-waiver: large inputs (the findings register is capped and every cell is clipped on a codepoint boundary)
 - completeness-waiver: unauthorized access (the audit reads the caller's project directory through the same evaluator and gate the CLI already exposes)

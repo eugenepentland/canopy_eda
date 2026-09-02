@@ -396,10 +396,16 @@ pub fn cmdReviewAudit(allocator: std.mem.Allocator, args: []const []const u8) Co
     };
     defer allocator.free(markdown);
     if (output) |path| {
-        infra_fs.cwd().writeFile(.{ .sub_path = path, .data = markdown }) catch |err| {
+        // Regenerating over an existing audit keeps the reviewer's filled
+        // Disposition cells for every row the new evidence still renders.
+        const previous = infra_fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024) catch null;
+        defer if (previous) |bytes| allocator.free(bytes);
+        const merged = if (previous) |bytes| try @import("review_audit.zig").mergeDispositions(allocator, markdown, bytes) else markdown;
+        defer if (previous != null) allocator.free(merged);
+        infra_fs.cwd().writeFile(.{ .sub_path = path, .data = merged }) catch |err| {
             exit.fatal(cannot_write_fmt, .{ path, err });
         };
-        std.debug.print("Wrote {s} ({d} bytes)\n", .{ path, markdown.len });
+        std.debug.print("Wrote {s} ({d} bytes{s})\n", .{ path, merged.len, if (previous != null) ", dispositions carried forward" else "" });
     } else {
         try std.Io.File.stdout().writeStreamingAll(infra_fs.currentIo(), markdown);
     }

@@ -346,6 +346,93 @@ fn renderInner(
     try w.writeAll("\n## Open questions for a human\n\n- (state the question, the options, and what each costs)\n");
 }
 
+// ── Regeneration ──────────────────────────────────────────────────────────
+
+/// How many trailing cells of a table row belong to the reviewer: the
+/// Disposition column on the four- and eight-column tables, and
+/// Disposition/Owner/Date on the findings register. Zero for any other shape.
+fn reviewerTail(cell_count: usize) usize {
+    return switch (cell_count) {
+        4, 8 => 1,
+        7 => 3,
+        else => 0,
+    };
+}
+
+fn splitRow(line: []const u8, out: *[16][]const u8) usize {
+    var body = std.mem.trim(u8, line, " \t\r");
+    if (body.len == 0 or body[0] != '|') return 0;
+    body = body[1..];
+    if (body.len > 0 and body[body.len - 1] == '|') body = body[0 .. body.len - 1];
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, body, '|');
+    while (it.next()) |cell| {
+        if (n == out.len) return 0;
+        out[n] = std.mem.trim(u8, cell, " \t");
+        n += 1;
+    }
+    return n;
+}
+
+fn rowKey(allocator: std.mem.Allocator, cells: []const []const u8) std.mem.Allocator.Error![]const u8 {
+    return std.mem.join(allocator, "\x1f", cells);
+}
+
+fn tailEmpty(cells: []const []const u8) bool {
+    for (cells) |cell| if (cell.len > 0) return false;
+    return true;
+}
+
+/// Carry the reviewer's filled tail cells from `previous` into `rendered`
+/// wherever the same row (every cell before the reviewer's columns) is
+/// rendered again and its tail is still empty. Rows the new evidence no
+/// longer produces are dropped with their dispositions, which is the point:
+/// a disposition only survives while the finding it answers does.
+pub fn mergeDispositions(
+    allocator: std.mem.Allocator,
+    rendered: []const u8,
+    previous: []const u8,
+) std.mem.Allocator.Error![]u8 {
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+    var kept: std.StringHashMapUnmanaged([]const []const u8) = .empty;
+    var lines = std.mem.splitScalar(u8, previous, '\n');
+    while (lines.next()) |line| {
+        var cells: [16][]const u8 = undefined;
+        const n = splitRow(line, &cells);
+        const k = reviewerTail(n);
+        if (k == 0 or tailEmpty(cells[n - k .. n])) continue;
+        const key = try rowKey(arena, cells[0 .. n - k]);
+        try kept.put(arena, key, try arena.dupe([]const u8, cells[n - k .. n]));
+    }
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    const w = &out.writer;
+    var first = true;
+    var rendered_lines = std.mem.splitScalar(u8, rendered, '\n');
+    while (rendered_lines.next()) |line| {
+        if (!first) w.writeAll("\n") catch return error.OutOfMemory;
+        first = false;
+        var cells: [16][]const u8 = undefined;
+        const n = splitRow(line, &cells);
+        const k = reviewerTail(n);
+        const tail: ?[]const []const u8 = if (k == 0 or !tailEmpty(cells[n - k .. n])) null else kept.get(try rowKey(arena, cells[0 .. n - k]));
+        const filled = tail orelse {
+            w.writeAll(line) catch return error.OutOfMemory;
+            continue;
+        };
+        w.writeAll("|") catch return error.OutOfMemory;
+        for (cells[0 .. n - k]) |cell| {
+            w.print(" {s} |", .{cell}) catch return error.OutOfMemory;
+        }
+        for (filled) |cell| {
+            w.print(" {s} |", .{cell}) catch return error.OutOfMemory;
+        }
+    }
+    return try out.toOwnedSlice();
+}
+
 // ── Collection ────────────────────────────────────────────────────────────
 
 fn jsonStr(value: std.json.Value, key: []const u8) []const u8 {
@@ -668,4 +755,38 @@ test "rendered audit survives the package Markdown rules with hostile cells" {
     try std.testing.expect(std.mem.indexOf(u8, markdown, "Layout / one") != null);
     try std.testing.expect(std.mem.indexOf(u8, markdown, "## Stage 1b") != null);
     try std.testing.expect(std.mem.indexOf(u8, markdown, "pll-loop (inferred)") != null);
+}
+
+// spec: review-audit - regenerating into an existing audit keeps the reviewer's disposition cells for rows that are still rendered
+test "regeneration carries dispositions forward by row identity" {
+    const allocator = std.testing.allocator;
+    const previous =
+        \\| Check | Result | Evidence | Disposition |
+        \\| --- | --- | --- | --- |
+        \\| Clean tree | clean | run_fab_readiness.project_status | fixed |
+        \\| Build warnings | 3 evaluator warning(s) | unknown sub-form | blocking — checklist Build/check |
+        \\| Source | Severity | Ref | Finding | Disposition | Owner | Date |
+        \\| --- | --- | --- | --- | --- | --- | --- |
+        \\| erc | warning | U1 | old finding | waived | EP | 2026-09-01 |
+        \\| erc | warning | U2 | kept finding | escalated | EP | 2026-09-02 |
+    ;
+    const rendered =
+        \\| Check | Result | Evidence | Disposition |
+        \\| --- | --- | --- | --- |
+        \\| Clean tree | clean | run_fab_readiness.project_status |  |
+        \\| Build warnings | 0 evaluator warning(s) | netlisp build |  |
+        \\| Source | Severity | Ref | Finding | Disposition | Owner | Date |
+        \\| --- | --- | --- | --- | --- | --- | --- |
+        \\| erc | warning | U2 | kept finding |  |  |  |
+        \\| erc | error | U3 | new finding |  |  |  |
+    ;
+    const merged = try mergeDispositions(allocator, rendered, previous);
+    defer allocator.free(merged);
+    try std.testing.expect(std.mem.indexOf(u8, merged, "| Clean tree | clean | run_fab_readiness.project_status | fixed |") != null);
+    // The build-warnings result changed, so its old disposition does not apply.
+    try std.testing.expect(std.mem.indexOf(u8, merged, "| Build warnings | 0 evaluator warning(s) | netlisp build |  |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, merged, "| erc | warning | U2 | kept finding | escalated | EP | 2026-09-02 |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, merged, "old finding") == null);
+    try std.testing.expect(std.mem.indexOf(u8, merged, "| erc | error | U3 | new finding |  |  |  |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, merged, "| --- | --- | --- | --- |") != null);
 }
