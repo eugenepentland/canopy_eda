@@ -9,7 +9,7 @@
 12 src/eval/env.zig|BoardSpec
 12 src/eval/env.zig|Check
 9 src/eval/env.zig|ClassRf
-28 src/eval/env.zig|DesignBlock
+29 src/eval/env.zig|DesignBlock
 13 src/eval/env.zig|DesignRulesSpec
 9 src/eval/env.zig|ElectricalDecl
 25 src/eval/env.zig|Instance
@@ -64,7 +64,7 @@
 12 src/placement/optimizer.zig|Loop
 16 src/placement/optimizer.zig|Params
 17 src/placement/optimizer.zig|Part
-22 src/placement/optimizer.zig|Placement
+23 src/placement/optimizer.zig|Placement
 8 src/placement/pad_grid.zig|PadObs
 18 src/placement/pdn_impedance.zig|Capacitor
 15 src/placement/pdn_impedance.zig|Rail

@@ -1100,6 +1100,15 @@ pub const PowerRail = struct {
     enable_net: []const u8 = "",
 };
 
+/// One `(module-policy (net-class "NET" class))` pin: the placement
+/// criticality class an author fixed for a net, overriding the name heuristic.
+/// `class` is the atom as written — validated at parse time against the
+/// module-policy vocabulary — so this module needs no placement import.
+pub const NetClassPin = struct {
+    net: []const u8,
+    class: []const u8,
+};
+
 /// The proven worst-case DC potential range a net's copper reaches, keyed by
 /// the FLATTENED net name (`buck_5v75/VIN_F`, `V_12V`) so a sub-block-internal
 /// node is nameable at all. Release rating checks read these exactly as they
@@ -2116,6 +2125,11 @@ pub const DesignBlock = struct {
     /// net reach", which is also true of a filtered pin node and of a signal
     /// whose driver the author declared.
     net_envelopes: []const NetEnvelope = &.{},
+    /// Author-pinned placement classes from `(module-policy (net-class …))`,
+    /// consulted before the name heuristic by the placer, the ERC info row and
+    /// the describe facts. Named like envelopes: the flattened net name, or a
+    /// bare leaf that matches any module-local net of that name.
+    net_class_pins: []const NetClassPin = &.{},
     /// Explicit AC target-impedance intent. This stays separate from `rails`
     /// because those entries intentionally union ferrite-connected nets for
     /// DC budgeting while a ferrite is an AC element/domain boundary.

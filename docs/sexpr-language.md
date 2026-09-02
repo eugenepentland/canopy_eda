@@ -585,6 +585,25 @@ schematic.
   `/schematics/<name>`, eyeball the Layout tab at full zoom-out, and treat a
   stale or scattered diagram as part of the change still to finish.
 
+### Placement class pins: `(module-policy …)`
+
+The placer, the routing order and the `layout_class_inferred` ERC info all
+classify nets by name (`input_rail`, `switch_node`, `clock`, `rf`, `feedback`,
+`analog`, `power`, `ground`, `control`, `signal`). When the guess is wrong, or
+when you want the decision recorded so the info stops appearing, pin it:
+
+```lisp
+(module-policy
+  (net-class "V_24V_CLEAN" power)      ;; a clean post-LDO rail, not an input rail
+  (net-class "REF_ADF" clock)
+  (net-class "BOOST25_SW" switch_node)) ;; a bare leaf reaches the module-local net
+```
+
+Design-block scope only. The net is the flattened name, or a bare leaf that
+matches every module-local net of that name. A pinned class is final — the
+hub-plus-inductor switch-node upgrade does not apply — and a pinned net is no
+longer reported as inferred. Unknown class atoms are warned and dropped.
+
 ### Lint warnings
 
 Unknown sub-forms / enum words inside known forms (e.g. `(role inptu)`, a

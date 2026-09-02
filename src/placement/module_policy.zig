@@ -21,6 +21,7 @@
 //! observability; later phases let the design author override it.
 
 const std = @import("std");
+const env = @import("../eval/env.zig");
 const rails_mod = @import("../eval/rails.zig");
 const decouple_key = @import("../decouple_key.zig");
 const optimizer = @import("optimizer.zig");
@@ -142,9 +143,24 @@ fn classifyNets(p: Placement, idx: *std.StringHashMapUnmanaged(usize), out: []Ne
             if (p.parts[pi].kind == .hub) touch_hub = true;
             if (isInductor(pin.ref_des)) touch_ind = true;
         }
+        if (pinnedNetClass(p.net_class_pins, net.name)) |pinned| {
+            out[i] = pinned;
+            continue;
+        }
         out[i] = classifyNetName(net.name);
         if ((out[i] == .signal or out[i] == .control) and touch_hub and touch_ind) out[i] = .switch_node;
     }
+}
+
+/// The class an author pinned for `name` with `(module-policy (net-class …))`,
+/// matched by the flattened name or by its leaf; null when the net is unpinned.
+/// A pinned class is final — the switch-node upgrade does not apply to it.
+pub fn pinnedNetClass(pins: []const env.NetClassPin, name: []const u8) ?NetClass {
+    for (pins) |pin| {
+        if (!std.mem.eql(u8, pin.net, name) and !std.mem.eql(u8, pin.net, leafName(name))) continue;
+        return std.meta.stringToEnum(NetClass, pin.class);
+    }
+    return null;
 }
 
 /// Classify a net by its leaf name alone (the structural switch-node upgrade
@@ -444,4 +460,50 @@ test "analyze detects a buck module and its input cap" {
     try testing.expectEqual(@as(usize, 1), policy.modules.len);
     try testing.expectEqual(ModuleClass.buck, policy.modules[0].class);
     try testing.expect(policy.modules[0].has_inductor);
+}
+
+// spec: placement/module_policy - applies (module-policy …) author overrides over the heuristic detection
+test "a pinned net class replaces the name heuristic and the switch-node upgrade" {
+    const pad = geometry.Pad{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 };
+    var hub_pads = [_]geometry.Pad{pad};
+    var l_pads = [_]geometry.Pad{pad};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &hub_pads, .fallback = false },
+        .{ .ref_des = "L1", .kind = .passive, .hw = 1, .hh = 1, .pads = &l_pads, .fallback = false },
+    };
+    const vin = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "L1", .pin = "2" } };
+    const sw = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "L1", .pin = "1" } };
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "V_12V", .pins = &vin },
+        .{ .name = "boost/BOOST_SW", .pins = &sw },
+    };
+    const pins = [_]env.NetClassPin{
+        .{ .net = "V_12V", .class = "power" },
+        .{ .net = "BOOST_SW", .class = "signal" },
+    };
+    const p = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .net_class_pins = &pins,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 1,
+        .maxy = 1,
+        .generated = true,
+    };
+    var policy = try analyze(testing.allocator, p);
+    defer policy.deinit(testing.allocator);
+    // V_12V reads as input_rail by name; the pin says power. The leaf pin on the
+    // module-local switch node holds it at signal even though hub + inductor
+    // would otherwise upgrade it to switch_node.
+    try testing.expectEqual(NetClass.power, policy.net_class[0]);
+    try testing.expectEqual(NetClass.signal, policy.net_class[1]);
+    try testing.expect(pinnedNetClass(&pins, "V_12V_RAW") == null);
+    try testing.expect(pinnedNetClass(&pins, "other/V_12V") == .power);
+    try testing.expect(pinnedNetClass(&.{.{ .net = "X", .class = "widget" }}, "X") == null);
 }

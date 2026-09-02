@@ -259,6 +259,7 @@ pub fn analyze(
     var tally = LoadTally{};
     const top = try topScope(allocator, block, &net_parent);
     try creditLoads(allocator, block, top, &tally);
+    try creditPortDeclarations(allocator, block, &net_parent, &tally);
     const loads = &tally.loads;
     const consumer_groups = &tally.groups;
 
@@ -606,11 +607,12 @@ fn creditNet(
 /// `(sub-block …)` states on an INPUT power port, resolved to the top-level
 /// rail that port ties to.
 ///
-/// Deliberately NOT a `RailConsumer` and deliberately not summed into
-/// `load_typ_a` / `load_max_a`. A `RailConsumer` is an annotated PIN — a
-/// measured contribution the budget table adds up — while this is a boundary
-/// declaration made by the module about itself, which the budget has never
-/// counted. Folding it in would silently restate every board's rail totals.
+/// Not itself a `RailConsumer`: a `RailConsumer` is an annotated PIN, a
+/// measured contribution the budget table adds up. The one case the budget
+/// DOES count a port declaration is `creditPortDeclarations` — a sealed module
+/// that annotates no pin on the rail it taps is credited its input-port
+/// `(current …)` as one consumer row, so the rail is not left with no load at
+/// all; a module whose pins already credited the rail keeps those rows.
 ///
 /// What it IS good for is branch sizing: everything inside the module reaches
 /// the rail through that port, so no series element in there can carry more
@@ -628,6 +630,84 @@ pub const BranchLoad = struct {
     /// Summed `(current … max)` across this module's input ports on the rail.
     i_max: ?f64,
 };
+
+/// A sealed module that annotates none of its own pins on a rail but declares
+/// `(current typ max)` on the input power port it draws through is credited
+/// that declaration as one consumer row named `<sub-block>/<port>`, so a rail
+/// fed only through modules still carries a load envelope for the budget and
+/// the copper screen. A module whose internal pins already credited the rail
+/// keeps those measured rows and its port stays a branch bound only, and a
+/// regulator module (an output port with an efficiency) is left to the
+/// back-computation in step 3b so its input draw is never counted twice.
+fn creditPortDeclarations(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    net_parent: *std.StringHashMapUnmanaged([]const u8),
+    tally: *LoadTally,
+) std.mem.Allocator.Error!void {
+    for (block.sub_blocks) |sb| {
+        if (moduleIsRegulator(sb.block)) continue;
+        for (sb.block.ports) |port| {
+            if (!std.mem.eql(u8, port.direction, "in")) continue;
+            if (port.isDeclaredNonPower() or !port.isPowerSource()) continue;
+            if (port.current_typ == null and port.current_max == null) continue;
+            const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ sb.name, port.name });
+            const root = findRailForSubPath(block, net_parent, path) orelse continue;
+            if (moduleCreditedRail(tally, sb.name, root)) continue;
+            const rail_name = railNameForSubPath(block, path) orelse root;
+            var load = tally.loads.get(root) orelse RailLoad{ .first_name = rail_name };
+            const key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ path, root });
+            const gop = try tally.groups.getOrPut(allocator, key);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .{
+                    .ref_des = path,
+                    .component = "module port",
+                    .label = "declared on the module's input port",
+                    .net = rail_name,
+                    .root = root,
+                };
+                try load.group_keys.append(allocator, key);
+            }
+            try gop.value_ptr.pins.append(allocator, port.name);
+            if (port.current_typ) |v| {
+                load.sum_typ += v;
+                load.any_typ = true;
+                gop.value_ptr.sum_typ += v;
+                gop.value_ptr.any_typ = true;
+            }
+            if (port.current_max) |v| {
+                load.sum_max += v;
+                load.any_max = true;
+                gop.value_ptr.sum_max += v;
+                gop.value_ptr.any_max = true;
+            }
+            try tally.loads.put(allocator, root, load);
+        }
+    }
+}
+
+/// A module with an efficiency-declared output is a regulator: step 3b charges
+/// its input rail from its output loads, so its port declaration must not.
+fn moduleIsRegulator(block: *const DesignBlock) bool {
+    for (block.ports) |port| {
+        if (!std.mem.eql(u8, port.direction, "out")) continue;
+        if (port.efficiency != null or port.efficiency_linear) return true;
+    }
+    return false;
+}
+
+/// True when some annotated pin inside sub-block `sb_name` already credited
+/// rail `root` (its consumer rows carry the `sb_name/` prefix). A row with no
+/// current on it is a pin the walk merely saw, not a credit.
+fn moduleCreditedRail(tally: *const LoadTally, sb_name: []const u8, root: []const u8) bool {
+    var it = tally.groups.valueIterator();
+    while (it.next()) |group| {
+        if (!std.mem.eql(u8, group.root, root)) continue;
+        if (!group.any_typ and !group.any_max) continue;
+        if (group.ref_des.len > sb_name.len and std.mem.startsWith(u8, group.ref_des, sb_name) and group.ref_des[sb_name.len] == '/') return true;
+    }
+    return false;
+}
 
 /// Every `(path, rail)` pair for which a sub-block's input power ports declare
 /// a current. A module tapping one rail through several ports contributes the
@@ -994,6 +1074,67 @@ test "a sub-block's annotated pins land on the parent rail its port ties to" {
         try testing.expectEqualStrings("VDD", c.net);
     }
     try testing.expect(found_u1);
+}
+
+// spec: eval/power_budget - a sealed module's declared input-port current is one consumer on the rail it taps when the module annotates no pin there
+test "a sealed module's port declaration is credited only when its pins are not" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Two sealed modules on the board rail V5: `lna` annotates nothing and
+    // declares 0.12/0.15 A on its VDD port; `sw` annotates a 0.20 A pin AND
+    // declares 0.30 A on its port. The rail sees 0.12 + 0.20, never the 0.30.
+    const lna = try alloc.create(DesignBlock);
+    const lna_pins = try alloc.dupe(env_mod.PinRef, &.{.{ .ref_des = "U1", .pin = "1" }});
+    lna.* = .{
+        .name = "lna-mod",
+        .instances = try alloc.dupe(env_mod.Instance, &.{namedPart("U1", "lna-chip")}),
+        .nets = try alloc.dupe(env_mod.Net, &.{.{ .name = "VDD", .pins = lna_pins }}),
+        .ports = try alloc.dupe(env_mod.Port, &.{.{ .name = "VDD", .net = "VDD", .direction = "in", .nominal = 5.0, .current_typ = 0.12, .current_max = 0.15 }}),
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const sw = try alloc.create(DesignBlock);
+    const sw_pins = try alloc.dupe(env_mod.PinRef, &.{.{ .ref_des = "U1", .pin = "1", .i_typ = 0.20, .i_max = 0.25 }});
+    sw.* = .{
+        .name = "sw-mod",
+        .instances = try alloc.dupe(env_mod.Instance, &.{namedPart("U1", "sw-chip")}),
+        .nets = try alloc.dupe(env_mod.Net, &.{.{ .name = "VIN", .pins = sw_pins }}),
+        .ports = try alloc.dupe(env_mod.Port, &.{.{ .name = "VIN", .net = "VIN", .direction = "in", .nominal = 5.0, .current_typ = 0.30, .current_max = 0.35 }}),
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const top_pins = try alloc.dupe(env_mod.PinRef, &.{.{ .ref_des = "TP1", .pin = "1" }});
+    const block = DesignBlock{
+        .name = "board",
+        .instances = try alloc.dupe(env_mod.Instance, &.{namedPart("TP1", "testpoint")}),
+        .nets = try alloc.dupe(env_mod.Net, &.{.{ .name = "V5", .pins = top_pins }}),
+        .ports = try alloc.dupe(env_mod.Port, &.{.{ .name = "V5", .net = "V5", .direction = "in", .nominal = 5.0, .current_typ = 1.0, .current_max = 1.0 }}),
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = try alloc.dupe(env_mod.SubBlock, &.{ .{ .name = "lna", .block = lna }, .{ .name = "sw", .block = sw } }),
+        .net_ties = try alloc.dupe(env_mod.NetTie, &.{ .{ .a = "lna/VDD", .b = "V5" }, .{ .a = "sw/VIN", .b = "V5" } }),
+    };
+    const rails = try analyze(alloc, &block);
+    const v5 = railNamed(rails, "V5").?;
+    try testing.expect(v5.any_typ_load);
+    try testing.expectApproxEqAbs(@as(f64, 0.32), v5.load_typ_a, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.40), v5.load_max_a, 1e-9);
+    var found_port = false;
+    var found_pin = false;
+    for (v5.consumers) |c| {
+        if (std.mem.eql(u8, c.ref_des, "lna/VDD")) {
+            found_port = true;
+            try testing.expectEqualStrings("module port", c.component);
+            try testing.expectApproxEqAbs(@as(f64, 0.12), c.i_typ.?, 1e-9);
+        }
+        if (std.mem.eql(u8, c.ref_des, "sw/U1")) found_pin = true;
+        try testing.expect(!std.mem.eql(u8, c.ref_des, "sw/VIN"));
+    }
+    try testing.expect(found_port and found_pin);
 }
 
 // spec: eval/power_budget - the sub-block load walk recurses, so a module nested inside a module still credits the board rail its ports chain up to

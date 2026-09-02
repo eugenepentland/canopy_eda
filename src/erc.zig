@@ -214,6 +214,8 @@ fn checkLayoutClasses(
         // are an internal per-pad detail of a rail that is itself surfaced, and
         // their munged names trip the name heuristics (e.g. "V08CAP" → input_rail).
         if (std.mem.indexOfScalar(u8, net.name, '.') != null) continue;
+        // An author-pinned class is a decision, not a guess — nothing to report.
+        if (module_policy.pinnedNetClass(block.net_class_pins, net.name) != null) continue;
         const cls = module_policy.classifyNetName(net.name);
         if (!module_policy.isInterestingClass(cls)) continue;
         const msg = std.fmt.allocPrint(
@@ -2700,6 +2702,55 @@ fn isSignedVoltRail(base: []const u8) bool {
     return std.mem.indexOfScalar(u8, base[2..], 'V') != null;
 }
 
+/// A module-local supply node spelled with a prefix — `BOOST25_VIN`,
+/// `LMK_VDD_IN`, `SW_VCC_FILT` — carries its supply word as one `_`-separated
+/// token; `isSupplyRailName` only sees the whole name's prefix or suffix, so a
+/// regulator fed through a ferrite inside its own module read as unpowered.
+fn supplyTokenInName(base: []const u8) bool {
+    var it = std.mem.tokenizeScalar(u8, base, '_');
+    while (it.next()) |tok| if (pin_roles.isSupplyFn(tok)) return true;
+    return false;
+}
+
+/// True when nothing powers `inst`: no supply-named net reaches it and none of
+/// its declared `power_in` pads lands on a net with another member.
+fn powerConnectionMissing(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    block: *const DesignBlock,
+    inst: Instance,
+    has_vdd: *const std.StringHashMapUnmanaged(void),
+) bool {
+    if (has_vdd.contains(inst.ref_des)) return false;
+    return !declaredSupplyPadConnected(allocator, project_dir, block, inst);
+}
+
+/// True when a pad the library declares `(electrical … (type power-in))` sits
+/// on a net with at least one other member: the part IS powered, whatever the
+/// net is called.
+fn declaredSupplyPadConnected(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    block: *const DesignBlock,
+    inst: Instance,
+) bool {
+    if (project_dir.len == 0 or inst.electrical.len == 0) return false;
+    const pads = pin_roles.padFunctions(allocator, project_dir, inst.component);
+    for (inst.electrical) |decl| {
+        if (decl.electrical_type != .power_in) continue;
+        for (pads) |pad| {
+            if (!std.ascii.eqlIgnoreCase(pad.fn_name, decl.pin)) continue;
+            for (block.nets) |net| {
+                if (net.pins.len < 2) continue;
+                for (net.pins) |pin| {
+                    if (std.mem.eql(u8, pin.ref_des, inst.ref_des) and std.mem.eql(u8, pin.pin, pad.pad)) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 fn checkBlockPowerPins(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
@@ -2727,7 +2778,7 @@ fn checkBlockPowerPins(
         // delegates to `pin_roles.isSupplyFn` for the exact `VS`/`VSYS` form).
         // The supply vocabulary itself lives in `isSupplyRailName`, shared with
         // the strap direct-tie check so the two can no longer drift apart.
-        const is_vdd = !is_gnd and isSupplyRailName(base);
+        const is_vdd = !is_gnd and (isSupplyRailName(base) or supplyTokenInName(base));
 
         for (net.pins) |pin| {
             if (pin.ref_des.len == 0) continue;
@@ -2763,7 +2814,7 @@ fn checkBlockPowerPins(
                 .ref_des = inst.ref_des,
             });
         }
-        if (pins.has_supply and !has_vdd.contains(inst.ref_des)) {
+        if (pins.has_supply and powerConnectionMissing(allocator, project_dir, block, inst, &has_vdd)) {
             const msg = std.fmt.allocPrint(allocator, "{s}: IC has no power connection", .{inst.ref_des}) catch continue;
             try violations.append(allocator, .{
                 .kind = .unconnected_pin,
@@ -3844,6 +3895,59 @@ fn makePowerPinBlock(
 }
 
 // spec: erc - Recognises a VREF-supplied level translator as powered (no false positive)
+// spec: erc - a module-local supply node whose name carries a supply token counts as the IC's power connection
+test "power pins module-local VIN node counts as a supply" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // A strap-named token (BOOST_EN) is not a supply: the rule still fires there.
+    const cases = [_]struct { net: []const u8, flagged: bool }{
+        .{ .net = "BOOST25_VIN", .flagged = false },
+        .{ .net = "LMK_VDD_IN", .flagged = false },
+        .{ .net = "SW_VCC_FILT", .flagged = false },
+        .{ .net = "BOOST_EN", .flagged = true },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.flagged, try noPowerConnectionFlagged(alloc, case.net));
+    }
+}
+
+/// Build the LM2733 power-pin fixture with its VIN pin on `net_name` and
+/// report whether the ERC flags "IC has no power connection" for it.
+fn noPowerConnectionFlagged(alloc: std.mem.Allocator, net_name: []const u8) !bool {
+    const block = try makePowerPinBlock(alloc, "lm2733xmf-nopb", net_name);
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkUnconnectedPowerPins(alloc, &block, "", &violations);
+    for (violations.items) |v| {
+        if (std.mem.eql(u8, v.message, "U1: IC has no power connection")) return true;
+    }
+    return false;
+}
+
+// spec: erc - a net pinned by (module-policy (net-class …)) is not reported as an inferred layout class
+test "a pinned net is not reported as an inferred layout class" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const pins = try alloc.dupe(env_mod.PinRef, &.{.{ .ref_des = "U1", .pin = "1" }});
+    const nets = try alloc.dupe(Net, &.{ .{ .name = "V_24V_CLEAN", .pins = pins }, .{ .name = "REF_ADF", .pins = pins } });
+    const pinned = try alloc.dupe(env_mod.NetClassPin, &.{.{ .net = "V_24V_CLEAN", .class = "power" }});
+    const block = DesignBlock{
+        .name = "pinned",
+        .instances = &.{},
+        .nets = nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .net_class_pins = pinned,
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkLayoutClasses(alloc, &block, &violations);
+    try std.testing.expectEqual(@as(usize, 1), violations.items.len);
+    try std.testing.expectEqualStrings("REF_ADF", violations.items[0].net);
+}
+
 test "power pins VREF-supplied translator is not flagged" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
