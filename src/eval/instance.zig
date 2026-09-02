@@ -12,6 +12,7 @@ const EvalError = evaluator_mod.EvalError;
 const ids = @import("ids.zig");
 const pin_roles = @import("../placement/pin_roles.zig");
 const thermal = @import("thermal.zig");
+const forms_mod = @import("forms.zig");
 const PinNetDecl = evaluator_mod.PinNetDecl;
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -180,7 +181,10 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     var strap_oks: std.ArrayList(env_mod.StrapOk) = .empty;
     var nc_oks: std.ArrayList(env_mod.NcOk) = .empty;
     var power: ?env_mod.PowerDecl = null;
-    const known_forms = [_][]const u8{ "pin", "part", "note", "bus", "id", "as", "dnp", "decouples", "near", "strap-ok", "nc-ok", "power" };
+    // Head atoms this body reserves, derived from the documented registry so
+    // the reference and the parser cannot disagree: anything NOT listed there
+    // falls through to the inline-property reading below.
+    const known_forms = &forms_mod.instance_reserved_forms;
 
     var positional_pad: usize = 1;
     for (args[2..]) |form| {
@@ -253,7 +257,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
                 continue;
             }
             const key = fc[0].asAtom() orelse continue;
-            if (!env_mod.containsString(&known_forms, key)) {
+            if (!env_mod.containsString(known_forms, key)) {
                 const val = (try self.evalNode(fc[1], env)).asString() orelse {
                     if (!std.mem.eql(u8, key, "row") and !std.mem.eql(u8, key, "col")) {
                         self.warnFmt(form.span, "ignored sub-form ({s} …) in (instance \"{s}\" …) — property values must be strings", .{ key, ref_des });

@@ -5,9 +5,15 @@
 **Machine-checked reference: [docs/language-forms.md](docs/language-forms.md).**
 Auto-generated from the evaluator's dispatch tables — every special form,
 builtin operator, fmt directive, SI numeric suffix, design-scope form (with
-arity + allowed scopes), and section-classifier keyword. It cannot drift
-(see Build System above), so consult it for the grammar inventory; the
-subsections below cover conventions and idiomatic usage only.
+arity + allowed scopes), and section-classifier keyword, plus the compound
+forms whose bodies have a grammar of their own: `(instance …)` and
+`(pins …)` sub-forms, `(sub-block …)` children (including `(bridge …)`),
+`(port …)` options, the identity/layout markers, and the
+`(component …)` library fields. Those tables are the same lists the
+evaluator derives its accepted-children checks from, and a coverage test
+walks `src/eval` for head atoms no registry names, so the reference cannot
+drift. Consult it for the grammar inventory; the subsections below cover
+conventions and idiomatic usage only.
 
 ### Instance with inline pin-net connections
 
@@ -68,10 +74,15 @@ these four cases to decide whether something becomes a section:
    (pin …) …)`, plus `(role …)`, `(protocol …)`, and `(note …)` entries
    for firmware contracts and datasheet rationale. The peripheral's own
    pin-level implementation is sealed in a `(defmodule …)` under
-   `lib/modules/` and brought in as a `(sub-block …)`. **Structural constraint:** `(sub-block …)`
-   forms are *not* evaluated inside `(section …)`; place the sub-block at
-   design-block top level immediately after its section (e.g. `(section
-   "USB" …)` then `(sub-block "usb" (usb-c-hs))`).
+   `lib/modules/` and brought in as a `(sub-block …)`. A `(sub-block …)`
+   evaluates correctly *inside* a `(section …)` and inside a sub-section —
+   its parts flatten into the netlist and its `(bridge …)` ties are applied
+   exactly as at design-block top level, and the enclosing section
+   additionally records it as a hosted block for the system-overview
+   diagram. House style in `stm32n6.sexp` still puts the sub-block at top
+   level immediately after its section (e.g. `(section "USB" …)` then
+   `(sub-block "usb" (usb-c-hs))`) so the consolidated rail `(net …)` forms
+   that wire it sit beside it; both placements are supported.
 2. **Self-contained hardware with no main-IC interface** — test points,
    mounting standoffs, fiducials. Make a section that directly
    `(instance …)`s the parts; there is no pin map and no sub-block.
@@ -91,7 +102,9 @@ these four cases to decide whether something becomes a section:
 One section per coherent subsystem — don't merge unrelated functions, and
 don't split one subsystem (or one rail) across two sections. Section
 bodies may also carry `(port …)` boundary declarations, `(calc …)` design
-math, and `(bus …)` multi-bit shorthand; see `stm32n6.sexp` for each.
+math, and multi-bit shorthand — `(bus-port …)` / `(bus-net …)` at section
+scope, and `(bus …)` inside a `(pins …)` block or an `(instance …)` body;
+see `stm32n6.sexp` for each.
 
 **Section-labeling conventions.** Every section has a *name* (short
 functional role) and an optional *subtitle* (one-line technical summary).
@@ -734,3 +747,62 @@ that anchor plus its `origin_key` and the item's **0-based ordinal**, so ids
 are stable across rebuilds without minting an impossible `(id …)` per
 iteration. A `(ids ("R_FAP@0" <hex8>) …)` sidecar on the loop form pins
 migrated identities when a hand-unrolled block is folded into a `for`.
+
+### Sub-block port wiring: `(bridge …)`
+
+```scheme
+;; Prefix idiom — one board net per port, sharing a peripheral prefix.
+(sub-block "imu" (icm42688)
+  (bridge "IMU_" SCK MOSI MISO (rename CS NCS)))
+;;   →  (net "IMU_SCK"  "imu/SCK")
+;;      (net "IMU_MOSI" "imu/MOSI")
+;;      (net "IMU_MISO" "imu/MISO")
+;;      (net "IMU_NCS"  "imu/CS")
+
+;; Empty-prefix idiom — the form reads as a port → board-net map.
+(sub-block "dsa" (bcuda-dsa-hmc1119)
+  (bridge "" (rename LPF_RF IF1_LNA) (rename DSA_RF IF1_DSA)
+             V_3V3A (rename SPI_DSA_SCK SPI_SCK) SPI_DSA_CSN GND)
+  (id a625bd1e))
+```
+
+`(bridge "PREFIX" PORT… (rename PORT SUFFIX)…)` is how hierarchy is wired.
+Each bridged port `P` emits **one net tie** between the board net
+`PREFIX<suffix>` and the module net `<sub-block-name>/P`, where `<suffix>`
+is `P` itself unless a `(rename P SUFFIX)` overrides it. It collapses the
+per-port `(net "BOARD_NET" "sub/PORT")` lines a peripheral sub-block would
+otherwise need at the design top level, and it is exactly equivalent to
+writing them out — nothing else changes.
+
+Two idioms are in use, both above:
+
+- **Shared prefix** for a peripheral whose board nets are named after it.
+  Bare port names pass through (`SCK` → `IMU_SCK`); a `(rename …)` covers
+  the odd one out (`CS` → `IMU_NCS`).
+- **Empty prefix + one `(rename PORT NET)` per port**, which reads as a
+  port-to-net map and is the dominant style on `barracuda.sexp`. A bare
+  port name there means "same name on both sides" (`GND`, `V_3V3A`).
+
+Power and ground ports are usually left *off* the bridge list and wired
+through the consolidated `(net …)` rail forms instead — one `(net …)` per
+rail, so the validator does not see a rail split across sections. Bridge
+them only when the module's rail name genuinely differs from the board's
+(`(rename V_3V3 V_3V3_LMX)`).
+
+A `(sub-block …)` accepts only `(bridge …)`, `(id …)`, `(ids …)` and
+`(reflow)` as trailing children; anything else warns. See
+[docs/language-forms.md § Sub-block sub-forms](language-forms.md).
+
+### The four unrelated `(group …)` forms
+
+`group` is overloaded across four grammars that share nothing but the word:
+
+| Where | Shape | Meaning |
+| --- | --- | --- |
+| Design-block scope | `(group "name" ("R1" "R2" …))` | Bundle ref-des components for the schematic renderer's visual grouping pass. Members are a **list**. |
+| `(diagram-layout …)` | `(group "Label" "a" "b" …)` | Labelled region over **variadic block keys** (section names / sub-block handles) on the block diagram. |
+| `(pins "REF" …)` | `(group "label")` | Label every pin the block declares so the schematic draws them as one named group. |
+| `(rough …)` | `(group "name" "REF"…)` | A PCB rough-placement cluster of ref-des strings. |
+
+The generated reference lists each in its own table; when in doubt, check
+the arity — a parenthesised member list means the design-scope form.
