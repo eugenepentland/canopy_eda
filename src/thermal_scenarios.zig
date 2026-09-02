@@ -1307,7 +1307,8 @@ test "a ladder solved once paints and reads at any ambient without re-solving" {
 
     // One ambient-free solve — the shape the field cache retains.
     const fields = try solveFields(arena, bt, p, .{});
-    try testing.expectEqual(@typeInfo(Scenario).@"enum".field_names.len, fields.len);
+    // A board with no authored fan keeps the historical four-rung ladder.
+    try testing.expectEqual(@as(usize, 4), fields.len);
 
     // Reading it at two ambients shifts every absolute temperature one for one
     // while the underlying rise field never moves. This is what lets one solve
