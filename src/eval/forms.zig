@@ -655,7 +655,8 @@ pub const scope_form_docs = blk: {
             "ref-des. A saved layout can override its physical assembly; " ++
             "removing or rebuilding the sidecar falls back to this declaration. Each (left|right|top|bottom …) list " ++
             "(fan …) authors an axial fan normal to one PCB face: its frame projection is board-local, distance is " ++
-            "outlet-to-board standoff, and the catalog free-flow/shutoff-pressure endpoints remain distinct. The required " ++
+            "outlet-to-board normally or outlet-to-fin-tip when a board sink shares that face, and the catalog " ++
+            "free-flow/shutoff-pressure endpoints remain distinct. The required " ++
             "operating-flow-fraction states the installed-flow assumption instead of silently claiming both maxima at once. " ++
             "Its optional fan scenario applies distance-expanded forced convection only beneath that projected jet. " ++
             "docks those parts flush INSIDE that board edge (the words name physical edges, " ++

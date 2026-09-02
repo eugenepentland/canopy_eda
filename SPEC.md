@@ -4304,8 +4304,11 @@ least junction margin in still air. A board-authored fan adds a fifth row ahead
 of the generic airflow brackets, and a configured fan plus physical heatsink
 adds a sixth simultaneous row after their standalone rows. Its catalog free-flow and shutoff-pressure
 endpoints remain distinct, an explicit installed-flow fraction sets the volume
-flow, and its position, face and standoff produce a distance-expanded local jet
-instead of a global film coefficient. Linearity is the load-bearing invariant — the
+flow, and its position, face and target clearance produce a distance-expanded local jet
+instead of a global film coefficient. When fan and board-mounted heatsink share
+a face, clearance is measured to the fin tips, jet/contact overlap drives the
+fin film coefficient, and the base replaces bare-PCB convection beneath it;
+opposite-face assemblies remain aerodynamically isolated. Linearity is the load-bearing invariant — the
 system is solved with ambient as the ZERO reference, so what is returned is a
 RISE field that is independent of the ambient it will be read at, and one solve
 per scenario therefore serves every ambient a caller asks about. It is a
@@ -4317,8 +4320,9 @@ coupling through the air.
 - the rise field is linear in the injected power, so two sources solved together equal the two solved apart added cell by cell
 - more airflow strictly lowers the board's maximum rise, and the heatsink scenario strictly lowers its target part's junction rise
 - an authored fan adds a spatial cooling rung whose selected face, projected position, standoff and installed-flow assumption drive the per-cell film coefficient
-- a saved layout can override the authored fan's projected position, PCB face and outlet-to-board standoff without changing how the thermal field consumes its operating point
+- a saved layout can override the authored fan's projected position, PCB face and outlet-to-target clearance without changing how the thermal field consumes its operating point
 - a configured fan and heatsink add one simultaneous rung, and when they occupy opposite PCB faces the fan changes only its own face while the sink keeps its natural-convection path
+- a fan aimed at a board-mounted heatsink on the same PCB face measures clearance to the fin tips, cools the fins in proportion to jet/contact overlap, leaves the covered PCB without a duplicate bare-face path, and reaches exposed PCB at the additional sink height
 - one scenario can be solved on its own and matches the ladder's answer for it, and the heatsink asked for alone still bolts its sink to the part the still-air solve names
 - a drawn straight-fin heatsink derives its fin count and theta-SA from material and geometry, and applies that sink over the exact authored contact rectangle
 - a PCB-mounted heatsink needs no component target and couples its passive path once across every active board cell beneath its exact contact rectangle
@@ -7007,7 +7011,7 @@ is what makes the predicate exact rather than approximately right.
 - The PCB editor overlays source-declared fabrication backing, edits every region with the outline sketch palette and undo, and persists compiled polygons plus index-aligned native sketches without changing side or material
 - The PCB editor draws one target-free board-contact heatsink rectangle on either PCB face, reopens it for parameter edits, drags it to reposition, resizes it with corner handles, directly edits fin count or gap, material, base/fins and thermal pad, persists the assembly with the named layout, previews its pad/base/fins in 3D, and feeds every covered PCB thermal cell plus the same derived theta-SA to built-in and Elmer thermal solves
 - The PCB editor offers a persistent display-only heatsink visibility toggle in Appearance > Objects, without changing saved geometry or thermal simulations, and entering the heatsink edit tool reveals a hidden heatsink
-- The PCB editor draws a movable circular axial-fan target and outlet footprint, edits its PCB face and outlet-to-board distance with its catalog airflow/pressure and installed-flow assumption, and persists the exact fan assembly with each saved layout for the thermal fan scenario
+- The PCB editor draws a movable circular axial-fan target and outlet footprint, edits its PCB face and outlet-to-target distance with its catalog airflow/pressure and installed-flow assumption, explains that a same-face heatsink makes the target its fin tips, and persists the exact fan assembly with each saved layout for the thermal fan scenario
 - Selecting a board outline exposes editable dimensions, slides horizontal/vertical edges only perpendicular to themselves, and uses Shift to constrain non-axis-aligned edge slides to their dominant axis
 - The PCB passive inspector offers compatible footprint families from the project library
 - PCB passive footprint edits update the exact owning schematic source

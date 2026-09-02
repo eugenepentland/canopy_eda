@@ -426,7 +426,7 @@ pub fn scenarioCells(
     const hot = row.hottest();
     return .{
         .scenario = if (row.scenario == .fan and row.cooling.fan.model.len > 0)
-            try std.fmt.allocPrint(allocator, "Fan {s} ({d:.1} m/s at PCB)", .{ row.cooling.fan.model, row.cooling.fan.velocity_m_s })
+            try std.fmt.allocPrint(allocator, "Fan {s} ({d:.1} m/s at target)", .{ row.cooling.fan.model, row.cooling.fan.velocity_m_s })
         else
             try thermal_scenarios.scenarioLabel(allocator, row.scenario, thermal_scenarios.sinkOf(ladder)),
         .hottest = if (hot) |h| h.ref else dash,

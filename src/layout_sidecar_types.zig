@@ -58,7 +58,8 @@ pub const SavedHeatsink = struct {
 
 /// One axial fan aimed normal to a PCB face. The rectangle is the outlet
 /// footprint projected into board coordinates; `distance_mm` is the clear
-/// outlet-to-board standoff.
+/// outlet-to-board distance normally, or outlet-to-fin-tip clearance when a
+/// board-mounted heatsink occupies the selected face.
 pub const SavedFan = struct {
     /// Projected outlet rectangle in absolute board coordinates.
     pub const Rect = struct { x: f64, y: f64, w: f64, h: f64 };

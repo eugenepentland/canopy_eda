@@ -199,7 +199,7 @@ test "authored target follows source identity across ref-des renumbering" {
     try std.testing.expectEqual(@as(?sidecar.SavedHeatsink, null), missing);
 }
 
-// spec: placement/thermal_field - a saved layout can override the authored fan's projected position, PCB face and outlet-to-board standoff without changing how the thermal field consumes its operating point
+// spec: placement/thermal_field - a saved layout can override the authored fan's projected position, PCB face and outlet-to-target clearance without changing how the thermal field consumes its operating point
 test "authored fan footprint is lifted from board-local and accepts a saved override" {
     const placement = optimizer.Placement{
         .parts = &.{},

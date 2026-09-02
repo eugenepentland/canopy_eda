@@ -88,8 +88,10 @@ const covered_face_fraction: f64 = 0.4;
 const h_airflow_1ms: f64 = 22.0;
 /// Film coefficient per face at roughly 2 m/s of forced air (W/m²K).
 const h_airflow_2ms: f64 = 35.0;
-/// Lateral growth of a free axial-fan jet per millimetre of outlet-to-board
-/// standoff. A 0.1 half-angle is the deliberately blunt screening convention:
+/// Lateral growth of a free axial-fan jet per millimetre of outlet-to-target
+/// clearance. The target is the board unless a same-face board sink intercepts
+/// the jet, in which case it is the fin tips. A 0.1 half-angle is the
+/// deliberately blunt screening convention:
 /// it conserves the authored delivered flow while making distance widen and
 /// slow the footprint instead of pretending an 80 mm fan is a uniform room
 /// breeze.
@@ -320,7 +322,9 @@ pub const Heatsink = struct {
 };
 
 /// One axial fan aimed normal to a PCB face. `footprint` is the projection of
-/// its outlet frame onto the board at zero standoff. The two catalog maxima are
+/// its outlet frame onto the target surface at zero clearance. `distance_mm`
+/// is outlet-to-board normally and outlet-to-fin-tip when a board-mounted
+/// heatsink occupies the same face. The two catalog maxima are
 /// kept separately because they are opposite endpoints of the P-Q curve, not a
 /// simultaneously available operating point. `operating_flow_fraction` makes
 /// the installed-flow assumption explicit until a measured/system-curve value
@@ -621,8 +625,9 @@ pub const ScenarioCooling = struct {
 
 /// Solve the four screening scenarios plus the authored fan scenario when one
 /// is enabled. When both physical assemblies are configured, append a combined
-/// fan-plus-heatsink solve. The fan changes only its selected PCB face while
-/// the sink retains its independently rated/derived natural-convection path.
+/// fan-plus-heatsink solve. On opposite PCB faces the two paths remain
+/// independent. On the same face, fan/sink footprint overlap raises the fin
+/// film coefficient while the sink base shields the PCB beneath it.
 ///
 /// `natural` is solved first because the heatsink scenario needs its answer: the
 /// sink goes on the part with the WORST junction margin in still air, which is
@@ -1229,7 +1234,7 @@ fn boardHeatsinkEffect(inputs: Inputs, grid: FieldGrid, scenario: Scenario) ?Hea
     const face = hs.physical_face orelse return null;
     const contact = clippedRect(hs.contact orelse return null, inputs.board) orelse return null;
     const area_m2 = contact.w_mm * contact.h_mm * square_mm_to_m2;
-    const resistance = padResistance(hs, area_m2) + sinkToAmbient(hs);
+    const resistance = padResistance(hs, area_m2) + sinkToAmbientFor(inputs, scenario);
     if (!(resistance > 0) or !std.math.isFinite(resistance)) return null;
     return .{
         .spans = boxSpans(grid, contact),
@@ -1255,9 +1260,24 @@ fn validNonnegative(value: ?f64) ?f64 {
 /// thickness/gap and is estimated from plate-fin efficiency plus exposed
 /// area; legacy/CLI sinks with zero fin thickness retain their rated theta-SA.
 pub fn sinkToAmbient(hs: Heatsink) f64 {
-    if (geometryDriven(hs.geometry)) return estimatedThetaSa(hs);
+    if (geometryDriven(hs.geometry)) return estimatedThetaSaAtFilm(hs, h_natural);
     if (std.math.isFinite(hs.theta_sa_c_per_w) and hs.theta_sa_c_per_w >= 0) return hs.theta_sa_c_per_w;
     return default_theta_sa_c_per_w;
+}
+
+/// Sink-to-ambient resistance used by one board scenario. A geometry-driven,
+/// board-mounted sink receives forced-convection credit only where a fan on
+/// the same PCB face actually overlaps its contact footprint. Rated package
+/// sinks retain their authored theta-SA because their test conditions and fin
+/// geometry are unknown.
+pub fn sinkToAmbientFor(inputs: Inputs, scenario: Scenario) f64 {
+    const hs = inputs.cooling.heatsink;
+    if (!geometryDriven(hs.geometry)) return sinkToAmbient(hs);
+    const overlap = fanSinkOverlapFraction(inputs, scenario);
+    if (!(overlap > 0)) return sinkToAmbient(hs);
+    const forced_h = fanFilmCoefficient(inputs.cooling.fan);
+    const effective_h = h_natural + overlap * @max(forced_h - h_natural, 0);
+    return estimatedThetaSaAtFilm(hs, effective_h);
 }
 
 /// Number of whole fins that fit the authored base at its stated pitch.
@@ -1275,7 +1295,7 @@ fn geometryDriven(geometry: HeatsinkGeometry) bool {
         std.math.isFinite(geometry.fin_gap_mm) and geometry.fin_gap_mm >= 0;
 }
 
-fn estimatedThetaSa(hs: Heatsink) f64 {
+fn estimatedThetaSaAtFilm(hs: Heatsink, film_w_m2k: f64) f64 {
     const g = hs.geometry;
     const width_m = g.width_mm * 1.0e-3;
     const length_m = g.length_mm * 1.0e-3;
@@ -1292,13 +1312,14 @@ fn estimatedThetaSa(hs: Heatsink) f64 {
     const fin_length_m = if (g.fin_axis == .length) length_m else width_m;
     const across_m = if (g.fin_axis == .length) width_m else length_m;
     const k = hs.material.conductivity();
-    const m_l = fin_h_m * @sqrt(2.0 * h_natural / (k * fin_t_m));
+    const h = if (std.math.isFinite(film_w_m2k) and film_w_m2k > 0) film_w_m2k else h_natural;
+    const m_l = fin_h_m * @sqrt(2.0 * h / (k * fin_t_m));
     const efficiency = if (m_l > 1.0e-9) std.math.tanh(m_l) / m_l else 1.0;
     const fin_area = n * fin_length_m * (2.0 * fin_h_m + fin_t_m);
     const base_open = fin_length_m * @max(across_m - n * fin_t_m, 0);
     const effective_area = base_open + efficiency * fin_area;
     if (!(effective_area > 0)) return default_theta_sa_c_per_w;
-    const convection = 1.0 / (h_natural * effective_area);
+    const convection = 1.0 / (h * effective_area);
     const base_conduction = base_m / (k * width_m * length_m);
     return convection + base_conduction;
 }
@@ -1569,19 +1590,8 @@ fn configurePackedSolver(
                 }
             }
         }
-        if (boardHeatsinkEffect(inputs, grid, .heatsink)) |effect| {
-            const share: f64 = @floatFromInt(spanCells(effect.spans));
-            var r = effect.spans[1].lo;
-            while (r <= effect.spans[1].hi) : (r += 1) {
-                var c = effect.spans[0].lo;
-                while (c <= effect.spans[0].hi) : (c += 1) {
-                    const i = r * work.cols + c;
-                    var lanes: [simd_scenarios]f32 = work.to_ambient[i];
-                    lanes[lane] += @floatCast(effect.conductance_w_per_k / share);
-                    work.to_ambient[i] = lanes;
-                }
-            }
-        }
+        if (boardHeatsinkEffect(inputs, grid, .heatsink)) |effect|
+            addPackedBoardHeatsink(work, grid, inputs, covered, effect, lane);
     }
 
     var r: usize = 0;
@@ -1614,6 +1624,32 @@ fn configurePackedSolver(
         if (active != 0) total += @as(ScenarioF64, @floatCast(source)) / scale;
     }
     work.total_power = total;
+}
+
+fn addPackedBoardHeatsink(
+    work: *PackedSolver,
+    grid: FieldGrid,
+    inputs: Inputs,
+    covered: []const [2]bool,
+    effect: HeatsinkEffect,
+    lane: usize,
+) void {
+    const cell_m = grid.cell_mm * 1.0e-3;
+    const cell_area_m2 = cell_m * cell_m;
+    const share: f64 = @floatFromInt(spanCells(effect.spans));
+    const face = @backingInt(effect.face);
+    var r = effect.spans[1].lo;
+    while (r <= effect.spans[1].hi) : (r += 1) {
+        var c = effect.spans[0].lo;
+        while (c <= effect.spans[0].hi) : (c += 1) {
+            const i = r * work.cols + c;
+            var lanes: [simd_scenarios]f32 = work.to_ambient[i];
+            if (boardSinkShieldsCell(inputs, .heatsink, grid, i, effect.face))
+                lanes[lane] -= @floatCast(h_natural * cell_area_m2 * faceFactor(covered[i][face]));
+            lanes[lane] += @floatCast(effect.conductance_w_per_k / share);
+            work.to_ambient[i] = lanes;
+        }
+    }
 }
 
 fn packedLaneToGrid(work: *const PackedSolver, lane: usize, grid: FieldGrid) void {
@@ -1768,8 +1804,9 @@ fn fillFaces(
     };
 }
 
-/// Effective jet footprint at the PCB. Standoff widens both dimensions by a
-/// conservative free-jet half-angle while preserving the fan centre.
+/// Effective jet footprint at the selected target surface. Clearance widens
+/// both dimensions by a conservative free-jet half-angle while preserving the
+/// fan centre.
 fn fanImpactRect(fan: Fan) ?BoardRect {
     const base = fan.footprint orelse return null;
     if (!fan.enabled()) return null;
@@ -1783,8 +1820,9 @@ fn fanImpactRect(fan: Fan) ?BoardRect {
     };
 }
 
-/// Area-average jet velocity at the PCB (m/s), from the explicitly assumed
-/// installed volume flow divided by the distance-expanded footprint.
+/// Area-average jet velocity at the selected target surface (m/s), from the
+/// explicitly assumed installed volume flow divided by the distance-expanded
+/// footprint.
 pub fn fanVelocity(fan: Fan) f64 {
     const rect = fanImpactRect(fan) orelse return 0;
     const area_m2 = rect.w_mm * rect.h_mm * square_mm_to_m2;
@@ -1800,16 +1838,76 @@ pub fn fanFilmCoefficient(fan: Fan) f64 {
     return h_natural + 11.5 * v + 0.5 * v * v;
 }
 
-fn faceFilmCoefficient(inputs: Inputs, scenario: Scenario, grid: FieldGrid, i: usize, face: Side) f64 {
-    if (!usesFan(scenario) or face != inputs.cooling.fan.face) return scenario.filmCoefficient();
-    const impact = fanImpactRect(inputs.cooling.fan) orelse return h_natural;
+/// Fraction of a board sink's clipped contact footprint intercepted by the
+/// fan jet at the fin tips. Opposite-face assemblies are deliberately isolated.
+fn fanSinkOverlapFraction(inputs: Inputs, scenario: Scenario) f64 {
+    if (scenario != .fan_heatsink) return 0;
+    const hs = inputs.cooling.heatsink;
+    if (!boardMountedHeatsink(hs)) return 0;
+    if (hs.physical_face != inputs.cooling.fan.face) return 0;
+    const contact = clippedRect(hs.contact orelse return 0, inputs.board) orelse return 0;
+    const impact = fanImpactRect(inputs.cooling.fan) orelse return 0;
+    const overlap = intersectionArea(contact, impact);
+    const contact_area = contact.w_mm * contact.h_mm;
+    if (!(contact_area > 0)) return 0;
+    return std.math.clamp(overlap / contact_area, 0, 1);
+}
+
+fn intersectionArea(a: BoardRect, b: BoardRect) f64 {
+    const x0 = @max(a.x_mm, b.x_mm);
+    const y0 = @max(a.y_mm, b.y_mm);
+    const x1 = @min(a.x_mm + a.w_mm, b.x_mm + b.w_mm);
+    const y1 = @min(a.y_mm + a.h_mm, b.y_mm + b.h_mm);
+    return @max(x1 - x0, 0) * @max(y1 - y0, 0);
+}
+
+fn sameFaceBoardHeatsink(inputs: Inputs, scenario: Scenario) bool {
+    const hs = inputs.cooling.heatsink;
+    return scenario == .fan_heatsink and boardMountedHeatsink(hs) and
+        hs.physical_face == inputs.cooling.fan.face;
+}
+
+/// The authored fan clearance ends at the fin tips for a same-face assembly.
+/// Bare PCB outside the sink is one sink height farther from the outlet.
+fn fanAtBoardSurface(inputs: Inputs, scenario: Scenario) Fan {
+    var fan = inputs.cooling.fan;
+    if (!sameFaceBoardHeatsink(inputs, scenario)) return fan;
+    const g = inputs.cooling.heatsink.geometry;
+    const base = if (std.math.isFinite(g.base_mm)) @max(g.base_mm, 0) else 0;
+    const fins = if (std.math.isFinite(g.fin_height_mm)) @max(g.fin_height_mm, 0) else 0;
+    const target_clearance = if (std.math.isFinite(fan.distance_mm)) @max(fan.distance_mm, 0) else 0;
+    fan.distance_mm = target_clearance + base + fins;
+    return fan;
+}
+
+fn cellCenterInRect(grid: FieldGrid, i: usize, rect: BoardRect) bool {
     const col = i % grid.cols;
     const row = i / grid.cols;
     const x = grid.origin_x_mm + (@as(f64, @floatFromInt(col)) + 0.5) * grid.cell_mm;
     const y = grid.origin_y_mm + (@as(f64, @floatFromInt(row)) + 0.5) * grid.cell_mm;
-    const inside = x >= impact.x_mm and x <= impact.x_mm + impact.w_mm and
-        y >= impact.y_mm and y <= impact.y_mm + impact.h_mm;
-    return if (inside) fanFilmCoefficient(inputs.cooling.fan) else h_natural;
+    return x >= rect.x_mm and x <= rect.x_mm + rect.w_mm and
+        y >= rect.y_mm and y <= rect.y_mm + rect.h_mm;
+}
+
+/// A mounted sink base replaces, rather than supplements, bare-PCB convection
+/// on its physical face. Its explicit pad + sink path is added separately.
+fn boardSinkShieldsCell(inputs: Inputs, scenario: Scenario, grid: FieldGrid, i: usize, face: Side) bool {
+    if (!usesHeatsink(scenario)) return false;
+    const hs = inputs.cooling.heatsink;
+    if (!boardMountedHeatsink(hs) or hs.physical_face != face) return false;
+    const contact = clippedRect(hs.contact orelse return false, inputs.board) orelse return false;
+    const spans = boxSpans(grid, contact);
+    const col = i % grid.cols;
+    const row = i / grid.cols;
+    return col >= spans[0].lo and col <= spans[0].hi and row >= spans[1].lo and row <= spans[1].hi;
+}
+
+fn faceFilmCoefficient(inputs: Inputs, scenario: Scenario, grid: FieldGrid, i: usize, face: Side) f64 {
+    if (boardSinkShieldsCell(inputs, scenario, grid, i, face)) return 0;
+    if (!usesFan(scenario) or face != inputs.cooling.fan.face) return scenario.filmCoefficient();
+    const fan = fanAtBoardSurface(inputs, scenario);
+    const impact = fanImpactRect(fan) orelse return h_natural;
+    return if (cellCenterInRect(grid, i, impact)) fanFilmCoefficient(fan) else h_natural;
 }
 
 /// Flag one side of every cell under a part's box as covered by its body.
@@ -2700,6 +2798,77 @@ test "opposite-face fan and heatsink solve together without forcing air over the
     try testing.expect(ladder[5].hotspot.rise_c < ladder[4].hotspot.rise_c);
     const one = try solveScenario(arena, inputs, .fan_heatsink);
     try testing.expectApproxEqAbs(ladder[5].hotspot.rise_c, one.hotspot.rise_c, 1e-4);
+}
+
+// spec: placement/thermal_field - a fan aimed at a board-mounted heatsink on the same PCB face measures clearance to the fin tips, cools the fins in proportion to jet/contact overlap, leaves the covered PCB without a duplicate bare-face path, and reaches exposed PCB at the additional sink height
+test "same-face fan cools the heatsink from fin-tip distance without cooling through its base" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const parts = [_]PartInput{.{
+        .ref_des = "U1",
+        .watts = 3,
+        .theta_jb = 8,
+        .tj_max = 125,
+        .mount = .{ .box = .{ .x_mm = 8, .y_mm = 8, .w_mm = 4, .h_mm = 4 }, .side = .top },
+    }};
+    const fan = Fan{
+        .model = "9A0812G4D011",
+        .footprint = .{ .x_mm = 6, .y_mm = 6, .w_mm = 8, .h_mm = 8 },
+        .face = .bottom,
+        .distance_mm = 10,
+        .free_air_flow_m3_s = 0.025,
+        .max_static_pressure_pa = 80.4,
+        .operating_flow_fraction = 0.6,
+    };
+    const bottom_sink = Heatsink{
+        .physical_face = .bottom,
+        .contact = .{ .x_mm = 6, .y_mm = 6, .w_mm = 8, .h_mm = 8 },
+        .geometry = .{
+            .width_mm = 8,
+            .length_mm = 8,
+            .base_mm = 2,
+            .fin_height_mm = 10,
+            .fin_thickness_mm = 1,
+            .fin_gap_mm = 1,
+        },
+    };
+    const inputs = Inputs{
+        .board = .{ .x_mm = 0, .y_mm = 0, .w_mm = 30, .h_mm = 20 },
+        .parts = &parts,
+        .cooling = .{ .fan = fan, .heatsink = bottom_sink },
+    };
+
+    try testing.expectApproxEqAbs(@as(f64, 1), fanSinkOverlapFraction(inputs, .fan_heatsink), 1e-12);
+    try testing.expect(sinkToAmbientFor(inputs, .fan_heatsink) < sinkToAmbient(bottom_sink));
+
+    const grid = try makeAdaptiveGrid(arena, inputs);
+    const centre = grid.rows / 2 * grid.cols + grid.cols / 3;
+    try testing.expectEqual(@as(f64, 0), faceFilmCoefficient(inputs, .heatsink, grid, centre, .bottom));
+    try testing.expectEqual(@as(f64, 0), faceFilmCoefficient(inputs, .fan_heatsink, grid, centre, .bottom));
+
+    const sink_only = try solveScenario(arena, inputs, .heatsink);
+    const combined = try solveScenario(arena, inputs, .fan_heatsink);
+    try testing.expect(combined.hotspot.rise_c < sink_only.hotspot.rise_c);
+    try testing.expect(combined.parts[0].tj_rise_c.? < sink_only.parts[0].tj_rise_c.?);
+
+    var farther = inputs;
+    farther.cooling.fan.distance_mm = 200;
+    try testing.expect(sinkToAmbientFor(farther, .fan_heatsink) > sinkToAmbientFor(inputs, .fan_heatsink));
+
+    var partial = inputs;
+    partial.cooling.fan.footprint.?.x_mm = 10;
+    const partial_overlap = fanSinkOverlapFraction(partial, .fan_heatsink);
+    try testing.expect(partial_overlap > 0 and partial_overlap < 1);
+    const partial_theta = sinkToAmbientFor(partial, .fan_heatsink);
+    try testing.expect(partial_theta > sinkToAmbientFor(inputs, .fan_heatsink));
+    try testing.expect(partial_theta < sinkToAmbient(bottom_sink));
+
+    var opposite_face = inputs;
+    opposite_face.cooling.fan.face = .top;
+    try testing.expectEqual(@as(f64, 0), fanSinkOverlapFraction(opposite_face, .fan_heatsink));
+    try testing.expectEqual(sinkToAmbient(bottom_sink), sinkToAmbientFor(opposite_face, .fan_heatsink));
 }
 
 // spec: placement/thermal_field - one scenario can be solved on its own and matches the ladder's answer for it, and the heatsink asked for alone still bolts its sink to the part the still-air solve names

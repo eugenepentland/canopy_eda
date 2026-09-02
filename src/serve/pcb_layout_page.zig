@@ -7823,7 +7823,7 @@ const tip_text = "Silkscreen text (T): click on the board to place a label " ++
 const tip_backing = "Edit fabrication backing regions with the shared shape-sketch palette: lines/arcs, dimensions, constraints, fillet, chamfer, offset and mirror. " ++
     "The authored side, material, thickness, and automatic footprint cutouts remain unchanged. Saved with the layout and emitted in its named Gerber.";
 const tip_heatsink = "Draw or edit a PCB-mounted physical heatsink. Drag its body to move it, drag corner handles to resize it, or click it to edit its face, material, fin count/dimensions, and thermal pad. Every board cell under its base is thermally coupled; no component target is needed. Saved with the layout; the thermal ladder and 3D view use it.";
-const tip_fan = "Place or edit an axial fan. Drag its circular footprint to move it, drag corner handles to resize its outlet, or click it to edit the PCB face, outlet-to-board distance, and airflow specifications. Saved with the layout and used by the fan thermal scenario.";
+const tip_fan = "Place or edit an axial fan. Drag its circular footprint to move it, drag corner handles to resize its outlet, or click it to edit the PCB face, outlet-to-target distance, and airflow specifications. The target is the fin tips when a heatsink shares that face, otherwise the PCB. Saved with the layout and used by the fan thermal scenario.";
 const tip_ruler = "Ruler / dimension (D): drag to measure, or select a footprint first and drag its origin to a straight board edge to create a driving dimension.";
 const tip_move = "Move the selection by an X/Y distance (M): select footprints, tracks, vias, or outline-sketch geometry, then press M (or this button) and type how far to move it; one undo step.";
 const pad_align_tool_html = @embedFile("assets/pcb_pad_align_tool.html");
@@ -13631,7 +13631,7 @@ test "CLI persist refreshes the auto cache poses so a default read sees the muta
     try std.testing.expectEqual(@as(f64, 7.5), slot.params.loop_w);
 }
 
-// spec: Web Server - The PCB editor draws a movable circular axial-fan target and outlet footprint, edits its PCB face and outlet-to-board distance with its catalog airflow/pressure and installed-flow assumption, and persists the exact fan assembly with each saved layout for the thermal fan scenario
+// spec: Web Server - The PCB editor draws a movable circular axial-fan target and outlet footprint, edits its PCB face and outlet-to-target distance with its catalog airflow/pressure and installed-flow assumption, explains that a same-face heatsink makes the target its fin tips, and persists the exact fan assembly with each saved layout for the thermal fan scenario
 // spec: Web Server - physical board navigation exposes stable 3D and a read-only assembly workspace
 // spec: serve/board-review - the PCB header exposes Review only for board designs and preserves a selected saved layout
 test "PCB header links board designs to assembly and keeps modules scoped" {

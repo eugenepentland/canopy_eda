@@ -298,7 +298,7 @@ fn writeManifest(alloc: std.mem.Allocator, input: Input, groups: Groups) Error![
     const shape = input.model.shape;
     var out: std.Io.Writer.Allocating = .init(alloc);
     const w = &out.writer;
-    try w.writeAll("{\n  \"schema\":\"netlisp-elmer-thermal\",\n  \"schemaVersion\":\"1.0\",\n  \"exporterVersion\":");
+    try w.writeAll("{\n  \"schema\":\"netlisp-elmer-thermal\",\n  \"schemaVersion\":\"1.1\",\n  \"exporterVersion\":");
     try json_writer.writeString(w, exporter_version);
     try w.writeAll(",\n  \"design\":");
     try json_writer.writeString(w, input.design_name);
@@ -306,15 +306,17 @@ fn writeManifest(alloc: std.mem.Allocator, input: Input, groups: Groups) Error![
     if (input.layout_name.len == 0) try w.writeAll("null") else try json_writer.writeString(w, input.layout_name);
     const scenario = input.builtin.scenario;
     try w.print(",\n  \"scenario\":{{\"name\":\"{s}\",\"ambientC\":{d},\"airSpeedMps\":", .{ @tagName(scenario), input.ambient_c });
-    const speed = if (scenario == .fan) thermal_field.fanVelocity(input.solver_inputs.cooling.fan) else airSpeedMps(scenario);
+    const has_fan = scenario == .fan or scenario == .fan_heatsink;
+    const has_heatsink = scenario == .heatsink or scenario == .fan_heatsink;
+    const speed = if (has_fan) thermal_field.fanVelocity(input.solver_inputs.cooling.fan) else airSpeedMps(scenario);
     if (speed) |value| try w.print("{d}", .{value}) else try w.writeAll("null");
     try w.print(",\"stillAir\":{s},\"faceFilmWm2K\":", .{if (scenario == .natural or scenario == .heatsink) "true" else "false"});
-    if (scenario == .fan) try w.writeAll("null") else try w.print("{d}", .{scenario.filmCoefficient()});
+    if (has_fan) try w.writeAll("null") else try w.print("{d}", .{scenario.filmCoefficient()});
     try w.writeAll(",\"edgeCondition\":\"adiabatic\"},\n");
-    if (scenario == .heatsink) {
+    if (has_heatsink) {
         const hs = input.solver_inputs.cooling.heatsink;
         const ref_des = appliedHeatsinkRef(input);
-        const theta_sa = thermal_field.sinkToAmbient(hs);
+        const theta_sa = thermal_field.sinkToAmbientFor(input.solver_inputs, scenario);
         const fin_count = thermal_field.finCount(hs.geometry);
         try w.writeAll("  \"heatsink\":{\"attachment\":");
         try json_writer.writeString(w, if (hs.ref_des.len == 0 and hs.contact != null and hs.physical_face != null) "board" else "component");
@@ -335,14 +337,18 @@ fn writeManifest(alloc: std.mem.Allocator, input: Input, groups: Groups) Error![
     } else {
         try w.writeAll("  \"heatsink\":null,\n");
     }
-    if (scenario == .fan) {
+    if (has_fan) {
         const fan = input.solver_inputs.cooling.fan;
         const rect = fan.footprint orelse thermal_field.BoardRect{ .x_mm = 0, .y_mm = 0, .w_mm = 0, .h_mm = 0 };
+        const hs = input.solver_inputs.cooling.heatsink;
+        const fan_targets_sink = scenario == .fan_heatsink and hs.ref_des.len == 0 and
+            hs.contact != null and hs.physical_face == fan.face;
         try w.writeAll("  \"fan\":{\"model\":");
         try json_writer.writeString(w, fan.model);
-        try w.print(",\"face\":\"{s}\",\"footprintMm\":[{d},{d},{d},{d}],\"distanceMm\":{d},\"freeAirFlowM3s\":{d},\"maxStaticPressurePa\":{d},\"operatingFlowFraction\":{d},\"operatingFlowM3s\":{d},\"estimatedPressurePa\":{d},\"velocityAtBoardMps\":{d}}},\n", .{
-            @tagName(fan.face),     rect.x_mm,                  rect.y_mm,                   rect.w_mm,           rect.h_mm,               fan.distance_mm,
-            fan.free_air_flow_m3_s, fan.max_static_pressure_pa, fan.operating_flow_fraction, fan.operatingFlow(), fan.estimatedPressure(), thermal_field.fanVelocity(fan),
+        try w.print(",\"face\":\"{s}\",\"footprintMm\":[{d},{d},{d},{d}],\"distanceMm\":{d},\"distanceTarget\":\"{s}\",\"freeAirFlowM3s\":{d},\"maxStaticPressurePa\":{d},\"operatingFlowFraction\":{d},\"operatingFlowM3s\":{d},\"estimatedPressurePa\":{d},\"velocityAtTargetMps\":{d}}},\n", .{
+            @tagName(fan.face),                                   rect.x_mm,              rect.y_mm,                  rect.w_mm,                   rect.h_mm,           fan.distance_mm,
+            if (fan_targets_sink) "heatsink_fin_tips" else "pcb", fan.free_air_flow_m3_s, fan.max_static_pressure_pa, fan.operating_flow_fraction, fan.operatingFlow(), fan.estimatedPressure(),
+            thermal_field.fanVelocity(fan),
         });
     } else {
         try w.writeAll("  \"fan\":null,\n");
@@ -450,7 +456,7 @@ fn coolingLabel(scenario: thermal_field.Scenario) []const u8 {
         .airflow_1ms => "1 m/s airflow",
         .airflow_2ms => "2 m/s airflow",
         .heatsink => "a heatsink",
-        .fan_heatsink => "the specified fan and passive heatsink",
+        .fan_heatsink => "the specified fan and heatsink",
     };
 }
 
@@ -771,6 +777,27 @@ test "Elmer export emits a native hexahedral mesh and still-air case" {
     try std.testing.expect(std.mem.indexOf(u8, sunk.manifest, "\"contactRectMm\":[1,2,20,20]") != null);
     try std.testing.expect(std.mem.indexOf(u8, sunk.manifest, "\"thicknessMm\":0.5") != null);
     try std.testing.expect(std.mem.indexOf(u8, sunk.readme, "20 x 20 mm") != null);
+
+    var combined_input = sink_input;
+    combined_input.builtin.scenario = .fan_heatsink;
+    combined_input.solver_inputs.cooling.heatsink.ref_des = "";
+    combined_input.solver_inputs.cooling.heatsink.side = .board_backside;
+    combined_input.solver_inputs.cooling.heatsink.physical_face = .bottom;
+    combined_input.solver_inputs.cooling.fan = .{
+        .model = "9A0812G4D011",
+        .footprint = .{ .x_mm = 0, .y_mm = 0, .w_mm = 80, .h_mm = 80 },
+        .face = .bottom,
+        .distance_mm = 10,
+        .free_air_flow_m3_s = 0.025,
+        .max_static_pressure_pa = 80.4,
+        .operating_flow_fraction = 0.6,
+    };
+    const combined = try build(alloc, combined_input);
+    try std.testing.expect(std.mem.indexOf(u8, combined.manifest, "\"heatsink\":{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, combined.manifest, "\"fan\":{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, combined.manifest, "\"distanceTarget\":\"heatsink_fin_tips\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, combined.manifest, "\"velocityAtTargetMps\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, combined.readme, "specified fan and heatsink") != null);
 
     var oversized = input;
     oversized.model.shape.cols = thermal_field.max_cells_axis + 1;

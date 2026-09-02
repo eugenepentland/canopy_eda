@@ -3406,6 +3406,7 @@ src/placement/thermal_field.zig::isActive | fn isActive(self: FieldGrid, col: us
 src/placement/thermal_field.zig::max_cells_axis value
 src/placement/thermal_field.zig::operatingFlow | fn operatingFlow(self: Fan) f64
 src/placement/thermal_field.zig::sinkToAmbient | fn sinkToAmbient(hs: Heatsink) f64
+src/placement/thermal_field.zig::sinkToAmbientFor | fn sinkToAmbientFor(inputs: Inputs, scenario: Scenario) f64
 src/placement/thermal_field.zig::solveScenario | fn solveScenario( allocator: std.mem.Allocator, inputs: Inputs, scenario: Scenario, ) std.mem.Allocator.Error!ScenarioResult
 src/placement/thermal_field.zig::solveScenarios | fn solveScenarios( allocator: std.mem.Allocator, inputs: Inputs, ) std.mem.Allocator.Error![]ScenarioResult
 src/placement/thermal_field.zig::spreaderLayers | fn spreaderLayers(inner_planes: usize) u8
