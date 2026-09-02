@@ -183,6 +183,7 @@ test {
     _ = @import("module_metadata.zig");
     _ = @import("net_name.zig");
     _ = @import("numeric.zig");
+    _ = @import("poly_scanline.zig");
     _ = @import("parts.zig");
     _ = @import("paths.zig");
     _ = @import("pdf.zig");
@@ -239,6 +240,7 @@ test {
     _ = @import("placement/rf_pad_adapt.zig");
     _ = @import("ground_via_seed.zig");
     _ = @import("placement/guide_branch.zig");
+    _ = @import("placement/elliptic_integral.zig");
     _ = @import("placement/impedance.zig");
     _ = @import("placement/impedance_field.zig");
     _ = @import("placement/impedance_microstrip.zig");
@@ -358,6 +360,7 @@ test {
     _ = @import("render_svg/context.zig");
     _ = @import("render_svg/draw.zig");
     _ = @import("render_svg/hub.zig");
+    _ = @import("render_svg/schematic_walk.zig");
     _ = @import("render_svg/section_inset.zig");
     _ = @import("req_checks_cases.zig");
     _ = @import("req_derived_checks.zig");
@@ -423,6 +426,7 @@ test {
     _ = @import("layout_sidecar_store.zig");
     _ = @import("serve/library.zig");
     _ = @import("serve/library_3d.zig");
+    _ = @import("serve/mcp_arg_names.zig");
     _ = @import("serve/mcp_checks.zig");
     _ = @import("serve/mcp_close_gaps.zig");
     _ = @import("route_cleanup_gate.zig");
@@ -500,6 +504,7 @@ test {
     _ = @import("serve/warm_sched.zig");
     _ = @import("serve/ward_auth.zig");
     _ = @import("sexpr/ast.zig");
+    _ = @import("sexpr/paren_span.zig");
     _ = @import("sexpr/parser.zig");
     _ = @import("sexpr/printer.zig");
     _ = @import("sexpr/tokenizer.zig");
@@ -511,6 +516,7 @@ test {
     _ = @import("target_unblock.zig");
     _ = @import("testpoint_silkscreen.zig");
     _ = @import("wasm_drc.zig");
+    _ = @import("uuid.zig");
     _ = @import("zipfile.zig");
 }
 

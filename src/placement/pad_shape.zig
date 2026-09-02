@@ -14,6 +14,7 @@
 const std = @import("std");
 const optimizer = @import("optimizer.zig");
 const geometry = @import("geometry.zig");
+const poly_scanline = @import("../poly_scanline.zig");
 
 /// A pad's world-space collision shape: its bounding box (always) plus, for a
 /// non-rectangular pad, the real copper outline in world mm (`poly`; empty ⇒
@@ -35,43 +36,15 @@ pub const Shape = struct {
 pub fn copperAnchor(shape: Shape) [2]f64 {
     const center = [2]f64{ (shape.x0 + shape.x1) / 2, (shape.y0 + shape.y1) / 2 };
     if (shape.poly.len < 3 or pointInPoly(shape.poly, center[0], center[1])) return center;
-    if (widestScanlineInterval(shape.poly, center[1])) |span|
+    if (poly_scanline.widestInterval(shape.poly, center[1])) |span|
         return .{ (span[0] + span[1]) / 2, center[1] };
     for (shape.poly, 0..) |point, i| {
         const previous = shape.poly[if (i == 0) shape.poly.len - 1 else i - 1];
         const y = (previous[1] + point[1]) / 2;
-        if (widestScanlineInterval(shape.poly, y)) |span|
+        if (poly_scanline.widestInterval(shape.poly, y)) |span|
             return .{ (span[0] + span[1]) / 2, y };
     }
     return center;
-}
-
-/// Widest even/odd-filled interval where a horizontal scanline crosses a
-/// simple polygon. Footprint outlines are simplified before reaching here;
-/// the generous fixed bound avoids allocator plumbing through every pad-target
-/// query while still covering raw small custom polygons.
-fn widestScanlineInterval(poly: []const [2]f64, y: f64) ?[2]f64 {
-    var intersections: [512]f64 = undefined;
-    var count: usize = 0;
-    var previous = poly[poly.len - 1];
-    for (poly) |point| {
-        if ((previous[1] > y) != (point[1] > y)) {
-            if (count == intersections.len) return null;
-            intersections[count] = previous[0] + (y - previous[1]) /
-                (point[1] - previous[1]) * (point[0] - previous[0]);
-            count += 1;
-        }
-        previous = point;
-    }
-    if (count < 2) return null;
-    std.mem.sort(f64, intersections[0..count], {}, std.sort.asc(f64));
-    var best: ?[2]f64 = null;
-    var i: usize = 0;
-    while (i + 1 < count) : (i += 2) {
-        const candidate = [2]f64{ intersections[i], intersections[i + 1] };
-        if (best == null or candidate[1] - candidate[0] > best.?[1] - best.?[0]) best = candidate;
-    }
-    return best;
 }
 
 /// Outline-simplification tolerance (mm). KiCad emits a custom pad's rounded

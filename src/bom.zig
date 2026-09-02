@@ -10,6 +10,7 @@ const env_mod = @import("eval/env.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const parts_mod = @import("parts.zig");
 const infra_random = @import("infra/random.zig");
+const uuid_text = @import("uuid.zig");
 const kicad_format = @import("kicad_pcb/format.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
@@ -22,20 +23,6 @@ pub const applyExisting = bom_resolve.applyExisting;
 pub const applyResolvedSelections = bom_resolve.applyResolvedSelections;
 pub const existingSidecarMatches = bom_resolve.existingSidecarMatches;
 pub const entryMatchesSource = bom_resolve.entryMatchesSource;
-
-// ── Constants ─────────────────────────────────────────────────────
-// UUID v4 byte indices (RFC 4122)
-const uuid_version_byte: usize = 6;
-const uuid_variant_byte: usize = 8;
-const uuid_byte_5: usize = 5;
-const uuid_byte_7: usize = 7;
-const uuid_byte_9: usize = 9;
-const uuid_byte_10: usize = 10;
-const uuid_byte_11: usize = 11;
-const uuid_byte_12: usize = 12;
-const uuid_byte_13: usize = 13;
-const uuid_byte_14: usize = 14;
-const uuid_byte_15: usize = 15;
 
 /// Error set for BOM loading and application. Covers parser-side errors,
 /// the file IO surface infra_fs.cwd() exposes, and `OutOfMemory`.
@@ -235,20 +222,13 @@ pub fn collectFlatInstances(
     }
 }
 
-/// Generate a v4 UUID string (lowercase hex with dashes).
+/// Generate a v4 UUID string (lowercase hex with dashes). Only the 16 random
+/// bytes are minted here; the version/variant stamping and the canonical text
+/// form are `uuid.format`'s, shared with `flat_netlist.uuidFromId`.
 pub fn generateUuid(allocator: std.mem.Allocator) (std.mem.Allocator.Error || std.Io.RandomSecureError)![]const u8 {
     var bytes: [16]u8 = undefined;
     try infra_random.bytes(&bytes);
-    bytes[uuid_version_byte] = (bytes[uuid_version_byte] & 0x0f) | 0x40;
-    bytes[uuid_variant_byte] = (bytes[uuid_variant_byte] & 0x3f) | 0x80;
-
-    return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}" ++
-        "-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
-        bytes[0],                 bytes[1],            bytes[2],                 bytes[3],
-        bytes[4],                 bytes[uuid_byte_5],  bytes[uuid_version_byte], bytes[uuid_byte_7],
-        bytes[uuid_variant_byte], bytes[uuid_byte_9],  bytes[uuid_byte_10],      bytes[uuid_byte_11],
-        bytes[uuid_byte_12],      bytes[uuid_byte_13], bytes[uuid_byte_14],      bytes[uuid_byte_15],
-    });
+    return uuid_text.format(allocator, bytes, .random_v4);
 }
 
 /// Jaccard-style overlap of two net lists in [0, 1]: `|a ∩ b| / |a ∪ b|`.
@@ -296,38 +276,10 @@ pub fn applyBomUuids(
         }
     }
 
-    try applyBomUuidsRec(block, &uuid_map, allocator, "");
-}
-
-/// Apply the ref_des→uuid map through the block hierarchy, threading the
-/// `sub-block/…` prefix so hierarchical `.bom` keys line up (mirrors
-/// `bom_resolve.applyBom`'s prefix threading).
-fn applyBomUuidsRec(
-    block: *const DesignBlock,
-    uuid_map: *const std.StringHashMapUnmanaged([]const u8),
-    allocator: std.mem.Allocator,
-    prefix: []const u8,
-) std.mem.Allocator.Error!void {
-    // Apply to instances (uses @constCast — safe because block was just allocated)
-    const instances: []Instance = @constCast(block.instances);
-    for (instances) |*inst| {
-        const key = if (prefix.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, inst.ref_des })
-        else
-            inst.ref_des;
-        defer if (prefix.len > 0) allocator.free(key);
-        if (uuid_map.get(key)) |uuid| {
-            inst.uuid = uuid;
-        }
-    }
-    for (block.sub_blocks) |sb| {
-        const child_prefix = if (prefix.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sb.name })
-        else
-            sb.name;
-        defer if (prefix.len > 0) allocator.free(child_prefix);
-        try applyBomUuidsRec(sb.block, uuid_map, allocator, child_prefix);
-    }
+    // The uuid half of `bom_resolve.applyBom` — same recursion, same
+    // prefix threading, no property merge. (`@constCast` is safe: the caller
+    // owns the block it just evaluated.)
+    try bom_resolve.applyBom(allocator, block, &uuid_map, null, "");
 }
 
 // spec: bom - Generates deterministic UUIDs in the expected format

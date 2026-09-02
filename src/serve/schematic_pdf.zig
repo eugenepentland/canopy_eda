@@ -42,6 +42,8 @@ const svg2pdf = @import("../svg2pdf.zig");
 const mcp_tools = @import("mcp_tools.zig");
 const notes = @import("notes.zig");
 const page_cache = @import("page_cache.zig");
+const handler_probe = @import("handler_probe.zig");
+const cached_download = @import("cached_download.zig");
 const thermal_api = @import("thermal_api.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
@@ -193,40 +195,15 @@ fn composeFor(
 /// is percent-decoded before any lookup (httpz hands path params over
 /// verbatim). Unknown name → 404 with a plain-text body.
 pub fn schematicPdfApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
-    const name_raw = req.param("name") orelse {
-        res.status = http_not_found;
-        res.body = err_not_found;
-        return;
-    };
-    const name = try urlDecodeAlloc(ctx.allocator, name_raw);
-
-    // Read the live version BEFORE composing, so a design edit that lands
-    // mid-request is treated as a miss next time instead of being baked in.
-    const live_version = serve_root.getLiveVersion(name);
-    var miss_version: ?u32 = null;
-    if (ctx.state.caches.reads.schematic_pdf.serve(.{
-        .scratch = ctx.allocator,
-        .req = req,
-        .res = res,
-        .name = name,
-        .live_version = live_version,
-    }, &miss_version)) {
-        // The structural self-check (`pdf.validate`) is NOT re-run: these exact
-        // bytes passed it at compose time and nothing has touched them since.
-        res.content_type = .PDF;
-        res.header(header_content_disposition, try dispositionFor(ctx.allocator, name));
-        res.header(header_cors_allow_origin, "*");
-        return;
-    }
+    const endpoint = cached_download.endpointFor(ctx, req, res, err_not_found, framePdf);
+    const cache = &ctx.state.caches.reads.schematic_pdf;
+    const miss = try cached_download.begin(endpoint, cache) orelse return;
 
     var deps: ?page_cache.FileSet = null;
-    const bytes = composeFor(ctx.allocator, ctx.project_dir, name, themeFromQuery(req), &deps) catch |e| {
+    const bytes = composeFor(ctx.allocator, ctx.project_dir, miss.name, themeFromQuery(req), &deps) catch |e| {
         if (deps) |d| d.deinit();
+        if (cached_download.answeredNotFound(endpoint, e)) return;
         switch (e) {
-            error.FileNotFound, error.NotADesign, error.InvalidName => {
-                res.status = http_not_found;
-                res.body = err_not_found;
-            },
             error.BadHeader,
             error.MissingStartxref,
             error.BadXrefOffset,
@@ -237,33 +214,25 @@ pub fn schematicPdfApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
             error.UnbalancedGraphicsState,
             error.UnbalancedTextObject,
             => {
-                log.warn("schematic-pdf self-check {s} failed: {s}", .{ name, @errorName(e) });
-                res.status = http_internal_error;
-                res.body = err_self_check;
+                log.warn("schematic-pdf self-check {s} failed: {s}", .{ miss.name, @errorName(e) });
+                cached_download.fail(endpoint, err_self_check);
             },
             else => {
-                log.warn("schematic-pdf compose {s} failed: {s}", .{ name, @errorName(e) });
-                res.status = http_internal_error;
-                res.body = err_compose;
+                log.warn("schematic-pdf compose {s} failed: {s}", .{ miss.name, @errorName(e) });
+                cached_download.fail(endpoint, err_compose);
             },
         }
         return;
     };
 
+    try cached_download.finish(endpoint, cache, miss, bytes, deps);
+}
+
+/// How every answer from this endpoint is framed, hit or miss alike.
+fn framePdf(allocator: std.mem.Allocator, res: *httpz.Response, name: []const u8) std.mem.Allocator.Error!void {
     res.content_type = .PDF;
-    res.header(header_content_disposition, try dispositionFor(ctx.allocator, name));
+    res.header(header_content_disposition, try dispositionFor(allocator, name));
     res.header(header_cors_allow_origin, "*");
-    res.body = bytes;
-    ctx.state.caches.reads.schematic_pdf.store(.{
-        .scratch = ctx.allocator,
-        .req = req,
-        .res = res,
-        .name = name,
-        .body = bytes,
-        .files = deps,
-        .live_version = miss_version,
-        .current_version = serve_root.getLiveVersion(name),
-    });
 }
 
 /// `Content-Disposition` naming the download `<name>.pdf`. Built per request
@@ -271,13 +240,6 @@ pub fn schematicPdfApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
 /// so a cached answer is framed exactly as a fresh one.
 fn dispositionFor(allocator: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error![]const u8 {
     return std.fmt.allocPrint(allocator, "attachment; filename=\"{s}.pdf\"", .{name});
-}
-
-/// Percent-decode a path param onto `allocator`. httpz passes `:params`
-/// verbatim, so every filesystem-facing use decodes first.
-fn urlDecodeAlloc(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]u8 {
-    const buf = try allocator.dupe(u8, raw);
-    return std.Uri.percentDecodeInPlace(buf);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────
@@ -323,21 +285,9 @@ fn writePdfFixture(dir: std.Io.Dir, file: []const u8) !void {
 
 /// Drive the real handler for `name` (percent-encoded as given) and return the
 /// status plus a copy of the body on `alloc`.
-const Served = struct { status: u16, body: []const u8, content_type: ?httpz.ContentType };
-
-fn serve(alloc: std.mem.Allocator, project: []const u8, name: []const u8, theme: ?[]const u8) !Served {
-    var state = serve_root.ServerState{};
-    var srv = Server{ .allocator = alloc, .project_dir = project, .auth_dir = project, .state = &state };
-    var ht = httpz.testing.init(.{});
-    defer ht.deinit();
-    ht.param("name", name);
-    if (theme) |t| ht.query("theme", t);
-    try schematicPdfApi(&srv, ht.req, ht.res);
-    return .{
-        .status = ht.res.status,
-        .body = try alloc.dupe(u8, ht.res.body),
-        .content_type = ht.res.content_type,
-    };
+fn serve(alloc: std.mem.Allocator, project: []const u8, name: []const u8, theme: ?[]const u8) !handler_probe.Served {
+    const t = theme orelse return handler_probe.drive(alloc, project, name, &.{}, schematicPdfApi);
+    return handler_probe.drive(alloc, project, name, &.{.{ "theme", t }}, schematicPdfApi);
 }
 
 // spec: Web Server - GET /api/schematic-pdf/:name returns the composed review PDF as an application/pdf attachment that passes the writer's structural self-check

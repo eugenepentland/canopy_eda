@@ -14,6 +14,7 @@ const Branch = ctx_mod.Branch;
 const text_g_close = "</text>\n</g>\n";
 const BranchBody = ctx_mod.BranchBody;
 const draw = @import("draw.zig");
+const schematic_walk = @import("schematic_walk.zig");
 const hub_width = draw.hub_width;
 const hub_x = draw.hub_x;
 const pin_stub = draw.pin_stub;
@@ -38,7 +39,7 @@ const escape = @import("../escape.zig");
 // ── Layout constants ──────────────────────────────────────────────
 const half_divisor: f64 = 2.0;
 const branch_bus_gap: f64 = 10.0;
-const terminal_gap: f64 = 20.0;
+const terminal_gap = schematic_walk.chain_gap;
 const far_x_sentinel: f64 = 99999.0;
 const terminal_inset: f64 = 15.0;
 const label_baseline: f64 = 4.0;
@@ -384,38 +385,46 @@ test "branch tree terminals can be deferred for hub-level routing" {
 
 // ── Passive chain drawing ─────────────────────────────────────────────
 
-/// Lay out a horizontal series chain of passive spokes leftward from
-/// `start_x`, drawing wire segments between each pair and returning the
-/// final x of the chain so the caller can attach a terminal symbol.
-pub fn drawPassiveChainLeft(_: *RenderCtx, w: anytype, start_x: f64, cy: f64, spokes: []const FlatInst) RenderError!f64 {
-    if (spokes.len == 0) return start_x;
-    var x = start_x;
-    for (spokes, 0..) |inst, i| {
-        if (i > 0) {
-            try drawWire(w, x, cy, x - terminal_gap, cy);
-            x -= terminal_gap;
+/// The SVG backend of `schematic_walk.passiveChain`: a gap between two bodies
+/// is a wire, and a body is a drawn passive on the side the walk names.
+fn ChainDrawer(comptime W: type) type {
+    return struct {
+        w: W,
+
+        pub fn wire(self: @This(), x1: f64, y1: f64, x2: f64, y2: f64) RenderError!void {
+            return drawWire(self.w, x1, y1, x2, y2);
         }
-        try drawPassiveLeft(w, inst, x, cy);
-        x -= passive_bw;
-    }
-    return x;
+
+        pub fn passive(
+            self: @This(),
+            inst: FlatInst,
+            x: f64,
+            cy: f64,
+            dir: schematic_walk.Direction,
+        ) RenderError!void {
+            return switch (dir) {
+                .left => drawPassiveLeft(self.w, inst, x, cy),
+                .right => drawPassiveRight(self.w, inst, x, cy),
+            };
+        }
+    };
 }
 
-/// Right-hand mirror of `drawPassiveChainLeft`. Walks the spoke list left
-/// to right, drawing each passive box in series, and returns the final x
-/// past the last passive's right edge.
+fn chainDrawer(w: anytype) ChainDrawer(@TypeOf(w)) {
+    return .{ .w = w };
+}
+
+/// Lay out a horizontal series chain of passive spokes leftward from
+/// `start_x`, drawing wire segments between each pair and returning the
+/// final x of the chain so the caller can attach a terminal symbol. The walk
+/// itself is `schematic_walk.passiveChain`, shared with the JSON backend.
+pub fn drawPassiveChainLeft(_: *RenderCtx, w: anytype, start_x: f64, cy: f64, spokes: []const FlatInst) RenderError!f64 {
+    return schematic_walk.passiveChain(chainDrawer(w), .left, start_x, cy, spokes);
+}
+
+/// Right-hand mirror of `drawPassiveChainLeft`.
 pub fn drawPassiveChainRight(_: *RenderCtx, w: anytype, start_x: f64, cy: f64, spokes: []const FlatInst) RenderError!f64 {
-    if (spokes.len == 0) return start_x;
-    var x = start_x;
-    for (spokes, 0..) |inst, i| {
-        if (i > 0) {
-            try drawWire(w, x, cy, x + terminal_gap, cy);
-            x += terminal_gap;
-        }
-        try drawPassiveRight(w, inst, x, cy);
-        x += passive_bw;
-    }
-    return x;
+    return schematic_walk.passiveChain(chainDrawer(w), .right, start_x, cy, spokes);
 }
 
 fn drawPassiveLeft(w: anytype, inst: FlatInst, x: f64, cy: f64) !void {

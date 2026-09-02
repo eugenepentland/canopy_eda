@@ -36,6 +36,7 @@
 //!     report.
 
 const std = @import("std");
+const mcp_arg_names = @import("mcp_arg_names.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const modules_mod = @import("modules.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
@@ -3398,29 +3399,7 @@ fn argStr(args_val: ?std.json.Value, key: []const u8) ?[]const u8 {
     return if (v == .string and v.string.len > 0) v.string else null;
 }
 
-/// A net-name restriction argument, accepted as a JSON array or a comma string
-/// (the same shape the PCB image/describe tools take for `nets`/`refs`). Empty
-/// when absent — the pass then works every open net.
-fn argNames(alloc: std.mem.Allocator, args_val: ?std.json.Value, key: []const u8) HandlerError![]const []const u8 {
-    const av = args_val orelse return &.{};
-    if (av != .object) return &.{};
-    const v = av.object.get(key) orelse return &.{};
-    var out: std.ArrayList([]const u8) = .empty;
-    switch (v) {
-        .array => |arr| for (arr.items) |it| {
-            if (it == .string and it.string.len > 0) try out.append(alloc, it.string);
-        },
-        .string => |s| {
-            var parts = std.mem.splitScalar(u8, s, ',');
-            while (parts.next()) |p| {
-                const t = std.mem.trim(u8, p, " ");
-                if (t.len > 0) try out.append(alloc, t);
-            }
-        },
-        else => {},
-    }
-    return out.items;
-}
+const argNames = mcp_arg_names.parse;
 
 /// A boolean argument, or null when the caller did not supply one.
 fn argBool(args_val: ?std.json.Value, key: []const u8) ?bool {

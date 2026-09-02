@@ -3,6 +3,7 @@
 //! of the stack/reference model and deserves its own compact domain boundary.
 
 const std = @import("std");
+const elliptic = @import("elliptic_integral.zig");
 
 const Error = error{OutOfDomain};
 const eta0: f64 = 120.0 * std.math.pi;
@@ -19,27 +20,7 @@ fn positive(v: f64) bool {
     return v > 0 and std.math.isFinite(v);
 }
 
-/// Complete elliptic integral K(k), evaluated as π/(2 AGM(1,sqrt(1-k²))).
-fn ellipticK(k: f64) Error!f64 {
-    if (!(k > 0 and k < 1)) return Error.OutOfDomain;
-    if (!std.math.isFinite(k)) return Error.OutOfDomain;
-    var a: f64 = 1;
-    var b = @sqrt(1.0 - k * k);
-    var i: usize = 0;
-    while (i < 32) : (i += 1) {
-        const next_a = 0.5 * (a + b);
-        const next_b = @sqrt(a * b);
-        if (next_a == a and next_b == b) break;
-        a = next_a;
-        b = next_b;
-    }
-    if (!positive(a)) return Error.OutOfDomain;
-    return std.math.pi / (2.0 * a);
-}
-
-fn ellipticRatio(k: f64) Error!f64 {
-    return try ellipticK(k) / try ellipticK(@sqrt(1.0 - k * k));
-}
+const ellipticRatio = elliptic.completeRatio;
 
 /// Ghione-Naldi ground-backed CPW with Gupta's finite-thickness correction.
 /// `gap_mm` is the edge-to-edge centre-strip/ground slot; no mask is modelled.

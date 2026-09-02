@@ -703,13 +703,23 @@ fn mergeProps(
     return merged.toOwnedSlice(allocator);
 }
 
-fn applyBom(
+/// Apply the resolved `.bom` identities down the block hierarchy, threading the
+/// `sub-block/…` prefix so hierarchical keys line up — matching a child on its
+/// bare ref-des would give a top-level `C3`'s uuid to every same-named
+/// sub-block twin.
+///
+/// `props_map` is optional: the read-only uuid-only application
+/// (`bom.applyBomUuids`, which serve handlers call) passes null and gets
+/// exactly the uuid half of this walk. It is the same recursion either way —
+/// two copies of it could disagree about the prefix and quietly hand two parts
+/// one identity.
+pub fn applyBom(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     uuid_map: *const std.StringHashMapUnmanaged([]const u8),
-    props_map: *const std.StringHashMapUnmanaged([]const Property),
+    props_map: ?*const std.StringHashMapUnmanaged([]const Property),
     prefix: []const u8,
-) !void {
+) std.mem.Allocator.Error!void {
     const instances: []Instance = @constCast(block.instances);
     for (instances) |*inst| {
         const key = if (prefix.len > 0)
@@ -722,9 +732,11 @@ fn applyBom(
             inst.uuid = allocator.dupe(u8, uuid) catch uuid;
         }
 
-        if (props_map.get(key)) |bom_props| {
-            if (bom_props.len > 0) {
-                inst.properties = try mergeProps(allocator, inst.properties, bom_props);
+        if (props_map) |props| {
+            if (props.get(key)) |bom_props| {
+                if (bom_props.len > 0) {
+                    inst.properties = try mergeProps(allocator, inst.properties, bom_props);
+                }
             }
         }
     }

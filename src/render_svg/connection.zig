@@ -32,6 +32,7 @@ const writeDebugPin = draw.writeDebugPin;
 const hub_mod = @import("hub.zig");
 const estimateBranchCount = hub_mod.estimateBranchCount;
 const branch_mod = @import("branch.zig");
+const schematic_walk = @import("schematic_walk.zig");
 const RenderError = draw.RenderError;
 const escape = @import("../escape.zig");
 
@@ -39,7 +40,7 @@ const escape = @import("../escape.zig");
 const half_divisor: f64 = 2.0;
 const nc_offset: f64 = 10.0;
 const bus_offset_px: f64 = 10.0;
-const pin_offset: f64 = 20.0;
+const pin_offset = schematic_walk.chain_gap;
 const feedback_lane_gap: f64 = 24.0;
 const branch_tree_bus_gap: f64 = draw.bus_gap;
 const far_x_sentinel: f64 = 99999.0;
@@ -254,7 +255,7 @@ fn renderGroupedConnectionsImpl(
         }
     }
 
-    try deduplicateGroupedSpokes(self, &classified, hub_ref);
+    try deduplicateGroupedSpokes(self, Classified, &classified, hub_ref);
 
     // Every connection on this stub filtered away. A glyph is a reviewable
     // CLAIM ("this pad goes nowhere"), so it may only be drawn when the claim is
@@ -1469,72 +1470,39 @@ test "deferred terminals do not overlap two feedback rails on one hub side" {
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, got.written(), ">OUT_B</text>"));
 }
 
-/// Render terminal labels/symbols, grouping by terminal name.
-pub fn renderTerminalGroups(self: *RenderCtx, w: anytype, results: []const BranchBody, term_x: f64, side: Side) RenderError!void {
-    if (results.len == 0) return;
+/// The SVG backend of `schematic_walk.terminalGroups`. `branchEnd` is where
+/// this side does real work: a deferred vertical series is materialised the
+/// moment the walk asks where its branch ends, so the wire it draws next
+/// starts at the body it just emitted.
+fn TerminalDrawer(comptime W: type) type {
+    return struct {
+        self: *RenderCtx,
+        w: W,
+        side: Side,
 
-    const anchor: []const u8 = switch (side) {
-        .left => "end",
-        .right => "start",
+        pub fn significant(s: @This(), term: []const u8) bool {
+            return s.self.significant_nets.contains(term);
+        }
+
+        pub fn branchEnd(s: @This(), body: BranchBody) RenderError!f64 {
+            return materializeDeferredSeries(s.self, s.w, body, s.side, null);
+        }
+
+        pub fn wire(s: @This(), seg: schematic_walk.Segment) RenderError!void {
+            return drawNetWire(s.w, seg.x1, seg.y1, seg.x2, seg.y2, seg.term);
+        }
+
+        pub fn terminal(s: @This(), x: f64, cy: f64, term: []const u8, anchor: []const u8) RenderError!void {
+            return branch_mod.drawTerminal(s.self, s.w, x, cy, term, anchor);
+        }
     };
+}
 
-    var i: usize = 0;
-    while (i < results.len) {
-        const term = results[i].terminal;
-        var j = i + 1;
-        while (j < results.len) : (j += 1) {
-            if (!std.mem.eql(u8, results[j].terminal, term)) break;
-        }
-        const group_slice = results[i..j];
-
-        if (!self.significant_nets.contains(term)) {
-            i = j;
-            continue;
-        }
-
-        if (group_slice.len == 1) {
-            const r = group_slice[0];
-            const end_x = try materializeDeferredSeries(self, w, r, side, null);
-            try drawNetWire(w, end_x, r.cy, term_x, r.cy, term);
-            try branch_mod.drawTerminal(self, w, term_x, r.cy, term, anchor);
-        } else {
-            const nearest_x = blk: {
-                var nx: f64 = switch (side) {
-                    .left => far_x_sentinel,
-                    .right => -far_x_sentinel,
-                };
-                for (group_slice) |r| {
-                    switch (side) {
-                        .left => {
-                            nx = @min(nx, r.end_x);
-                        },
-                        .right => {
-                            nx = @max(nx, r.end_x);
-                        },
-                    }
-                }
-                break :blk nx;
-            };
-            const grp_bus_x = switch (side) {
-                .left => nearest_x - pin_offset,
-                .right => nearest_x + pin_offset,
-            };
-
-            const first_cy = group_slice[0].cy;
-            const last_cy = group_slice[group_slice.len - 1].cy;
-
-            for (group_slice) |r| {
-                const end_x = try materializeDeferredSeries(self, w, r, side, null);
-                try drawNetWire(w, end_x, r.cy, grp_bus_x, r.cy, term);
-            }
-
-            try drawNetWire(w, grp_bus_x, first_cy, grp_bus_x, last_cy, term);
-            try drawNetWire(w, grp_bus_x, last_cy, term_x, last_cy, term);
-            try branch_mod.drawTerminal(self, w, term_x, last_cy, term, anchor);
-        }
-
-        i = j;
-    }
+/// Render terminal labels/symbols, grouping by terminal name. The grouping
+/// walk is `schematic_walk.terminalGroups`, shared with the JSON backend.
+pub fn renderTerminalGroups(self: *RenderCtx, w: anytype, results: []const BranchBody, term_x: f64, side: Side) RenderError!void {
+    const drawer = TerminalDrawer(@TypeOf(w)){ .self = self, .w = w, .side = side };
+    return schematic_walk.terminalGroups(drawer, results, term_x, side);
 }
 
 /// A resistor on a non-owner boundary of a shared passive island renders as a
@@ -1598,7 +1566,7 @@ pub const ChainResult = struct {
 /// One passive already scheduled as part of a grouped connection walk. The
 /// pin and terminal are part of the identity because the same passive island
 /// can legitimately expose a local branch from another hub pin.
-const PlannedSpoke = struct {
+pub const PlannedSpoke = struct {
     hub_pin: []const u8,
     terminal: []const u8,
     ref_des: []const u8,
@@ -1628,7 +1596,7 @@ fn rememberPlannedSpoke(
 /// The first spoke walk draws every chain and branch it discovers; later
 /// adjacency entries for those same passives must not reserve empty rows that
 /// extend the outer bus beyond its last visible connection.
-fn reserveGroupedSpoke(
+pub fn reserveGroupedSpoke(
     self: *RenderCtx,
     planned: *std.ArrayList(PlannedSpoke),
     spoke_ref: []const u8,
@@ -1649,8 +1617,21 @@ fn reserveGroupedSpoke(
     return true;
 }
 
-fn deduplicateGroupedSpokes(self: *RenderCtx, classified: *std.ArrayList(Classified), hub_ref: []const u8) error{OutOfMemory}!void {
-    var retained: std.ArrayList(Classified) = .empty;
+/// Drop the grouped-connection entries whose passive island another entry has
+/// already reserved, so the outer bus stops at the last VISIBLE connection.
+///
+/// `Entry` is a comptime parameter because the two backends classify into
+/// different records (the SVG one also carries `externally_visible`); the walk
+/// reads only `.conn` and `.terminal`, and both must reserve islands in the
+/// same order or the two renderings of one schematic disagree about which
+/// spokes are drawn.
+pub fn deduplicateGroupedSpokes(
+    self: *RenderCtx,
+    comptime Entry: type,
+    classified: *std.ArrayList(Entry),
+    hub_ref: []const u8,
+) error{OutOfMemory}!void {
+    var retained: std.ArrayList(Entry) = .empty;
     var planned: std.ArrayList(PlannedSpoke) = .empty;
     for (classified.items) |entry| {
         const keep = switch (entry.conn.endpoint) {
