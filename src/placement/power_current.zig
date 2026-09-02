@@ -25,6 +25,10 @@ pub const Segment = struct {
     b: [2]f64,
     layer: u8,
     resistance_ohm_per_mm: f64,
+    /// Copper width. Hand-drawn copper meets at overlapping ends, not at
+    /// coincident centreline points, so an end or a junction within half
+    /// this width of the centreline joins the segment.
+    width_mm: f64 = 0,
 };
 
 /// One through-via barrel; resistance is the full top-to-bottom value.
@@ -32,6 +36,8 @@ pub const Barrel = struct {
     route_index: usize,
     at: [2]f64,
     resistance_ohm: f64,
+    /// Barrel radius: copper whose centreline passes within it joins the via.
+    radius_mm: f64 = 0,
 };
 
 /// One connected component of a computed copper pour/plane. `contacts` are
@@ -138,6 +144,19 @@ const Graph = struct {
         return self.keys.items.len - 1;
     }
 
+    /// `nodeOf` with a geometric snap: an existing node on the same layer
+    /// within `snap_mm` of `p` is the same copper point, because the two
+    /// pieces of copper overlap there even though their centrelines miss.
+    fn nodeNear(self: *Graph, arena: std.mem.Allocator, p: [2]f64, layer: ?u8, snap_mm: f64) std.mem.Allocator.Error!usize {
+        if (snap_mm > node_eps_mm) {
+            for (self.pos.items, self.layer.items, 0..) |old, old_layer, i| {
+                if (old_layer == null or layer == null or old_layer.? != layer.?) continue;
+                if (dist(old, p) <= snap_mm) return i;
+            }
+        }
+        return self.nodeOf(arena, p, layer);
+    }
+
     fn newHub(self: *Graph, arena: std.mem.Allocator, p: [2]f64) std.mem.Allocator.Error!usize {
         const index = self.keys.items.len;
         const unique_layer: i16 = -1 - @as(i16, @intCast(index));
@@ -197,8 +216,8 @@ fn buildGraph(arena: std.mem.Allocator, input: Input) std.mem.Allocator.Error!Gr
     for (input.segments) |segment| {
         const cuts = try splitParams(arena, input.segments, input.barrels, input.sheets, segment);
         var previous = segment.a;
-        graph.track_a[segment.route_index] = try graph.nodeOf(arena, segment.a, segment.layer);
-        graph.track_b[segment.route_index] = try graph.nodeOf(arena, segment.b, segment.layer);
+        graph.track_a[segment.route_index] = try graph.nodeNear(arena, segment.a, segment.layer, segment.width_mm / 2);
+        graph.track_b[segment.route_index] = try graph.nodeNear(arena, segment.b, segment.layer, segment.width_mm / 2);
         for (cuts) |t| {
             const at = lerp(segment.a, segment.b, t);
             try addPiece(arena, &graph, segment, previous, at);
@@ -225,15 +244,15 @@ fn addSheet(arena: std.mem.Allocator, graph: *Graph, sheet: Sheet) std.mem.Alloc
 fn addPiece(arena: std.mem.Allocator, graph: *Graph, segment: Segment, a: [2]f64, b: [2]f64) std.mem.Allocator.Error!void {
     const length = dist(a, b);
     if (length < min_piece_mm) return;
-    const na = try graph.nodeOf(arena, a, segment.layer);
-    const nb = try graph.nodeOf(arena, b, segment.layer);
+    const na = try graph.nodeNear(arena, a, segment.layer, segment.width_mm / 2);
+    const nb = try graph.nodeNear(arena, b, segment.layer, segment.width_mm / 2);
     try graph.addEdge(arena, .{ .a = na, .b = nb, .resistance = segment.resistance_ohm_per_mm * length, .kind = .track, .route_index = segment.route_index });
 }
 
 fn addBarrel(arena: std.mem.Allocator, graph: *Graph, barrel: Barrel) std.mem.Allocator.Error!void {
     var contacts: std.ArrayList(usize) = .empty;
     for (graph.pos.items, graph.layer.items, 0..) |point, layer, node| {
-        if (layer == null or dist(point, barrel.at) > node_eps_mm) continue;
+        if (layer == null or dist(point, barrel.at) > @max(barrel.radius_mm, node_eps_mm) + node_eps_mm) continue;
         try appendUnique(arena, &contacts, node);
     }
     if (contacts.items.len < 2) return;
@@ -438,15 +457,17 @@ fn splitParams(
     var out: std.ArrayList(f64) = .empty;
     const length = dist(segment.a, segment.b);
     if (length < min_piece_mm) return out.items;
+    const half = segment.width_mm / 2;
     for (segments) |other| {
         if (other.layer != segment.layer) continue;
-        for ([2][2]f64{ other.a, other.b }) |point| if (projectOn(segment, point)) |t| try appendParam(arena, &out, t, length);
+        const join = @max(half, other.width_mm / 2);
+        for ([2][2]f64{ other.a, other.b }) |point| if (projectOn(segment, point, join)) |t| try appendParam(arena, &out, t, length);
         if (crossParam(segment, other)) |t| try appendParam(arena, &out, t, length);
     }
-    for (barrels) |barrel| if (projectOn(segment, barrel.at)) |t| try appendParam(arena, &out, t, length);
+    for (barrels) |barrel| if (projectOn(segment, barrel.at, barrel.radius_mm)) |t| try appendParam(arena, &out, t, length);
     for (sheets) |sheet| {
         if (sheet.layer != segment.layer) continue;
-        for (sheet.contacts) |at| if (projectOn(segment, at)) |t| try appendParam(arena, &out, t, length);
+        for (sheet.contacts) |at| if (projectOn(segment, at, half)) |t| try appendParam(arena, &out, t, length);
     }
     std.mem.sort(f64, out.items, {}, comptime std.sort.asc(f64));
     return out.items;
@@ -459,14 +480,17 @@ fn appendParam(arena: std.mem.Allocator, out: *std.ArrayList(f64), t: f64, lengt
     try out.append(arena, t);
 }
 
-fn projectOn(segment: Segment, point: [2]f64) ?f64 {
+/// The parameter along `segment` where `point` joins it: the point's
+/// projection when it lies within `tolerance_mm` (never less than the node
+/// epsilon) of the centreline, null when it misses the copper.
+fn projectOn(segment: Segment, point: [2]f64, tolerance_mm: f64) ?f64 {
     const dx = segment.b[0] - segment.a[0];
     const dy = segment.b[1] - segment.a[1];
     const length2 = dx * dx + dy * dy;
     if (length2 <= min_piece_mm * min_piece_mm) return null;
     const t = ((point[0] - segment.a[0]) * dx + (point[1] - segment.a[1]) * dy) / length2;
     if (t < 0 or t > 1) return null;
-    if (dist(lerp(segment.a, segment.b, t), point) > node_eps_mm) return null;
+    if (dist(lerp(segment.a, segment.b, t), point) > @max(tolerance_mm, node_eps_mm)) return null;
     return t;
 }
 
@@ -579,4 +603,51 @@ test "computed sheet component completes a split rail across separate traces" {
     try testing.expectApproxEqAbs(@as(f64, 1.0), result.typical.track_current_a[0], 1e-8);
     try testing.expectApproxEqAbs(@as(f64, 0.8), result.typical.track_current_a[1], 1e-8);
     try testing.expectApproxEqAbs(@as(f64, 0.2), result.typical.track_current_a[2], 1e-8);
+}
+
+// spec: placement/power-routing - a branch whose end lands inside the trunk's copper joins the trunk even when its centreline misses the trunk's by less than the copper half-width
+test "a branch ending inside the trunk copper joins the trunk" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The branch ends 0.05 mm above the 0.3 mm trunk's centreline: inside its copper.
+    const segments = [_]Segment{
+        .{ .route_index = 0, .a = .{ 0, 0 }, .b = .{ 2, 0 }, .layer = 0, .resistance_ohm_per_mm = 0.01, .width_mm = 0.3 },
+        .{ .route_index = 1, .a = .{ 1, 0.05 }, .b = .{ 1, 1 }, .layer = 0, .resistance_ohm_per_mm = 0.01, .width_mm = 0.2 },
+    };
+    const loads = [_]Load{.{ .contacts = &.{.{ .at = .{ 1, 1 }, .layer = 0, .reach_mm = 0.01 }}, .typical_a = 1, .maximum_a = null }};
+    const result = try solve(arena, .{
+        .segments = &segments,
+        .barrels = &.{},
+        .counts = .{ .tracks = 2, .vias = 0 },
+        .source_contacts = &.{.{ .at = .{ 0, 0 }, .layer = 0, .reach_mm = 0.01 }},
+        .source_complete = true,
+        .loads = &loads,
+    });
+    try testing.expectEqual(Status.solved, result.typical.status);
+    try testing.expectApproxEqAbs(@as(f64, 1.0), result.typical.track_current_a[1], 1e-9);
+}
+
+// spec: placement/power-routing - a via joins every track whose copper its barrel overlaps, not only tracks ending exactly at its centre
+test "a via joins a track whose end sits inside its barrel" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The bottom track ends 0.03 mm from the 0.4 mm via's centre.
+    const segments = [_]Segment{
+        .{ .route_index = 0, .a = .{ 0, 0 }, .b = .{ 1, 0 }, .layer = 0, .resistance_ohm_per_mm = 0.01, .width_mm = 0.2 },
+        .{ .route_index = 1, .a = .{ 1.03, 0 }, .b = .{ 2, 0 }, .layer = 1, .resistance_ohm_per_mm = 0.01, .width_mm = 0.2 },
+    };
+    const barrels = [_]Barrel{.{ .route_index = 0, .at = .{ 1, 0 }, .resistance_ohm = 0.001, .radius_mm = 0.2 }};
+    const loads = [_]Load{.{ .contacts = &.{.{ .at = .{ 2, 0 }, .layer = 1, .reach_mm = 0.01 }}, .typical_a = 1, .maximum_a = null }};
+    const result = try solve(arena, .{
+        .segments = &segments,
+        .barrels = &barrels,
+        .counts = .{ .tracks = 2, .vias = 1 },
+        .source_contacts = &.{.{ .at = .{ 0, 0 }, .layer = 0, .reach_mm = 0.01 }},
+        .source_complete = true,
+        .loads = &loads,
+    });
+    try testing.expectEqual(Status.solved, result.typical.status);
+    try testing.expectApproxEqAbs(@as(f64, 1.0), result.typical.via_current_a[0], 1e-9);
 }

@@ -325,18 +325,89 @@ fn loadContacts(
         return .{ .contacts = out.items, .complete = complete and out.items.len > 0 };
     }
 
-    if (!sameNet(net.name, consumer.net)) return .{ .contacts = out.items, .complete = false };
+    if (sameNet(net.name, consumer.net)) try scopedContacts(alloc, placement, net_index, consumer, &out);
+    if (out.items.len == 0) try bridgedContacts(alloc, placement, net_index, consumer, &out);
+    return .{ .contacts = out.items, .complete = out.items.len > 0 };
+}
 
-    // Back-computed regulator input loads are keyed on a sub-block port rather
-    // than a physical ref-des. Its hub device pads on this flattened net are
-    // the physical load contacts.
+/// Contacts for a sub-block-keyed consumer on this net.
+///
+/// Back-computed regulator input loads and declared module-port loads are
+// keyed on a sub-block port rather than a physical ref-des. Its hub device
+// pads on this flattened net are the physical load contacts. A port whose
+// module-side net reaches only a filter (a choke, a bead, a series
+/// resistor) before the consuming IC has no hub pad on this net at all;
+/// the current still leaves the board copper at those passive pads, so
+/// they are the contacts when no hub pad exists.
+fn scopedContacts(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    net_index: usize,
+    consumer: power_budget.RailConsumer,
+    out: *std.ArrayList(power_current.Contact),
+) std.mem.Allocator.Error!void {
+    const net = placement.nets[net_index];
+    const scope = net_names.parent(consumer.ref_des) orelse consumer.ref_des;
     for (net.pins) |pin| {
-        if (!descendantOf(pin.ref_des, consumer.ref_des)) continue;
+        if (!descendantOf(pin.ref_des, scope)) continue;
         const part = partForRef(placement, pin.ref_des) orelse continue;
         if (part.kind != .hub) continue;
-        if (contactForPin(placement, pin)) |contact| try appendContact(alloc, &out, contact);
+        if (contactForPin(placement, pin)) |contact| try appendContact(alloc, out, contact);
     }
-    return .{ .contacts = out.items, .complete = out.items.len > 0 };
+    if (out.items.len == 0) for (net.pins) |pin| {
+        if (!descendantOf(pin.ref_des, scope)) continue;
+        if (contactForPin(placement, pin)) |contact| try appendContact(alloc, out, contact);
+    };
+}
+
+/// Contacts for a consumer whose annotated pad sits on a SIBLING net reached
+/// from this one through a two-terminal series part (a ferrite bead, an
+/// inductor, a jumper). The power budget already rolled that load up onto
+/// this rail through the same part; physically its current leaves this
+/// net's copper at the part's pad here, so that pad is the load contact.
+/// One series part deep: a chain of beads would need the graph itself.
+fn bridgedContacts(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    net_index: usize,
+    consumer: power_budget.RailConsumer,
+    out: *std.ArrayList(power_current.Contact),
+) std.mem.Allocator.Error!void {
+    const net = placement.nets[net_index];
+    for (net.pins) |pin| {
+        const part = partForRef(placement, pin.ref_des) orelse continue;
+        if (part.kind == .hub or part.pads.len != 2) continue;
+        const far_pad = if (std.mem.eql(u8, part.pads[0].number, pin.pin)) part.pads[1] else part.pads[0];
+        const far_net = netIndexOfPad(placement, pin.ref_des, far_pad.number) orelse continue;
+        if (far_net == net_index or !netCarriesConsumer(placement, far_net, consumer)) continue;
+        if (contactForPin(placement, pin)) |contact| try appendContact(alloc, out, contact);
+    }
+}
+
+/// The flattened net a pad sits on, by reference designator and pad number.
+fn netIndexOfPad(placement: optimizer.Placement, ref_des: []const u8, pad_number: []const u8) ?usize {
+    for (placement.nets, 0..) |net, index| {
+        for (net.pins) |pin| {
+            if (std.mem.eql(u8, pin.ref_des, ref_des) and std.mem.eql(u8, pin.pin, pad_number)) return index;
+        }
+    }
+    return null;
+}
+
+/// True when `net_index` holds the consumer's own annotated pad, or a hub pad
+/// of the sub-block a port-keyed consumer names.
+fn netCarriesConsumer(placement: optimizer.Placement, net_index: usize, consumer: power_budget.RailConsumer) bool {
+    const scope = net_names.parent(consumer.ref_des) orelse consumer.ref_des;
+    for (placement.nets[net_index].pins) |pin| {
+        if (std.mem.eql(u8, pin.ref_des, consumer.ref_des)) {
+            for (consumer.pins) |wanted| if (std.mem.eql(u8, pin.pin, wanted)) return true;
+            continue;
+        }
+        if (!descendantOf(pin.ref_des, scope)) continue;
+        const part = partForRef(placement, pin.ref_des) orelse continue;
+        if (part.kind == .hub) return true;
+    }
+    return false;
 }
 
 fn buildSurfaces(
@@ -487,6 +558,7 @@ fn solveCurrent(
             .b = .{ track.x2, track.y2 },
             .layer = track.layer,
             .resistance_ohm_per_mm = if (area > 0) copper_resistivity_ohm_m * 1000.0 / area else 0,
+            .width_mm = track.width,
         });
     }
     var barrels: std.ArrayList(power_current.Barrel) = .empty;
@@ -498,6 +570,7 @@ fn solveCurrent(
             .route_index = route_index,
             .at = .{ via.x, via.y },
             .resistance_ohm = conductorResistance(boardThicknessMm(placement), area),
+            .radius_mm = via.dia / 2,
         });
     }
     const sources = try sourceContacts(alloc, placement, net_index, demand.source_terminals);
@@ -1148,4 +1221,81 @@ test "external power source terminals resolve only top-level connector pads" {
     const contacts = try sourceContacts(alloc, placement, 0, &.{"@external/VDD"});
     try testing.expectEqual(@as(usize, 1), contacts.len);
     try testing.expectApproxEqAbs(@as(f64, 0), contacts[0].at[0], 1e-9);
+}
+
+// spec: placement/power-routing - a port-keyed consumer whose module-side net reaches only passive parts resolves those pads as its load contacts
+test "a port-keyed consumer resolves passive pads when the module has no hub pad on the rail" {
+    const pad = @import("geometry.zig").Pad{ .number = "1", .x = 0, .y = 0, .w = 0.2, .h = 0.2 };
+    const parts = [_]optimizer.Part{
+        .{ .ref_des = "lna/L1", .kind = .passive, .hw = 0.1, .hh = 0.1, .pads = &.{pad}, .fallback = false, .x = 2, .y = 1 },
+        .{ .ref_des = "lna/R4", .kind = .passive, .hw = 0.1, .hh = 0.1, .pads = &.{pad}, .fallback = false, .x = 2, .y = 2 },
+        .{ .ref_des = "reg/U1", .kind = .hub, .hw = 0.1, .hh = 0.1, .pads = &.{pad}, .fallback = false, .x = 0, .y = 0 },
+    };
+    const pins = [_]@import("../flat_netlist.zig").FlatPin{
+        .{ .ref_des = "lna/L1", .pin = "1" },
+        .{ .ref_des = "lna/R4", .pin = "1" },
+        .{ .ref_des = "reg/U1", .pin = "1" },
+    };
+    const nets = [_]optimizer.FlatNet{.{ .name = "V_5VA", .pins = &pins }};
+    const placement = optimizer.Placement{
+        .parts = @constCast(&parts),
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 3,
+        .maxy = 3,
+        .generated = true,
+    };
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const port_load = try loadContacts(arena, placement, 0, .{ .ref_des = "lna/VDD", .component = "module port", .net = "V_5VA", .pins = &.{"VDD"}, .i_typ = 0.128, .i_max = 0.144 });
+    try testing.expect(port_load.complete);
+    try testing.expectEqual(@as(usize, 2), port_load.contacts.len);
+    // A regulator keyed the same way still prefers its hub pad over passives.
+    const reg_load = try loadContacts(arena, placement, 0, .{ .ref_des = "reg/VIN", .net = "V_5VA", .pins = &.{"VIN"}, .i_typ = 0.2, .i_max = 0.2 });
+    try testing.expect(reg_load.complete);
+    try testing.expectEqual(@as(usize, 1), reg_load.contacts.len);
+}
+
+// spec: placement/power-routing - a consumer whose annotated pad sits behind a two-terminal series part on a sibling net enters this net's copper at that part's pad
+test "a bead-fed consumer on a sibling net resolves to the bead's pad on the rail" {
+    const geometry = @import("geometry.zig");
+    const one = geometry.Pad{ .number = "1", .x = 0, .y = 0, .w = 0.2, .h = 0.2 };
+    const bead_pads = [_]geometry.Pad{ .{ .number = "1", .x = -0.3, .y = 0, .w = 0.2, .h = 0.2 }, .{ .number = "2", .x = 0.3, .y = 0, .w = 0.2, .h = 0.2 } };
+    const parts = [_]optimizer.Part{
+        .{ .ref_des = "FB1", .kind = .passive, .hw = 0.4, .hh = 0.1, .pads = &bead_pads, .fallback = false, .x = 1, .y = 0 },
+        .{ .ref_des = "amp/U1", .kind = .hub, .hw = 0.1, .hh = 0.1, .pads = &.{one}, .fallback = false, .x = 2, .y = 0 },
+    };
+    const rail_pins = [_]@import("../flat_netlist.zig").FlatPin{.{ .ref_des = "FB1", .pin = "1" }};
+    const branch_pins = [_]@import("../flat_netlist.zig").FlatPin{ .{ .ref_des = "FB1", .pin = "2" }, .{ .ref_des = "amp/U1", .pin = "14" } };
+    const nets = [_]optimizer.FlatNet{ .{ .name = "V_5VA", .pins = &rail_pins }, .{ .name = "V_5VA_AMP", .pins = &branch_pins } };
+    const placement = optimizer.Placement{
+        .parts = @constCast(&parts),
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 3,
+        .maxy = 3,
+        .generated = true,
+    };
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    // Annotated on the amplifier's own pad, declared on its module-local net
+    // name, rolled up onto V_5VA by the bead: it enters V_5VA at FB1 pad 1.
+    const load = try loadContacts(arena, placement, 0, .{ .ref_des = "amp/U1", .net = "V_5VA_AMP", .pins = &.{"14"}, .i_typ = 0.074, .i_max = 0.1 });
+    try testing.expect(load.complete);
+    try testing.expectEqual(@as(usize, 1), load.contacts.len);
+    try testing.expectApproxEqAbs(@as(f64, 0.7), load.contacts[0].at[0], 1e-9);
 }
