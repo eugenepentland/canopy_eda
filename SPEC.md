@@ -7209,6 +7209,7 @@ is what makes the predicate exact rather than approximately right.
 - the PCB STEP download name ends in `_ID_XXXXXXXX.step` using the exact eight-hex fabrication identity printed on that PCB
 - the PCB 3D viewer composites each face's outer copper, soldermask, and silkscreen—including generated sub-circuit, test-point, and pin-1 artwork—into one non-overlapping visible canvas cap; the regular STEP export omits that raster artwork instead of turning it into selectable geometry, and only mechanical drills strictly larger than 1 mm are cut through the board
 - every board renderer paints exposed pad copper above routed traces, so a normally masked trace entering a land cannot visually coat that component pad with solder mask
+- a via-in-pad keeps its drilled centre visible after component pads paint above routed copper
 - exposed RF copper on both board faces uses the same swept taper polygons in Assembly and the PCB 3D viewer
 - the retired /pcb-route-lab page 302-redirects to the /pcb-layout page for the same design
 - assembly model bodies load from persistent calibrated PNGs and render STEP only to populate a missing or stale filesystem cache entry

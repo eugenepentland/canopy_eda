@@ -1030,6 +1030,7 @@ const Ctx = struct {
     fn stageParts(self: *Ctx) void {
         if (self.opts.compare != null) self.drawCompareGhost();
         self.drawParts();
+        if (self.opts.routed) |r| self.drawViaHoles(r);
     }
 
     /// `ratsnest` — airwires, decoupling loops, their optional dimension
@@ -1300,7 +1301,19 @@ const Ctx = struct {
             const c = [_]f32{ self.xpx(v.x), self.ypx(v.y) };
             const rad = @max(self.len(v.dia / 2), self.pw(1.2));
             self.cv.disc(c[0], c[1], rad, via_col, 1.0);
-            self.cv.disc(c[0], c[1], rad * 0.45, via_hole, 1.0);
+        }
+    }
+
+    /// Punch via drills after pad copper. Pads intentionally win over routed
+    /// copper, but their fill must not hide a real bore when a via sits inside
+    /// a land (via-in-pad). A missing legacy drill keeps the old 45%-of-barrel
+    /// visual fallback; saved vias with a drill use their manufactured size.
+    fn drawViaHoles(self: *Ctx, r: router.RouteResult) void {
+        for (r.vias) |v| {
+            const c = [_]f32{ self.xpx(v.x), self.ypx(v.y) };
+            const barrel = @max(self.len(v.dia / 2), self.pw(1.2));
+            const bore = if (v.drill > 0) self.len(v.drill / 2) else barrel * 0.45;
+            self.cv.disc(c[0], c[1], bore, via_hole, 1.0);
         }
     }
 
@@ -2299,6 +2312,46 @@ test "PNG paints a bottom-side part under the top-side part it overlaps" {
     // F.Cu pad red (#C83434) wins over the B.Cu pad blue (#4D7FC4) underneath.
     try std.testing.expect(cv.buf[at] > 0x90);
     try std.testing.expect(cv.buf[at + 2] < 0x60);
+}
+
+// spec: Web Server - a via-in-pad keeps its drilled centre visible after component pads paint above routed copper
+test "PNG re-punches a via bore through an overlapping SMD pad" {
+    const alloc = std.testing.allocator;
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 4, .h = 4 }};
+    var parts = [_]optimizer.Part{.{
+        .ref_des = "U1",
+        .kind = .hub,
+        .hw = 2,
+        .hh = 2,
+        .pads = &pads,
+        .fallback = false,
+        .x = 10,
+        .y = 10,
+    }};
+    const p = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 20,
+        .maxy = 20,
+        .generated = false,
+    };
+    const vias = [_]router.Via{.{ .x = 10, .y = 10, .dia = 0.8, .drill = 0.3, .net = 0 }};
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &vias, .routed = 1, .total = 1 };
+    var cv = try renderCanvas(alloc, p, .{ .width = 600, .routed = routed, .bare = true });
+    defer cv.deinit();
+
+    // 25 final px/mm at width 600, doubled by the raster supersampling. The
+    // 2 mm margin moves world (10,10) to internal pixel (600,600).
+    const px_mm: usize = 50;
+    const at = ((12 * px_mm) * cv.iw + 12 * px_mm) * 3;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x10, 0x23 }, cv.buf[at .. at + 3]);
 }
 
 // spec: Web Server - the PCB PNG paints declared outer pours as computed fill contours with antipad holes carved by the routed copper the image draws

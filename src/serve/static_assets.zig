@@ -692,7 +692,7 @@ test "PCB editor renders generated RF fence vias as dashed editable annuli" {
         // One normal via row and visibility state cover every via. Generated
         // RF-fence barrels alone branch to the dashed annulus in both renderers.
         .{ .marker = "[\"via\",\"Vias\"" },
-        .{ .marker = "var byL={},barrel=[],fence=[],holes=new Path2D(),nb=0;" },
+        .{ .marker = "var byL={},barrel=[],fence=[],holes=new Path2D();" },
         .{ .marker = "function paintFenceVia" },
         .{ .marker = "function paintFenceVias" },
         .{ .marker = "paintFenceVias(ctx,CB.f)" },
@@ -783,11 +783,13 @@ test "PCB editor keeps every drilled bore visible through pours and board flips"
         // the independently toggled Excellon layer instead of repainting pads.
         "if(!CAM_REVIEW&&pp.bore&&(!gpuOwns(\"parts\")||hlAny)){ctx.globalAlpha=1",
         "via:anyCopperVisible()?1:0",
+        "function paintViaHoles(ctx,cop,only)",
+        "ctx.fill(cuBatchGet().h)",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 
     const batch_barrel = std.mem.indexOf(u8, pcb_board_js, "for(var vi=0;vi<CB.v.length;vi++)").?;
-    const batch_hole = std.mem.indexOfPos(u8, pcb_board_js, batch_barrel, "ctx.fill(CB.h)").?;
+    const batch_hole = std.mem.indexOfPos(u8, pcb_board_js, batch_barrel, "ctx.fill(cuBatchGet().h)").?;
     try std.testing.expect(batch_barrel < batch_hole);
     const gpu_barrel = std.mem.indexOf(u8, pcb_gpu_js, "barrel.push([ux(v.x), uy(v.y), rr, (O.viaFence && O.viaFence(v)) ? -rh : 0, vc]);").?;
     const gpu_hole = std.mem.indexOfPos(u8, pcb_gpu_js, gpu_barrel, "hole.push([ux(v.x), uy(v.y), rh, 0, ch]);").?;
