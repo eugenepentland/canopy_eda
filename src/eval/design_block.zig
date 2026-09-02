@@ -29,6 +29,7 @@ const micro_forms = @import("micro_forms.zig");
 const pin_enrichment = @import("pin_enrichment.zig");
 const forms_mod = @import("forms.zig");
 const board_role_mod = @import("board_role.zig");
+const board_keepout_mod = @import("board_keepout.zig");
 const net_analysis = @import("net_analysis.zig");
 const section_maturity = @import("section_maturity.zig");
 const stackup_presets = @import("stackup_presets.zig");
@@ -2290,6 +2291,9 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
             heatsink = try parseBoardHeatsink(self, child, c[1..]);
             continue;
         }
+        // Authored interior keepouts are read after this loop: they validate
+        // against the outline, which (size W H) may declare further down.
+        if (std.mem.eql(u8, head, "keepout")) continue;
         if (std.mem.eql(u8, head, "corners")) {
             for (c[1..]) |item_node| {
                 const ref = item_node.asString() orelse item_node.asAtom() orelse continue;
@@ -2306,6 +2310,7 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
         .sides = board_sides,
         .corners = corners.toOwnedSlice(self.allocator) catch &.{},
         .perimeter_fence = perimeter_fence,
+        .keepouts = try board_keepout_mod.parseAll(self, form_children[1..], w, h),
         .heatsink = heatsink,
         .present = true,
     };

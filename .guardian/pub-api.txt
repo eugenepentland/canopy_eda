@@ -174,6 +174,7 @@ src/board_theme.zig::edge_cuts value
 src/board_theme.zig::focus_accent value
 src/board_theme.zig::grid_dot value
 src/board_theme.zig::improvement value
+src/board_theme.zig::keepout_region value
 src/board_theme.zig::loop_return value
 src/board_theme.zig::pad_npth value
 src/board_theme.zig::pad_pth value
@@ -458,6 +459,9 @@ src/erc.zig::loadPinoutMap | fn loadPinoutMap(allocator: std.mem.Allocator, path
 src/erc.zig::runErc | fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8) std.mem.Allocator.Error![]const Violation
 src/erc.zig::writeViolationsJson | fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
 src/escape.zig::writeXml | fn writeXml(w: anytype, s: []const u8) !void
+src/eval/board_keepout.zig::edge_tolerance_mm value
+src/eval/board_keepout.zig::parseAll | fn parseAll( self: *Evaluator, form_children: []const Node, w: f64, h: f64, ) EvalError![]const env.BoardKeepoutSpec
+src/eval/board_keepout.zig::sideFromAtom | fn sideFromAtom(word: []const u8) ?env.BoardKeepoutSide
 src/eval/board_role.zig::parse | fn parse(evaluator: anytype, children: []const Node) BoardRole
 src/eval/board_role.zig::parsePowerPlane | fn parsePowerPlane(evaluator: anytype, children: []const Node) bool
 src/eval/builders.zig::DecoupleEmitContext struct_
@@ -496,6 +500,8 @@ src/eval/env.zig::BlockDef struct_
 src/eval/env.zig::BlockOrigin enum_
 src/eval/env.zig::BlockRole enum_
 src/eval/env.zig::BoardHeatsinkSpec struct_
+src/eval/env.zig::BoardKeepoutSide enum_
+src/eval/env.zig::BoardKeepoutSpec struct_
 src/eval/env.zig::BoardRole enum_
 src/eval/env.zig::BoardSpec struct_
 src/eval/env.zig::CalcBlock struct_
@@ -1697,6 +1703,18 @@ src/placement/blocker_nomination.zig::ranked | fn ranked(self: Table, alloc: std
 src/placement/blocker_nomination.zig::sweepHops | fn sweepHops(t: *Table, alloc: std.mem.Allocator, s: Sweep) std.mem.Allocator.Error!void
 src/placement/blocker_nomination.zig::trackGap | fn trackGap(hops: []const Hop, c: router.Track) f64
 src/placement/blocker_nomination.zig::viaGap | fn viaGap(hops: []const Hop, v: router.Via) f64
+src/placement/board_keepout.zig::Region struct_
+src/placement/board_keepout.zig::allowsNet | fn allowsNet(self: Region, name: []const u8) bool
+src/placement/board_keepout.zig::anyDeclared | fn anyDeclared(placement: optimizer.Placement) bool
+src/placement/board_keepout.zig::blockingPart | fn blockingPart(regions: []const Region, part: optimizer.Part) ?Region
+src/placement/board_keepout.zig::corners | fn corners(self: Region) [4][2]f64
+src/placement/board_keepout.zig::coversLayer | fn coversLayer(self: Region, layer: u8) bool
+src/placement/board_keepout.zig::coversSide | fn coversSide(self: Region, side: optimizer.Side) bool
+src/placement/board_keepout.zig::hitsPart | fn hitsPart(region: Region, part: optimizer.Part) bool
+src/placement/board_keepout.zig::insetAt | fn insetAt(self: Region, x: f64, y: f64) f64
+src/placement/board_keepout.zig::partDepth | fn partDepth(regions: []const Region, part: optimizer.Part) f64
+src/placement/board_keepout.zig::regionsOf | fn regionsOf( arena: std.mem.Allocator, placement: optimizer.Placement, ) std.mem.Allocator.Error![]const Region
+src/placement/board_keepout.zig::resolve | fn resolve( arena: std.mem.Allocator, rect: ?optimizer.BoardRect, specs: []const env.BoardKeepoutSpec, ) std.mem.Allocator.Error![]const Region
 src/placement/bypass_intent.zig::Legs struct_
 src/placement/bypass_intent.zig::Seg struct_
 src/placement/bypass_intent.zig::any | fn any(self: Legs) bool
@@ -1948,6 +1966,7 @@ src/placement/drc.zig::errorCount | fn errorCount(violations: []const Violation)
 src/placement/drc.zig::partyIndex | fn partyIndex(i: usize) i32
 src/placement/drc.zig::segSegDist | fn segSegDist(ax1: f64, ay1: f64, ax2: f64, ay2: f64, bx1: f64, by1: f64, bx2: f64, by2: f64) f64
 src/placement/drc.zig::staging_exempt_mm value
+src/placement/drc_board_keepout.zig::check | fn check( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), placement: optimizer.Placement, tracks: []const router.Track, vias: []const router.Via, ) std.mem.Allocator.Error!void
 src/placement/drc_compose.zig::CheckReport struct_
 src/placement/drc_compose.zig::CopperCheck struct_
 src/placement/drc_compose.zig::Delta value
@@ -2440,6 +2459,7 @@ src/placement/octilinear.zig::tol_sin value
 src/placement/octilinear.zig::turned | fn turned(lat: Lattice, from_key: usize, to_key: usize) u32
 src/placement/octilinear.zig::turnedAlways | fn turnedAlways(lat: Lattice, from_key: usize, to_key: usize) u32
 src/placement/optimizer.zig::BoardArc struct_
+src/placement/optimizer.zig::BoardKeepoutRegion value
 src/placement/optimizer.zig::BoardRect value
 src/placement/optimizer.zig::BoardRules struct_
 src/placement/optimizer.zig::Breakdown struct_
@@ -2473,6 +2493,7 @@ src/placement/optimizer.zig::SeedMode enum_
 src/placement/optimizer.zig::Side enum_
 src/placement/optimizer.zig::Stub struct_
 src/placement/optimizer.zig::authoredRoughObjective | fn authoredRoughObjective(p: Placement, rough: env.RoughSpec) f64
+src/placement/optimizer.zig::boardKeepoutRegions | fn boardKeepoutRegions( arena: std.mem.Allocator, p: Placement, ) std.mem.Allocator.Error![]const BoardKeepoutRegion
 src/placement/optimizer.zig::carriesPlane | fn carriesPlane(self: BoardRules, name: []const u8) bool
 src/placement/optimizer.zig::clearanceBetween | fn clearanceBetween(self: *const BoardRules, a: i32, b: i32, base: f64) f64
 src/placement/optimizer.zig::clearanceForNet | fn clearanceForNet(self: *const BoardRules, net: i32, base: f64) f64

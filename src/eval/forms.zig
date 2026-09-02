@@ -572,6 +572,8 @@ pub const scope_form_docs = blk: {
         .syntax = "(board [(part-number \"PN\")] (size W H) [(corner-radius R)] [(outline-approved \"DIGEST\")] " ++
             "[(perimeter-fence (via DIA DRILL) (spacing PITCH) (edge-offset OFFSET) (mask-width WIDTH) [(net \"GND\")] " ++
             "[(keepout CLEARANCE [(blocks components tracks vias)] [(allow-nets \"NET\"…)])])] " ++
+            "[(keepout \"NAME\" (rect X Y W H) (side top|bottom|both) " ++
+            "[(blocks components tracks vias)] [(allow-nets \"NET\"…)] [(reason \"WHY\")])]… " ++
             "[(heatsink (rect X Y W H) (side top|bottom) (target \"SCOPE\" \"ORIGIN\") " ++
             "[(material aluminum_6063|aluminum_1050|copper)] [(base-mm N)] [(fin-height-mm N)] " ++
             "[(fin-thickness-mm N)] [(fin-gap-mm N)] [(fin-axis length|width)] " ++
@@ -597,7 +599,15 @@ pub const scope_form_docs = blk: {
             "(keepout CLEARANCE …) reserves a visible " ++
             "band beyond the vias' inward copper edge; (blocks …) chooses whether components, " ++
             "tracks, and/or vias are forbidden there (all three by default), while (allow-nets …) " ++
-            "admits named copper such as GND. (heatsink …) authors the board's rebuildable default thermal assembly; " ++
+            "admits named copper such as GND. A named (keepout \"NAME\" (rect X Y W H) (side …) …) is the AUTHORED " ++
+            "interior region — a heatsink plate's footprint, a shield can, a bracket — repeatable, its rectangle " ++
+            "board-local millimetres from the outline's top-left (the (heatsink …) frame). (side top|bottom|both) " ++
+            "picks the face(s) it reserves, (blocks …) the families it forbids there (all three by default), and " ++
+            "(allow-nets …) admits named copper; (reason \"WHY\") is carried to DRC, /api/pcb-describe and the " ++
+            "renderers. The placer refuses to put a component courtyard in it, DRC reports board_keepout for a " ++
+            "courtyard, track, or via that lands there, and it is drawn and labelled on /pcb-layout and the PCB PNG. " ++
+            "A rectangle outside the outline, a non-positive size, or an unknown side/blocks word is an error, not a " ++
+            "warning. (heatsink …) authors the board's rebuildable default thermal assembly; " ++
             "its rectangle uses board-local millimetres from the outline's top-left, its physical construction feeds " ++
             "the heatsink scenario, and its target is the stable sub-block/source-origin pair rather than a renumberable " ++
             "ref-des. A saved layout can override its physical assembly; " ++

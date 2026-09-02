@@ -246,6 +246,7 @@ var DRC_HELP={
  sharp_bend:"An RF track turns sharper than its declared maximum frequency tolerates.",
  keepout_violation:"Foreign copper enters an RF net class's advisory same-layer isolation halo.",
  perimeter_keepout:"A component, track, or via enters the fixed perimeter-fence exclusion band. This is a fabrication error by default; only generated fence vias and explicitly allowed nets are admitted.",
+ board_keepout:"A component courtyard, track, or via enters a named region the design reserved with (board \u2026 (keepout \u2026)) \u2014 a heatsink plate, a shield can, a bracket. This is a fabrication error by default; the region's own (blocks \u2026) chooses which families it forbids and (allow-nets \u2026) admits named copper.",
  pour_invalid:"A computed copper pour has malformed or ambiguous final regions and cannot be fabricated safely.",
  pour_overlap:"A final copper pour touches or overlaps foreign copper on the same physical layer.",
  copper_stub:"A trace endpoint stops without reaching a same-net pad, via, trace, or pour.",

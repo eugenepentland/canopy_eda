@@ -69,6 +69,7 @@ test {
     _ = @import("emit.zig");
     _ = @import("erc.zig");
     _ = @import("escape.zig");
+    _ = @import("eval/board_keepout.zig");
     _ = @import("eval/board_role_cases.zig");
     _ = @import("eval/builders.zig");
     _ = @import("eval/builtins.zig");
@@ -217,6 +218,8 @@ test {
     _ = @import("placement/drc_diffpair.zig");
     _ = @import("placement/drc_keepout.zig");
     _ = @import("placement/drc_match.zig");
+    _ = @import("placement/board_keepout.zig");
+    _ = @import("placement/drc_board_keepout.zig");
     _ = @import("placement/drc_perimeter_keepout.zig");
     _ = @import("placement/drc_pour.zig");
     _ = @import("placement/drc_scope.zig");

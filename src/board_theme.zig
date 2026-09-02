@@ -94,6 +94,10 @@ pub const loop_return = "#58a6ff";
 // draws its labels with page CSS), so they are named constants and stay OFF
 // the wire — the viewer has no use for them.
 
+/// An authored `(board … (keepout …))` region's wash, rim and label. The same
+/// violet the viewer hatches a fixed keepout with (`paintFixedKeepouts` in
+/// `serve/assets/pcb_board.js`), so the still image and the page agree.
+pub const keepout_region = "#a855f7";
 /// Header/label text in the rendered PNG.
 pub const text = "#c9d1d9";
 /// Secondary PNG label text.

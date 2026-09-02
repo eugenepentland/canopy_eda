@@ -49,7 +49,7 @@ fn actionable(v: drc.Violation) bool {
 
 fn marksFirst(v: drc.Violation) bool {
     return switch (v.kind) {
-        .via_pad, .via_via, .via_spacing, .via_track, .track_track, .track_pad, .annular, .min_drill, .track_width, .copper_stub, .implicit_junction, .sharp_bend, .land_transit, .keepout_violation, .perimeter_keepout => true,
+        .via_pad, .via_via, .via_spacing, .via_track, .track_track, .track_pad, .annular, .min_drill, .track_width, .copper_stub, .implicit_junction, .sharp_bend, .land_transit, .keepout_violation, .perimeter_keepout, .board_keepout => true,
         .board_edge, .hole_hole => v.who.part_a < 0,
         else => false,
     };

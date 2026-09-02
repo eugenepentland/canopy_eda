@@ -22,6 +22,7 @@ const std = @import("std");
 const httpz = @import("httpz");
 const optimizer = @import("../placement/optimizer.zig");
 const board_layers = @import("../board_layers.zig");
+const env = @import("../eval/env.zig");
 const router = @import("../placement/router.zig");
 const rf_port_report = @import("../placement/rf_port_report.zig");
 const rf_path_solver = @import("../placement/rf_path_solver.zig");
@@ -613,6 +614,7 @@ pub fn writeDescribeJson(
         try w.writeAll("}");
     }
     if (pour_open) try w.writeAll("]");
+    try writeKeepouts(w, alloc, p);
     try writeStackup(w, p);
     try w.writeAll("}");
     const b = p.breakdown;
@@ -744,6 +746,52 @@ pub fn writeDescribeJson(
 /// block has a dominant supply rail, an inner rail plane). Both are the exact
 /// assignment the router stitches against and the Gerber pours — the whole
 /// point of reporting it is that the assumption stops being silent.
+/// The board's AUTHORED keepout regions, in world millimetres like `outline`.
+/// The perimeter band is derived from geometry already in this document; these
+/// rectangles are not derivable from anything else here, so an agent reading
+/// the facts would otherwise have no way to know a piece of the board is
+/// reserved. Absent entirely when the board declares none.
+fn writeKeepouts(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement) DescribeError!void {
+    const regions = try optimizer.boardKeepoutRegions(alloc, p);
+    if (regions.len == 0) return;
+    try w.writeAll(",\"keepouts\":[");
+    for (regions, 0..) |region, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try pcb_layout_page.writeJsonStr(w, region.spec.name);
+        try w.print(",\"side\":\"{s}\",\"rect\":{{\"minx\":{d:.2},\"miny\":{d:.2},\"w\":{d:.2},\"h\":{d:.2}}},\"blocks\":[", .{
+            @tagName(region.spec.side),
+            region.rect.minx,
+            region.rect.miny,
+            region.rect.w,
+            region.rect.h,
+        });
+        try writeBlockedFamilies(w, region.spec.blocks);
+        try w.writeAll("],\"allow_nets\":[");
+        for (region.spec.allow_nets, 0..) |net, ni| {
+            if (ni > 0) try w.writeAll(",");
+            try pcb_layout_page.writeJsonStr(w, net);
+        }
+        try w.writeAll("],\"reason\":");
+        try pcb_layout_page.writeJsonStr(w, region.spec.reason);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+}
+
+/// The physical families a keepout excludes, in the fixed order every keepout
+/// producer lists them.
+fn writeBlockedFamilies(w: *std.Io.Writer, blocks: env.PerimeterKeepoutBlocks) DescribeError!void {
+    var wrote = false;
+    inline for (.{ "components", "tracks", "vias" }) |family| {
+        if (@field(blocks, family)) {
+            if (wrote) try w.writeAll(",");
+            try w.writeAll("\"" ++ family ++ "\"");
+            wrote = true;
+        }
+    }
+}
+
 fn writeStackup(w: *std.Io.Writer, p: optimizer.Placement) DescribeError!void {
     const rules = p.rules;
     const stack = rules.layerStack();
@@ -1812,6 +1860,49 @@ test "writeDescribeJson emits parts with sides, nets and hub pad map" {
     try std.testing.expect(std.mem.indexOf(u8, out, "\"module_policy\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"net\":\"VIN\",\"class\":\"input_rail\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"ref\":\"C9\",\"origin\":\"C_IN\",\"role\":\"input_cap\"") != null);
+}
+
+// spec: Web Server - the pcb-describe board facts list every authored keepout region in world millimetres with its side, blocked families, allowed nets and reason
+test "pcb-describe names the board's authored keepout regions" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const specs = [_]env.BoardKeepoutSpec{.{
+        .name = "heatsink plate",
+        .rect = .{ .x = 5, .y = 0, .w = 5, .h = 10 },
+        .side = .bottom,
+        .blocks = .{ .components = true, .tracks = true, .vias = true },
+        .allow_nets = &.{"GND"},
+        .reason = "bottom-side conduction plate",
+    }};
+    const p = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = true,
+        // Board origin at world (100, 200): the emitted rectangle must be the
+        // WORLD one, not the board-local one the author wrote.
+        .board_rect = .{ .minx = 100, .miny = 200, .w = 10, .h = 10 },
+        .rules = .{ .board_keepouts = &specs },
+    };
+    var policy = try module_policy.analyze(alloc, p);
+    defer policy.deinit(alloc);
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeDescribeJson(&aw.writer, alloc, p, .{ .unplaced = &.{} }, null, "t", "Test", .{ .policy = policy });
+    const out = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"keepouts\":[{\"name\":\"heatsink plate\",\"side\":\"bottom\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"rect\":{\"minx\":105.00,\"miny\":200.00,\"w\":5.00,\"h\":10.00}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"blocks\":[\"components\",\"tracks\",\"vias\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"allow_nets\":[\"GND\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"reason\":\"bottom-side conduction plate\"") != null);
 }
 
 // spec: Web Server - the pcb-describe loop facts mark each decoupling target authored or defaulted and name the declared hub pad
