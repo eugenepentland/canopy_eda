@@ -16,7 +16,7 @@ const paths = @import("../paths.zig");
 const review = @import("../review.zig");
 const review_audit = @import("../review_audit.zig");
 const review_assessment = @import("../review_assessment.zig");
-const system_review_md = @import("../system_review_md.zig");
+const review_datasheets = @import("../review_datasheet_inventory.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 
@@ -209,19 +209,13 @@ pub fn reviewPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     try writeReviewNav(w, name, layout);
     try w.writeAll("</header>");
     if (!ctx.request_auth.role.canWrite()) try w.writeAll("<div class=\"read-only\">Read-only session: checklist decisions and evidence are visible, but only writers can change them.</div>");
-    try w.writeAll("<section class=\"review-intro\"><div class=\"intro-card\"><h2>Generated evidence review</h2><p>The board is inspected first. Exact machine-verifiable criteria close as Static pass/fail, clearly absent component families close as N/A, and the remainder is routed to an Agent review or Human / measurement queue.</p><p>Saved dispositions are explicit overrides. With no override, the live generated verdict remains authoritative and refreshes with the selected layout, release checks, component profiles, DRC, fabrication readiness, and BOM evidence. Connected review agents receive this same queue and write their evidence-backed dispositions back into this page.</p><div class=\"review-links\"><a href=\"/api/schematic-pdf/");
+    try w.writeAll("<section class=\"review-intro\"><div class=\"intro-card\"><h2>Generated engineering review</h2><p>The board is inspected first. Exact machine-verifiable criteria close as Static pass/fail, clearly absent component families close as N/A, and the remainder is routed to an Agent review or Human / measurement queue.</p><p>Agent review is datasheet-first: it inventories exact fitted BOM part numbers, uploads missing PDFs with the datasheet tools, reads them, and performs board-operating-point checks before it may ask for information. Purchase sourcing and fabrication-output paperwork are out of scope. The configured DRC profile remains the fabrication-rule authority, and actual DRC violations still fail their engineering checks.</p><p id=\"datasheet-status\">Exact fitted-part datasheet coverage is loading…</p><div class=\"review-links\"><a href=\"/api/schematic-pdf/");
     try writeUrlEncoded(w, name);
     try w.writeAll("\">Review PDF</a><a href=\"/api/export-review/");
     try writeUrlEncoded(w, name);
-    try w.writeAll("\">Review package</a><a href=\"/api/fab-readiness/");
-    try writeUrlEncoded(w, name);
-    if (layout) |selected| {
-        try w.writeAll("?layout=");
-        try writeUrlEncoded(w, selected);
-    }
-    try w.writeAll("\">Fab readiness JSON</a></div></div><div class=\"progress-card\"><div class=\"metric ready\"><strong id=\"metric-ready\">0 / 258</strong><span>ready (Pass + N/A)</span></div><div class=\"metric\"><strong id=\"metric-static\">0</strong><span>closed statically</span></div><div class=\"metric agent\"><strong id=\"metric-agent\">258</strong><span>agent queue</span></div><div class=\"metric manual\"><strong id=\"metric-manual\">0</strong><span>human / measurement</span></div><div class=\"metric blocked\"><strong id=\"metric-blocked\">0</strong><span>Fail / Needs info</span></div><div class=\"metric open\"><strong id=\"metric-open\">258</strong><span>remaining</span></div><div class=\"bar\" aria-label=\"Review readiness\"><span id=\"progress-bar\"></span></div></div></section>");
+    try w.writeAll("\">Review package</a></div></div><div class=\"progress-card\"><div class=\"metric ready\"><strong id=\"metric-ready\">0 / 258</strong><span>ready (Pass + N/A)</span></div><div class=\"metric\"><strong id=\"metric-static\">0</strong><span>closed statically</span></div><div class=\"metric agent\"><strong id=\"metric-agent\">258</strong><span>agent queue</span></div><div class=\"metric manual\"><strong id=\"metric-manual\">0</strong><span>human / measurement</span></div><div class=\"metric blocked\"><strong id=\"metric-blocked\">0</strong><span>Fail / Needs info</span></div><div class=\"metric open\"><strong id=\"metric-open\">258</strong><span>remaining</span></div><div class=\"bar\" aria-label=\"Review readiness\"><span id=\"progress-bar\"></span></div></div></section>");
     try w.writeAll("<div class=\"toolbar\"><input id=\"review-search\" type=\"search\" placeholder=\"Search criteria and generated evidence…\"><button class=\"filter active\" data-filter=\"all\">All</button><button class=\"filter\" data-filter=\"remaining\">Remaining</button><button class=\"filter\" data-filter=\"fail\">Fail</button><button class=\"filter\" data-filter=\"agent\">Agent queue</button><button class=\"filter\" data-filter=\"manual\">Human</button><button class=\"filter\" data-filter=\"na\">N/A</button><button class=\"filter\" data-filter=\"needs_info\">Needs info</button><button class=\"quiet-btn\" id=\"expand-all\">Expand all</button><button class=\"quiet-btn\" id=\"collapse-all\">Collapse all</button><span class=\"save-state\" id=\"save-state\"></span></div><div id=\"checklist\"></div><div class=\"empty\" id=\"empty\" hidden>No checklist items match this view.</div>");
-    try w.writeAll("<details class=\"audit-card\"><summary>Generated evidence register <span class=\"audit-note\">The detailed release audit behind the item-level verdicts</span></summary><div id=\"audit\" class=\"audit-loading\">Running release checks, component inventory, applicability, layout progress, DRC, and fabrication readiness…</div></details></main><script>const DESIGN_NAME=");
+    try w.writeAll("</main><script>const DESIGN_NAME=");
     try json_writer.writeScriptString(w, name);
     try w.writeAll(";const CHECKLIST_MARKDOWN=");
     try json_writer.writeScriptString(w, catalog_markdown);
@@ -233,7 +227,7 @@ pub fn reviewPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     res.body = out.written();
 }
 
-/// Return safe HTML from the existing generated Board Review Audit.
+/// Return scoped machine assessment and fitted-part datasheet coverage.
 pub fn auditApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse return jsonError(res, 404, "missing design name");
     if (!designExists(req.arena, ctx.project_dir, name)) return jsonError(res, 404, "no design by that name");
@@ -241,27 +235,20 @@ pub fn auditApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handler
         error.OutOfMemory => return error.OutOfMemory,
         else => return jsonError(res, 422, @errorName(err)),
     };
-    const markdown = try review_audit.renderFacts(req.arena, facts);
     const assessments = try review_assessment.build(req.arena, facts);
-    const html = renderAuditHtml(req.arena, markdown) catch |err| switch (err) {
+    const datasheets = review_datasheets.collect(req.arena, ctx.project_dir, name) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return jsonError(res, 500, "generated audit did not pass the safe Markdown profile"),
+        else => return jsonError(res, 422, @errorName(err)),
     };
     var out: std.Io.Writer.Allocating = .init(res.arena);
-    try out.writer.writeAll("{\"ok\":true,\"html\":");
-    try json_writer.writeString(&out.writer, html);
-    try out.writer.writeAll(",\"assessment\":");
+    try out.writer.writeAll("{\"ok\":true,\"assessment\":");
     try review_assessment.writeAssessmentJson(&out.writer, assessments);
+    try out.writer.writeAll(",\"datasheets\":");
+    try review_datasheets.writeInventory(&out.writer, datasheets);
     try out.writer.writeByte('}');
     res.content_type = .JSON;
     res.header("cache-control", "no-store");
     res.body = out.written();
-}
-
-fn renderAuditHtml(allocator: std.mem.Allocator, markdown: []const u8) ![]const u8 {
-    var document = try system_review_md.parse(allocator, markdown, .{});
-    defer document.deinit();
-    return try system_review_md.renderHtmlAlloc(allocator, &document);
 }
 
 // spec: serve/board-review - the supplied review catalog retains all 13 sections and 258 discrete decisions
@@ -309,10 +296,10 @@ test "board review state JSON round trips reviewer evidence" {
 }
 
 // spec: serve/board-review - the page reports ready, static pass, agent queue, human/measurement, blocked and open totals, and supports search plus generated-work filters
-// spec: serve/board-review - the automated audit loads separately after the checklist shell paints and renders only through the safe system-review Markdown parser
+// spec: serve/board-review - the automated assessment loads separately after the checklist shell paints and returns only scoped item verdicts plus exact fitted-part datasheet coverage
 // spec: serve/board-review - read-only reviewers see every disposition and generated result but cannot edit controls
 // spec: serve/board-review - the Review page carries the selected saved layout through every physical-board link
-test "board review page exposes progress filters safe audit and read-only controls" {
+test "board review page exposes scoped progress filters and read-only controls" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -354,9 +341,8 @@ test "board review page exposes progress filters safe audit and read-only contro
     try std.testing.expect(std.mem.indexOf(u8, body, "/assembly-debug/demo?layout=release-A") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "/thermal/demo?layout=release-A") != null);
 
-    const safe = try renderAuditHtml(arena, "# Generated audit\n\n- Evidence: **ready**\n");
-    try std.testing.expect(std.mem.indexOf(u8, safe, "<h1>Generated audit</h1>") != null);
-    try std.testing.expectError(error.RawHtml, renderAuditHtml(arena, "<script>alert(1)</script>"));
+    try std.testing.expect(std.mem.indexOf(u8, body, "fabrication readiness") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "Generated evidence register") == null);
 }
 
 // spec: serve/board-review - a checklist mutation accepts only a catalog item id and fixed status, bounds its evidence and note, requires writer authority plus the review mutation header, and stamps the authenticated identity instead of a body-supplied reviewer

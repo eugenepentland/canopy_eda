@@ -213,7 +213,7 @@ pub const Fetched = struct {
 
 /// The HTTP transport seam. Production passes `curlFetch`; tests pass a stub,
 /// so no unit test ever opens a socket.
-pub const Transport = *const fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!Fetched;
+pub const Transport = *const fn (std.mem.Allocator, []const u8, ?[]const u8) std.mem.Allocator.Error!Fetched;
 
 /// A `fetch_datasheet` request.
 pub const FetchRequest = struct {
@@ -221,6 +221,10 @@ pub const FetchRequest = struct {
     url: []const u8,
     /// Target filename under `lib/datasheets/`; null derives one from the URL.
     name: ?[]const u8 = null,
+    /// Optional manufacturer product page sent as the HTTP Referer. Some
+    /// vendor download endpoints reject an otherwise direct PDF request
+    /// unless it came from that page.
+    source_page: ?[]const u8 = null,
     /// Replace an existing file whose bytes DIFFER. Off by default: a
     /// same-name/different-content fetch is refused rather than silently
     /// invalidating the sha256 every `(datasheet-review …)` citing it records.
@@ -247,13 +251,19 @@ pub fn fetch(
         try writeFetchError(w, "url must be an absolute http(s) URL with no spaces or control characters");
         return false;
     }
+    if (req.source_page) |source_page| {
+        if (!datasheet_ref.isRemote(source_page)) {
+            try writeFetchError(w, "source_page must be an absolute http(s) URL with no spaces or control characters");
+            return false;
+        }
+    }
     const sanitized = upload_datasheet.sanitizeFilename(allocator, req.name orelse nameFromUrl(req.url)) catch {
         try writeFetchError(w, "invalid target filename");
         return false;
     };
     defer allocator.free(sanitized);
 
-    const got = try req.transport(allocator, req.url);
+    const got = try req.transport(allocator, req.url, req.source_page);
     defer if (got.bytes.len != 0) allocator.free(got.bytes);
     if (got.err.len != 0) {
         try writeFetchError(w, got.err);
@@ -333,15 +343,25 @@ fn nameFromUrl(url: []const u8) []const u8 {
 /// CDNs are exactly what the system client already handles for every other
 /// off-site fetch in this tree (CSE, DigiKey), and `runCaptured` gives it the
 /// timeout + process-group kill that a wedged download needs.
-fn curlFetch(allocator: std.mem.Allocator, url: []const u8) std.mem.Allocator.Error!Fetched {
-    const res = try subprocess.runCaptured(allocator, &[_][]const u8{
-        "curl",                "-sS",
-        "-L",                  "--max-time",
-        download_timeout_secs, "--max-filesize",
-        max_filesize_arg,      "-A",
-        browser_ua,            "--",
-        url,
-    }, max_download_bytes, download_timeout_ms);
+fn curlFetch(allocator: std.mem.Allocator, url: []const u8, source_page: ?[]const u8) std.mem.Allocator.Error!Fetched {
+    const res = if (source_page) |referer|
+        try subprocess.runCaptured(allocator, &[_][]const u8{
+            "curl",                "-sS",
+            "-L",                  "--max-time",
+            download_timeout_secs, "--max-filesize",
+            max_filesize_arg,      "-e",
+            referer,               "--",
+            url,
+        }, max_download_bytes, download_timeout_ms)
+    else
+        try subprocess.runCaptured(allocator, &[_][]const u8{
+            "curl",                "-sS",
+            "-L",                  "--max-time",
+            download_timeout_secs, "--max-filesize",
+            max_filesize_arg,      "-A",
+            browser_ua,            "--",
+            url,
+        }, max_download_bytes, download_timeout_ms);
     if (res.outcome != .ok) {
         res.deinit(allocator);
         return .{ .err = transportError(res.outcome) };
@@ -438,21 +458,31 @@ test "window clamps offset and limit and flags truncation" {
 /// Stub transport: a minimal but real PDF. sha256 94b8f2a1…02a0 (verified
 /// against `sha256sum` outside the tree, so the assertion is independent of
 /// `hexDigest`).
-fn stubPdf(allocator: std.mem.Allocator, url: []const u8) std.mem.Allocator.Error!Fetched {
+fn stubPdf(allocator: std.mem.Allocator, url: []const u8, source_page: ?[]const u8) std.mem.Allocator.Error!Fetched {
     _ = url;
+    _ = source_page;
     return .{ .bytes = try allocator.dupe(u8, "%PDF-1.7\nstub datasheet\n") };
 }
 
 /// Stub transport: a different, equally valid PDF. sha256 f448092d…a634.
-fn stubOtherPdf(allocator: std.mem.Allocator, url: []const u8) std.mem.Allocator.Error!Fetched {
+fn stubOtherPdf(allocator: std.mem.Allocator, url: []const u8, source_page: ?[]const u8) std.mem.Allocator.Error!Fetched {
     _ = url;
+    _ = source_page;
     return .{ .bytes = try allocator.dupe(u8, "%PDF-1.7\nDIFFERENT datasheet\n") };
 }
 
 /// Stub transport: what a login wall or cookie interstitial actually serves.
-fn stubHtml(allocator: std.mem.Allocator, url: []const u8) std.mem.Allocator.Error!Fetched {
+fn stubHtml(allocator: std.mem.Allocator, url: []const u8, source_page: ?[]const u8) std.mem.Allocator.Error!Fetched {
     _ = url;
+    _ = source_page;
     return .{ .bytes = try allocator.dupe(u8, "<!doctype html><title>Sign in</title>") };
+}
+
+fn stubReferrerPdf(allocator: std.mem.Allocator, url: []const u8, source_page: ?[]const u8) std.mem.Allocator.Error!Fetched {
+    _ = url;
+    if (!std.mem.eql(u8, source_page orelse "", "https" ++ "://vendor.invalid/product"))
+        return .{ .err = "missing source page" };
+    return .{ .bytes = try allocator.dupe(u8, "%PDF-1.7\nreferrer-gated datasheet\n") };
 }
 
 const stub_pdf_sha = "94b8f2a1a771cb19c88ad2fa269c58f20a50a9cb6183ab05d0ea71700c7802a0";
@@ -592,6 +622,30 @@ test "fetch rejects non-PDF bodies and non-http URLs" {
     const scheme = try fetchInto(std.testing.allocator, root, .{ .url = "file:///etc/passwd", .transport = stubPdf });
     defer std.testing.allocator.free(scheme);
     try std.testing.expect(std.mem.indexOf(u8, scheme, "absolute http(s) URL") != null);
+}
+
+// spec: serve/datasheet - fetch_datasheet accepts a validated manufacturer source_page and forwards it as the HTTP Referer for product-gated PDF endpoints
+test "fetch forwards a validated source page to the transport" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+
+    const body = try fetchInto(std.testing.allocator, root, .{
+        .url = "https" ++ "://vendor.invalid/download.pdf",
+        .source_page = "https" ++ "://vendor.invalid/product",
+        .transport = stubReferrerPdf,
+    });
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"ok\":true") != null);
+
+    const rejected = try fetchInto(std.testing.allocator, root, .{
+        .url = "https" ++ "://vendor.invalid/download.pdf",
+        .source_page = "file:///tmp/product",
+        .transport = stubReferrerPdf,
+    });
+    defer std.testing.allocator.free(rejected);
+    try std.testing.expect(std.mem.indexOf(u8, rejected, "source_page must be an absolute http(s) URL") != null);
 }
 
 // spec: serve/datasheet - fetch_datasheet derives its target name from the URL path segment, dropping query and fragment

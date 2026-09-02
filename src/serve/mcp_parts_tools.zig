@@ -499,6 +499,7 @@ pub fn toolFetchDatasheet(
     return datasheet.fetch(allocator, project_dir, .{
         .url = url,
         .name = optionalString(args_val, "name"),
+        .source_page = optionalString(args_val, "source_page"),
         .overwrite = mcp_tools.optionalBool(args_val, "overwrite") orelse false,
     }, out);
 }

@@ -6404,11 +6404,11 @@ the supplied 13-section research checklist as 258 stable decisions, detects
 which component/interface families apply, closes exact machine-provable checks
 as Pass, Fail, or N/A, and queues the remaining evidence packets for either an
 agent or a human/measurement decision. Saved human and agent dispositions are
-explicit overrides on those generated results. The existing Board Review Audit
-still loads after first paint as the detailed source register for release-profile
-checks, component profiles, layout progress, DRC, fabrication readiness and BOM
-evidence. Each override records Open, Pass, Fail, N/A, or Needs info plus
-evidence, a note, the actor identity/origin, and a UTC timestamp in the
+explicit overrides on those generated results. A scoped assessment loads after
+first paint from release-profile facts, component profiles, layout progress, DRC,
+and BOM evidence without rendering sourcing or fabrication documentation into
+the Review page. Each override records Open, Pass, Fail, N/A, or Needs info plus
+evidence, a note, an agent tool-attempt ledger, the actor identity/origin, and a UTC timestamp in the
 design-sibling .review.json sidecar.
 
 - the PCB header exposes Review only for board designs and preserves a selected saved layout
@@ -6421,7 +6421,10 @@ design-sibling .review.json sidecar.
 - a checklist mutation accepts only a catalog item id and fixed status, bounds its evidence and note, requires writer authority plus the review mutation header, and stamps the authenticated identity instead of a body-supplied reviewer
 - concurrent checklist mutations serialize their whole read-modify-write and atomically replace the design-sibling sidecar
 - agents can read the generated review queue and record evidence-backed item dispositions without editing its sidecar
-- the automated audit loads separately after the checklist shell paints and renders only through the safe system-review Markdown parser
+- the engineering-review scope statically excludes purchase sourcing and fabrication-output paperwork, while the configured DRC profile remains fabrication-rule authority and real DRC violations remain review failures
+- the agent queue inventories datasheet coverage by exact fitted BOM MPN and directs local reads, catalogue downloads, or manufacturer-URL fetches before component decisions
+- an agent cannot record Needs info without a concrete tool-attempt ledger, and a datasheet blocker requires both acquisition and reading attempts; legacy agent deferrals without that ledger reopen for review
+- the automated assessment loads separately after the checklist shell paints and returns only scoped item verdicts plus exact fitted-part datasheet coverage
 - read-only reviewers see every disposition and generated result but cannot edit controls
 - completeness-waiver: empty inputs (a missing or unknown board name answers 404; a missing sidecar is the valid all-open review state)
 - completeness-waiver: large inputs (the catalog is fixed at 258 items, persisted entries are capped to that count, state and request bytes are bounded, and evidence/note fields have independent limits)
@@ -6661,6 +6664,7 @@ Public functions: read, fetch
 - fetch_datasheet re-fetching identical bytes is idempotent and reports the unchanged digest
 - fetch_datasheet refuses to replace a stored datasheet whose bytes differ unless overwrite is requested
 - fetch_datasheet content-sniffs the %PDF magic and rejects a non-PDF body and any non-http(s) URL without writing
+- fetch_datasheet accepts a validated manufacturer source_page and forwards it as the HTTP Referer for product-gated PDF endpoints
 - fetch_datasheet derives its target name from the URL path segment, dropping query and fragment
 - a fetched Mini-Circuits filename keeps its trailing `+` and read_datasheet resolves that exact stored name
 

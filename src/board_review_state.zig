@@ -12,6 +12,8 @@ const max_state_bytes: usize = 2 * 1024 * 1024;
 pub const max_evidence_bytes: usize = 2048;
 /// Maximum reviewer/agent note accepted for one saved decision.
 pub const max_note_bytes: usize = 4096;
+/// Maximum tool-attempt ledger accepted for one agent decision.
+pub const max_attempted_bytes: usize = 2048;
 const max_entries: usize = catalog.item_count;
 
 /// Persisted checklist state values.
@@ -25,6 +27,7 @@ pub const Entry = struct {
     status: Status = .open,
     evidence: []const u8 = "",
     note: []const u8 = "",
+    attempted: []const u8 = "",
     updated_by: []const u8 = "",
     updated_at: []const u8 = "",
     origin: Origin = .human,
@@ -69,11 +72,19 @@ fn loadEntriesImpl(allocator: std.mem.Allocator, project_dir: []const u8, name: 
         const id = jsonStringField(value.object, "id", 16) orelse continue;
         if (!catalog.validItemId(id)) continue;
         const status_raw = jsonStringField(value.object, "status", 24) orelse "open";
-        const status = statusFromString(status_raw) orelse continue;
+        const saved_status = statusFromString(status_raw) orelse continue;
         const origin_raw = jsonStringField(value.object, "origin", 24) orelse "human";
         const origin = originFromString(origin_raw) orelse continue;
         const evidence = jsonStringField(value.object, "evidence", max_evidence_bytes) orelse "";
         const note = jsonStringField(value.object, "note", max_note_bytes) orelse "";
+        const attempted = jsonStringField(value.object, "attempted", max_attempted_bytes) orelse "";
+        // Agent deferrals written before the v3 attempt ledger did not prove
+        // that locally retrievable evidence had been exhausted. Re-open them
+        // for the stricter queue while retaining their note as context.
+        const status: Status = if (origin == .agent and saved_status == .needs_info and attempted.len == 0)
+            .open
+        else
+            saved_status;
         const updated_by = jsonStringField(value.object, "updated_by", 256) orelse "";
         const updated_at = jsonStringField(value.object, "updated_at", 64) orelse "";
         try entries.append(allocator, .{
@@ -81,6 +92,7 @@ fn loadEntriesImpl(allocator: std.mem.Allocator, project_dir: []const u8, name: 
             .status = status,
             .evidence = try allocator.dupe(u8, evidence),
             .note = try allocator.dupe(u8, note),
+            .attempted = try allocator.dupe(u8, attempted),
             .updated_by = try allocator.dupe(u8, updated_by),
             .updated_at = try allocator.dupe(u8, updated_at),
             .origin = origin,
@@ -106,6 +118,8 @@ pub fn writeEntryJson(w: *std.Io.Writer, entry: Entry) (std.mem.Allocator.Error 
     try json_writer.writeString(w, entry.evidence);
     try w.writeAll(",\"note\":");
     try json_writer.writeString(w, entry.note);
+    try w.writeAll(",\"attempted\":");
+    try json_writer.writeString(w, entry.attempted);
     try w.writeAll(",\"updated_by\":");
     try json_writer.writeString(w, entry.updated_by);
     try w.writeAll(",\"updated_at\":");
@@ -118,7 +132,7 @@ pub fn writeEntryJson(w: *std.Io.Writer, entry: Entry) (std.mem.Allocator.Error 
 fn renderStateImpl(allocator: std.mem.Allocator, entries: []const Entry) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
-    try out.writer.writeAll("{\"schema\":\"netlisp-board-review-v2\",\"entries\":[");
+    try out.writer.writeAll("{\"schema\":\"netlisp-board-review-v3\",\"entries\":[");
     for (entries, 0..) |entry, index| {
         if (index > 0) try out.writer.writeByte(',');
         try writeEntryJson(&out.writer, entry);
@@ -185,4 +199,21 @@ pub fn persistEntry(
     replacement: Entry,
 ) PersistEntryError!void {
     return persistEntryImpl(allocator, project_dir, name, mutex, replacement);
+}
+
+test "legacy agent needs-info without an attempt ledger reopens" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/demo.review.json", .data =
+        \\{"schema":"netlisp-board-review-v2","entries":[{"id":"3.2.1","status":"needs_info","evidence":"datasheet required","note":"old deferral","updated_by":"agent","updated_at":"2026-09-01T00:00:00Z","origin":"agent"}]}
+    });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const loaded = try loadEntries(arena_state.allocator(), root, "demo");
+    try std.testing.expectEqual(@as(usize, 1), loaded.len);
+    try std.testing.expectEqual(Status.open, loaded[0].status);
+    try std.testing.expectEqualStrings("old deferral", loaded[0].note);
 }

@@ -159,6 +159,7 @@ src/board_review_state.zig::Entry struct_
 src/board_review_state.zig::Origin enum_
 src/board_review_state.zig::Status enum_
 src/board_review_state.zig::loadEntries | fn loadEntries(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) LoadEntriesError![]const Entry
+src/board_review_state.zig::max_attempted_bytes value
 src/board_review_state.zig::max_evidence_bytes value
 src/board_review_state.zig::max_note_bytes value
 src/board_review_state.zig::persistEntry | fn persistEntry( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, mutex: *infra_fs.Mutex, replacement: Entry, ) PersistEntryError!void
@@ -3726,6 +3727,13 @@ src/review_audit.zig::collectFacts | fn collectFacts( arena: std.mem.Allocator, 
 src/review_audit.zig::mergeDispositions | fn mergeDispositions( allocator: std.mem.Allocator, rendered: []const u8, previous: []const u8, ) std.mem.Allocator.Error![]u8
 src/review_audit.zig::render | fn render( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) RenderError![]u8
 src/review_audit.zig::renderFacts | fn renderFacts(allocator: std.mem.Allocator, facts: Facts) std.mem.Allocator.Error![]u8
+src/review_datasheet_inventory.zig::CollectError value
+src/review_datasheet_inventory.zig::Row struct_
+src/review_datasheet_inventory.zig::Status enum_
+src/review_datasheet_inventory.zig::Summary struct_
+src/review_datasheet_inventory.zig::collect | fn collect(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) CollectError![]const Row
+src/review_datasheet_inventory.zig::summarize | fn summarize(rows: []const Row) Summary
+src/review_datasheet_inventory.zig::writeInventory | fn writeInventory(w: *std.Io.Writer, rows: []const Row) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
 src/review_html.zig::RenderError value
 src/review_html.zig::body_css value
 src/review_html.zig::mutedDash value
@@ -4161,6 +4169,7 @@ src/serve/matlab_rf_export.zig::pcbMatlabRfApi | fn pcbMatlabRfApi(ctx: *Server,
 src/serve/mcp_board_review.zig::RunError value
 src/serve/mcp_board_review.zig::recordItem | fn recordItem( allocator: std.mem.Allocator, project_dir: []const u8, args: ?std.json.Value, out: *std.ArrayList(u8), ) RunError!bool
 src/serve/mcp_board_review.zig::runChecklist | fn runChecklist( allocator: std.mem.Allocator, project_dir: []const u8, args: ?std.json.Value, out: *std.ArrayList(u8), ) RunError!bool
+src/serve/mcp_board_review.zig::runDatasheetInventory | fn runDatasheetInventory( allocator: std.mem.Allocator, project_dir: []const u8, args: ?std.json.Value, out: *std.ArrayList(u8), ) RunError!bool
 src/serve/mcp_build.zig::run | fn run( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, profile: preflight.Profile, severity: ?[]const u8, out: *std.ArrayList(u8), ) RunError!void
 src/serve/mcp_checks.zig::severityPasses | fn severityPasses(v: erc_mod.Violation, filter: ?[]const u8) bool
 src/serve/mcp_checks.zig::toolRunChecks | fn toolRunChecks( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), w: anytype, ) !bool

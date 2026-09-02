@@ -31,7 +31,7 @@
   function el(tag,cls,text){
     const node=document.createElement(tag);if(cls)node.className=cls;if(text!==undefined)node.textContent=text;return node;
   }
-  function saved(id){return state.get(id)||{id,status:"open",evidence:"",note:"",updated_by:"",updated_at:"",origin:"human"}}
+  function saved(id){return state.get(id)||{id,status:"open",evidence:"",note:"",attempted:"",updated_by:"",updated_at:"",origin:"human"}}
   function machine(id){return generated.get(id)||{id,verdict:"open",method:"agent",applicability:"applies",confidence:0,summary:assessmentReady?"Queued for agent review":"Generated analysis is running…",evidence:"",source:""}}
   function effective(id){
     const review=saved(id),auto=machine(id);
@@ -70,7 +70,9 @@
     const detail=el("details","item-detail"),detailSummary=el("summary",null,"Reviewer / agent override"),editor=el("div","override-editor"),evidence=el("input"),note=el("textarea"),save=el("button",null,"Save override");
     evidence.type="text";evidence.placeholder="Additional evidence: refdes, net, layer, datasheet §/page, or report";evidence.value=review.evidence;evidence.disabled=!CAN_WRITE;
     note.placeholder="Reviewer or agent interpretation";note.value=review.note;note.disabled=!CAN_WRITE;save.disabled=!CAN_WRITE;
-    editor.append(evidence,note,save);detail.append(detailSummary,editor);row.append(detail);
+    editor.append(evidence,note,save);
+    if(review.attempted)editor.append(el("small","attempt-ledger","Agent attempts: "+review.attempted));
+    detail.append(detailSummary,editor);row.append(detail);
     const stamp=el("div","item-stamp",review.updated_at?((review.origin==="agent"?"Agent":"Reviewer")+" · "+review.updated_by+" · "+review.updated_at):"No saved override — generated result is authoritative");row.append(stamp);
     const markDirty=()=>{save.textContent="Save override";setSaveState("Unsaved changes")};
     select.addEventListener("change",markDirty);evidence.addEventListener("input",markDirty);note.addEventListener("input",markDirty);
@@ -134,12 +136,15 @@
     (value.entries||[]).forEach(entry=>state.set(entry.id,entry));
   }
   async function loadAudit(){
-    const host=$("#audit"),query=new URLSearchParams(location.search),layout=query.get("layout");
+    const query=new URLSearchParams(location.search),layout=query.get("layout");
     let url="/api/board-review-audit/"+encodeURIComponent(DESIGN_NAME);if(layout)url+="?layout="+encodeURIComponent(layout);
     try{
       const response=await fetch(url,{headers:{accept:"application/json"}}),value=await response.json();if(!response.ok)throw new Error(value.error||("HTTP "+response.status));
-      host.innerHTML=value.html;(value.assessment&&value.assessment.items||[]).forEach(item=>generated.set(item.id,item));assessmentReady=true;setSaveState("Generated analysis current");render();
-    }catch(error){host.className="audit-error";host.textContent="Automated audit could not be generated: "+error.message;setSaveState("Generated analysis unavailable")}
+      (value.assessment&&value.assessment.items||[]).forEach(item=>generated.set(item.id,item));
+      const d=value.datasheets&&value.datasheets.summary,status=$("#datasheet-status");
+      if(d&&status)status.textContent="Exact fitted-part datasheets: "+d.local+" local · "+d.remote_only+" ready to fetch · "+d.missing+" missing · "+d.missing_mpn+" missing exact MPN";
+      assessmentReady=true;setSaveState("Generated analysis current");render();
+    }catch(error){console.error(error);setSaveState("Generated analysis unavailable")}
   }
   async function boot(){
     sections=parseCatalog(CHECKLIST_MARKDOWN);

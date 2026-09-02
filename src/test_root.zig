@@ -341,6 +341,7 @@ test {
     _ = @import("board_review_catalog.zig");
     _ = @import("board_review_state.zig");
     _ = @import("review_assessment.zig");
+    _ = @import("review_datasheet_inventory.zig");
     _ = @import("review_audit.zig");
     _ = @import("review_profiles.zig");
     _ = @import("waiver_register.zig");

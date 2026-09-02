@@ -347,6 +347,21 @@ fn applyReleaseRules(allocator: std.mem.Allocator, items: []Item, facts: review_
     } else addAgentEvidence(items, "12.6", "Revision and layout are frozen with no open notes; agent must confirm the sign-off record", "Revision present, placement/sub-circuits complete, and no open design notes.", "revision + layout ladder + design notes");
 }
 
+fn applyRequestedScope(items: []Item) void {
+    // This review is an engineering-correctness review. Purchase-time sourcing
+    // and fabrication-document paperwork are deliberately outside it; the
+    // configured board DRC remains authoritative for the fabricator's geometry
+    // limits, and real DRC findings continue to feed the layout criteria.
+    const sourcing = [_][]const u8{
+        "9.4", "9.5", "9.6", "9.7", "9.8", "9.10", "9.11", "9.12",
+    };
+    inline for (sourcing) |id| set(items, id, .na, .not_applicable, 100, "Excluded from this engineering review", "Purchase availability, pricing, lifecycle, compliance paperwork, and assembler logistics are outside the requested review scope.", "review scope policy");
+
+    set(items, "8.19", .na, .not_applicable, 100, "Excluded from this engineering review", "A separate fab/assembler capability-sheet review is outside scope; configured DRC rules remain the physical-rule authority.", "review scope policy");
+    inline for (.{ "11.1", "11.2", "11.3", "11.4", "11.5", "11.6", "11.7", "11.8", "11.9" }) |id|
+        set(items, id, .na, .not_applicable, 100, "Excluded from this engineering review", "Fabrication-output documentation is outside scope; configured DRC rules govern fabrication constraints and their actual violations remain visible in layout checks.", "review scope policy");
+}
+
 fn inheritRepeatedGotchas(allocator: std.mem.Allocator, items: []Item) std.mem.Allocator.Error!void {
     // Repeated gotchas inherit an exact generated verdict when their primary
     // checklist item was already closed; otherwise they stay independently in
@@ -378,6 +393,7 @@ fn applyStaticRules(allocator: std.mem.Allocator, items: []Item, facts: review_a
     try applyAssemblyAndBomRules(allocator, items, facts);
     try applyReleaseRules(allocator, items, facts);
     try inheritRepeatedGotchas(allocator, items);
+    applyRequestedScope(items);
 }
 
 /// Generate applicability, deterministic results, and remaining work packets.
@@ -433,6 +449,7 @@ pub fn writeAssessmentJson(w: *std.Io.Writer, items: []const Item) (std.mem.Allo
     try w.writeAll("]}");
 }
 
+// spec: serve/board-review - the engineering-review scope statically excludes purchase sourcing and fabrication-output paperwork, while the configured DRC profile remains fabrication-rule authority and real DRC violations remain review failures
 // spec: serve/board-review - generated applicability closes an absent component or interface family only from evaluated board inventory, while present or uncertain families remain queued unless an analyzer proves the complete criterion
 // spec: serve/board-review - generated Pass and Fail decisions cite current ERC, power-budget, layout, fabrication, BOM, identity, test-point, or board-declaration evidence rather than the saved sidecar
 test "assessment closes only exact static and clear N-A predicates" {
@@ -462,11 +479,14 @@ test "assessment closes only exact static and clear N-A predicates" {
     try std.testing.expectEqual(Verdict.na, find(items, "13.11").?.classification.verdict);
     try std.testing.expectEqual(Method.agent, find(items, "3.1.1").?.classification.method);
     try std.testing.expectEqual(Verdict.open, find(items, "3.1.1").?.classification.verdict);
+    try std.testing.expectEqual(Verdict.na, find(items, "9.4").?.classification.verdict);
+    try std.testing.expectEqual(Verdict.na, find(items, "11.1").?.classification.verdict);
+    try std.testing.expectEqualStrings("review scope policy", find(items, "11.1").?.source);
 
     var unrelated_fab_failure = facts;
     unrelated_fab_failure.fab.ok = false;
     unrelated_fab_failure.fab.error_ids = &.{"outline-drift"};
     const blocked_items = try build(arena, unrelated_fab_failure);
-    try std.testing.expectEqual(Verdict.open, find(blocked_items, "11.2").?.classification.verdict);
-    try std.testing.expectEqual(Method.agent, find(blocked_items, "11.2").?.classification.method);
+    try std.testing.expectEqual(Verdict.na, find(blocked_items, "11.2").?.classification.verdict);
+    try std.testing.expectEqual(Method.static, find(blocked_items, "11.2").?.classification.method);
 }

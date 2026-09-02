@@ -1,5 +1,6 @@
 # guardian-snapshot v2
 10 src/bench_route.zig|BoardResult
+8 src/board_review_state.zig|Entry
 8 src/bom.zig|BomEntry
 9 src/bom.zig|FlatInfo
 8 src/diagram/layout.zig|PowerBox
