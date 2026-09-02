@@ -530,6 +530,14 @@ fn writeRfRegions(g: *Gx, paths: []const rf_port_report.Outcome, layer: u8) Erro
         if (path.physical.layer != layer or path.physical.samples.len < 2) continue;
         try writeRfRun(g, path.physical.samples);
     }
+    // Separate swept runs have butt-ended G36 outlines. At an explicit
+    // same-net endpoint junction, flash the round collar an ordinary stroked
+    // track would have supplied. This unions a sampled fillet to its straight
+    // continuation even when their final chord directions differ slightly.
+    for (try path_copper.junctionCaps(g.arena, paths, layer)) |cap| {
+        try g.useAs(.c, cap.width_mm, 0, .conductor);
+        try g.flash(cap.at[0], cap.at[1]);
+    }
 }
 
 fn rfOwnsTrack(paths: []const rf_port_report.Outcome, track: router.Track) bool {
@@ -2216,6 +2224,53 @@ test "a folded RF offset ring emits overlapping simple Gerber regions" {
     var aw: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&aw.writer, arena, placement, .{ .tracks = &.{}, .rf_paths = &paths }, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, .{ .function = "Copper,L1,Top" });
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, aw.written(), "G36*"));
+}
+
+// spec: export_gerber - separately saved swept RF runs that share an endpoint receive one round junction collar, so a sampled fillet cannot leave a copper sliver before its straight continuation
+test "separate RF fillet and straight regions receive a junction collar" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const width = 0.3124;
+    // Reduced directly from Black Canyon's RF_A1_OUT. The two independently
+    // sampled runs converge on the same centreline endpoint from slightly
+    // different directions, so their butt caps bound the reported CAM cut.
+    const right_run = [_]@import("placement/rf_path_solver.zig").Sample{
+        .{ .at = .{ 6.41421356237467, 6.83397459621754 }, .s_mm = 0, .curvature = 0, .width_mm = width },
+        .{ .at = .{ 6.2071067811894, 6.99289321881629 }, .s_mm = 0.261, .curvature = 0, .width_mm = width },
+    };
+    const left_run = [_]@import("placement/rf_path_solver.zig").Sample{
+        .{ .at = .{ 5.9857864376256, 7.16602540378292 }, .s_mm = 0, .curvature = 0, .width_mm = width },
+        .{ .at = .{ 6.20710678118655, 6.99289321881345 }, .s_mm = 0.281, .curvature = 0, .width_mm = width },
+    };
+    const paths = [_]rf_port_report.Outcome{
+        .{
+            .net = 11,
+            .chosen = 0,
+            .feasible = true,
+            .success = true,
+            .metrics = .{},
+            .trials = &.{},
+            .physical = .{ .sample_count = right_run.len, .samples = &right_run, .layer = 0 },
+        },
+        .{
+            .net = 11,
+            .chosen = 0,
+            .feasible = true,
+            .success = true,
+            .metrics = .{},
+            .trials = &.{},
+            .physical = .{ .sample_count = left_run.len, .samples = &left_run, .layer = 0 },
+        },
+    };
+    const placement = testPlacement(&.{}, &.{});
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&aw.writer, arena, placement, .{ .tracks = &.{}, .rf_paths = &paths }, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, .{ .function = "Copper,L1,Top" });
+    const out = aw.written();
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "G36*"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "D03*"));
+    try testing.expect(std.mem.indexOf(u8, out, "C,0.312400*%") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "X6207107Y3007107D03*") != null);
 }
 
 // spec: export_gerber - downstream geometry consumes an RF portal collar as physical copper even when no compact track handle was persisted

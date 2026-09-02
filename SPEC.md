@@ -4883,6 +4883,7 @@ Public functions: planLayers, writeLayer
 - outer copper flashes side-correct pads and draws routed tracks/vias in the y-up frame
 - a solver RF taper is emitted as one swept polygon rather than its centreline chord apertures
 - a folded RF sweep emits overlapping simple dark regions instead of a self-crossing G36 region
+- separately saved swept RF runs that share an endpoint receive one round junction collar, so a sampled fillet cannot leave a copper sliver before its straight continuation
 - downstream geometry consumes an RF portal collar as physical copper even when no compact track handle was persisted
 - mask openings expand pads and tent vias; paste covers only same-side SMD pads
 - pad openings separated by a positive web below mask-web are merged across that web instead of producing a mask-sliver DRC warning

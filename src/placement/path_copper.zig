@@ -221,6 +221,76 @@ pub fn regions(arena: std.mem.Allocator, samples: []const Sample) std.mem.Alloca
     return result.toOwnedSlice(arena);
 }
 
+/// One round copper collar at an explicit junction between separately saved
+/// swept paths. Each individual region has a butt end. When a filleted run and
+/// its straight continuation are persisted separately, their final sampled
+/// directions can differ slightly and leave a triangular hole even though the
+/// centrelines meet exactly.
+pub const JunctionCap = struct {
+    at: [2]f64,
+    width_mm: f64,
+};
+
+const PathEndpoint = struct {
+    at: [2]f64,
+    width_mm: f64,
+    net: i32,
+    path_index: usize,
+};
+
+fn appendPathEndpoint(
+    arena: std.mem.Allocator,
+    out: *std.ArrayList(PathEndpoint),
+    samples: []const Sample,
+    from_start: bool,
+    net: i32,
+    path_index: usize,
+) std.mem.Allocator.Error!void {
+    if (samples.len < 2) return;
+    const at = if (from_start) samples[0].at else samples[samples.len - 1].at;
+    var width_mm: f64 = eps;
+    var distinct = false;
+    for (samples) |sample| {
+        if (samePoint(sample.at, at))
+            width_mm = @max(width_mm, sample.width_mm)
+        else
+            distinct = true;
+    }
+    if (!distinct) return;
+    try out.append(arena, .{ .at = at, .width_mm = width_mm, .net = net, .path_index = path_index });
+}
+
+/// Round collars needed to union separately persisted swept paths on `layer`.
+/// Endpoint coordinates, net, and layer must all match, so nearby unrelated
+/// copper is never bridged. Multiple branches at one point collapse to one
+/// collar with the widest incident endpoint diameter.
+pub fn junctionCaps(
+    arena: std.mem.Allocator,
+    paths: []const rf_port_report.Outcome,
+    layer: u8,
+) std.mem.Allocator.Error![]const JunctionCap {
+    var endpoints: std.ArrayList(PathEndpoint) = .empty;
+    for (paths, 0..) |path, path_index| {
+        if (!path.success or path.physical.gate_removed or path.physical.layer != layer) continue;
+        try appendPathEndpoint(arena, &endpoints, path.physical.samples, true, path.net, path_index);
+        try appendPathEndpoint(arena, &endpoints, path.physical.samples, false, path.net, path_index);
+    }
+
+    var caps: std.ArrayList(JunctionCap) = .empty;
+    for (endpoints.items, 0..) |a, i| {
+        for (endpoints.items[i + 1 ..]) |b| {
+            if (a.path_index == b.path_index or a.net != b.net or !samePoint(a.at, b.at)) continue;
+            const width_mm = @max(a.width_mm, b.width_mm);
+            for (caps.items) |*cap| {
+                if (!samePoint(cap.at, a.at)) continue;
+                cap.width_mm = @max(cap.width_mm, width_mm);
+                break;
+            } else try caps.append(arena, .{ .at = a.at, .width_mm = width_mm });
+        }
+    }
+    return caps.toOwnedSlice(arena);
+}
+
 fn arcProgress(circle: polygon_outline.ArcCircle, point: [2]f64, reverse: bool) f64 {
     const angle = std.math.atan2(point[1] - circle.cy, point[0] - circle.cx);
     const start = if (reverse) circle.start_angle + circle.sweep else circle.start_angle;

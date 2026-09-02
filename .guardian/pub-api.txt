@@ -2721,7 +2721,9 @@ src/placement/pair_pinch.zig::max_reports value
 src/placement/pair_pinch.zig::owner | fn owner(self: Report, side: Side) ?usize
 src/placement/pair_pinch.zig::record | fn record(self: *Log, report: Report) void
 src/placement/pair_pinch.zig::reports | fn reports(self: *const Log) []const Report
+src/placement/path_copper.zig::JunctionCap struct_
 src/placement/path_copper.zig::filterArcs | fn filterArcs(arena: std.mem.Allocator, paths: []const rf_port_report.Outcome, source: []const router.Arc) std.mem.Allocator.Error![]const router.Arc
+src/placement/path_copper.zig::junctionCaps | fn junctionCaps( arena: std.mem.Allocator, paths: []const rf_port_report.Outcome, layer: u8, ) std.mem.Allocator.Error![]const JunctionCap
 src/placement/path_copper.zig::outline | fn outline(arena: std.mem.Allocator, samples: []const Sample) std.mem.Allocator.Error![]const [2]f64
 src/placement/path_copper.zig::ownsTrack | fn ownsTrack(paths: []const rf_port_report.Outcome, track: anytype) bool
 src/placement/path_copper.zig::regions | fn regions(arena: std.mem.Allocator, samples: []const Sample) std.mem.Allocator.Error![]const []const [2]f64
