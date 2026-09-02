@@ -8005,6 +8005,7 @@ export never invents them.
 
 - CAL_THRU exports as one self-contained ZIP with the specified root directory and required files
 - ambiguous or branched routes fail instead of emitting misleading edge ports
+- a swept RF path in the crop is exported as its real width profile and tented taper, never as the compact editor handle
 - completeness-waiver: empty inputs (an absent design, saved layout, stackup, route, or GND fence returns a named refusal and no ZIP; no empty placeholder artifact is valid)
 - completeness-waiver: large inputs (v1 accepts one unbranched routed net and crops to its two endpoints; array sizes are bounded by the saved route/via slices and the ZIP writer's fixed entry set)
 - completeness-waiver: unauthorized access (the exporter is an in-process serializer over one already-authorized saved PCB view; HTTP authorization remains the server middleware's responsibility)
