@@ -13,9 +13,9 @@ const modules_mod = @import("serve/modules.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
 
 const export_usage =
-    "Usage: netlisp export-elmer-thermal [--project-dir <d>] [--output-dir <out>] [--layout <name>] [--ambient <C>] [--scenario <natural|fan|airflow_1ms|airflow_2ms|heatsink>] [--heatsink-ref <ref>] [--heatsink-side <package_top|board_backside>] [--sink-width-mm <mm>] [--sink-length-mm <mm>] [--sink-base-mm <mm>] [--sink-fin-height-mm <mm>] [--sink-fin-count <n>] [--sink-theta-sa <C/W>] [--pad-thickness-mm <mm>] [--pad-k <W/mK>] <design>\n";
+    "Usage: netlisp export-elmer-thermal [--project-dir <d>] [--output-dir <out>] [--layout <name>] [--ambient <C>] [--scenario <natural|fan|airflow_1ms|airflow_2ms|heatsink|fan_heatsink>] [--heatsink-ref <ref>] [--heatsink-side <package_top|board_backside>] [--sink-width-mm <mm>] [--sink-length-mm <mm>] [--sink-base-mm <mm>] [--sink-fin-height-mm <mm>] [--sink-fin-count <n>] [--sink-theta-sa <C/W>] [--pad-thickness-mm <mm>] [--pad-k <W/mK>] <design>\n";
 const compare_usage =
-    "Usage: netlisp compare-elmer-thermal [--project-dir <d>] [--output-dir <out>] [--layout <name>] [--ambient <C>] [--scenario <natural|fan|airflow_1ms|airflow_2ms|heatsink>] [--heatsink-ref <ref>] [--heatsink-side <package_top|board_backside>] [--sink-width-mm <mm>] [--sink-length-mm <mm>] [--sink-base-mm <mm>] [--sink-fin-height-mm <mm>] [--sink-fin-count <n>] [--sink-theta-sa <C/W>] [--pad-thickness-mm <mm>] [--pad-k <W/mK>] [--solver <ElmerSolver>] <design>\n";
+    "Usage: netlisp compare-elmer-thermal [--project-dir <d>] [--output-dir <out>] [--layout <name>] [--ambient <C>] [--scenario <natural|fan|airflow_1ms|airflow_2ms|heatsink|fan_heatsink>] [--heatsink-ref <ref>] [--heatsink-side <package_top|board_backside>] [--sink-width-mm <mm>] [--sink-length-mm <mm>] [--sink-base-mm <mm>] [--sink-fin-height-mm <mm>] [--sink-fin-count <n>] [--sink-theta-sa <C/W>] [--pad-thickness-mm <mm>] [--pad-k <W/mK>] [--solver <ElmerSolver>] <design>\n";
 const bench_usage =
     "Usage: netlisp bench-thermal [--project-dir <d>] [--layout <name>] [--reps <n>] <design>\n";
 

@@ -577,7 +577,9 @@ pub fn solveFieldsWithHeatsink(
 }
 
 /// As `solveFields`, with optional physical cooling assemblies. A fan adds one
-/// spatial forced-air scenario; null heatsink preserves the automatic sink.
+/// spatial forced-air scenario; a configured fan and sink add a simultaneous
+/// scenario whose forced convection remains confined to the fan's PCB face.
+/// Null heatsink preserves the automatic standalone sink rung.
 pub fn solveFieldsWithAssembly(
     allocator: std.mem.Allocator,
     bt: thermal.BoardThermal,
@@ -792,7 +794,7 @@ pub fn boardVerdict(ladder: Ladder) thermal.Verdict {
     return switch (row.scenario) {
         .natural => .passive_ok,
         .fan, .airflow_1ms, .airflow_2ms => .needs_airflow,
-        .heatsink => .needs_heatsink,
+        .heatsink, .fan_heatsink => .needs_heatsink,
     };
 }
 
@@ -886,6 +888,10 @@ pub fn scenarioLabel(
             std.fmt.allocPrint(allocator, "Heatsink on {s} ({s})", .{ sink.ref, sinkLabel(sink) })
         else
             std.fmt.allocPrint(allocator, "Heatsink ({s})", .{sinkLabel(sink)}),
+        .fan_heatsink => if (sink.ref.len > 0)
+            std.fmt.allocPrint(allocator, "Specified fan + passive heatsink on {s} ({s})", .{ sink.ref, sinkLabel(sink) })
+        else
+            std.fmt.allocPrint(allocator, "Specified fan + passive heatsink ({s})", .{sinkLabel(sink)}),
     };
 }
 
@@ -906,6 +912,10 @@ pub fn coolingClause(
             std.fmt.allocPrint(allocator, "with a heatsink on the {s} at {s}", .{ sinkLabel(sink), sink.ref })
         else
             std.fmt.allocPrint(allocator, "with a heatsink on the {s}", .{sinkLabel(sink)}),
+        .fan_heatsink => if (sink.ref.len > 0)
+            std.fmt.allocPrint(allocator, "with the specified fan and a passive heatsink on the {s} at {s}", .{ sinkLabel(sink), sink.ref })
+        else
+            std.fmt.allocPrint(allocator, "with the specified fan and a passive heatsink on the {s}", .{sinkLabel(sink)}),
     };
 }
 
@@ -927,6 +937,10 @@ pub fn interventionPhrase(
             std.fmt.allocPrint(allocator, "Needs a heatsink on the {s} at {s}", .{ sinkLabel(sink), sink.ref })
         else
             std.fmt.allocPrint(allocator, "Needs a heatsink on the {s}", .{sinkLabel(sink)}),
+        .fan_heatsink => if (sink.ref.len > 0)
+            std.fmt.allocPrint(allocator, "Needs the specified fan and a passive heatsink on the {s} at {s}", .{ sinkLabel(sink), sink.ref })
+        else
+            std.fmt.allocPrint(allocator, "Needs the specified fan and a passive heatsink on the {s}", .{sinkLabel(sink)}),
     };
 }
 
@@ -1193,6 +1207,7 @@ test "each scenario carries a printable label naming the heatsink's target" {
     try testing.expectEqualStrings("1 m/s airflow", try scenarioLabel(arena, .airflow_1ms, .{ .ref = "U1" }));
     try testing.expectEqualStrings("2 m/s airflow", try scenarioLabel(arena, .airflow_2ms, .{ .ref = "U1" }));
     try testing.expectEqualStrings("Heatsink on U5 (board backside)", try scenarioLabel(arena, .heatsink, .{ .ref = "U5" }));
+    try testing.expectEqualStrings("Specified fan + passive heatsink on U5 (PCB bottom)", try scenarioLabel(arena, .fan_heatsink, .{ .ref = "U5", .face = .bottom }));
     // A board with nothing placed has no part to bolt a sink to, and says so by
     // dropping the clause rather than naming the empty string.
     try testing.expectEqualStrings("Heatsink (board backside)", try scenarioLabel(arena, .heatsink, .{}));

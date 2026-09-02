@@ -4298,10 +4298,11 @@ it, where the transfer term is how hard it is for that part's heat to reach the
 layers the sheet lumps together — short where a via array stitches the land to
 the planes, long where nothing does.
 
-Four screening scenarios come back in one call: still air, roughly 1 m/s and
+Four baseline screening scenarios come back in one call: still air, roughly 1 m/s and
 2 m/s of forced air, and a small stamped heatsink bolted to the part with the
 least junction margin in still air. A board-authored fan adds a fifth row ahead
-of the generic airflow brackets. Its catalog free-flow and shutoff-pressure
+of the generic airflow brackets, and a configured fan plus physical heatsink
+adds a sixth simultaneous row after their standalone rows. Its catalog free-flow and shutoff-pressure
 endpoints remain distinct, an explicit installed-flow fraction sets the volume
 flow, and its position, face and standoff produce a distance-expanded local jet
 instead of a global film coefficient. Linearity is the load-bearing invariant — the
@@ -4317,6 +4318,7 @@ coupling through the air.
 - more airflow strictly lowers the board's maximum rise, and the heatsink scenario strictly lowers its target part's junction rise
 - an authored fan adds a spatial cooling rung whose selected face, projected position, standoff and installed-flow assumption drive the per-cell film coefficient
 - a saved layout can override the authored fan's projected position, PCB face and outlet-to-board standoff without changing how the thermal field consumes its operating point
+- a configured fan and heatsink add one simultaneous rung, and when they occupy opposite PCB faces the fan changes only its own face while the sink keeps its natural-convection path
 - one scenario can be solved on its own and matches the ladder's answer for it, and the heatsink asked for alone still bolts its sink to the part the still-air solve names
 - a drawn straight-fin heatsink derives its fin count and theta-SA from material and geometry, and applies that sink over the exact authored contact rectangle
 - a part with no pose is reported as skipped instead of placed, a part hanging off the board docks onto the nearest cell, and neither panics
@@ -6320,6 +6322,7 @@ nothing here writes to the project dir.
 - GET /api/thermal/:name?ambient=NN screens at the caller's ambient and rejects one that is not a number
 - GET /api/thermal/:name carries the layout-aware cooling ladder as four baseline rungs of absolute degrees at the requested ambient, each naming its hotspot, its ambient ceiling and any part it could not place
 - a board-authored fan adds an auditable fan-only row with its model, face, installed flow, velocity and pressure estimate
+- a board with an explicit fan and heatsink adds a simultaneous row carrying both assemblies after their standalone rows
 - the cooling ladder is read at the caller's ambient, so every temperature on it shifts one for one with ?ambient while each ambient ceiling stays put
 - a design with nothing to dissipate answers with a null ladder beside a sentence naming what is missing, and keeps every lumped field
 - GET /api/thermal/:name answers an unknown design or module name with a 404 whose body is not JSON
@@ -6375,7 +6378,7 @@ word nothing recognises. `?fragment=1` answers the two ambient-dependent
 regions alone — the response the page's own client swaps in, because the facts
 JSON carries numbers and not prose and re-deriving the verdict sentence in the
 browser is exactly the disagreement this page is built to prevent. Switching
-cooling scenario needs no round trip: all four per-part tables are rendered into
+cooling scenario needs no round trip: every available scenario's per-part table is rendered into
 the document and the client reveals one.
 
 `?scale_min=NN&scale_max=NN` selects the heat-map colour range only. The two

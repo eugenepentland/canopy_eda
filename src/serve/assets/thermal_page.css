@@ -163,8 +163,8 @@ button { color: inherit; }
   border: 1px solid var(--line);
   border-radius: 9px;
 }
-/* One rung per line: the panel is a column, and four abbreviated scenario
-   labels side by side are unreadable at this width. */
+/* One rung per line: the panel is a column, and the scenario labels are
+   unreadable side by side at this width. */
 .tp-seg { display: flex; flex-direction: column; width: 100%; gap: 2px; padding: 2px; background: var(--bg); border-radius: 7px; }
 .tp-seg-btn {
   min-height: 32px;

@@ -3415,7 +3415,7 @@ pub fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngReq
 ///   pins=U13,C5           label these parts' pads with net names ("hubs" = all)
 ///   thermal=1             paint the HEAT FIELD over this board instead of its
 ///                         copper — the picture twin of /api/thermal/:name
-///   scenario=natural|fan|airflow_1ms|airflow_2ms|heatsink
+///   scenario=natural|fan|airflow_1ms|airflow_2ms|heatsink|fan_heatsink
 ///                         which cooling scenario the heat field is solved for
 ///                         (thermal=1 only; default natural)
 ///   ambient=NN            ambient °C the heat image's absolute temperatures

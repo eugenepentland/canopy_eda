@@ -629,8 +629,8 @@ fn writeLadder(
 }
 
 /// One scenario's per-part table, hottest junction first. Hidden unless it is
-/// the selected scenario: all four are in the document so switching rungs is a
-/// class change rather than a solve.
+/// selected: every available rung is in the document, so switching is a class
+/// change rather than a solve.
 fn writeScenarioParts(
     w: *std.Io.Writer,
     alloc: std.mem.Allocator,

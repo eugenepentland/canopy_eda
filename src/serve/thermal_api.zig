@@ -651,6 +651,23 @@ fn writeThermalFixture(dir: std.Io.Dir) !void {
         \\    (pin 2 "GND")
         \\    (power 1.0)))
     });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "src/fan-sink-heater.sexp", .data =
+        \\(import hot-ic)
+        \\
+        \\(design-block "Fan and Sink Heater Board"
+        \\  (board (size 40 20)
+        \\    (heatsink (rect 8 6 12 8) (side bottom) (target "" "U1")
+        \\      (material aluminum_6063) (base-mm 2) (fin-height-mm 10)
+        \\      (fin-thickness-mm 1) (fin-gap-mm 1.5) (fin-axis length)
+        \\      (pad-thickness-mm 0.5) (pad-k-w-mk 6))
+        \\    (fan (model "9A0812G4D011") (rect -20 -30 80 80) (side top)
+        \\      (distance-mm 10) (free-air-flow-m3-s 0.025)
+        \\      (max-static-pressure-pa 80.4) (operating-flow-fraction 0.6)))
+        \\  (instance "U1" hot-ic
+        \\    (pin 1 "VIN")
+        \\    (pin 2 "GND")
+        \\    (power 1.0)))
+    });
     try dir.writeFile(std.testing.io, .{ .sub_path = "src/quiet.sexp", .data =
         \\(import cool-ic)
         \\
@@ -992,6 +1009,28 @@ test "the thermal endpoint carries the authored fan operating point" {
     try testing.expect(try num(fan.get("velocity_m_s").?) > 0);
     try testing.expect(try num(fan.get("estimated_pressure_pa").?) > 0);
     try testing.expect(try num(rows[1].object.get("board_max_c").?) < try num(rows[0].object.get("board_max_c").?));
+}
+
+// spec: serve/thermal - a board with an explicit fan and heatsink adds a simultaneous row carrying both assemblies after their standalone rows
+test "the thermal endpoint exposes the combined fan and heatsink scenario" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeThermalFixture(tmp.dir);
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    const got = try serve(alloc, project, "fan-sink-heater", null);
+    try testing.expectEqual(@as(u16, 200), got.status);
+    const rows = try scenarioRows(alloc, got.body);
+    try testing.expectEqual(@as(usize, 6), rows.len);
+    try testing.expectEqualStrings("heatsink", rows[4].object.get("scenario").?.string);
+    try testing.expectEqualStrings("fan_heatsink", rows[5].object.get("scenario").?.string);
+    try testing.expectEqualStrings("bottom", rows[5].object.get("heatsink").?.object.get("face").?.string);
+    try testing.expectEqualStrings("top", rows[5].object.get("fan").?.object.get("face").?.string);
+    try testing.expect(try num(rows[5].object.get("board_max_c").?) < try num(rows[1].object.get("board_max_c").?));
+    try testing.expect(try num(rows[5].object.get("board_max_c").?) < try num(rows[4].object.get("board_max_c").?));
 }
 
 // spec: serve/thermal - the cooling ladder is read at the caller's ambient, so every temperature on it shifts one for one with ?ambient while each ambient ceiling stays put
