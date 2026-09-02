@@ -229,7 +229,7 @@ Local dev still uses `http://localhost:7050`.
   planes per the `(stackup …)` form (no form = the router's implicit 4-layer
   model, emitted as two inner ground planes with clearance antipads around
   foreign holes; a plane declared on an outer layer pours it with
-  clear-polarity isolation), solder mask (0.05 mm expansion, vias tented),
+  clear-polarity isolation), solder mask (1:1 pad openings by default, vias tented),
   paste, silkscreen (footprint art + 5x7 ref-des strokes, mirrored on the
   bottom), and the board profile (the ★ layout's drawn outline > authored
   `(board …)` rect > parts-bbox fallback) — plus the Excellon PTH/NPTH

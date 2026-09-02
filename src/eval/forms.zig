@@ -1008,7 +1008,7 @@ pub const scope_form_docs = blk: {
             "geometry — an explicit query/panel override still wins for interactive routing, but the fab " ++
             "gate judges the board against these authored rules. All are global defaults — a per-net " ++
             "(net-class …) still overrides width/clearance/via for its own nets. An omitted rule keeps the " ++
-            "toolchain's built-in default (clearance 0.127, min-drill 0.2, mask-margin 0.05, mask-relief-corner-radius 0, copper-edge = " ++
+            "toolchain's built-in default (clearance 0.127, min-drill 0.2, mask-margin 0, mask-relief-corner-radius 0, copper-edge = " ++
             "clearance, component-edge 0.2, hole-to-hole 0.25, min-annular 0.1, mask-web 0.1, min-width 0.1, " ++
             "pour-clearance 0.3, track-width 0.127, " ++
             "via 0.4 / 0.2, via-plating 0.025), so a design with no form uses those defaults.",

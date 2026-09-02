@@ -43,7 +43,7 @@ const env = @import("eval/env.zig");
 // Solder-mask margin and copper-pour isolation are no longer hard-coded here —
 // they live in `optimizer.DesignRules` (`mask_margin` / `pour_clearance` /
 // `copper_edge`), resolved from the design's `(design-rules …)` form with the
-// old constants (0.05 / 0.3) as defaults, and read via `placement.rules.design`.
+// fabrication defaults (0 / 0.3), and read via `placement.rules.design`.
 
 /// Silkscreen stroke width (mm), independent of vector text cap height.
 const silk_w_mm = silk_font.stroke_width_mm;
@@ -892,7 +892,7 @@ fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optim
             // A pad's own `(mask-margin …)` REPLACES the board rule for it
             // (KiCad's per-pad `solder_mask_margin`) — a fiducial's target is
             // a bare 0.75 mm pad under a 2.25 mm opening, and flashing it at
-            // the board's 0.05 mm ships a fiducial no vision system can read.
+            // the board default ships a fiducial no vision system can read.
             try flashPad(g, p, pad, pad.maskMargin(margin));
         }
     }
@@ -2593,8 +2593,8 @@ test "writeLayer emits top copper with pads, tracks, and via lands" {
     try testing.expect(std.mem.indexOf(u8, bot, "X1000000Y9000000D02*\nX2000000Y9000000D01*") != null);
 }
 
-// spec: export_gerber - mask openings expand pads and tent vias; paste covers only same-side SMD pads
-test "mask expands pads and skips vias; paste skips through-hole" {
+// spec: export_gerber - mask opens pads at the resolved margin and tents vias; paste covers only same-side SMD pads
+test "mask opens pads at the resolved margin and skips vias; paste skips through-hole" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
@@ -2613,7 +2613,7 @@ test "mask expands pads and skips vias; paste skips through-hole" {
     try writeLayer(&mw.writer, arena, placement, .{ .vias = &vias }, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
     const mask = mw.written();
     try testing.expect(std.mem.indexOf(u8, mask, "%TF.FilePolarity,Negative*%") != null);
-    try testing.expect(std.mem.indexOf(u8, mask, "R,1.100000X0.600000*%") != null); // 0.05/side expansion
+    try testing.expect(std.mem.indexOf(u8, mask, "R,1.000000X0.500000*%") != null); // default 1:1 opening
     try testing.expect(std.mem.indexOf(u8, mask, "X5000000Y5000000D03*") == null); // via tented
 
     var pw: std.Io.Writer.Allocating = .init(arena);
@@ -2636,7 +2636,8 @@ test "exposed paddle opens the opposite mask at one to one" {
     var parts = [_]optimizer.Part{
         .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
     };
-    const placement = testPlacement(&parts, &.{});
+    var placement = testPlacement(&parts, &.{});
+    placement.rules.design.mask.margin = 0.05;
 
     var top_writer: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&top_writer.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
@@ -2683,9 +2684,9 @@ test "opposite paddle mask window protects non-ground tracks and vias" {
 
     try testing.expect(std.mem.indexOf(u8, mask, "R,2.000000X2.000000*%") != null); // exact EP opening
     try testing.expect(std.mem.indexOf(u8, mask, "%LPC*%") != null); // mask restored over SIG copper
-    try testing.expect(std.mem.indexOf(u8, mask, "C,0.300000*%") != null); // 0.2 trace + 0.05/side guard
-    try testing.expect(std.mem.indexOf(u8, mask, "X8850000Y5000000D02*\nX11150000Y5000000D01*") != null);
-    try testing.expect(std.mem.indexOf(u8, mask, "C,0.500000*%") != null); // 0.4 via + 0.05/side guard
+    try testing.expect(std.mem.indexOf(u8, mask, "C,0.200000*%") != null); // 1:1 guard over the 0.2 trace
+    try testing.expect(std.mem.indexOf(u8, mask, "X8900000Y5000000D02*\nX11100000Y5000000D01*") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "C,0.400000*%") != null); // 1:1 guard over the 0.4 via
     try testing.expect(std.mem.indexOf(u8, mask, "X9500000Y5500000D03*") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "X10500000Y5500000D03*") == null); // GND via remains exposed
     try testing.expect(std.mem.indexOf(u8, mask, "%LPD*%") != null);
@@ -2705,7 +2706,7 @@ test "a fiducial's pad overrides open the mask and skip the stencil" {
 
     // `lib/footprints/fiducial-0p75-2p25.sexp`: a 0.75 mm round target under a
     // 0.75 mm/side mask opening, taking no paste — beside an ordinary pad that
-    // declares neither and must keep the board's 0.05 mm margin and its paste.
+    // declares neither and must keep the board's 1:1 opening and its paste.
     const pads = [_]geometry.Pad{
         .{ .number = "1", .x = 0, .y = 0, .w = 0.75, .h = 0.75, .shape = "circle", .overrides = .{ .mask_margin = 0.75, .no_paste = true } },
         .{ .number = "2", .x = 3, .y = 0, .w = 1.0, .h = 0.5 },
@@ -2719,11 +2720,11 @@ test "a fiducial's pad overrides open the mask and skip the stencil" {
     try writeLayer(&mw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
     const mask = mw.written();
     // 0.75 copper + 2×0.75 = 2.25 mm opening — the fiducial's whole point. The
-    // board-rule opening (0.75 + 2×0.05 = 0.85) must NOT appear.
+    // board-rule 1:1 opening (0.75 mm) must NOT replace that override.
     try testing.expect(std.mem.indexOf(u8, mask, "C,2.250000*%") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "C,0.850000*%") == null);
-    // The undeclared pad still opens at the board rule (1.0/0.5 + 2×0.05).
-    try testing.expect(std.mem.indexOf(u8, mask, "R,1.100000X0.600000*%") != null);
+    // The undeclared pad still opens at the board rule (1.0 × 0.5, 1:1).
+    try testing.expect(std.mem.indexOf(u8, mask, "R,1.000000X0.500000*%") != null);
 
     var pw: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&pw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .paste = .top }, .{ .function = "Paste,Top" });
@@ -2853,7 +2854,7 @@ test "perimeter mask stays on non-ground copper while fence vias remain independ
     // 0.2 mm web, the SIG trace plus pour clearance, and the SIG via guard.
     try testing.expect(std.mem.indexOf(u8, top, "X0Y10000000D02*\nX20000000Y10000000D01*") != null);
     const clear_pos = std.mem.indexOf(u8, top, "%LPC*%") orelse return error.ClearPolarityMissing;
-    try testing.expect(std.mem.indexOf(u8, top, "R,1.500000X0.900000*%") != null);
+    try testing.expect(std.mem.indexOf(u8, top, "R,1.400000X0.800000*%") != null);
     try testing.expect(std.mem.indexOfPos(u8, top, clear_pos, "X5000000Y9500000D03*") != null);
     try testing.expect(std.mem.indexOf(u8, top, "C,0.600000*%") != null);
     try testing.expect(std.mem.indexOfPos(u8, top, clear_pos, "X14000000Y10000000D02*\nX14000000Y8000000D01*") != null);
@@ -2861,7 +2862,7 @@ test "perimeter mask stays on non-ground copper while fence vias remain independ
     try testing.expect(std.mem.indexOfPos(u8, top, clear_pos, "X17000000Y9500000D03*") != null);
     const reopen_pos = std.mem.indexOfPos(u8, top, clear_pos, "%LPD*%") orelse return error.DarkPolarityMissing;
     try testing.expect(reopen_pos > clear_pos);
-    try testing.expect(std.mem.indexOf(u8, top, "R,1.100000X0.500000*%") != null);
+    try testing.expect(std.mem.indexOf(u8, top, "R,1.000000X0.400000*%") != null);
 
     var bottom_writer: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&bottom_writer.writer, arena, placement, .{ .tracks = &tracks, .vias = &vias }, &.{}, export_fab.frameFor(placement), .{ .mask = .bottom }, .{ .function = "Soldermask,Bot" });
@@ -2869,7 +2870,7 @@ test "perimeter mask stays on non-ground copper while fence vias remain independ
     // restores its exact circular guard after the same continuous band.
     const bottom = bottom_writer.written();
     try testing.expect(std.mem.indexOf(u8, bottom, "X0Y10000000D02*\nX20000000Y10000000D01*") != null);
-    try testing.expect(std.mem.indexOf(u8, bottom, "R,1.500000X0.900000*%") == null);
+    try testing.expect(std.mem.indexOf(u8, bottom, "R,1.400000X0.800000*%") == null);
     try testing.expect(std.mem.indexOf(u8, bottom, "C,0.600000*%") == null);
     try testing.expect(std.mem.indexOf(u8, bottom, "C,0.800000*%") != null);
 
@@ -2911,7 +2912,7 @@ test "perimeter mask is absent on a face without the matching ground pour" {
     try testing.expect(std.mem.indexOf(u8, bottom_writer.written(), "C,1.400000*%") == null);
 }
 
-// spec: export_gerber - the mask margin comes from (design-rules …), defaulting byte-identically to 0.05 mm
+// spec: export_gerber - the mask margin comes from (design-rules …), defaulting to 0 mm for 1:1 pad openings
 test "mask margin reads from the design rules" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -2922,12 +2923,11 @@ test "mask margin reads from the design rules" {
         .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
     };
 
-    // No form ⇒ default 0.05/side ⇒ the same 1.100000X0.600000 opening the
-    // legacy constant produced (the byte-identical regression).
+    // No form ⇒ default 0/side ⇒ a 1:1 1.000000X0.500000 opening.
     const base = testPlacement(&parts, &.{});
     var mw: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&mw.writer, arena, base, .{}, &.{}, export_fab.frameFor(base), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
-    try testing.expect(std.mem.indexOf(u8, mw.written(), "R,1.100000X0.600000*%") != null);
+    try testing.expect(std.mem.indexOf(u8, mw.written(), "R,1.000000X0.500000*%") != null);
 
     // A (design-rules (mask-margin 0.1)) widens the opening to 0.1/side ⇒
     // 1.200000X0.700000.
@@ -2947,18 +2947,18 @@ test "mask output removes a sub-minimum web between pad openings" {
     const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
     var parts = [_]optimizer.Part{
         .{ .ref_des = "R1", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
-        .{ .ref_des = "R2", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pads, .fallback = false, .x = 10.55, .y = 5 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pads, .fallback = false, .x = 10.45, .y = 5 },
     };
     const placement = testPlacement(&parts, &.{});
     var out: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&out.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
     const mask = out.written();
-    // Two 0.5 mm-tall openings leave 0.05 mm of mask between them. The extra
-    // 0.5 mm round stroke crosses that complete web, merging the apertures.
-    try testing.expect(std.mem.indexOf(u8, mask, "%ADD11C,0.500000*%") != null);
+    // Two 0.4 mm-tall 1:1 openings leave 0.05 mm of mask between them. The
+    // 0.4 mm round stroke crosses that complete web, merging the apertures.
+    try testing.expect(std.mem.indexOf(u8, mask, "%ADD11C,0.400000*%") != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, mask, "D01*"));
 
-    parts[1].x = 10.6; // opening gap = 0.1 mm, exactly the retained-web floor.
+    parts[1].x = 10.5; // opening gap = 0.1 mm, exactly the retained-web floor.
     const legal = testPlacement(&parts, &.{});
     var legal_out: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&legal_out.writer, arena, legal, .{}, &.{}, export_fab.frameFor(legal), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
@@ -3018,10 +3018,10 @@ test "max-freq mask relief emits polygons and no via flashes" {
     const mask = try reliefMask(arena, &.{}, &nets, &rules, copper);
 
     // The RF trace and its connected transition antipad are closed regions,
-    // never via flashes. The trace boundary is 1.554 mm wide because the class
+    // never via flashes. The trace boundary is 1.454 mm wide because the class
     // is a fence target; the distant RF via creates no third region.
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, mask, "G36*"));
-    try testing.expect(std.mem.indexOf(u8, mask, "X2000000Y4223000D02*") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "X2000000Y4273000D02*") != null);
     // The unclassed track never opens (its y-up start (2,2) is absent).
     try testing.expect(std.mem.indexOf(u8, mask, "X2000000Y2000000D02*") == null);
     // Neither via creates a flash aperture: the first is exposed because the
@@ -3070,7 +3070,7 @@ test "continuous mask relief restores a local pad island" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1.0, .h = 0.5 }};
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1.0, .h = 0.5, .overrides = .{ .mask_margin = 0.05 } }};
     var parts = [_]optimizer.Part{
         .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
     };
@@ -3081,9 +3081,9 @@ test "continuous mask relief restores a local pad island" {
     };
     const mask = try reliefMask(arena, &parts, &nets, &rules, .{ .tracks = &tracks });
 
-    // The centreline dam still ends the relief at x=9.35. A clear-polarity
-    // 1.3 x 0.8 mm copy then restores exactly the pad opening plus one 0.1 mm
-    // web; dark polarity reopens the ordinary 1.1 x 0.6 mm pad aperture.
+    // The pad's explicit margin makes the centreline dam end at x=9.35. A
+    // clear-polarity 1.3 x 0.8 mm copy then restores exactly the pad opening
+    // plus one 0.1 mm web; dark polarity reopens its 1.1 x 0.6 mm aperture.
     try testing.expect(std.mem.indexOf(u8, mask, "G36*") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "X9350000Y") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "%LPC*%") != null);
@@ -3108,14 +3108,14 @@ test "nearby pad island leaves the RF trace relief continuous" {
     const mask = try reliefMask(arena, &parts, &nets, &rules, .{ .tracks = &tracks });
 
     // The single region still runs from x=2 through x=8. Only the local
-    // 0.8 mm pad-shaped protector is clear, followed by the 0.6 mm aperture.
+    // 0.7 mm pad-shaped protector is clear, followed by the 0.5 mm aperture.
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, mask, "G36*"));
     try testing.expect(std.mem.indexOf(u8, mask, "X2000000Y4600000D02*") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "X8000000Y") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "%LPC*%") != null);
-    try testing.expect(std.mem.indexOf(u8, mask, "R,0.800000X0.800000*%") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "R,0.700000X0.700000*%") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "%LPD*%") != null);
-    try testing.expect(std.mem.indexOf(u8, mask, "R,0.600000X0.600000*%") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "R,0.500000X0.500000*%") != null);
 }
 
 // spec: export_gerber - mask-relief pad-dam terminations use the authored corner fillet in the fabrication layer
@@ -3124,7 +3124,7 @@ test "mask relief writes the authored terminal fillet" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1.0, .h = 0.5 }};
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1.0, .h = 0.5, .overrides = .{ .mask_margin = 0.05 } }};
     var parts = [_]optimizer.Part{
         .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
     };
@@ -3138,12 +3138,12 @@ test "mask relief writes the authored terminal fillet" {
     try writeLayer(&mw.writer, arena, placement, .{ .tracks = &tracks }, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
     const mask = mw.written();
 
-    // The centreline dam transition is x=9.35. Its 0.777 mm half
+    // The explicit pad margin puts the dam transition at x=9.35. Its 0.727 mm half
     // opening is pulled in by the authored 0.2 mm fillet at the vertical cap:
-    // world y=5.577 becomes y-up 4.423 in the Gerber frame.
+    // world y=5.527 becomes y-up 4.473 in the Gerber frame.
     try testing.expect(std.mem.indexOf(u8, mask, "G36*") != null);
     try testing.expect(std.mem.indexOf(u8, mask, "G02") != null or std.mem.indexOf(u8, mask, "G03") != null);
-    try testing.expect(std.mem.indexOf(u8, mask, "X9350000Y4423000") != null);
+    try testing.expect(std.mem.indexOf(u8, mask, "X9350000Y4473000") != null);
 }
 
 // spec: export_gerber - fence vias never emit solder-mask apertures; the widened RF polygon alone exposes overlapping copper
@@ -3689,7 +3689,7 @@ test "apertures declare what they draw" {
     var mw: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&mw.writer, arena, placement, .{}, &.{}, frame, .{ .mask = .top }, .{ .function = "Soldermask,Top" });
     try testing.expect(std.mem.indexOf(u8, mw.written(), "%TA.") == null);
-    try testing.expect(std.mem.indexOf(u8, mw.written(), "R,1.100000X0.600000*%") != null);
+    try testing.expect(std.mem.indexOf(u8, mw.written(), "R,1.000000X0.500000*%") != null);
     var sw: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&sw.writer, arena, placement, .{}, &.{}, frame, .{ .silk = .top }, .{ .function = "Legend,Top" });
     try testing.expect(std.mem.indexOf(u8, sw.written(), "%TA.") == null);
@@ -3978,7 +3978,8 @@ test "custom pad mask opening dilates its copper outline" {
     var parts = [_]optimizer.Part{
         .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
     };
-    const placement = testPlacement(&parts, &.{});
+    var placement = testPlacement(&parts, &.{});
+    placement.rules.design.mask.margin = 0.05;
 
     var cw: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&cw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, .{ .function = "Copper,L1,Top" });
@@ -4011,7 +4012,8 @@ test "concave custom pad mask preserves its source region" {
     var parts = [_]optimizer.Part{
         .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 5 },
     };
-    const placement = testPlacement(&parts, &.{});
+    var placement = testPlacement(&parts, &.{});
+    placement.rules.design.mask.margin = 0.05;
     var cw: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&cw.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, .{ .function = "Copper,L1,Top" });
     var mw: std.Io.Writer.Allocating = .init(arena);

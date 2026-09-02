@@ -3466,7 +3466,7 @@ test "check default rules equal the documented defaults" {
     try testing.expectEqual(@as(f64, 0.25), d.hole_to_hole);
     try testing.expectEqual(@as(f64, 0.1), d.mask.web);
     try testing.expectEqual(@as(f64, 0.1), d.min_width);
-    try testing.expectEqual(@as(f64, 0.05), d.mask.margin);
+    try testing.expectEqual(@as(f64, 0), d.mask.margin);
     try testing.expectEqual(@as(f64, 0.3), d.pour_clearance);
     // copper_edge unset ⇒ the DRC edge clearance falls back to the plain
     // copper clearance (the old board_edge behaviour) and the Gerber pour

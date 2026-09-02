@@ -765,7 +765,7 @@ pub const DesignRules = struct {
     /// adjacent openings. Sub-minimum positive webs are removed by merging the
     /// apertures in the fabrication mask. One group because mask generation
     /// always reads the two together.
-    mask: env.MaskRules = .{ .margin = 0.05, .web = 0.1, .relief_corner_radius = 0 },
+    mask: env.MaskRules = .{ .margin = 0, .web = 0.1, .relief_corner_radius = 0 },
     /// Copper-pour isolation (mm) for an INNER plane: the gap a solid pour
     /// holds off foreign copper (hole/via antipads, track and pad halos) AND
     /// its Gerber board-edge pullback. A pour on an OUTER copper face resolves
@@ -12464,7 +12464,7 @@ test "designRulesOf fills defaults and honours authored overrides" {
     const d0 = designRulesOf(&none);
     try testing.expectEqual(@as(f64, 0.127), d0.clearance);
     try testing.expectEqual(@as(f64, 0.2), d0.min_drill);
-    try testing.expectEqual(@as(f64, 0.05), d0.mask.margin);
+    try testing.expectEqual(@as(f64, 0), d0.mask.margin);
     try testing.expectEqual(@as(f64, 0), d0.mask.relief_corner_radius);
     try testing.expectEqual(@as(f64, 0.25), d0.hole_to_hole);
     try testing.expectEqual(@as(f64, 0.1), d0.min_annular);

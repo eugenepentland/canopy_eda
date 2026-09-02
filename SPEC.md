@@ -4885,7 +4885,7 @@ Public functions: planLayers, writeLayer
 - a folded RF sweep emits overlapping simple dark regions instead of a self-crossing G36 region
 - separately saved swept RF runs that share an endpoint receive one round junction collar, so a sampled fillet cannot leave a copper sliver before its straight continuation
 - downstream geometry consumes an RF portal collar as physical copper even when no compact track handle was persisted
-- mask openings expand pads and tent vias; paste covers only same-side SMD pads
+- mask opens pads at the resolved margin and tents vias; paste covers only same-side SMD pads
 - pad openings separated by a positive web below mask-web are merged across that web instead of producing a mask-sliver DRC warning
 - an IC exposed paddle opens the opposite-face solder mask at the exact EP outline, without the component-side mask margin
 - non-ground outer-face traces and vias remain masked where they cross an opposite-face exposed-paddle window, and a non-ground pour suppresses that window
@@ -4938,7 +4938,7 @@ Public functions: planLayers, writeLayer
 - an editable board text tagged with a test-point identity replaces exactly that generated label
 - non-testpoint components do not receive generated test-point silkscreen labels
 - generated sub-circuit legs and names avoid mask-relieved bare copper like pads
-- the mask margin comes from (design-rules …), defaulting byte-identically to 0.05 mm
+- the mask margin comes from (design-rules …), defaulting to 0 mm for 1:1 pad openings
 - a non-rectangular board emits its exact outline polygon on the edge layer
 - board-level silkscreen text strokes onto the silk layer at its world anchor, and only on its own side
 - fabricated silkscreen text uses scalable single-line vector glyphs with independent stroke thickness and one consistent cap height for capitals and digits

@@ -313,7 +313,7 @@ fn collectDams(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem
             // this pass preserves stands against the opening the mask writer
             // actually flashes rather than a smaller one it never draws. This
             // is why the standoff is per-pad rather than one board-wide value:
-            // a fiducial's 2.25 mm opening and a signal land's 0.05 mm one owe
+            // a fiducial's 2.25 mm opening and a signal land's 1:1 one owe
             // their webs completely different distances.
             const grow = pad.maskMargin(design.mask.margin) + design.mask.web;
             const both = pad.thru or pad.npth or pad.drill > 0;
@@ -1202,16 +1202,16 @@ test "sub-minimum pad-aperture webs are merged" {
     const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
     var parts = [_]optimizer.Part{
         .{ .ref_des = "R1", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pads, .fallback = false },
-        .{ .ref_des = "R2", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pads, .fallback = false, .x = 0.55 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.2, .hh = 0.2, .pads = &pads, .fallback = false, .x = 0.45 },
     };
     const merges = try collectMerges(arena, testPlacement(&parts, &.{}, &.{}));
     try testing.expectEqual(@as(usize, 1), merges.len);
     try testing.expectEqual(@as(u8, 0), merges[0].layer);
-    try testing.expectApproxEqAbs(@as(f64, 0.25), merges[0].x1, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 0.3), merges[0].x2, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 0.5), merges[0].width, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.2), merges[0].x1, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.25), merges[0].x2, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.4), merges[0].width, 1e-9);
 
-    parts[1].x = 0.6; // opening gap = 0.1 mm: exactly legal, no merge.
+    parts[1].x = 0.5; // opening gap = 0.1 mm: exactly legal, no merge.
     try testing.expectEqual(@as(usize, 0), (try collectMerges(arena, testPlacement(&parts, &.{}, &.{}))).len);
 }
 
@@ -1247,9 +1247,9 @@ test "fenced default band swallows the fence row" {
     const tracks = [_]router.Track{.{ .x1 = 2, .y1 = 5, .x2 = 8, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 }};
     const r = try compute(arena, placement, .{ .tracks = &tracks });
     try testing.expectEqual(@as(usize, 1), r.strokes.len);
-    // gap (0.127 clearance + 0.1 margin) + fence via 0.4 + mask margin 0.05,
-    // each side of the 0.2 trace ⇒ 0.2 + 2×0.677.
-    try testing.expectApproxEqAbs(@as(f64, 1.554), r.strokes[0].widths.opening, 1e-9);
+    // gap (0.127 clearance + 0.1 margin) + fence via 0.4 + zero mask margin,
+    // each side of the 0.2 trace ⇒ 0.2 + 2×0.627.
+    try testing.expectApproxEqAbs(@as(f64, 1.454), r.strokes[0].widths.opening, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0.2), r.strokes[0].widths.copper, 1e-9);
 
     const layered = [_]optimizer.NetRule{
@@ -1259,7 +1259,7 @@ test "fenced default band swallows the fence row" {
     placement.rules.net = &layered;
     const lr = try compute(arena, placement, .{ .tracks = &tracks });
     const pitch = via_fence.guidedWavelengthMm(12e9) / via_fence.pitch_wavelength_divisor;
-    const layered_opening = 0.2 + 2 * (0.227 + 0.4 + pitch + 0.05);
+    const layered_opening = 0.2 + 2 * (0.227 + 0.4 + pitch);
     try testing.expectApproxEqAbs(layered_opening, lr.strokes[0].widths.opening, 1e-9);
 
     const selective = [_]optimizer.NetRule{
@@ -1268,7 +1268,7 @@ test "fenced default band swallows the fence row" {
     };
     placement.rules.net = &selective;
     const sr = try compute(arena, placement, .{ .tracks = &tracks });
-    try testing.expectApproxEqAbs(@as(f64, 1.554), sr.strokes[0].widths.opening, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1.454), sr.strokes[0].widths.opening, 1e-9);
 
     // A max-freq class WITHOUT a (fence) widens identically: it is a fence
     // target, so the fence the Fence action will generate needs the same
@@ -1279,7 +1279,7 @@ test "fenced default band swallows the fence row" {
     };
     placement.rules.net = &undeclared;
     const ur = try compute(arena, placement, .{ .tracks = &tracks });
-    try testing.expectApproxEqAbs(@as(f64, 1.554), ur.strokes[0].widths.opening, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1.454), ur.strokes[0].widths.opening, 1e-9);
 
     // An authored (mask-relief MM) still wins over the derived band either way.
     const authored = [_]optimizer.NetRule{
@@ -1297,12 +1297,12 @@ test "short exposed run between two pads keeps its mask" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    // Two pads 1.7 mm apart: their dams (pad half 0.25 + margin 0.05 + web
+    // Two pads 1.6 mm apart: their dams (pad half 0.25 + zero margin + web
     // 0.1 each) leave a 0.9 mm sliver between them — under the 1 mm floor,
     // so nothing opens.
     const pads = [_]geometry.Pad{
-        .{ .number = "1", .x = -0.85, .y = 0, .w = 0.5, .h = 0.5 },
-        .{ .number = "2", .x = 0.85, .y = 0, .w = 0.5, .h = 0.5 },
+        .{ .number = "1", .x = -0.8, .y = 0, .w = 0.5, .h = 0.5 },
+        .{ .number = "2", .x = 0.8, .y = 0, .w = 0.5, .h = 0.5 },
     };
     var parts = [_]optimizer.Part{
         .{ .ref_des = "R1", .kind = .passive, .hw = 1.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 5, .y = 5 },
@@ -1312,7 +1312,7 @@ test "short exposed run between two pads keeps its mask" {
         .{},
     };
     const placement = testPlacement(&parts, &two_nets, &rules);
-    const tracks = [_]router.Track{.{ .x1 = 4.15, .y1 = 5, .x2 = 5.85, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 }};
+    const tracks = [_]router.Track{.{ .x1 = 4.2, .y1 = 5, .x2 = 5.8, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 }};
     const r = try compute(arena, placement, .{ .tracks = &tracks });
     try testing.expectEqual(@as(usize, 0), r.strokes.len);
 }
@@ -1467,9 +1467,9 @@ test "bend emits a rounding joint disc" {
     try testing.expectApproxEqAbs(@as(f64, 5), r.joints[0].y, 1e-9);
     try testing.expectEqual(@as(u8, 0), r.joints[0].layer);
     // dia = max width + 2×relief; the class is a max-freq fence target, so the
-    // band is the fence row's (gap 0.227 + via 0.4 + margin 0.05) and the bend
-    // disc rounds that wider corner: 0.2 + 2×0.677.
-    try testing.expectApproxEqAbs(@as(f64, 1.554), r.joints[0].dia, 1e-9);
+    // band is the fence row's (gap 0.227 + via 0.4 + zero mask margin) and the
+    // bend disc rounds that wider corner: 0.2 + 2×0.627.
+    try testing.expectApproxEqAbs(@as(f64, 1.454), r.joints[0].dia, 1e-9);
 
     // A collinear continuation (two straight segments joined) emits no disc —
     // there is no corner to round, and the joint is already covered.
@@ -1592,13 +1592,13 @@ test "pad-dam terminal survives a short route chord boundary" {
     const rules = [_]optimizer.NetRule{ .{ .class = .{ .name = "rf" }, .rf = .{ .max_freq_hz = 12e9 } }, .{} };
     var placement = testPlacement(&parts, &two_nets, &rules);
     placement.rules.design.mask.relief_corner_radius = 0.4;
-    // The pad dam begins at x=9.35. The short first chord ends at x=9.31,
+    // The pad dam begins at x=9.4. The short first chord ends at x=9.36,
     // producing only a zero-length exposed sample; the next, 0.064 mm chord
     // starts fully exposed at local t=0 and must still carry a 0.4 mm fillet.
     const tracks = [_]router.Track{
-        .{ .x1 = 10, .y1 = 5, .x2 = 9.31, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 },
-        .{ .x1 = 9.31, .y1 = 5, .x2 = 9.246, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 },
-        .{ .x1 = 9.246, .y1 = 5, .x2 = 2, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 10, .y1 = 5, .x2 = 9.36, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 9.36, .y1 = 5, .x2 = 9.296, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 9.296, .y1 = 5, .x2 = 2, .y2 = 5, .layer = 0, .width = 0.2, .net = 0 },
     };
     const relief = try compute(arena, placement, .{ .tracks = &tracks });
     try testing.expectEqual(@as(usize, 2), relief.strokes.len);

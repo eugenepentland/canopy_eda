@@ -167,7 +167,7 @@ Missing vs KiCad: courtyard-overlap (exists only as placement lint, not
 DRC), silk-over-pad, hole-to-hole clearance, min-drill, copper-to-edge per
 class, via-in-pad flag, unconnected-items (belongs in 0.1), starved
 thermals (belongs with 0.4). Global board-level default rules don't exist —
-only per-net-class; mask margin (0.05) and pour clearance (0.3) are
+only per-net-class; mask margin (0) and pour clearance (0.3) are
 hard-coded constants in `export_gerber.zig:29,32`.
 
 **Build:** `(design-rules (clearance …) (min-drill …) (mask-margin …)

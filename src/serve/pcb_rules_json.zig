@@ -398,8 +398,8 @@ test "the net-class blob resolves mask relief and fence reach" {
     };
     try writeNetClasses(&aw.writer, fixture(null, &rules));
     const out = aw.written();
-    // Fenced max-freq default: gap (0.127 + 0.1) + fence via 0.4 + margin 0.05.
-    try testing.expect(std.mem.indexOf(u8, out, "\"mask_relief_mm\":0.67") != null);
+    // Fenced max-freq default: gap (0.127 + 0.1) + fence via 0.4 + zero margin.
+    try testing.expect(std.mem.indexOf(u8, out, "\"mask_relief_mm\":0.62") != null);
     // The RF corridor reaches from the signal copper edge through the derived
     // 0.227 mm fence gap and the full 0.4 mm ground-via diameter.
     try testing.expect(std.mem.indexOf(u8, out, "\"rf_corridor_mm\":0.62") != null);
@@ -446,11 +446,11 @@ test "the blob serves mask-relief geometry for the shown copper" {
     // The relieved RF_IN track ships as one continuous opening polygon and
     // its connected via transition as a second antipad-sized polygon. Exact
     // trace corner arcs and construction strokes remain available for
-    // fence/copper logic: 0.2 + 2×0.677 mm for this fence-target class.
+    // fence/copper logic: 0.2 + 2×0.627 mm for this fence-target class.
     try testing.expect(std.mem.indexOf(u8, out, "\"openings\":[{\"l\":0,\"p\":[") != null);
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "{\"l\":0,\"p\":["));
     try testing.expect(std.mem.indexOf(u8, out, "\"a\":[[") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\"w\":1.554") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"w\":1.454") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"cu\":0.2") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"x1\":2") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"vias\"") == null);

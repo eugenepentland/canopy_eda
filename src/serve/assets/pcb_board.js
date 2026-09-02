@@ -1846,7 +1846,7 @@ function paintParts(ctx,k,mov,only){
    ctx.globalAlpha=padAlpha*(pd.drill>0?throughAlpha:focusAlpha);
    // Gerber-equivalent mask relief: SMD pads open only on their face while
    // through/NPTH pads open on both. Vias remain tented in paintTracks.
-   if(PHYSICAL_REVIEW&&physicalFace){var mm=PCB.rules&&typeof PCB.rules.mask_margin==="number"?PCB.rules.mask_margin:0.05;
+   if(PHYSICAL_REVIEW&&physicalFace){var mm=PCB.rules&&typeof PCB.rules.mask_margin==="number"?PCB.rules.mask_margin:0;
     ctx.strokeStyle=PH.opening;ctx.lineWidth=Math.max(2*mm*S,0.8);ctx.lineJoin="round";
     padPath(ctx,pd);ctx.stroke();ctx.lineJoin="miter";}
    // The DEFAULT-coloured fill is the one thing the GPU pad pass replaces; the

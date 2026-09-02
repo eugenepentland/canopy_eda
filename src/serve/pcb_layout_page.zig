@@ -15390,7 +15390,7 @@ test "board-rule json carries fab-floor scalars and the perimeter mask width" {
     try std.testing.expect(std.mem.indexOf(u8, d, "\"min_drill\":0.2") != null);
     try std.testing.expect(std.mem.indexOf(u8, d, "\"min_annular\":0.1") != null);
     try std.testing.expect(std.mem.indexOf(u8, d, "\"hole_to_hole\":0.25") != null);
-    try std.testing.expect(std.mem.indexOf(u8, d, "\"mask_margin\":0.05") != null);
+    try std.testing.expect(std.mem.indexOf(u8, d, "\"mask_margin\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, d, "\"mask_web\":0.1") != null);
     try std.testing.expect(std.mem.indexOf(u8, d, "\"min_width\":0.1") != null);
     try std.testing.expect(std.mem.indexOf(u8, d, "\"clearance\":0.127") != null);
