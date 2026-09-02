@@ -3429,7 +3429,7 @@ function renderProps(){var body=document.getElementById("prop-body");if(!body)re
   if(nn===selNetCur)e.classList.add("net-sel");
   e.addEventListener("mouseenter",function(){hlBy("data-net",nn,"net-hl",true);});
   e.addEventListener("mouseleave",function(){hlBy("data-net",nn,"net-hl",false);});
-  e.addEventListener("click",function(){selNet(nn);});});}
+  e.addEventListener("click",function(){if(window.PCBFindNet)window.PCBFindNet(nn);else selNet(nn);});});}
 // Write a value into a prop-panel field whether it's an editable input/select
 // (edit page) or a read-only span (RO preview). A focused field is left alone
 // so a live drag never clobbers what the user is typing.
@@ -11945,7 +11945,8 @@ function focusPart(want,keepPane){
  var findInput=document.getElementById("pcb-find-input");if(!findInput)return;
  var findResults=document.getElementById("pcb-find-results"),findMeta=document.getElementById("pcb-find-meta"),
   findClear=document.getElementById("pcb-find-clear");
- var findOpen=false,findPrev="side-props",findRows=[],findAt=-1,findPreviewNet=null,findPreviewGroup=null;
+ var findOpen=false,findPrev="side-props",findRows=[],findAt=-1,findPreviewNet=null,findPreviewGroup=null,
+  findPreviewFlash=false,findActivated=false;
  var findKinds={part:["Components","PART"],net:["Nets","NET"],drc:["DRC violations","DRC"],
   group:["Sub-circuits","SUB"],text:["Board text","TEXT"]};
  var findOrder={part:0,net:1,drc:2,group:3,text:4};
@@ -12011,13 +12012,14 @@ function focusPart(want,keepPane){
    if(a.score!==b.score)return a.score-b.score;return a.title.localeCompare(b.title,undefined,{numeric:true,sensitivity:"base"});});return matches;}
  function findPreviewClear(){if(findPreviewNet&&hoverNet===findPreviewNet)hoverNet=null;
   if(findPreviewGroup&&hoverGrpName===findPreviewGroup)hoverGrpName=null;
-  findPreviewNet=null;findPreviewGroup=null;paintSoon();}
+  if(findPreviewFlash){flashIdx=-1;flashUntil=0;flashPt=null;flashPtUntil=0;}
+  findPreviewNet=null;findPreviewGroup=null;findPreviewFlash=false;paintSoon();}
  function findPreview(r){findPreviewClear();if(!r)return;
-  if(r.type==="part"){flashIdx=r.data.i;flashUntil=Date.now()+900;}
+  if(r.type==="part"){flashIdx=r.data.i;flashUntil=Date.now()+900;findPreviewFlash=true;}
   else if(r.type==="net"){findPreviewNet=r.data.net;hoverNet=findPreviewNet;}
   else if(r.type==="group"){findPreviewGroup=r.data.g;hoverGrpName=findPreviewGroup;}
-  else if(r.type==="drc"){var d=(PCB.drc||[])[r.data.i];if(drcOnBoard(d)&&d.x!=null&&d.y!=null){flashPt={x:d.x,y:d.y};flashPtUntil=Date.now()+900;}}
-  else if(r.type==="text"){flashPt={x:r.data.x,y:r.data.y};flashPtUntil=Date.now()+900;}paintSoon();}
+  else if(r.type==="drc"){var d=(PCB.drc||[])[r.data.i];if(drcOnBoard(d)&&d.x!=null&&d.y!=null){flashPt={x:d.x,y:d.y};flashPtUntil=Date.now()+900;findPreviewFlash=true;}}
+  else if(r.type==="text"){flashPt={x:r.data.x,y:r.data.y};flashPtUntil=Date.now()+900;findPreviewFlash=true;}paintSoon();}
  function findSetAt(at,scroll){if(!findRows.length){findAt=-1;findInput.removeAttribute("aria-activedescendant");return;}
   findAt=(at+findRows.length)%findRows.length;var active=null;
   findResults.querySelectorAll("[data-findrow]").forEach(function(el){var on=+el.getAttribute("data-findrow")===findAt;
@@ -12039,20 +12041,27 @@ function focusPart(want,keepPane){
   findResults.innerHTML=h;findResults.querySelectorAll("[data-findrow]").forEach(function(el){var i=+el.getAttribute("data-findrow");
    el.addEventListener("mouseenter",function(){findSetAt(i,false);});el.addEventListener("click",function(){findSetAt(i,false);findActivate(findRows[i]);});});
   findSetAt(0,false);}
- function findActivate(r){if(!r)return;findPreviewClear();
-  if(r.type==="part"){reviewClear();focusPart(r.data.ref,true);}
-  else if(r.type==="net"){reviewSet({nets:[r.data.net],fit:true,context:false,kind:"net"});stickyNetSet(netCollapse(r.data.net));}
-  else if(r.type==="drc"){reviewClear();drcGoto(r.data.i);}
-  else if(r.type==="group"){reviewSet({refs:r.data.refs,fit:true,context:false,kind:"subcircuit"});if(!RO)selectGroup(r.data.g,true);}
-  else if(r.type==="text"){reviewClear();focusPoint(r.data.x,r.data.y);}
+ function findFocusClear(){findPreviewClear();if(!findActivated)return;findActivated=false;
+  reviewClear();clearSel();inspClear();flashIdx=-1;flashUntil=0;flashPt=null;flashPtUntil=0;paintSoon();}
+ function findActivate(r){findActivateFit(r,true);}
+ function findActivateFit(r,fit){if(!r)return;findPreviewClear();
+  reviewClear();clearSel();inspClear();findActivated=true;
+  if(r.type==="part")focusPart(r.data.ref,true);
+  else if(r.type==="net"){reviewSet({nets:[r.data.net],fit:fit!==false,context:false,kind:"net"});stickyNetSet(netCollapse(r.data.net));}
+  else if(r.type==="drc")drcGoto(r.data.i);
+  else if(r.type==="group"){reviewSet({refs:r.data.refs,fit:fit!==false,context:false,kind:"subcircuit"});if(!RO)selectGroup(r.data.g,true);}
+  else if(r.type==="text")focusPoint(r.data.x,r.data.y);
   try{findInput.focus({preventScroll:true});}catch(e){findInput.focus();}}
  function findOpenPanel(){var fresh=!findOpen;if(fresh){var active=document.querySelector('.side-tab.active[data-sidetab]');
    if(active)findPrev=active.getAttribute("data-sidetab")||"side-props";}
   findOpen=true;pcbSideTab("side-find");findInput.setAttribute("aria-expanded","true");if(fresh)findRender();}
  function findTabLeave(){if(!findOpen)return;findOpen=false;findInput.setAttribute("aria-expanded","false");findPreviewClear();}
- function findClose(){if(!findOpen)return;var prev=findPrev;findTabLeave();try{findInput.blur();}catch(e){}pcbSideTab(prev||"side-props");}
+ function findClose(){if(!findOpen)return;var prev=findPrev;findFocusClear();findTabLeave();try{findInput.blur();}catch(e){}pcbSideTab(prev||"side-props");}
  window.PCBFindIsOpen=function(){return findOpen;};window.PCBFindClose=findClose;window.PCBFindTabLeave=findTabLeave;
  window.PCBFindRefresh=function(){if(findOpen)findRender();};
+ window.PCBFindNet=function(net){net=String(net||"");if(!net)return;findOpenPanel();findInput.value="net:"+net;findRender();
+  var key=reviewNetKey(net),at=findRows.findIndex(function(r){return r.type==="net"&&reviewNetKey(r.data.net)===key;});
+  if(at>=0){findSetAt(at,false);findActivateFit(findRows[at],false);}};
  if(/Mac|iPhone|iPad/.test(navigator.platform||"")){var k=findInput.parentNode.querySelector("kbd");if(k)k.textContent="⌘ F";}
  findInput.addEventListener("focus",findOpenPanel);findInput.addEventListener("input",findRender);
  findInput.addEventListener("keydown",function(ev){
@@ -12060,7 +12069,7 @@ function focusPart(want,keepPane){
   if(ev.key==="Enter"){ev.preventDefault();ev.stopPropagation();if(findAt<0)findSetAt(0,true);findActivate(findRows[findAt]);return;}
   if(ev.key==="Escape"){ev.preventDefault();ev.stopPropagation();findClose();return;}
   if(ev.key==="F3"){ev.preventDefault();ev.stopPropagation();findSetAt(findAt+(ev.shiftKey?-1:1),true);findActivate(findRows[findAt]);}});
- findClear.addEventListener("click",function(){findInput.value="";findRender();findInput.focus();});
+ findClear.addEventListener("click",function(){findFocusClear();findInput.value="";findRender();findInput.focus();});
  document.addEventListener("keydown",function(ev){
   if((ev.ctrlKey||ev.metaKey)&&!ev.altKey&&findNorm(ev.key)==="f"){ev.preventDefault();ev.stopPropagation();findOpenPanel();findInput.focus();findInput.select();return;}
   if(ev.key==="F3"&&ev.target!==findInput&&findInput.value.trim()){ev.preventDefault();var wasOpen=findOpen;findOpenPanel();

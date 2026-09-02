@@ -1889,6 +1889,20 @@ test "PCB board find indexes and activates every phase-one entity kind" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+// Keep both entry points tied to one cleanup path, and keep the older embedded
+// viewer behavior as the fallback when the full Find dock is absent.
+test "PCB board find clears its focus and accepts pin-to-net navigation" {
+    const markers = [_][]const u8{
+        "function findFocusClear()",
+        "function findClose(){if(!findOpen)return;var prev=findPrev;findFocusClear();",
+        "findClear.addEventListener(\"click\",function(){findFocusClear();",
+        "window.PCBFindNet=function(net)",
+        "findInput.value=\"net:\"+net",
+        "if(window.PCBFindNet)window.PCBFindNet(nn);else selNet(nn)",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 // Keep the keystroke path proportional to search candidates: copper summaries
 // are presentation data, and belong only on the capped rows being rendered.
 test "PCB board find defers whole-board net summaries until after matching" {

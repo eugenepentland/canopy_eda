@@ -214,6 +214,14 @@ const reverts = {
     ["if(openSummary)openSummary.addEventListener(\"click\",drcShowFirstOpen);",
       "if(openSummary)openSummary.addEventListener(\"click\",function(){/* reverted: inert summary */});"],
   ],
+  "find-focus": [
+    ["function findClose(){if(!findOpen)return;var prev=findPrev;findFocusClear();findTabLeave();",
+      "function findClose(){if(!findOpen)return;var prev=findPrev;findTabLeave();"],
+    ["findClear.addEventListener(\"click\",function(){findFocusClear();findInput.value=\"\";",
+      "findClear.addEventListener(\"click\",function(){findInput.value=\"\";"],
+    ["if(window.PCBFindNet)window.PCBFindNet(nn);else selNet(nn);",
+      "selNet(nn);"],
+  ],
 };
 
 function applyRevert(source, id) {
@@ -329,6 +337,65 @@ async function saveAs(board, name) {
 // ── the invariants ───────────────────────────────────────────────────────────
 
 const invariants = [
+  {
+    id: "find-focus",
+    title: "Find cleanup clears component focus and Pin-to-net opens a net search",
+    revert: "find-focus",
+    async run(env, c) {
+      const board = await openBoard(env, env.design("find-focus"));
+      try {
+        await board.settle();
+        const page = board.page;
+        const ref = await page.evaluate(() => PCB.parts[0] && PCB.parts[0].ref);
+        c.ok(!!ref, "the fixture exposes a component to find");
+
+        await page.fill("#pcb-find-input", `ref:${ref}`);
+        await page.press("#pcb-find-input", "Enter");
+        await clickBound(page, '.side-tab[data-sidetab="side-props"]');
+        const selected = await page.evaluate(() => ({
+          title: (document.querySelector("#prop-body .prop-ref") || {}).textContent || "",
+          chips: Array.from(document.querySelectorAll("#prop-body .pn[data-net]"))
+            .map((el) => el.getAttribute("data-net")).filter(Boolean),
+        }));
+        c.ok(selected.chips.length > 0, "the selected component exposes a Pin-to-net chip", selected);
+
+        const net = selected.chips[0];
+        await page.evaluate((want) => {
+          const chip = Array.from(document.querySelectorAll("#prop-body .pn[data-net]"))
+            .find((el) => el.getAttribute("data-net") === want);
+          if (chip) chip.click();
+        }, net);
+        const netFind = await page.evaluate(() => ({
+          pane: !(document.getElementById("side-find") || {}).hidden,
+          query: (document.getElementById("pcb-find-input") || {}).value || "",
+          rows: Array.from(document.querySelectorAll("#pcb-find-results .find-row b")).map((el) => el.textContent),
+        }));
+        c.eq(netFind.pane, true, "the Find results pane is visible");
+        c.eq(netFind.query, `net:${net}`, "the query is scoped to the clicked net");
+        c.ok(netFind.rows.includes(net), "the clicked net is present in the results", netFind);
+
+        await clickBound(page, "#pcb-find-clear");
+        const afterX = await page.evaluate(() => ({
+          query: (document.getElementById("pcb-find-input") || {}).value || "",
+          prop: (document.querySelector("#prop-body .prop-ref") || {}).textContent || "",
+        }));
+        c.eq(afterX.query, "", "X empties the query");
+        c.eq(afterX.prop, "Board outline", "X clears the Find-owned board focus");
+
+        await page.fill("#pcb-find-input", `ref:${ref}`);
+        await page.press("#pcb-find-input", "Enter");
+        await page.press("#pcb-find-input", "Escape");
+        const afterEscape = await page.evaluate(() => ({
+          active: !!document.querySelector('.side-tab.active[data-sidetab="side-props"]'),
+          prop: (document.querySelector("#prop-body .prop-ref") || {}).textContent || "",
+        }));
+        c.eq(afterEscape.active, true, "Escape returns to the previous Properties tab");
+        c.eq(afterEscape.prop, "Board outline", "Escape clears the Find-owned component focus");
+        c.ok(board.errors().length === 0, "no page errors", board.errors());
+      } finally { await board.close(); }
+    },
+  },
+
   {
     id: "drc-open-summary",
     title: "the open-net summary reveals and locates its nearest connection",
