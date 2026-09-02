@@ -10,6 +10,7 @@ const std = @import("std");
 const env_mod = @import("eval/env.zig");
 const ids = @import("eval/ids.zig");
 const derived_checks = @import("req_derived_checks.zig");
+const physical_checks = @import("req_physical_checks.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
@@ -32,10 +33,26 @@ const dc_equiv_resistor_ohms: f64 = 25.0;
 const pin_not_found_msg = "pin '{s}' not found in pinout";
 const pin_net_unresolved_msg = "pin '{s}' could not be resolved to a net";
 
-/// Outcome of evaluating one component requirement: `pass` / `fail` for
-/// automated checks, `na` when no check primitive ran, and `verified` once
-/// `applyVerifications` overlays a matching design-side `(verifies …)` form.
-pub const Status = enum { pass, fail, na, verified };
+/// Outcome of evaluating one component requirement.
+///
+/// `pass` / `fail` are the two verdicts an automated check can reach on the
+/// netlist alone; `na` means no check primitive ran (reviewer judgement), and
+/// `verified` is set once `applyVerifications` overlays a matching design-side
+/// `(verifies …)` form.
+///
+/// Two further outcomes exist because a check can be RUN and still not reach a
+/// verdict, and collapsing either onto `na` or `pass` would lie:
+///
+///   * `unproven` — the rule applies here, but the evidence the design carries
+///     cannot decide it (a capacitor with no voltage-rating attribute, a net
+///     with no derivable envelope, a power-up order the enable graph leaves
+///     undetermined). A warning in every profile: it is never a pass, and it is
+///     not the reviewer-judgement hole `na` describes.
+///   * `layout_deferred` — the rule is about geometry, so the netlist-level
+///     checker structurally cannot answer it; the real measurement is a
+///     layout lint over the saved placement. Informational here, and the
+///     message says which lint carries the verdict.
+pub const Status = enum { pass, fail, na, verified, unproven, layout_deferred };
 
 /// One requirement-check outcome: a `Status`, a human `message` the review
 /// UI displays under the requirement text, and an optional `Verification`
@@ -107,7 +124,9 @@ fn applyOneVerification(
         const results = map.get(inst.ref_des) orelse return;
         if (ri >= results.len) return;
         switch (results[ri].status) {
-            .na => {
+            // An `unproven`/`layout_deferred` check reached no verdict, so a
+            // reviewer sign-off closes it exactly as it closes an `na`.
+            .na, .unproven, .layout_deferred => {
                 results[ri].status = .verified;
                 results[ri].verification = v;
             },
@@ -222,6 +241,9 @@ fn evalCheck(
                 .set_resistor_output = c,
             }),
         ),
+        .cap_rating => |c| physical_checks.evalCapRating(allocator, eval, block, inst, c),
+        .max_distance => |c| physical_checks.evalMaxDistance(allocator, eval, block, inst, c),
+        .sequence => |c| physical_checks.evalSequence(allocator, eval, block, inst, c),
     };
 }
 
@@ -780,7 +802,9 @@ fn evalSeriesElement(
     return fail(allocator, "no {c} between {s} and {s}; need a value in [{d:.3}, {d:.3}] {s}", .{ prefix, pin_net, target_net, min, max, unit_label });
 }
 
-fn parseValueFor(kind: env_mod.SeriesKind, s: []const u8) ?f64 {
+/// A component value string read in the natural unit of its class:
+/// ohms for R, microhenries for L, microfarads for C.
+pub fn parseValueFor(kind: env_mod.SeriesKind, s: []const u8) ?f64 {
     return switch (kind) {
         .R => parseOhms(s),
         .L => parseMicroHenries(s),
@@ -812,27 +836,50 @@ fn suffixToMicroHenries(s: []const u8) ?f64 {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-fn netForPinFn(
+/// Where a requirement's pin token landed: the physical pad it names and the
+/// net that pad sits on.
+pub const PinLocation = struct { pad: []const u8, net: []const u8 };
+
+/// The net a pinout FUNCTION name (or a bare pad id) resolves to on `inst`.
+/// Public so `req_physical_checks` resolves pins exactly as the core
+/// primitives do — a second pin walk would eventually disagree about which
+/// pad a datasheet function names.
+pub fn netForPinFn(
     eval: *Evaluator,
     block: *const DesignBlock,
     inst: Instance,
     pin_fn: []const u8,
 ) ?[]const u8 {
-    const pinout_key = if (inst.pinout.len > 0) inst.pinout else inst.symbol;
-    if (pinout_key.len == 0) return null;
-    const sym_pins = ids.getSymbolPins(eval, pinout_key) orelse return null;
+    const found = padAndNetForPin(eval, block, inst, pin_fn) orelse return null;
+    return found.net;
+}
 
-    // Primary: match against pin function name (e.g. "VDD", "VSSAON").
-    var it = sym_pins.iterator();
-    while (it.next()) |e| {
-        if (std.ascii.eqlIgnoreCase(e.value_ptr.*, pin_fn)) {
-            if (netForPhysicalPin(block, inst.ref_des, e.key_ptr.*)) |n| return n;
+/// The pad-and-net view of the same walk `netForPinFn` performs. The layout
+/// rules need the PAD (a distance is measured from copper, not from a net),
+/// and resolving it twice by two routes is exactly how a pin binding and the
+/// gate that judges it drift apart.
+pub fn padAndNetForPin(
+    eval: *Evaluator,
+    block: *const DesignBlock,
+    inst: Instance,
+    pin_fn: []const u8,
+) ?PinLocation {
+    const pinout_key = if (inst.pinout.len > 0) inst.pinout else inst.symbol;
+    if (pinout_key.len > 0) {
+        if (ids.getSymbolPins(eval, pinout_key)) |sym_pins| {
+            // Primary: match against pin function name (e.g. "VDD", "VSSAON").
+            var it = sym_pins.iterator();
+            while (it.next()) |e| {
+                if (!std.ascii.eqlIgnoreCase(e.value_ptr.*, pin_fn)) continue;
+                if (netForPhysicalPin(block, inst.ref_des, e.key_ptr.*)) |n|
+                    return .{ .pad = e.key_ptr.*, .net = n };
+            }
         }
     }
     // Fallback: physical pin id (e.g. "17", "A1"). Lets requirements name
     // a specific pin even when its pinout function is generic ("GND"/"VSS")
     // and the part has many such pins.
-    if (netForPhysicalPin(block, inst.ref_des, pin_fn)) |n| return n;
+    if (netForPhysicalPin(block, inst.ref_des, pin_fn)) |n| return .{ .pad = pin_fn, .net = n };
     return null;
 }
 
@@ -847,7 +894,8 @@ fn netForPhysicalPin(block: *const DesignBlock, ref_des: []const u8, pin_id: []c
     return null;
 }
 
-fn instancePinOnNet(block: *const DesignBlock, inst: Instance, net_name: []const u8) bool {
+/// True when any pad of `inst` sits on a net aliasing `net_name`.
+pub fn instancePinOnNet(block: *const DesignBlock, inst: Instance, net_name: []const u8) bool {
     for (block.nets) |net| {
         if (!netsAlias(net.name, net_name)) continue;
         for (net.pins) |pr| if (std.mem.eql(u8, pr.ref_des, inst.ref_des)) return true;
@@ -862,12 +910,13 @@ fn instancePinOnNet(block: *const DesignBlock, inst: Instance, net_name: []const
 /// net into N+1 entries in `block.nets`. Treating those as equivalent
 /// here means a decoupling cap stitched to `VBUS.U11.VDD_1` counts as
 /// bridging `VBUS` for the purposes of a "cap between VDD and VSS" rule.
-fn netsAlias(a: []const u8, b: []const u8) bool {
+pub fn netsAlias(a: []const u8, b: []const u8) bool {
     if (std.mem.eql(u8, a, b)) return true;
     return std.mem.eql(u8, netBase(a), netBase(b));
 }
 
-fn netBase(name: []const u8) []const u8 {
+/// The logical net behind a per-pin stub alias (`VBUS.U11.VDD_1` -> `VBUS`).
+pub fn netBase(name: []const u8) []const u8 {
     const idx = std.mem.indexOfScalar(u8, name, '.') orelse return name;
     return name[0..idx];
 }
@@ -1039,12 +1088,41 @@ fn isDigit(c: u8) bool {
     return c >= '0' and c <= '9';
 }
 
-fn fail(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) Result {
+/// Allocator-owned failure message. Public so `req_physical_checks` builds its
+/// verdicts with the same three constructors the core primitives use.
+pub fn fail(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) Result {
     const msg = std.fmt.allocPrint(allocator, fmt, args) catch "";
     return .{ .status = .fail, .message = msg };
 }
 
-fn passMsg(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) Result {
+/// Allocator-owned pass message. Public alongside `fail`.
+pub fn passMsg(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) Result {
     const msg = std.fmt.allocPrint(allocator, fmt, args) catch "";
     return .{ .status = .pass, .message = msg };
+}
+
+/// Parse a capacitor / resistor voltage-rating string ("16V", "6.3 V", "250mV",
+/// "1kV") to volts. Deliberately stricter than the fab gate's `parseRating`,
+/// which accepts any unit because its caller already knows the key it looked
+/// up: here the string comes from an unlabelled attribute list where "63mW"
+/// and "1A" sit beside the voltage, so a missing or foreign unit must be a
+/// rejection rather than a bare number taken as volts.
+pub fn parseVolts(s: []const u8) ?f64 {
+    const text = std.mem.trim(u8, s, " \t");
+    if (text.len == 0) return null;
+    var i: usize = 0;
+    while (i < text.len and (isDigit(text[i]) or text[i] == '.')) : (i += 1) {}
+    if (i == 0) return null;
+    const num = std.fmt.parseFloat(f64, text[0..i]) catch return null;
+    const suffix = std.mem.trim(u8, text[i..], " \t");
+    const scale = suffixToVolts(suffix) orelse return null;
+    const volts = num * scale;
+    return if (std.math.isFinite(volts) and volts > 0) volts else null;
+}
+
+fn suffixToVolts(s: []const u8) ?f64 {
+    if (ieql(s, "V")) return 1.0;
+    if (ieql(s, "mV")) return 1e-3;
+    if (ieql(s, "kV")) return 1e3;
+    return null;
 }

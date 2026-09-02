@@ -57,7 +57,11 @@ pub fn parseProfile(word: ?[]const u8) ?Profile {
 /// Validation subsystem that emitted a structured preflight finding.
 pub const FindingKind = enum { requirement, datasheet_review, profile_incomplete, eval_warning };
 /// Normalized outcome shared by machine checks and datasheet-review checks.
-pub const FindingStatus = enum { pass, fail, pending, verified, missing, incomplete, stale };
+/// `unproven` and `deferred` mirror the two `req_checks.Status` outcomes that
+/// are neither a verdict nor the reviewer-judgement hole `pending` names: a
+/// check that ran and could not decide, and a geometry rule whose verdict
+/// lives in a layout lint.
+pub const FindingStatus = enum { pass, fail, pending, verified, missing, incomplete, stale, unproven, deferred };
 
 /// Required topics for a complete active-component datasheet review. The DSL
 /// accepts additional categories, but strict preflight requires each key here
@@ -95,6 +99,18 @@ pub const Finding = struct {
 pub fn requirementSeverity(status: req_checks.Status, profile: Profile) checks.Severity {
     if (status == .fail) return .@"error";
     if (status == .na) return if (isStrict(profile)) .@"error" else .warning;
+    // A check that RAN and could not decide is a warning in every profile,
+    // including release. Escalating it the way `na` escalates would punish the
+    // parts that carry an executable rule harder than the ones that carry only
+    // prose — the opposite of the incentive the check engine exists to create.
+    // Closing it is authoring work (a rating attribute, a `(net-envelope …)`,
+    // an `(enable …)`) or an explicit `(verifies …)` sign-off.
+    if (status == .unproven) return .warning;
+    // A layout-deferred rule is informational HERE by construction: the
+    // netlist surface cannot answer it, and the layout lint that can is a
+    // separate gate. Making it a warning would be noise no schematic edit
+    // could ever clear.
+    if (status == .layout_deferred) return .info;
     return .info;
 }
 
@@ -301,10 +317,14 @@ fn appendRequirementFindings(
 }
 
 fn findingStatus(status: req_checks.Status) FindingStatus {
-    if (status == .pass) return .pass;
-    if (status == .fail) return .fail;
-    if (status == .verified) return .verified;
-    return .pending;
+    return switch (status) {
+        .pass => .pass,
+        .fail => .fail,
+        .verified => .verified,
+        .unproven => .unproven,
+        .layout_deferred => .deferred,
+        .na => .pending,
+    };
 }
 
 /// Append one finding whose message is already owned by `allocator`. On an

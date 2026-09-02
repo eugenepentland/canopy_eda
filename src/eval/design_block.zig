@@ -24,6 +24,7 @@ const builders = @import("builders.zig");
 const special_forms = @import("special_forms.zig");
 const rails_mod = @import("rails.zig");
 const net_envelopes = @import("net_envelopes.zig");
+const physical_checks = @import("../req_physical_checks.zig");
 const test_point_mod = @import("test_point.zig");
 const micro_forms = @import("micro_forms.zig");
 const pin_enrichment = @import("pin_enrichment.zig");
@@ -258,6 +259,13 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     // `asserted_fns` slices. Multi-alt pins remain empty and trigger
     // `pin_function_required` in ERC.
     pin_enrichment.enrichPinFunctions(self.allocator, block, self.project_dir) catch return EvalError.OutOfMemory;
+
+    // `(check (max-distance …))` requirements become measurable layout rules
+    // only now: the pinout resolves the pin to a pad, and the ref-des the
+    // candidate passives are named by are final only after the two
+    // auto-assign passes above. Recurses, so a sub-block's parts are resolved
+    // in the ref-des space its parent gave them.
+    physical_checks.resolveDistanceRules(self, block);
 
     // Validate: warn about dead-end nets, etc.
     try validate.validateDesign(self, block);

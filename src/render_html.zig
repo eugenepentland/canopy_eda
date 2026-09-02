@@ -598,7 +598,9 @@ fn tallyRefCounts(
         .fail => {
             if (r.verification != null) out.fail_overridden += 1 else out.fail_real += 1;
         },
-        .na => out.na += 1,
+        // Both undecided outcomes join the `na` bucket: the section badge
+        // asks "is anything still unanswered here", and they are.
+        .na, .unproven, .layout_deferred => out.na += 1,
     };
 }
 
@@ -978,9 +980,11 @@ fn writeHubCard(
 fn statusSortKey(status: req_checks.Status, has_verification: bool) u8 {
     return switch (status) {
         .fail => if (has_verification) @as(u8, 1) else @as(u8, 0),
-        .na => 2,
-        .verified => 3,
-        .pass => 4,
+        .unproven => 2,
+        .na => 3,
+        .layout_deferred => 4,
+        .verified => 5,
+        .pass => 6,
     };
 }
 
@@ -994,7 +998,7 @@ fn writeRequirementsDetails(w: anytype, requirements: []const env_mod.Requiremen
         .pass => pass_ct += 1,
         .fail => fail_ct += 1,
         .verified => verified_ct += 1,
-        .na => {},
+        .na, .unproven, .layout_deferred => {},
     };
     const header_class: []const u8 = if (fail_ct > 0) "hub-reqs has-fail" else if (pass_ct > 0) "hub-reqs" else "hub-reqs";
     // Requirements stay collapsed by default — even when failing — so the
@@ -1041,12 +1045,16 @@ fn writeRequirementsDetails(w: anytype, requirements: []const env_mod.Requiremen
             .fail => "FAIL",
             .na => "PENDING",
             .verified => "VERIFIED",
+            .unproven => "UNPROVEN",
+            .layout_deferred => "LAYOUT",
         };
         const pill_title: []const u8 = switch (status) {
             .pass => "Automated check passed",
             .fail => "Automated check failed",
             .na => "No automated check — reviewer judgment required",
             .verified => "Manually verified by design-side (verifies …)",
+            .unproven => "Automated check ran but the design carries no evidence to decide it",
+            .layout_deferred => "Judged on the saved layout by a placement lint, not here",
         };
         try w.print(
             "<li class=\"req-row status-{s}\"><div class=\"req-head\">" ++

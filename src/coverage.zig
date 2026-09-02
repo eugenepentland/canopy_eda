@@ -310,7 +310,7 @@ fn allRequirementsVerified(results: []const req_checks.Result, expected_n: usize
     for (results[0..expected_n]) |r| {
         switch (r.status) {
             .pass, .verified => {},
-            .fail, .na => return false,
+            .fail, .na, .unproven, .layout_deferred => return false,
         }
     }
     return true;

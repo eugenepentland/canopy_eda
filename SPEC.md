@@ -3743,6 +3743,8 @@ Public functions: lint, freeFindings
 - flags a near-bound passive sitting more than 5 mm from the exact pad it declared, and clears when it is adjacent
 - reports a near binding that resolved to nothing, naming the cause, so a declaration that did nothing is never silent
 - measures a bottom-side part through the optimizer's own mirrored pad transform, so a flipped decap is judged where the board draws it
+- measures a (check (max-distance …)) requirement against the nearest qualifying passive and clears when one is close enough
+- a distance requirement whose netlist carries no qualifying passive is left to the build-time checker rather than reported per placement
 
 ## placement/routability_lint
 
@@ -4413,6 +4415,10 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - parseCheck dispatches every documented check keyword to its Check variant via check_docs
 - decoupling max-uf prevents bulk capacitors satisfying HF bypass rules
 - decoupling rejects malformed or inverted capacitor bounds
+- cap-rating defaults to the documented ceramic derating ratio when neither bound is written
+- cap-rating rejects unknown, repeated or non-positive bounds
+- max-distance accepts the four passive kinds with an optional value window and rejects an inverted one
+- sequence accepts only the before relation word and a non-negative margin
 
 ## eval/pin_enrichment
 
@@ -5696,6 +5702,27 @@ Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenr
 - completeness-waiver: malformed encoding (names are opaque UTF-8 byte slices; malformed source is rejected before evaluation)
 - completeness-waiver: integer overflow (the checker only counts slice entries with usize and performs no integer arithmetic)
 - completeness-waiver: panic-free (all analysis allocations return allocator errors and optional lookups are checked)
+
+## req_physical_checks
+
+Public functions: evalCapRating, evalMaxDistance, evalSequence, resolveDistanceRules
+
+- cap-rating passes a capacitor rated above the derived envelope and fails one rated below it
+- cap-rating reports an unrated capacitor and an underivable net envelope as unproven rather than passing either
+- max-distance defers to the layout lint when a qualifying passive exists and fails at build time when the netlist has none
+- resolving a max-distance rule records the measured pad and every qualifying passive on its net for the layout lint
+- sequence passes a derived power-up order that satisfies it and fails one that reverses it
+- sequence reports an undetermined power-up order as unproven and names what would prove it
+- evaluating a design resolves its max-distance requirements onto the instances the placement layer reads
+- parseVolts reads a rating attribute and rejects the foreign units that sit beside it
+- completeness-waiver: empty inputs (an unresolved pin, an empty envelope table, or an empty sequencing model each produce a failed or unproven check result rather than indexing absent data)
+- completeness-waiver: large inputs (the checks scan the already-allocated instance, net and envelope slices linearly and allocate only their diagnostic message and the resolved candidate list)
+- completeness-waiver: unauthorized access (a pure design-analysis layer with no access surface; authorization is enforced before CLI dispatch)
+- completeness-waiver: i/o failure (the primitives perform no I/O; pinout loading is owned by the evaluator and a miss becomes an unresolved-pin result)
+- completeness-waiver: concurrent access (the checks read an immutable design snapshot plus request-local evaluator state; the one mutation, resolveDistanceRules, runs inside the single-threaded post-build pass)
+- completeness-waiver: malformed encoding (typed design data comes from the S-expression parser, while an unreadable voltage or component-value spelling returns null and simply does not qualify)
+- completeness-waiver: integer overflow (voltage, distance and value arithmetic is f64; the only integer is the sequencing order the analyzer already bounds at eight relaxation passes)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
 ## req_derived_checks
 

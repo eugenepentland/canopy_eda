@@ -354,6 +354,9 @@ check`, the review doc, and the CLI `run_checks` /
 | `(series-element (kind R\|L\|C) (pin "P") (target-net "N") (min X) (max Y))` | An R/L/C of value in [X, Y] (Ω/µH/µF by kind) must bridge pin P's net and N. |
 | `(feedback-divider (pin "FB") (return-net "GND") (reference-v V) (tolerance-pct P))` | Calculate VOUT=VREF*(1+Rtop/Rbottom) and compare it with the declared or rail-named output voltage. |
 | `(set-resistor-output (pin "SET") (return-net "GND") (output-pin "OUT") (current-ua I) (tolerance-pct P))` | Calculate VOUT=ISET*RSET and compare it with the declared or rail-named output voltage. |
+| `(cap-rating (pin "A") (pin "B") [(min-ratio X)] [(min-v V)])` | Every capacitor bridging pins A and B must be rated at least X times the derived worst-case DC potential across those nets and at least V volts; the default with neither bound is 1.5x for ceramic derating. An unrated cap or an underivable envelope is reported unproven, never passed. |
+| `(max-distance (pin "P") (kind C\|R\|L\|any) (mm D) [(min-value X)] [(max-value Y)])` | The nearest matching passive on pin P's net must sit within D mm of that pad in the saved layout. Netlist-time this is layout-deferred (it fails early only when no passive matches at all); the measurement is the req-distance-far layout lint. |
+| `(sequence (pin "A") before (pin "B") [(margin-ms N)])` | The rail on pin A must power up before the rail on pin B, judged against the derived enable-graph order. An undetermined order is unproven, not a pass. margin-ms is recorded and reported but not enforced: the sequencing model carries no timing yet. |
 | `(voltage-not-above (pin "A") (pin "B") (margin M))` | The highest declared voltage on pin A's net must be no greater than the lowest declared voltage on pin B's net plus M volts. |
 
 ## Datasheet review preflight

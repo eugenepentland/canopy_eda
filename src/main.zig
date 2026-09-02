@@ -627,6 +627,7 @@ test {
     _ = @import("eval/thermal.zig");
     _ = @import("eval/power_sequencing.zig");
     _ = @import("req_checks_cases.zig");
+    _ = @import("req_physical_checks_cases.zig");
     _ = @import("component_classification.zig");
     _ = @import("module_metadata.zig");
     _ = @import("canonical_module_check.zig");
