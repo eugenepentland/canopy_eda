@@ -863,6 +863,37 @@ from the read-only resolve path rather than walking the hierarchy again.
 - completeness-waiver: integer overflow (no arithmetic beyond formatting already-computed net and pad counts)
 - completeness-waiver: panic-free (a design that fails to resolve degrades to a comment line and the next design)
 
+## rewrite-pins-by-name
+
+Public functions: tool
+
+The corpus writes pin pads by number 2699 times against 291 by name, then
+repeats the pinout in a trailing comment — `(pin 5 "GND") ;; ILIM` beside
+`(strap-ok 5 "ILIM->GND …")`. The language already resolves a function name
+through the part's pinout, so writing the name makes the strap and no-connect
+sign-offs self-documenting and turns a pad renumber into a resolvable name
+rather than a silent re-point. The rewrite is spliced at AST byte spans (the
+`id_insert` discipline) so nothing outside the replaced token moves, and it is
+gated twice: per token by re-running the evaluator's own resolver on the
+proposed spelling, and per file by flattening both sources and demanding the
+identical netlist and the identical resolved bindings.
+
+- the rewrite splices at AST spans, so every comment and blank line survives byte for byte, the line count is unchanged, and multi-pad shorthand rewrites each pad independently
+- a function name repeated on several pads is skipped with its reason, and a connector whose pinout names every contact after its own number is left entirely alone
+- strap-ok, nc-ok and a near form's own pad resolve through the declaring part's pinout while near and decouples resolve their target pad through the named part's
+- the rewritten source is accepted only when it evaluates and its flattened netlist and resolved bindings match the original line for line, so a rewrite that moved a pad is refused
+- the default run writes nothing and returns the unified diff, and write true replaces the file atomically with the proven bytes
+- the tool is registered as a mutation and its declared schema round-trips through netlisp tool list
+
+- completeness-waiver: empty inputs (a missing `file`, a file outside lib/modules and src/, and a file with nothing to rewrite each answer with a named result instead of a write)
+- completeness-waiver: large inputs (the source is read under the same 10 MiB library cap the evaluator uses, and the reported skip list is capped with the remainder counted)
+- completeness-waiver: unauthorized access (a local CLI over the caller's own project directory; the path is confined to lib/modules and src/, traversal and absolute paths are refused, and the write is registered as a mutation like every other design edit)
+- completeness-waiver: i/o failure (an unreadable source is refused before anything is planned, and the write is a tmp-then-rename atomic replace so a crash cannot truncate the design)
+- completeness-waiver: concurrent access (single-threaded; the plan is computed and proven against bytes already read, and each evaluation owns its own evaluator and arena)
+- completeness-waiver: malformed encoding (a source that does not parse or does not evaluate is refused, and a function name the tokenizer would read back as anything else is never spliced)
+- completeness-waiver: integer overflow (byte offsets come from the parser's own spans and are bounds-checked against the source before any splice; no input-derived arithmetic)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
 ## bench-page
 
 Public functions: benchOne, corpus, writeTable, writeResultsJson, cmdBenchPage

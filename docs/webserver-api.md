@@ -659,6 +659,26 @@ Tools include:
   For module-level *layout*, the PCB tools above accept a module name as
   `name` directly (resolved via a real instantiation in a design, else a
   zero-arg call).
+- **Source rewriting (mutation)**: `rewrite-pins-by-name` `{file, write?, refs?}`
+  — rewrite a module's or board's numeric PAD tokens into the pinout **function
+  name** the evaluator already resolves them through, so `(pin 5 "GND") ;; ILIM`
+  plus `(strap-ok 5 "ILIM->GND …")` becomes `(pin ILIM "GND")` plus
+  `(strap-ok ILIM …)`. Covers `(pin PAD… "NET")` (multi-pad shorthand and
+  `(part …)` bodies included), `(strap-ok …)`, `(nc-ok …)`, `(near "REF" PAD
+  [(own PAD)])` and `(decouples "REF" PAD)` — the last two resolving through
+  the TARGET ref's pinout. Text is spliced at AST byte spans, so comments and
+  formatting outside the replaced token are preserved byte for byte. A pad
+  moves only when the evaluator's own resolver, re-run on the proposed
+  spelling, returns the same pad, the function name is unique in the pinout,
+  and the name re-tokenizes to itself; repeated names, positional connector
+  pads, pads with no function and parts with no pinout are reported instead.
+  Default `write:false` returns the unified diff without touching the file;
+  either way the ORIGINAL and REWRITTEN sources are evaluated and flattened and
+  the write is refused unless their netlists AND resolved bindings match. `file`
+  must be under `lib/modules/` or `src/`. Returns
+  `{ok,file,rewritten,written,netlist_equivalent,parts_without_pinout,
+  positional_parts,skipped[{ref,pad,reason}],skipped_omitted,diff}`. Full rules
+  in `docs/sexpr-language.md`.
 - **VFS file ops**: `read_file`, `list_dir`, `glob` (read-only);
   `write_file`, `edit_file`, `delete_file`, `move_file` (mutation).
 - **Build / state**: `build`, `regenerate_pinout`, `restore_version`.
