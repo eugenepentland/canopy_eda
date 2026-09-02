@@ -29,6 +29,7 @@ const pour = @import("pour.zig");
 const path_copper = @import("path_copper.zig");
 const pose_math = @import("pose_math.zig");
 const outline = @import("outline.zig");
+const rf_port_report = @import("rf_port_report.zig");
 const RfSample = @import("rf_path_solver.zig").Sample;
 const via_antipad = @import("via_antipad.zig");
 const board_layers = @import("../board_layers.zig");
@@ -528,6 +529,7 @@ pub const ViaAdditionGate = struct {
         pad_grid: Grid,
         track_grid: Grid,
         tracks: []const router.Track,
+        rf_paths: []const rf_port_report.Outcome,
         identity: net_identity.Identity,
     };
 
@@ -552,13 +554,16 @@ pub const ViaAdditionGate = struct {
     ) std.mem.Allocator.Error!ViaAdditionGate {
         const pads = try padBoxes(arena, placement);
         const clr_max = gridInflation(placement, routed.vias, clearance, probe);
+        const physical_tracks = try path_copper.tracks(arena, routed);
+        const ordinary_tracks = physical_tracks[0..ordinaryTrackCount(routed)];
         var gate = ViaAdditionGate{
             .placement = placement,
             .world = .{
                 .pads = pads,
                 .pad_grid = try Grid.build(arena, PadBox, pads, padBox, clr_max),
-                .track_grid = try Grid.build(arena, router.Track, routed.tracks, trackBox, clr_max),
-                .tracks = routed.tracks,
+                .track_grid = try Grid.build(arena, router.Track, ordinary_tracks, trackBox, clr_max),
+                .tracks = ordinary_tracks,
+                .rf_paths = routed.rf_port_outcomes,
                 .identity = try net_identity.Identity.init(arena, placement),
             },
             .clr = .{ .base = clearance, .rules = placement.rules },
@@ -578,6 +583,7 @@ pub const ViaAdditionGate = struct {
         const one = [_]router.Via{v};
         try checkViaPad(c, &one, self.world.pads, &self.world.pad_grid);
         try checkViaTrack(c, &one, self.world.tracks, &self.world.track_grid);
+        try checkRfPathVia(c, self.world.rf_paths, &one);
         for (self.others.items) |other| {
             if (viaPairViolation(c, v, other)) |viol| try out.append(arena, viol);
         }
@@ -698,10 +704,7 @@ fn checkImpl(
     // Swept paths are the physical width authority. Saved editor handles stay
     // compact; every capsule-based rule sees private profile chords instead.
     const tracks = try path_copper.tracks(arena, routed);
-    var ordinary_tracks: usize = 0;
-    for (routed.tracks) |track| {
-        if (!path_copper.ownsTrack(routed.rf_port_outcomes, track)) ordinary_tracks += 1;
-    }
+    const ordinary_tracks = ordinaryTrackCount(routed);
     const rules = placement.rules.design;
     const clr = ClearanceResolver{ .base = clearance, .rules = placement.rules };
     // Widest clearance any pair can demand — the grid inflation, so no violating
@@ -714,13 +717,17 @@ fn checkImpl(
     // cell is sized to cover the mask-opening margin used there.
     var pad_grid = try Grid.build(arena, PadBox, pads, padBox, @max(clr_max, rules.mask.margin));
     var via_grid = try Grid.build(arena, router.Via, vias, viaBox, clr_max);
+    var via_track_grid = try Grid.build(arena, router.Track, tracks[0..ordinary_tracks], trackBox, clr_max);
     var track_grid = try Grid.build(arena, router.Track, tracks, trackBox, clr_max);
 
     const identity = try net_identity.Identity.init(arena, placement);
     const c = Ctx{ .arena = arena, .out = &out, .clr = clr, .clr_max = clr_max, .via_to_via = rules.via_to_via, .identity = identity };
     try checkViaPad(c, vias, pads, &pad_grid);
     try checkViaVia(c, vias, &via_grid);
-    try checkViaTrack(c, vias, tracks, &track_grid);
+    // Variable-width paths are exact filled regions, not the round-ended
+    // max-width capsules their remaining centreline rules conservatively use.
+    try checkViaTrack(c, vias, tracks[0..ordinary_tracks], &via_track_grid);
+    try checkRfPathVia(c, routed.rf_port_outcomes, vias);
     try checkTrackTrack(c, tracks, &track_grid);
     // A variable-width path fabricates as butt-ended swept regions, not the
     // round-ended max-width capsules used by the remaining centreline rules.
@@ -810,6 +817,18 @@ fn checkImpl(
         try appendSharpViolation(arena, &out, sb);
     }
     return out.toOwnedSlice(arena);
+}
+
+/// Stored tracks not replaced by a successful swept RF path. `path_copper.tracks`
+/// emits these first and follows them with private path chords, so this count is
+/// also the slice boundary between exact ordinary capsules and conservative
+/// scalar-width probes.
+fn ordinaryTrackCount(routed: router.RouteResult) usize {
+    var count: usize = 0;
+    for (routed.tracks) |track| {
+        if (!path_copper.ownsTrack(routed.rf_port_outcomes, track)) count += 1;
+    }
+    return count;
 }
 
 /// True only for an INTERNAL tessellation vertex of a successful swept path.
@@ -1215,6 +1234,51 @@ fn checkViaTrack(c: Ctx, vias: []const router.Via, tracks: []const router.Track,
             if (gap < eff - eps) {
                 try c.out.append(c.arena, .{ .x = v.x, .y = v.y, .gap = gap, .clearance = eff, .kind = .via_track, .who = netParties(v.net, t.net), .layer = layerOf(t.layer) });
             }
+        }
+    }
+}
+
+/// Via-to-track clearance for swept variable-width copper. The scalar-width
+/// lowering uses max-endpoint capsules so generic centreline rules cannot miss
+/// copper, but their round caps and rectangular taper spans are larger than the
+/// fabricated butt-ended sweep. Measure the via disc against the exact region
+/// union instead, once per via/path, so a legal fence row beside a taper does not
+/// become a stack of synthetic `via_track` findings.
+fn checkRfPathVia(c: Ctx, paths: []const rf_port_report.Outcome, vias: []const router.Via) Err {
+    for (paths) |path| {
+        if (!path.success or path.physical.gate_removed) continue;
+        const regions = try path_copper.regions(c.arena, path.physical.samples);
+        if (regions.len == 0) continue;
+        for (vias) |via| {
+            if (c.sameNet(path.net, via.net)) continue;
+            const eff = c.clr.between(path.net, via.net);
+            const vr = via.dia / 2;
+            var best = std.math.inf(f64);
+            for (regions) |region| {
+                if (region.len < 3) continue;
+                const shape = regionShape(region);
+                const gap = pad_shape.pointDist(
+                    shape.x0,
+                    shape.y0,
+                    shape.x1,
+                    shape.y1,
+                    shape.poly,
+                    via.x,
+                    via.y,
+                    vr + eff,
+                ) - vr;
+                best = @min(best, gap);
+            }
+            if (best >= eff - eps) continue;
+            try c.out.append(c.arena, .{
+                .x = via.x,
+                .y = via.y,
+                .gap = best,
+                .clearance = eff,
+                .kind = .via_track,
+                .who = netParties(via.net, path.net),
+                .layer = layerOf(path.physical.layer),
+            });
         }
     }
 }
@@ -2833,6 +2897,7 @@ test "check flags track-to-pad clashes layer-aware" {
 }
 
 // spec: placement/drc - a wide RF taper is checked as its exact butt-ended sweep, so a short launch land does not acquire a round cap behind its centre and falsely crowd the adjacent pad
+// spec: placement/drc - a via beside a variable-width RF path is checked against the exact swept copper, so a legal fence row beside a launch taper is not rejected by conservative max-width chord capsules
 test "exact RF taper does not grow a capsule behind a short launch pad" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -2904,6 +2969,16 @@ test "exact RF taper does not grow a capsule behind a short launch pad" {
     const exact = router.RouteResult{ .tracks = &handle, .vias = &.{}, .rf_port_outcomes = &outcomes, .routed = 1, .total = 1 };
     try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, exact, 0.127), .track_pad));
 
+    // One fence via sits behind the butt-ended launch and another follows the
+    // taper's sloped flank. Both keep 0.227 mm edge clearance from the real
+    // copper, but max-width capsules would invent a collision at each site.
+    const fence_vias = [_]router.Via{
+        .{ .x = -0.552, .y = 0, .dia = 0.4, .drill = 0.2, .net = 1 },
+        .{ .x = 0.3, .y = 0.565, .dia = 0.4, .drill = 0.2, .net = 1 },
+    };
+    const exact_fenced = router.RouteResult{ .tracks = &handle, .vias = &fence_vias, .rf_port_outcomes = &outcomes, .routed = 1, .total = 1 };
+    try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, exact_fenced, 0.127), .via_track));
+
     // Pin the old failure mode: the same first chord treated as a scalar-width
     // capsule really does report the synthetic 0.100 mm gap.
     const capsule = [_]router.Track{.{
@@ -2919,6 +2994,13 @@ test "exact RF taper does not grow a capsule behind a short launch pad" {
     const old_findings = try check(arena, placement, legacy, 0.127);
     try testing.expectEqual(@as(usize, 1), countKind(old_findings, .track_pad));
     try testing.expectApproxEqAbs(@as(f64, 0.1), firstOfKind(old_findings, .track_pad).?.gap, 1e-9);
+
+    const capsule_spans = [_]router.Track{
+        capsule[0],
+        .{ .x1 = 0.125, .y1 = 0, .x2 = 0.353, .y2 = 0, .layer = 0, .width = 0.55, .net = 0 },
+    };
+    const legacy_fenced = router.RouteResult{ .tracks = &capsule_spans, .vias = &fence_vias, .routed = 1, .total = 1 };
+    try testing.expect(countKind(try check(arena, placement, legacy_fenced, 0.127), .via_track) >= 2);
 }
 
 // spec: placement/drc - parent-rail copper may touch a structurally proven generated per-pin bypass pad, while dotted lookalike nets remain foreign

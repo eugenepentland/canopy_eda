@@ -292,7 +292,6 @@ fn cullNearViolations(
         var best: ?usize = null;
         var best_d: f64 = cull_radius_mm;
         for (fence, 0..) |s, i| {
-            if (doomed[i]) continue;
             const d = std.math.hypot(s.x - vio.x, s.y - vio.y);
             if (d < best_d) {
                 best_d = d;
@@ -300,8 +299,14 @@ fn cullNearViolations(
             }
         }
         if (best) |b| {
-            doomed[b] = true;
-            removed += 1;
+            // One via can yield several findings (for example one per nearby
+            // conservative track probe). Every finding must keep resolving to
+            // that same cause; skipping an already-doomed nearest via would
+            // walk outward and delete innocent neighbours in the same round.
+            if (!doomed[b]) {
+                doomed[b] = true;
+                removed += 1;
+            }
         }
     }
     var kept: std.ArrayList(SavedVia) = .empty;
@@ -913,6 +918,7 @@ test "the default fence mode vets every site and mode all keeps every non-coinci
 }
 
 // spec: Web Server - The fence's DRC ratchet culls the fence vias implicated in a new error-severity violation and leaves warnings, net-open findings and pre-existing copper alone
+// spec: Web Server - Repeated DRC findings from one generated fence via cull that via once rather than consuming its legal neighbours
 test "the fence ratchet culls the vias a new violation implicates, and only those" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -941,6 +947,25 @@ test "the fence ratchet culls the vias a new violation implicates, and only thos
     try testing.expectEqual(@as(usize, 2), out.kept.len);
     try testing.expectEqual(@as(f64, 1), out.kept[0].x);
     try testing.expectEqual(@as(f64, 9), out.kept[1].x);
+
+    // A path lowered into several conservative probes can report the same via
+    // more than once. All three findings resolve to the centre post; the two
+    // neighbours must survive the round.
+    const dense_fence = [_]SavedVia{
+        .{ .x = 4.2, .y = 1, .d = 0.4, .drill = 0.2, .net = "GND", .f = "SIG" },
+        .{ .x = 5, .y = 1, .d = 0.4, .drill = 0.2, .net = "GND", .f = "SIG" },
+        .{ .x = 5.8, .y = 1, .d = 0.4, .drill = 0.2, .net = "GND", .f = "SIG" },
+    };
+    const repeated = [_]drc.Violation{
+        .{ .x = 5, .y = 1, .gap = -0.1, .clearance = 0.127, .kind = .via_track },
+        .{ .x = 5, .y = 1, .gap = -0.2, .clearance = 0.127, .kind = .via_track },
+        .{ .x = 5, .y = 1, .gap = -0.3, .clearance = 0.127, .kind = .via_track },
+    };
+    const unique = try cullNearViolations(alloc, &dense_fence, &repeated);
+    try testing.expectEqual(@as(usize, 1), unique.removed);
+    try testing.expectEqual(@as(usize, 2), unique.kept.len);
+    try testing.expectEqual(@as(f64, 4.2), unique.kept[0].x);
+    try testing.expectEqual(@as(f64, 5.8), unique.kept[1].x);
 
     // A violation with no fence via within the cull radius costs nothing — the
     // ratchet never reaches across a board to blame an innocent row, and it can only

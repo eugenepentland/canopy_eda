@@ -3167,6 +3167,7 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - native routed arc strokes are audited against final pours on outer and inner physical layers, subtract holes, and replace their stored chords
 - foreign-pour DRC audits an RF path's exact swept regions and suppresses its compact handles, never replacing a narrow taper end with the widest endpoint capsule
 - a wide RF taper is checked as its exact butt-ended sweep, so a short launch land does not acquire a round cap behind its centre and falsely crowd the adjacent pad
+- a via beside a variable-width RF path is checked against the exact swept copper, so a legal fence row beside a launch taper is not rejected by conservative max-width chord capsules
 - implicit ground fills are one physical carrier and a fill whose boundary construction failed remains invalid even when empty
 - a leaf-only net alias is accepted only when unique; sibling flattened nets with the same leaf remain distinct copper
 - reporting DRC retains the same exact variable-width RF carve that Gerber computes from the raw route proof
@@ -7433,6 +7434,7 @@ is what makes the predicate exact rather than approximately right.
 - A fence dry run reports what it would place and writes nothing to the layout
 - A fence run defaults to the vetted mode, placing only sites the board accepts and ending at the DRC error count it started from, while mode=all places every non-coincident site and reports the DRC without culling it
 - The fence's DRC ratchet culls the fence vias implicated in a new error-severity violation and leaves warnings, net-open findings and pre-existing copper alone
+- Repeated DRC findings from one generated fence via cull that via once rather than consuming its legal neighbours
 - The fence ratchet compares violation identity against the baseline and never culls a new fence via merely because it is near a pre-existing error
 - The fence endpoint and the generate_fence tool reject an unknown mode naming the two spellings that exist
 - Re-running the fence on a layout replaces the previous fence rather than stacking a second row beside the same trace
