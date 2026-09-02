@@ -3436,6 +3436,8 @@ Public functions: analyze, classifyNetName, isInductor
 - exports the detected policy as an editable (module-policy …) block
 
 ## placement/power-routing
+- a branch whose end lands inside the trunk's copper joins the trunk even when its centreline misses the trunk's by less than the copper half-width
+- a via joins every track whose copper its barrel overlaps, not only tracks ending exactly at its centre
 
 Public functions: capacityForArea, traceCapacityA, requiredTraceWidthMm,
 viaCapacityA, requiredViaDrillMm, routingCurrentA, powerWidthForNet,
@@ -3469,6 +3471,8 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - adaptive routing retains the full maximum-current target while a pour-backed rail keeps its short authored fanout width
 - an adaptive rail reports one warning at its worst electrical shortfall while the fabrication minimum remains a hard error
 - a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an incomplete opted-in rail screens every segment at the whole-rail current
+- a port-keyed consumer whose module-side net reaches only passive parts resolves those pads as its load contacts
+- a consumer whose annotated pad sits behind a two-terminal series part on a sibling net enters this net's copper at that part's pad
 - a rail with no annotated load routes for its declared source capacity, so a standalone regulator page sizes copper from its own output rating
 - declared loads outrank source capacity, so a rail routes for what the board draws rather than what its supply could deliver
 - a standalone module that rates its own output port and declares a bare layer count gets an IPC-2221 width for that rail; without the stackup no width is invented
