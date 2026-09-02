@@ -837,7 +837,7 @@ pub fn putDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
     );
     // The saved document is one of the dossier's own inputs. Keep the prior
     // result readable, but mark it stale until a writer regenerates it.
-    ctx.state.dossiers.invalidate(loaded.parsed.value.name);
+    ctx.state.reviews.dossiers.invalidate(loaded.parsed.value.name);
 
     const digest = system_review.sha256Hex(body);
     var out: std.Io.Writer.Allocating = .init(res.arena);
@@ -907,7 +907,7 @@ pub fn uploadAssetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
     );
     // An asset is package evidence the dossier enumerates, so the retained copy
     // becomes stale under the same rule a document save uses.
-    ctx.state.dossiers.invalidate(loaded.parsed.value.name);
+    ctx.state.reviews.dossiers.invalidate(loaded.parsed.value.name);
 
     var out: std.Io.Writer.Allocating = .init(res.arena);
     try out.writer.writeAll("{\"ok\":true,\"path\":");
@@ -1002,7 +1002,7 @@ pub fn attestSystemApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
     commitMutation(ctx, ac_session, "system_review_attest", loaded.manifest_rel, null);
     // The manifest's attestation is on the dossier's own readiness face, so an
     // approval marks the retained copy stale exactly as a document save does.
-    ctx.state.dossiers.invalidate(loaded.parsed.value.name);
+    ctx.state.reviews.dossiers.invalidate(loaded.parsed.value.name);
 
     var out: std.Io.Writer.Allocating = .init(res.arena);
     try out.writer.writeAll("{\"ok\":true,\"content_lock\":");
@@ -1209,7 +1209,7 @@ pub fn draftPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
 /// It is no longer composed inside the request. Composition is a complete
 /// review snapshot plus a complete fabrication-readiness pass per board — about
 /// a minute for a two-board system — which made this page look hung in a
-/// browser. The request now answers from `state.dossiers` (see
+/// browser. The request now answers from `state.reviews.dossiers` (see
 /// `serve/dossier_jobs.zig`) and never blocks on the composer:
 ///
 ///   * a composed copy is served immediately, with `x-netlisp-dossier-state`
@@ -1239,12 +1239,12 @@ pub fn dossierPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
         return sendPackageFailure(res, err, .draft);
 
     const now_ms = clock.milliTimestamp();
-    var state_view = ctx.state.dossiers.snapshot(null, name);
-    if (state_view.stale(now_ms)) _ = ctx.state.dossiers.revalidate(ctx.project_dir, name);
-    state_view = ctx.state.dossiers.snapshot(null, name);
+    var state_view = ctx.state.reviews.dossiers.snapshot(null, name);
+    if (state_view.stale(now_ms)) _ = ctx.state.reviews.dossiers.revalidate(ctx.project_dir, name);
+    state_view = ctx.state.reviews.dossiers.snapshot(null, name);
     if (!state_view.has_document and state_view.stale(now_ms))
-        dossier_jobs.spawn(&ctx.state.dossiers, ctx.project_dir, name);
-    const view = ctx.state.dossiers.snapshot(ctx.allocator, name);
+        dossier_jobs.spawn(&ctx.state.reviews.dossiers, ctx.project_dir, name);
+    const view = ctx.state.reviews.dossiers.snapshot(ctx.allocator, name);
 
     if (view.html) |html| {
         res.content_type = .HTML;
@@ -1379,7 +1379,7 @@ pub fn dossierStatusApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     if (!isSimpleName(name)) return sendJsonError(res, 400, "invalid system name");
     // No allocator: polling this must not copy the whole document to answer
     // a question about its existence.
-    const view = ctx.state.dossiers.snapshot(null, name);
+    const view = ctx.state.reviews.dossiers.snapshot(null, name);
     const now_ms = clock.milliTimestamp();
     const state: []const u8 = if (view.composing)
         "composing"
@@ -1424,8 +1424,8 @@ pub fn regenerateDossierApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
     const name = req.param("name") orelse return sendJsonError(res, 404, "missing system name");
     system_review_package.dossierPreflight(ctx.allocator, ctx.project_dir, name) catch |err|
         return sendPackageFailure(res, err, .draft);
-    const started = dossier_jobs.regenerate(&ctx.state.dossiers, ctx.project_dir, name);
-    const view = ctx.state.dossiers.snapshot(null, name);
+    const started = dossier_jobs.regenerate(&ctx.state.reviews.dossiers, ctx.project_dir, name);
+    const view = ctx.state.reviews.dossiers.snapshot(null, name);
     if (!started and !view.composing) return sendJsonError(res, 503, "dossier regeneration could not start");
     res.status = 202;
     res.content_type = .JSON;
@@ -1666,7 +1666,7 @@ test "the dossier page serves the composed copy or a loader and never composes i
     // Background composition stays off, so nothing here starts a detached
     // minute of board analysis against a fixture the test is about to delete.
     var state: serve_root.ServerState = .{};
-    defer state.dossiers.deinit();
+    defer state.reviews.dossiers.deinit();
     var server = Server{
         .allocator = allocator,
         .project_dir = project,
@@ -1704,8 +1704,8 @@ test "the dossier page serves the composed copy or a loader and never composes i
     // A finished composition is served back verbatim — the page retains the
     // composer's bytes rather than wrapping or annotating them.
     const composed = "<!doctype html><html><body>dossier v1</body></html>";
-    const first_gen = state.dossiers.begin("demo").?;
-    state.dossiers.finish("demo", first_gen, try std.heap.page_allocator.dupe(u8, composed), null);
+    const first_gen = state.reviews.dossiers.begin("demo").?;
+    state.reviews.dossiers.finish("demo", first_gen, try std.heap.page_allocator.dupe(u8, composed), null);
 
     var warm = httpz.testing.init(.{});
     defer warm.deinit();
@@ -1729,7 +1729,7 @@ test "the dossier page serves the composed copy or a loader and never composes i
 
     // A mutation keeps the old bytes immediately readable, clearly labels them,
     // and does not spend a background compose until the writer asks.
-    state.dossiers.invalidate("demo");
+    state.reviews.dossiers.invalidate("demo");
     var stale = httpz.testing.init(.{});
     defer stale.deinit();
     server.allocator = stale.res.arena;
@@ -1740,7 +1740,7 @@ test "the dossier page serves the composed copy or a loader and never composes i
     try std.testing.expect(std.mem.indexOf(u8, stale.res.body, ">Regenerate</button>") != null);
     try std.testing.expect(std.mem.indexOf(u8, stale.res.body, "/dossier-regenerate") != null);
     try std.testing.expectEqualStrings("stale", stale.res.headers.get("x-netlisp-dossier-state").?);
-    try std.testing.expect(!state.dossiers.snapshot(null, "demo").composing);
+    try std.testing.expect(!state.reviews.dossiers.snapshot(null, "demo").composing);
 
     var stale_status = httpz.testing.init(.{});
     defer stale_status.deinit();
@@ -1753,7 +1753,7 @@ test "the dossier page serves the composed copy or a loader and never composes i
     // While the one explicit replacement is running, the same old results stay
     // visible with a non-actionable progress notice.
     const recomposed = "<!doctype html><html><body>dossier v2</body></html>";
-    const second_gen = state.dossiers.begin("demo").?;
+    const second_gen = state.reviews.dossiers.begin("demo").?;
     var joined_regenerate = httpz.testing.init(.{});
     defer joined_regenerate.deinit();
     server.allocator = joined_regenerate.res.arena;
@@ -1773,7 +1773,7 @@ test "the dossier page serves the composed copy or a loader and never composes i
     try std.testing.expect(std.mem.indexOf(u8, replacing.res.body, "Regenerating dossier") != null);
     try std.testing.expectEqualStrings("recomposing", replacing.res.headers.get("x-netlisp-dossier-state").?);
 
-    state.dossiers.finish("demo", second_gen, try std.heap.page_allocator.dupe(u8, recomposed), null);
+    state.reviews.dossiers.finish("demo", second_gen, try std.heap.page_allocator.dupe(u8, recomposed), null);
 
     var reloaded = httpz.testing.init(.{});
     defer reloaded.deinit();
@@ -1797,7 +1797,7 @@ test "a background dossier failure reaches the page as the composer's diagnostic
     defer allocator.free(project);
 
     var state: serve_root.ServerState = .{};
-    defer state.dossiers.deinit();
+    defer state.reviews.dossiers.deinit();
     var server = Server{
         .allocator = allocator,
         .project_dir = project,
@@ -1807,8 +1807,8 @@ test "a background dossier failure reaches the page as the composer's diagnostic
 
     // The composer only reaches this refusal after a board pass, so it is the
     // background thread that records it…
-    const gen = state.dossiers.begin("demo").?;
-    state.dossiers.finish("demo", gen, null, error.BoardNotFound);
+    const gen = state.reviews.dossiers.begin("demo").?;
+    state.reviews.dossiers.finish("demo", gen, null, error.BoardNotFound);
 
     // …and the page answers it exactly as the synchronous composer used to:
     // the composer's own status and wording, never a blank page or a loader
@@ -2006,7 +2006,7 @@ test "saving a review document preserves an explicitly stale dossier" {
     defer allocator.free(project);
 
     var state: serve_root.ServerState = .{};
-    defer state.dossiers.deinit();
+    defer state.reviews.dossiers.deinit();
     var server = Server{
         .allocator = allocator,
         .project_dir = project,
@@ -2016,8 +2016,8 @@ test "saving a review document preserves an explicitly stale dossier" {
     };
 
     // A dossier composed from the pre-save workspace…
-    const gen = state.dossiers.begin("demo").?;
-    state.dossiers.finish(
+    const gen = state.reviews.dossiers.begin("demo").?;
+    state.reviews.dossiers.finish(
         "demo",
         gen,
         try std.heap.page_allocator.dupe(u8, "<!doctype html><html><body>before the save</body></html>"),
@@ -2045,5 +2045,5 @@ test "saving a review document preserves an explicitly stale dossier" {
     try std.testing.expect(std.mem.indexOf(u8, after.res.body, "before the save") != null);
     try std.testing.expect(std.mem.indexOf(u8, after.res.body, "Cached dossier is stale") != null);
     try std.testing.expectEqualStrings("stale", after.res.headers.get("x-netlisp-dossier-state").?);
-    try std.testing.expect(!state.dossiers.snapshot(null, "demo").composing);
+    try std.testing.expect(!state.reviews.dossiers.snapshot(null, "demo").composing);
 }

@@ -59,6 +59,7 @@ const sync_kicad_sch = @import("serve/sync_kicad_sch.zig");
 const assembly_debug = @import("serve/assembly_debug.zig");
 const assembly_page_cache = @import("serve/assembly_page_cache.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
+const board_review = @import("serve/board_review.zig");
 const pcb_subseeds = @import("serve/pcb_subseeds.zig");
 const matlab_rf_export = @import("serve/matlab_rf_export.zig");
 const pcb_page_cache = @import("serve/pcb_page_cache.zig");
@@ -454,14 +455,14 @@ pub const ServerState = struct {
     /// store names no project directory and writes nothing, so a handler test
     /// logs nowhere unless it asks to; `serve()` is what turns it on.
     request_log: request_log.Store = .{},
-    /// Composed system-review dossiers, one slot per system, filled by a
-    /// detached compose thread (see `serve/dossier_jobs.zig`). Composition is a
-    /// minute of per-board review and fabrication analysis, so the page reads
-    /// this instead of composing inside the request. Completed results persist
-    /// below the project `out/` directory across server restarts. A
-    /// default-constructed store has background composition off and starts no
-    /// thread.
-    dossiers: dossier_jobs.Store = .{},
+    /// Long-lived state shared by the generated dossiers and human review
+    /// checklist. Dossier composition is backgrounded and persisted below
+    /// `out/`; the mutex serializes review-sidecar read-modify-write operations
+    /// so concurrent reviewer saves cannot silently discard one another.
+    reviews: struct {
+        dossiers: dossier_jobs.Store = .{},
+        board_review_mutex: infra_fs.Mutex = .{},
+    } = .{},
 };
 
 // ── Server ─────────────────────────────────────────────────────────────
@@ -814,6 +815,10 @@ fn registerPcbRoutes(router: anytype) void {
     // ordinary PCB layout page so bookmarks/agents don't 404.
     router.get("/pcb-route-lab/:name", routeLabRedirect, .{});
     router.get("/pcb-layout/:name", pcb_layout_page.pcbLayoutPage, .{});
+    router.get("/review/:name", board_review.reviewPage, .{});
+    router.get("/api/board-review/:name", board_review.getStateApi, .{});
+    router.post("/api/board-review/:name", board_review.updateStateApi, .{});
+    router.get("/api/board-review-audit/:name", board_review.auditApi, .{});
     router.get("/api/pcb-cam/:name", pcb_layout_page.pcbCamJsonApi, .{});
     router.get("/api/pcb-subseeds/:name", pcb_subseeds.pcbSubSeedsApi, .{});
     router.post("/api/pcb-subcircuit-layout/:name", pcb_subseeds.saveSubcircuitLayoutApi, .{});
@@ -913,7 +918,7 @@ pub fn serve(
         // Only a real server composes dossiers in the background: the detached
         // thread outlives the request that started it, which a handler test's
         // stack-owned `ServerState` could not survive.
-        .dossiers = .{ .background = true, .project_dir = project_dir },
+        .reviews = .{ .dossiers = .{ .background = true, .project_dir = project_dir } },
     }; // owned here; shared by pointer
     defer state.caches.deinit();
     // A real server may run background full-board DRC sweeps behind the

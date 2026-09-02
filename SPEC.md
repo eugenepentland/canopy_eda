@@ -6394,6 +6394,38 @@ Read-only: nothing here writes to the project dir.
 - completeness-waiver: integer overflow (every measured quantity is an f64 watt, degree or degree-per-watt; the only counts are usize tallies of an existing slice)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
+## serve/board-review
+
+Public functions: reviewPage, getStateApi, updateStateApi, auditApi
+
+The board Review tab is a board-scoped, evidence-driven release checklist.
+It renders the supplied 13-section research checklist as 258 stable decisions
+and keeps those human dispositions separate from generated facts: the page
+loads the existing Board Review Audit after first paint, so release-profile
+checks, component profiles, layout progress, DRC, fabrication readiness and BOM
+evidence stay current without pretending they answer human engineering
+judgments. Each item records Open, Pass, Fail, N/A, or Needs info plus evidence,
+a reviewer note, the authenticated reviewer, and a UTC timestamp in the
+design-sibling .review.json sidecar.
+
+- the PCB header exposes Review only for board designs and preserves a selected saved layout
+- the Review page carries the selected saved layout through every physical-board link
+- the supplied review catalog retains all 13 sections and 258 discrete decisions
+- the page reports ready, reviewed, blocked and open totals, and supports search, remaining/failure filters, and per-section progress
+- human dispositions round-trip all evidence fields in bounded JSON
+- a checklist mutation accepts only a catalog item id and fixed status, bounds its evidence and note, requires writer authority plus the review mutation header, and stamps the authenticated identity instead of a body-supplied reviewer
+- concurrent checklist mutations serialize their whole read-modify-write and atomically replace the design-sibling sidecar
+- the automated audit loads separately after the checklist shell paints and renders only through the safe system-review Markdown parser
+- read-only reviewers see every disposition and generated result but cannot edit controls
+- completeness-waiver: empty inputs (a missing or unknown board name answers 404; a missing sidecar is the valid all-open review state)
+- completeness-waiver: large inputs (the catalog is fixed at 258 items, persisted entries are capped to that count, state and request bytes are bounded, and evidence/note fields have independent limits)
+- completeness-waiver: unauthorized access (GET is session-gated and read-only; POST additionally requires a writer role and the review mutation header)
+- completeness-waiver: i/o failure (state read/write failures answer JSON errors without replacing the prior atomic sidecar; an audit collection failure is shown separately without hiding the checklist)
+- completeness-waiver: concurrent access (one server-state mutex covers each state read-modify-write and atomic replacement prevents torn readers)
+- completeness-waiver: malformed encoding (the JSON parser validates request/state structure, catalog ids and statuses are allowlisted, HTML uses the shared XML escaper, script strings use the shared script-safe JSON writer, and audit HTML comes from the safe Markdown AST)
+- completeness-waiver: integer overflow (all progress counts are bounded by the 258-item catalog and every body/field length is checked before allocation into state)
+- completeness-waiver: panic-free (malformed state, invalid item data, missing designs and audit failures return explicit HTTP errors; repo-wide panic-budget covers the remaining allocation-only paths)
+
 ## serve/route-review
 
 Public functions: routeReviewPage, routeReviewApi, designRouteReviewApi, cachedDesignRouteReviewApi

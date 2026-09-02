@@ -398,7 +398,14 @@ fn writeNav(w: *std.Io.Writer, v: View) std.Io.Writer.Error!void {
         try writeLayoutParam(w, v, true);
         try w.writeAll("\">Assembly</a>");
     }
-    try w.writeAll("<a class=\"active\" aria-current=\"page\">Thermal</a></nav>");
+    try w.writeAll("<a class=\"active\" aria-current=\"page\">Thermal</a>");
+    if (!v.is_module) {
+        try w.writeAll("<a href=\"/review/");
+        try writeUrlEncoded(w, v.name);
+        try writeLayoutParam(w, v, true);
+        try w.writeAll("\">Review</a>");
+    }
+    try w.writeAll("</nav>");
 }
 
 /// `layout=<name>` when the page is screening a NAMED saved layout; nothing at
@@ -1204,7 +1211,7 @@ fn navView(name: []const u8, is_module: bool) View {
 }
 
 // spec: serve/thermal-page - the Thermal tab is active on /thermal/:name and follows Assembly on the schematic, PCB and assembly headers
-test "the thermal tab is last in the bar and active on its own page" {
+test "the thermal tab follows assembly and Review stays board scoped" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
@@ -1215,11 +1222,18 @@ test "the thermal tab is last in the bar and active on its own page" {
     const assembly = std.mem.indexOf(u8, bar, ">Assembly</a>").?;
     const thermal_tab = std.mem.indexOf(u8, bar, "aria-current=\"page\">Thermal</a>").?;
     try testing.expect(assembly < thermal_tab);
+    try testing.expect(std.mem.indexOf(u8, bar, "href=\"/review/demo\">Review</a>") != null);
     // A module has no Assembly surface, so its bar stops at 3D and Thermal.
     var mod: std.Io.Writer.Allocating = .init(alloc);
     try writeNav(&mod.writer, navView("power", true));
     try testing.expect(std.mem.indexOf(u8, mod.written(), "/assembly-debug/") == null);
+    try testing.expect(std.mem.indexOf(u8, mod.written(), "/review/") == null);
     try testing.expect(std.mem.indexOf(u8, mod.written(), ">Thermal</a>") != null);
+    var selected_view = navView("demo", false);
+    selected_view.layout = "release-A";
+    var selected: std.Io.Writer.Allocating = .init(alloc);
+    try writeNav(&selected.writer, selected_view);
+    try testing.expect(std.mem.indexOf(u8, selected.written(), "/review/demo?layout=release-A") != null);
     // The other three headers gained the same tab, each after their Assembly link.
     const heads = [_][]const u8{
         @embedFile("../render_html.zig"),

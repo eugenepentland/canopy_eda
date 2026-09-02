@@ -3819,6 +3819,10 @@ src/serve/board_backup.zig::RollBackupError value
 src/serve/board_backup.zig::WriteFileAtomicError value
 src/serve/board_backup.zig::rollBackup | fn rollBackup(arena: std.mem.Allocator, path: []const u8) RollBackupError!void
 src/serve/board_backup.zig::writeFileAtomic | fn writeFileAtomic(arena: std.mem.Allocator, path: []const u8, contents: []const u8) WriteFileAtomicError!void
+src/serve/board_review.zig::auditApi | fn auditApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/board_review.zig::getStateApi | fn getStateApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/board_review.zig::reviewPage | fn reviewPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/board_review.zig::updateStateApi | fn updateStateApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/bom_html.zig::BomCounts struct_
 src/serve/bom_html.zig::BomError value
 src/serve/bom_html.zig::BomRollup struct_

@@ -872,7 +872,13 @@ fn renderPageWithOptions(allocator: std.mem.Allocator, name: []const u8, index: 
         try w.writeAll("\">3D</a><a class=\"active\" aria-current=\"page\">Assembly</a>");
         try w.writeAll("<a href=\"/thermal/");
         try writeUrlEncoded(w, name);
-        try w.writeAll("\">Thermal</a></nav>");
+        try w.writeAll("\">Thermal</a><a href=\"/review/");
+        try writeUrlEncoded(w, name);
+        if (opts.layout) |selected| {
+            try w.writeAll("?layout=");
+            try writeUrlEncoded(w, selected);
+        }
+        try w.writeAll("\">Review</a></nav>");
     }
     try w.writeAll("</header><main class=\"workspace\"><aside class=\"panel\">");
     if (index.guides.len > 0) {
@@ -1385,6 +1391,7 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
     }, "an2548-div4-post-ldo", false);
     try std.testing.expect(std.mem.indexOf(u8, selected, "/pcb-layout/demo?layout=an2548-div4-post-ldo\">PCB Layout") != null);
     try std.testing.expect(std.mem.indexOf(u8, selected, "/pcb-layout/demo?view=3d&amp;layout=an2548-div4-post-ldo\">3D") != null);
+    try std.testing.expect(std.mem.indexOf(u8, selected, "/review/demo?layout=an2548-div4-post-ldo\">Review") != null);
     try std.testing.expect(std.mem.indexOf(u8, selected, "/pcb-layout/demo?embed=1&amp;review=1&amp;drc=0&amp;layout=an2548-div4-post-ldo") != null);
     const benchmark = try renderPage(arena.allocator(), "demo", .{
         .parts = &.{},

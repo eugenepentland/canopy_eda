@@ -723,6 +723,25 @@ const ACTIONS = {
   "module.erc_feedback": async (page) => measured(page, async () => page.locator("#erc-btn").click(),
     async () => waitForErcPanel(page)),
 
+  "board_review.search": async (page) => measured(page,
+    async () => page.locator("#review-search").fill("creepage"),
+    async () => page.waitForFunction(() => {
+      const shown = Array.from(document.querySelectorAll(".review-item")).filter((row) => !row.hidden);
+      return shown.length > 0 && shown.length < 258 && shown.every((row) =>
+        (row.textContent || "").toLowerCase().includes("creepage"));
+    })),
+  "board_review.remaining_filter": async (page) => {
+    await page.locator("#review-search").fill("");
+    return measured(page, async () => page.locator('[data-filter="remaining"]').click(),
+      async () => page.waitForFunction(() => document.querySelector('[data-filter="remaining"]')?.classList.contains("active")));
+  },
+  "board_review.section_expand": async (page) => {
+    const section = page.locator('.section-card[data-section="2"]');
+    if (await section.getAttribute("open") !== null) await section.locator("summary").click();
+    return measured(page, async () => section.locator("summary").click(),
+      async () => page.waitForFunction(() => document.querySelector('.section-card[data-section="2"]')?.open));
+  },
+
   "pcb_2d.find": async (page) => measured(page, async () => page.locator("#pcb-find-input").fill("U19"),
     async () => page.locator("#pcb-find-results [data-findrow]").first().waitFor({ state: "visible" })),
   "pcb_2d.side_panel": async (page) => measured(page, async () => page.locator('[data-sidetab="side-drc"]').click(),

@@ -8846,9 +8846,9 @@ fn writeActivityRail(w: *std.Io.Writer) std.Io.Writer.Error!void {
         "<button type=\"button\" data-dock-appearance title=\"Layers and objects\"><span aria-hidden=\"true\">▤</span><small>View</small></button></nav>");
 }
 
-/// Full-page header row: title + the Schematic ⇄ PCB Layout ⇄ 3D switcher
-/// (PCB active). Physical board designs also link to their view-only
-/// Assembly surface; reusable modules stop at the three design views.
+/// Full-page header row: title + the board-view switcher (PCB active).
+/// Physical board designs also link to Assembly and the board Review page;
+/// reusable modules retain the schematic/layout/3D/thermal surfaces only.
 /// `name` resolves as a design under src/ first, else a reusable module — the
 /// Schematic link points at the matching viewer.
 fn writeHeadNav(
@@ -8891,6 +8891,14 @@ fn writeHeadNav(
     // Thermal screens the same block a module page already shows, so unlike
     // Assembly it is offered on both.
     try w.print("<a href=\"/thermal/{s}\">Thermal</a>", .{name});
+    if (!is_module) {
+        try w.print("<a href=\"/review/{s}", .{name});
+        if (layout) |selected| {
+            try w.writeAll("?layout=");
+            try writeUrlEncoded(w, selected);
+        }
+        try w.writeAll("\">Review</a>");
+    }
     try w.writeAll("</nav>");
     try w.writeAll("</div>");
 }
@@ -13659,16 +13667,19 @@ test "CLI persist refreshes the auto cache poses so a default read sees the muta
 }
 
 // spec: Web Server - physical board navigation exposes stable 3D and a read-only assembly workspace
+// spec: serve/board-review - the PCB header exposes Review only for board designs and preserves a selected saved layout
 test "PCB header links board designs to assembly and keeps modules scoped" {
     var board: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer board.deinit();
     try writeHeadNav(&board.writer, false, "demo", "Demo", null, .{ .routed = 70, .total = 90, .unique_routed = 7, .unique_total = 9 });
     try std.testing.expect(std.mem.indexOf(u8, board.written(), "href=\"/pcb-layout/demo?view=3d\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, board.written(), "href=\"/assembly-debug/demo\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board.written(), "href=\"/review/demo\"") != null);
     var selected: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer selected.deinit();
     try writeHeadNav(&selected.writer, false, "demo", "Demo", "an2548-div4-post-ldo", null);
     try std.testing.expect(std.mem.indexOf(u8, selected.written(), "href=\"/assembly-debug/demo?layout=an2548-div4-post-ldo\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, selected.written(), "href=\"/review/demo?layout=an2548-div4-post-ldo\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_toggle_js, "get(\"view\")===\"3d\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-bottom\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-export-step\"") != null);
@@ -13694,6 +13705,7 @@ test "PCB header links board designs to assembly and keeps modules scoped" {
     defer module.deinit();
     try writeHeadNav(&module.writer, true, "power", "Power", null, null);
     try std.testing.expect(std.mem.indexOf(u8, module.written(), "/assembly-debug/") == null);
+    try std.testing.expect(std.mem.indexOf(u8, module.written(), "/review/") == null);
 }
 
 // spec: Web Server - The Routed UI count collapses per-pin micro-net connections onto unique logical net names while requiring every member connection to close

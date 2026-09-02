@@ -439,7 +439,8 @@ fn writeHeader(
     try w.writeAll("\">PCB Layout</a><a href=\"/pcb-layout/");
     try writeUrlEncoded(w, design_name);
     try w.writeAll("?view=3d\">3D</a>");
-    if (std.mem.eql(u8, options.path, "/schematics/")) {
+    const is_design = std.mem.eql(u8, options.path, "/schematics/");
+    if (is_design) {
         try w.writeAll("<a href=\"/assembly-debug/");
         try writeUrlEncoded(w, design_name);
         try w.writeAll("\">Assembly</a>");
@@ -451,6 +452,11 @@ fn writeHeader(
     try w.writeAll("<a href=\"/thermal/");
     try writeUrlEncoded(w, design_name);
     try w.writeAll("\">Thermal</a>");
+    if (is_design) {
+        try w.writeAll("<a href=\"/review/");
+        try writeUrlEncoded(w, design_name);
+        try w.writeAll("\">Review</a>");
+    }
     try w.writeAll("</nav>");
     try writeSchematicModeSwitch(w, design_name, options);
     // A design's fabrication role is explicit source metadata, not inferred
@@ -2950,6 +2956,7 @@ test "schematic header switches between sequential and functional views" {
     try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/pcb-layout/demo?view=3d\">3D</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "/editor/") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/assembly-debug/demo\">Assembly</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/review/demo\">Review</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "aria-label=\"Schematic view\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "class=\"schematic-mode-label active\">Functional") != null);
     // The slider links the view it is NOT showing, so from the default it is
@@ -2969,6 +2976,7 @@ test "schematic header switches between sequential and functional views" {
     try std.testing.expect(std.mem.indexOf(u8, mhtml, "href=\"/pcb-layout/mod?view=3d\">3D</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, mhtml, "/editor/") == null);
     try std.testing.expect(std.mem.indexOf(u8, mhtml, "/assembly-debug/") == null);
+    try std.testing.expect(std.mem.indexOf(u8, mhtml, "/review/") == null);
     try std.testing.expect(std.mem.indexOf(u8, mhtml, "class=\"schematic-mode-slider\" href=\"/modules/mod\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, mhtml, "role=\"switch\" aria-checked=\"false\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, mhtml, "class=\"schematic-mode-label active\">Sequential") != null);

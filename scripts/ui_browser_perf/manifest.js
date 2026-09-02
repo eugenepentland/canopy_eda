@@ -19,6 +19,7 @@ const routes = {
     ],
   },
   "/thermal/:name": { coverage: "surface", surface: "thermal" },
+  "/review/:name": { coverage: "surface", surface: "board_review" },
   "/library": { coverage: "surface", surface: "library" },
   "/library/footprint/:name": { coverage: "surface", surface: "footprint_editor" },
   "/library/3d/:footprint": { coverage: "surface", surface: "model_alignment_3d" },
@@ -149,6 +150,17 @@ const surfaces = [
       { id: "opacity", kind: "local" },
       { id: "pan", kind: "frame" },
       { id: "zoom", kind: "frame" },
+    ],
+  },
+  {
+    id: "board_review",
+    label: "Board review checklist",
+    path: "/review/barracuda-base",
+    ready: '.review-item[data-id="1.1"]',
+    scenarios: [
+      { id: "search", kind: "local", budgets: { p95_ms: 150, max_ms: 250 } },
+      { id: "remaining_filter", kind: "local", budgets: { p95_ms: 150, max_ms: 250 } },
+      { id: "section_expand", kind: "local", budgets: { p95_ms: 150, max_ms: 250 } },
     ],
   },
   {

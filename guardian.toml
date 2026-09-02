@@ -213,6 +213,11 @@ command = ["node", "--check", "src/serve/assets/route_review.js"]
 inputs = ["src/serve/assets/route_review.js"]
 
 [[external]]
+name = "board-review-js-syntax"
+command = ["node", "--check", "src/serve/assets/board_review.js"]
+inputs = ["src/serve/assets/board_review.js"]
+
+[[external]]
 name = "pcb-step-worker-js-syntax"
 command = ["node", "--check", "src/serve/assets/pcb_step_worker.js"]
 inputs = ["src/serve/assets/pcb_step_worker.js"]

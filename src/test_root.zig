@@ -383,6 +383,7 @@ test {
     _ = @import("serve/auth_store.zig");
     _ = @import("serve/autocommit.zig");
     _ = @import("serve/board_backup.zig");
+    _ = @import("serve/board_review.zig");
     _ = @import("serve/bom_html.zig");
     _ = @import("serve/component_info.zig");
     _ = @import("serve/component_search.zig");
