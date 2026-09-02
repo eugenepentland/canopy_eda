@@ -25,6 +25,7 @@ ban-globals|src/serve.zig|mutable global var outside wiring/main
 ban-globals|src/serve.zig|mutable global var outside wiring/main
 ban-globals|src/serve.zig|mutable global var outside wiring/main
 ban-globals|src/serve/drc_rules.zig|mutable global var outside wiring/main
+ban-globals|src/serve/mcp_board_review.zig|mutable global var outside wiring/main
 ban-globals|src/serve/mcp_tools.zig|mutable global var outside wiring/main
 ban-globals|src/serve/mcp_tools.zig|mutable global var outside wiring/main
 ban-globals|src/serve/modules.zig|mutable global var outside wiring/main

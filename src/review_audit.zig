@@ -124,6 +124,92 @@ pub const FindingRow = struct {
     message: []const u8,
 };
 
+/// Populated capacitor technologies, retaining unknown chemistry explicitly.
+pub const CapacitorInventory = struct {
+    total: usize = 0,
+    ceramic_caps: usize = 0,
+    tantalum_caps: usize = 0,
+    electrolytic_caps: usize = 0,
+    film_caps: usize = 0,
+    unknown_caps: usize = 0,
+};
+
+/// Populated passive-device counts used for applicability decisions.
+pub const PassiveInventory = struct {
+    resistors: usize = 0,
+    capacitors: CapacitorInventory = .{},
+    inductors: usize = 0,
+    ferrites: usize = 0,
+};
+
+/// Populated discrete and electromechanical-device counts.
+pub const DeviceInventory = struct {
+    diodes: usize = 0,
+    tvs_esd: usize = 0,
+    transistors: usize = 0,
+    fuses: usize = 0,
+    crystals: usize = 0,
+    connectors: usize = 0,
+    relays: usize = 0,
+};
+
+/// General population, assembly, and test-feature counts.
+pub const PopulationInventory = struct {
+    components: usize = 0,
+    active_ics: usize = 0,
+    optocouplers: usize = 0,
+    leds: usize = 0,
+    test_points: usize = 0,
+    fiducials: usize = 0,
+    dnp: usize = 0,
+};
+
+/// Authored power-system populations and voltage envelope.
+pub const PowerInventory = struct {
+    rails: usize = 0,
+    input_power_ports: usize = 0,
+    pdn_intents: usize = 0,
+    max_dc_v: f64 = 0,
+    has_battery: bool = false,
+    has_ldo: bool = false,
+    has_switcher: bool = false,
+};
+
+/// Detected buses and programmable-device capabilities.
+pub const InterfaceInventory = struct {
+    has_i2c: bool = false,
+    has_usb: bool = false,
+    has_ethernet: bool = false,
+    has_can_or_rs485: bool = false,
+    has_fpga: bool = false,
+    has_programmable: bool = false,
+    has_current_sense: bool = false,
+};
+
+/// Authored board-level and environmental capabilities.
+pub const BoardInventory = struct {
+    has_outline: bool = false,
+    has_stackup: bool = false,
+    has_revision: bool = false,
+    has_chassis: bool = false,
+    has_rf: bool = false,
+    has_high_voltage: bool = false,
+};
+
+/// Board populations and authored capabilities used to decide whether a
+/// checklist family applies. These are deliberately coarse facts rather than
+/// verdicts: absence may close a component-specific family as N/A, while a
+/// present population still needs the exact rule/evidence for a pass.
+pub const Inventory = struct {
+    passives: PassiveInventory = .{},
+    devices: DeviceInventory = .{},
+    population: PopulationInventory = .{},
+    power: PowerInventory = .{},
+    interfaces: InterfaceInventory = .{},
+    board: BoardInventory = .{},
+    parts: []const PartRow = &.{},
+};
+
 /// Every fact the audit renders, collected once and rendered purely.
 pub const Facts = struct {
     identity: Identity,
@@ -131,7 +217,7 @@ pub const Facts = struct {
     schematic: Schematic = .{},
     layout: Layout = .{},
     fab: Fab = .{},
-    parts: []const PartRow = &.{},
+    inventory: Inventory = .{},
     findings: []const FindingRow = &.{},
 };
 
@@ -280,21 +366,21 @@ fn renderInner(
     try row(w, &.{ "ERC errors / warnings", fmtBuf(buf, "{d} / {d}", .{ s.erc_errors, s.erc_warnings }), "netlisp check", "" });
     var reviewed: usize = 0;
     var unmet_parts: usize = 0;
-    for (facts.parts) |part| {
+    for (facts.inventory.parts) |part| {
         if (std.mem.eql(u8, part.review, "pass")) reviewed += 1;
         if (!std.mem.eql(u8, part.unmet, "none")) unmet_parts += 1;
     }
-    try row(w, &.{ "Active parts with a complete datasheet review / total", fmtBuf(buf, "{d} / {d}", .{ reviewed, facts.parts.len }), "run_checks datasheet_review", "" });
-    try row(w, &.{ "Active parts with unmet class-profile items / total", fmtBuf(buf, "{d} / {d}", .{ unmet_parts, facts.parts.len }), "run_checks profile_incomplete", "" });
+    try row(w, &.{ "Active parts with a complete datasheet review / total", fmtBuf(buf, "{d} / {d}", .{ reviewed, facts.inventory.parts.len }), "run_checks datasheet_review", "" });
+    try row(w, &.{ "Active parts with unmet class-profile items / total", fmtBuf(buf, "{d} / {d}", .{ unmet_parts, facts.inventory.parts.len }), "run_checks profile_incomplete", "" });
     try row(w, &.{ "Open design notes", fmtBuf(buf, "{d}", .{s.notes_open}), "list_design_notes", "" });
     try w.writeAll("\n");
 
     try w.writeAll("## Stage 1b — Per-component profile compliance\n\n");
     try header(w, &.{ "Ref", "Component", "Class profile", "Review", "Checks", "Electrical / currents", "Unmet items", "Disposition" });
-    for (facts.parts) |part| {
+    for (facts.inventory.parts) |part| {
         try row(w, &.{ part.ref, part.component, part.class, part.review, part.checks, part.data, part.unmet, "" });
     }
-    if (facts.parts.len == 0) try row(w, &.{ "none", "no active parts", "", "", "", "", "", "" });
+    if (facts.inventory.parts.len == 0) try row(w, &.{ "none", "no active parts", "", "", "", "", "", "" });
     try w.writeAll("\n");
 
     try w.writeAll("## Stage 2 and 3 — Analyses and BOM (run by hand)\n\n");
@@ -624,18 +710,178 @@ fn collectNotes(arena: std.mem.Allocator, board_path: []const u8, name: []const 
     return open;
 }
 
-/// Collect every fact and render the audit. The returned Markdown is owned
-/// by `allocator`.
-pub fn render(
-    allocator: std.mem.Allocator,
+fn containsIgnoreCase(text: []const u8, needle: []const u8) bool {
+    return std.ascii.findIgnoreCase(text, needle) != null;
+}
+
+fn instanceMentions(inst: env.Instance, needle: []const u8) bool {
+    if (containsIgnoreCase(inst.ref_des, needle) or
+        containsIgnoreCase(inst.component, needle) or
+        containsIgnoreCase(inst.value, needle) or
+        containsIgnoreCase(inst.label, needle)) return true;
+    for (inst.attrs) |attr| if (containsIgnoreCase(attr, needle)) return true;
+    for (inst.properties) |property| {
+        if (containsIgnoreCase(property.key, needle) or containsIgnoreCase(property.value, needle)) return true;
+    }
+    return false;
+}
+
+fn refClass(ref_des: []const u8) []const u8 {
+    var end: usize = 0;
+    while (end < ref_des.len and std.ascii.isAlphabetic(ref_des[end])) : (end += 1) {}
+    return ref_des[0..end];
+}
+
+fn noteNameCapabilities(inventory: *Inventory, name: []const u8) void {
+    inventory.interfaces.has_i2c = inventory.interfaces.has_i2c or containsIgnoreCase(name, "i2c") or
+        containsIgnoreCase(name, "sda") or containsIgnoreCase(name, "scl");
+    inventory.interfaces.has_usb = inventory.interfaces.has_usb or containsIgnoreCase(name, "usb");
+    inventory.interfaces.has_ethernet = inventory.interfaces.has_ethernet or containsIgnoreCase(name, "ethernet") or containsIgnoreCase(name, "eth_");
+    inventory.interfaces.has_can_or_rs485 = inventory.interfaces.has_can_or_rs485 or containsIgnoreCase(name, "rs485") or
+        containsIgnoreCase(name, "can_") or containsIgnoreCase(name, "canh") or containsIgnoreCase(name, "canl");
+    inventory.power.has_battery = inventory.power.has_battery or containsIgnoreCase(name, "battery") or containsIgnoreCase(name, "batt");
+    inventory.board.has_chassis = inventory.board.has_chassis or containsIgnoreCase(name, "chassis") or containsIgnoreCase(name, "earth");
+    inventory.board.has_rf = inventory.board.has_rf or containsIgnoreCase(name, "rf") or containsIgnoreCase(name, "vco") or
+        containsIgnoreCase(name, "pll") or containsIgnoreCase(name, "lo_");
+    inventory.board.has_high_voltage = inventory.board.has_high_voltage or containsIgnoreCase(name, "mains") or
+        containsIgnoreCase(name, "120v") or containsIgnoreCase(name, "230v") or containsIgnoreCase(name, "400v");
+}
+
+fn recordVoltage(inventory: *Inventory, value: ?f64) void {
+    const v = value orelse return;
+    if (!std.math.isFinite(v)) return;
+    inventory.power.max_dc_v = @max(inventory.power.max_dc_v, @abs(v));
+}
+
+fn noteInstanceCapabilities(inventory: *Inventory, inst: env.Instance) void {
+    noteNameCapabilities(inventory, inst.ref_des);
+    noteNameCapabilities(inventory, inst.component);
+    noteNameCapabilities(inventory, inst.value);
+    noteNameCapabilities(inventory, inst.label);
+    for (inst.attrs) |attr| noteNameCapabilities(inventory, attr);
+    for (inst.properties) |property| {
+        noteNameCapabilities(inventory, property.key);
+        noteNameCapabilities(inventory, property.value);
+    }
+}
+
+fn collectBlockTopology(block: *const env.DesignBlock, inventory: *Inventory) void {
+    inventory.power.rails += block.rails.len;
+    inventory.power.pdn_intents += block.pdn_intents.len;
+    inventory.population.test_points += block.test_points.len;
+    for (block.rails) |rail| {
+        noteNameCapabilities(inventory, rail.name);
+        recordVoltage(inventory, rail.nominal);
+        recordVoltage(inventory, rail.rated_voltage.min);
+        recordVoltage(inventory, rail.rated_voltage.max);
+    }
+    for (block.net_envelopes) |envelope| {
+        noteNameCapabilities(inventory, envelope.net);
+        recordVoltage(inventory, envelope.min);
+        recordVoltage(inventory, envelope.max);
+    }
+    for (block.nets) |net| noteNameCapabilities(inventory, net.name);
+    for (block.ports) |port| {
+        noteNameCapabilities(inventory, port.name);
+        noteNameCapabilities(inventory, port.net);
+        recordVoltage(inventory, port.rated_min);
+        recordVoltage(inventory, port.rated_max);
+        recordVoltage(inventory, port.nominal);
+        const has_voltage = port.rated_min != null or port.rated_max != null or port.nominal != null;
+        if (std.ascii.eqlIgnoreCase(port.direction, "in") and
+            (std.ascii.eqlIgnoreCase(port.kind, "power") or has_voltage))
+            inventory.power.input_power_ports += 1;
+    }
+}
+
+fn collectInstance(inst: env.Instance, inventory: *Inventory) void {
+    if (inst.placeholder) return;
+    if (env.isTestPoint(inst.component)) {
+        inventory.population.test_points += 1;
+        return;
+    }
+    const class = refClass(inst.ref_des);
+    if (std.ascii.eqlIgnoreCase(class, "FID")) {
+        inventory.population.fiducials += 1;
+        return;
+    }
+    if (inst.dnp) {
+        inventory.population.dnp += 1;
+        return;
+    }
+    inventory.population.components += 1;
+    if (component_classification.isActiveSemiconductor(inst)) inventory.population.active_ics += 1;
+
+    const is_led = instanceMentions(inst, "led") or containsIgnoreCase(inst.ref_des, "LED");
+    const is_tvs = instanceMentions(inst, "tvs") or instanceMentions(inst, "esd") or
+        instanceMentions(inst, "smbj") or instanceMentions(inst, "usblc");
+    const is_tantalum = instanceMentions(inst, "tantal");
+    const is_electrolytic = instanceMentions(inst, "electrolytic") or instanceMentions(inst, "aluminum capacitor");
+    const is_film = instanceMentions(inst, "film capacitor") or instanceMentions(inst, "safety capacitor") or
+        instanceMentions(inst, "x1 capacitor") or instanceMentions(inst, "x2 capacitor") or instanceMentions(inst, "y2 capacitor");
+    const ceramic_name = instanceMentions(inst, "ceramic") or instanceMentions(inst, "mlcc");
+    const ceramic_class1 = instanceMentions(inst, "c0g") or instanceMentions(inst, "np0");
+    const ceramic_class2 = instanceMentions(inst, "x5r") or instanceMentions(inst, "x7r") or instanceMentions(inst, "y5v");
+    const is_ceramic = ceramic_name or ceramic_class1 or ceramic_class2;
+
+    if (std.ascii.eqlIgnoreCase(class, "R")) inventory.passives.resistors += 1;
+    if (std.ascii.eqlIgnoreCase(class, "C")) {
+        inventory.passives.capacitors.total += 1;
+        if (is_tantalum) inventory.passives.capacitors.tantalum_caps += 1 else if (is_electrolytic) inventory.passives.capacitors.electrolytic_caps += 1 else if (is_film) inventory.passives.capacitors.film_caps += 1 else if (is_ceramic) inventory.passives.capacitors.ceramic_caps += 1 else inventory.passives.capacitors.unknown_caps += 1;
+    }
+    if (std.ascii.eqlIgnoreCase(class, "L")) inventory.passives.inductors += 1;
+    if (std.ascii.eqlIgnoreCase(class, "FB") or instanceMentions(inst, "ferrite")) inventory.passives.ferrites += 1;
+    if (is_tvs) inventory.devices.tvs_esd += 1 else if (std.ascii.eqlIgnoreCase(class, "D") and !is_led) inventory.devices.diodes += 1;
+    if (is_led) inventory.population.leds += 1;
+    if (std.ascii.eqlIgnoreCase(class, "Q") or instanceMentions(inst, "mosfet") or instanceMentions(inst, "transistor")) inventory.devices.transistors += 1;
+    if (std.ascii.eqlIgnoreCase(class, "F") or instanceMentions(inst, "fuse") or instanceMentions(inst, "pptc")) inventory.devices.fuses += 1;
+    const oscillator_ref = std.ascii.eqlIgnoreCase(class, "X") or std.ascii.eqlIgnoreCase(class, "Y");
+    const oscillator_name = instanceMentions(inst, "crystal") or instanceMentions(inst, "oscillator") or instanceMentions(inst, "tcxo");
+    if (oscillator_ref or oscillator_name) inventory.devices.crystals += 1;
+    if (component_classification.isPassThroughConnector(inst)) inventory.devices.connectors += 1;
+    if (std.ascii.eqlIgnoreCase(class, "K") or std.ascii.eqlIgnoreCase(class, "RL") or instanceMentions(inst, "relay")) inventory.devices.relays += 1;
+    if (instanceMentions(inst, "optocoupler") or instanceMentions(inst, "optoisolator")) inventory.population.optocouplers += 1;
+
+    inventory.power.has_ldo = inventory.power.has_ldo or instanceMentions(inst, "ldo") or instanceMentions(inst, "linear regulator");
+    inventory.power.has_switcher = inventory.power.has_switcher or instanceMentions(inst, "buck") or instanceMentions(inst, "boost") or
+        instanceMentions(inst, "switching regulator") or instanceMentions(inst, "dc-dc");
+    inventory.interfaces.has_fpga = inventory.interfaces.has_fpga or instanceMentions(inst, "fpga") or instanceMentions(inst, "xilinx") or
+        instanceMentions(inst, "artix") or instanceMentions(inst, "spartan");
+    const mcu = instanceMentions(inst, "microcontroller") or instanceMentions(inst, "mcu") or instanceMentions(inst, "stm32");
+    inventory.interfaces.has_programmable = inventory.interfaces.has_programmable or inventory.interfaces.has_fpga or mcu or
+        instanceMentions(inst, "processor") or instanceMentions(inst, "soc");
+    inventory.interfaces.has_current_sense = inventory.interfaces.has_current_sense or instanceMentions(inst, "current sense") or instanceMentions(inst, "shunt");
+    noteInstanceCapabilities(inventory, inst);
+}
+
+fn collectInventoryBlock(block: *const env.DesignBlock, inventory: *Inventory) void {
+    collectBlockTopology(block, inventory);
+    for (block.instances) |inst| collectInstance(inst, inventory);
+    for (block.sub_blocks) |sub| collectInventoryBlock(sub.block, inventory);
+}
+
+fn collectInventory(block: *const env.DesignBlock) Inventory {
+    var inventory: Inventory = .{
+        .board = .{
+            .has_outline = block.board.present and block.board.w > 0 and block.board.h > 0,
+            .has_stackup = block.stackup.present,
+            .has_revision = block.revision.present,
+        },
+    };
+    collectInventoryBlock(block, &inventory);
+    inventory.board.has_high_voltage = inventory.board.has_high_voltage or inventory.power.max_dc_v > 60.0;
+    return inventory;
+}
+
+/// Collect every generated audit fact. `arena` must outlive the returned
+/// value; callers normally use a request or scratch arena and render/serialize
+/// the facts before releasing it.
+pub fn collectFacts(
+    arena: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
     options: Options,
-) RenderError![]u8 {
-    var scratch = std.heap.ArenaAllocator.init(allocator);
-    defer scratch.deinit();
-    const arena = scratch.allocator();
-
+) RenderError!Facts {
     var eval = Evaluator.init(arena, project_dir);
     defer eval.deinit();
     const board_path = try paths.designSourcePath(arena, project_dir, name);
@@ -707,15 +953,30 @@ pub fn render(
     facts.schematic.build_warnings = try build_warnings.toOwnedSlice(arena);
     facts.findings = try findings.toOwnedSlice(arena);
     facts.schematic.notes_open = try collectNotes(arena, board_path, name);
+    facts.inventory = collectInventory(block);
 
     var parts: std.ArrayList(PartRow) = .empty;
     const collector = PartCollector{ .arena = arena, .project_dir = project_dir, .forms = forms, .report = report, .parts = &parts };
     try collector.collect(block, "");
-    facts.parts = try parts.toOwnedSlice(arena);
+    facts.inventory.parts = try parts.toOwnedSlice(arena);
 
     try collectFab(arena, project_dir, name, options.layout, &facts);
     try collectLadder(arena, project_dir, name, options.layout, &facts);
 
+    return facts;
+}
+
+/// Collect every fact and render the audit. The returned Markdown is owned
+/// by `allocator`.
+pub fn render(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    options: Options,
+) RenderError![]u8 {
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const facts = try collectFacts(scratch.allocator(), project_dir, name, options);
     return try renderFacts(allocator, facts);
 }
 
@@ -740,7 +1001,7 @@ test "rendered audit survives the package Markdown rules with hostile cells" {
         .schematic = .{ .preflight_errors = 1, .preflight_warnings = 2, .build_warnings = &.{"unknown sub-form (placement-order …) in (design-block …)"}, .notes_open = 3 },
         .layout = .{ .available = true, .ladder = &.{.{ .id = "placement", .status = "current", .done = 0, .total = 224 }}, .drc_warnings = 2, .by_kind = &.{.{ .kind = "land_transit", .count = 2 }} },
         .fab = .{ .available = true, .ok = true, .needs_waiver = true, .warning_ids = &.{"drc-warn"} },
-        .parts = &.{.{ .ref = "adf/U1", .component = "adf4159", .class = "pll-loop (inferred)", .review = "pass", .checks = "3 ok / 1 unmet", .data = "0 electrical decl(s); supply-current item open", .unmet = "control-levels, supply-current" }},
+        .inventory = .{ .parts = &.{.{ .ref = "adf/U1", .component = "adf4159", .class = "pll-loop (inferred)", .review = "pass", .checks = "3 ok / 1 unmet", .data = "0 electrical decl(s); supply-current item open", .unmet = "control-levels, supply-current" }} },
         .findings = &.{
             .{ .source = "layout_class_inferred", .severity = "warning", .ref = "V_24V", .message = "pin it with (module-policy (net-class \"V_24V\" <class>)) `now` **bold** [x]" },
             .{ .source = "eval_warning", .severity = "error", .ref = "", .message = "<script>alert(1)</script>" },

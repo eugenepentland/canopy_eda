@@ -6,7 +6,8 @@
 
 const std = @import("std");
 const httpz = @import("httpz");
-const atomic_write = @import("../infra/atomic_write.zig");
+const catalog = @import("../board_review_catalog.zig");
+const review_state = @import("../board_review_state.zig");
 const clock = @import("../infra/clock.zig");
 const escape = @import("../escape.zig");
 const infra_fs = @import("../infra/fs.zig");
@@ -14,6 +15,7 @@ const json_writer = @import("../json_writer.zig");
 const paths = @import("../paths.zig");
 const review = @import("../review.zig");
 const review_audit = @import("../review_audit.zig");
+const review_assessment = @import("../review_assessment.zig");
 const system_review_md = @import("../system_review_md.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
@@ -21,60 +23,25 @@ const Server = serve_root.Server;
 /// Allocation or response-writer failures that may escape an HTTP handler.
 const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
-const catalog_markdown = @embedFile("assets/board_review_checklist.md");
+const catalog_markdown = catalog.markdown;
 const page_css = @embedFile("assets/board_review.css");
 const page_js = @embedFile("assets/board_review.js");
 const navbar_css = @embedFile("assets/navbar.css");
-const max_state_bytes: usize = 2 * 1024 * 1024;
 const max_body_bytes: usize = 16 * 1024;
-const max_evidence_bytes: usize = 2048;
-const max_note_bytes: usize = 4096;
-const max_entries: usize = 258;
+const max_evidence_bytes = review_state.max_evidence_bytes;
+const max_note_bytes = review_state.max_note_bytes;
 const mutation_header = "x-netlisp-review";
 const mutation_value = "1";
 
-/// A reviewer's disposition for one checklist decision.
-const Status = enum { open, pass, fail, na, needs_info };
-
-/// Persisted human evidence for one stable checklist item id.
-const Entry = struct {
-    id: []const u8,
-    status: Status = .open,
-    evidence: []const u8 = "",
-    note: []const u8 = "",
-    updated_by: []const u8 = "",
-    updated_at: []const u8 = "",
-};
-
-fn statusFromString(raw: []const u8) ?Status {
-    if (std.mem.eql(u8, raw, "open")) return .open;
-    if (std.mem.eql(u8, raw, "pass")) return .pass;
-    if (std.mem.eql(u8, raw, "fail")) return .fail;
-    if (std.mem.eql(u8, raw, "na")) return .na;
-    if (std.mem.eql(u8, raw, "needs_info")) return .needs_info;
-    return null;
-}
-
-fn validItemId(id: []const u8) bool {
-    if (id.len == 0 or id.len > 16 or id[0] == '.' or id[id.len - 1] == '.') return false;
-    var last_dot = false;
-    for (id) |c| {
-        if (c == '.') {
-            if (last_dot) return false;
-            last_dot = true;
-        } else {
-            if (!std.ascii.isDigit(c)) return false;
-            last_dot = false;
-        }
-    }
-    var buffer: [24]u8 = undefined;
-    const needle = std.fmt.bufPrint(&buffer, "**{s}**", .{id}) catch return false;
-    return std.mem.indexOf(u8, catalog_markdown, needle) != null;
-}
-
-fn statePath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]u8 {
-    return paths.designSiblingPath(allocator, project_dir, name, ".review.json");
-}
+const Status = review_state.Status;
+const Entry = review_state.Entry;
+const statusFromString = review_state.statusFromString;
+const validItemId = catalog.validItemId;
+const loadEntries = review_state.loadEntries;
+const writeEntryJson = review_state.writeEntryJson;
+const renderState = review_state.renderState;
+const saveEntries = review_state.saveEntries;
+const persistEntry = review_state.persistEntry;
 
 fn designExists(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) bool {
     const source = paths.designSourcePath(allocator, project_dir, name) catch return false;
@@ -87,104 +54,6 @@ fn jsonStringField(object: std.json.ObjectMap, key: []const u8, max_len: usize) 
     const value = object.get(key) orelse return null;
     if (value != .string or value.string.len > max_len) return null;
     return value.string;
-}
-
-fn loadEntries(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]const Entry {
-    const path = try statePath(allocator, project_dir, name);
-    defer allocator.free(path);
-    const bytes = infra_fs.cwd().readFileAlloc(allocator, path, max_state_bytes) catch |err| switch (err) {
-        error.FileNotFound => return &.{},
-        else => return err,
-    };
-    defer allocator.free(bytes);
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidState;
-    const entries_value = parsed.value.object.get("entries") orelse return &.{};
-    if (entries_value != .array or entries_value.array.items.len > max_entries) return error.InvalidState;
-
-    var entries: std.ArrayList(Entry) = .empty;
-    for (entries_value.array.items) |value| {
-        if (value != .object) continue;
-        const id = jsonStringField(value.object, "id", 16) orelse continue;
-        if (!validItemId(id)) continue;
-        const status_raw = jsonStringField(value.object, "status", 24) orelse "open";
-        const status = statusFromString(status_raw) orelse continue;
-        const evidence = jsonStringField(value.object, "evidence", max_evidence_bytes) orelse "";
-        const note = jsonStringField(value.object, "note", max_note_bytes) orelse "";
-        const updated_by = jsonStringField(value.object, "updated_by", 256) orelse "";
-        const updated_at = jsonStringField(value.object, "updated_at", 64) orelse "";
-        try entries.append(allocator, .{
-            .id = try allocator.dupe(u8, id),
-            .status = status,
-            .evidence = try allocator.dupe(u8, evidence),
-            .note = try allocator.dupe(u8, note),
-            .updated_by = try allocator.dupe(u8, updated_by),
-            .updated_at = try allocator.dupe(u8, updated_at),
-        });
-    }
-    return try entries.toOwnedSlice(allocator);
-}
-
-fn writeEntryJson(w: *std.Io.Writer, entry: Entry) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
-    try w.writeAll("{\"id\":");
-    try json_writer.writeString(w, entry.id);
-    try w.writeAll(",\"status\":");
-    try json_writer.writeString(w, @tagName(entry.status));
-    try w.writeAll(",\"evidence\":");
-    try json_writer.writeString(w, entry.evidence);
-    try w.writeAll(",\"note\":");
-    try json_writer.writeString(w, entry.note);
-    try w.writeAll(",\"updated_by\":");
-    try json_writer.writeString(w, entry.updated_by);
-    try w.writeAll(",\"updated_at\":");
-    try json_writer.writeString(w, entry.updated_at);
-    try w.writeByte('}');
-}
-
-fn renderState(allocator: std.mem.Allocator, entries: []const Entry) ![]const u8 {
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    errdefer out.deinit();
-    try out.writer.writeAll("{\"schema\":\"netlisp-board-review-v1\",\"entries\":[");
-    for (entries, 0..) |entry, index| {
-        if (index > 0) try out.writer.writeByte(',');
-        try writeEntryJson(&out.writer, entry);
-    }
-    try out.writer.writeAll("]}");
-    return try out.toOwnedSlice();
-}
-
-fn saveEntries(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, entries: []const Entry) !void {
-    const path = try statePath(allocator, project_dir, name);
-    defer allocator.free(path);
-    const bytes = try renderState(allocator, entries);
-    defer allocator.free(bytes);
-    try atomic_write.writeFile(path, bytes);
-}
-
-fn persistEntry(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    mutex: *infra_fs.Mutex,
-    replacement: Entry,
-) !void {
-    mutex.lock();
-    defer mutex.unlock();
-    const old = try loadEntries(allocator, project_dir, name);
-    var next: std.ArrayList(Entry) = .empty;
-    var replaced = false;
-    for (old) |entry| {
-        if (std.mem.eql(u8, entry.id, replacement.id)) {
-            if (!replaced) try next.append(allocator, replacement);
-            replaced = true;
-        } else try next.append(allocator, entry);
-    }
-    if (!replaced) {
-        if (next.items.len >= max_entries) return error.ReviewStateFull;
-        try next.append(allocator, replacement);
-    }
-    try saveEntries(allocator, project_dir, name, next.items);
 }
 
 fn jsonError(res: *httpz.Response, status: u16, message: []const u8) HandlerError!void {
@@ -340,7 +209,7 @@ pub fn reviewPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     try writeReviewNav(w, name, layout);
     try w.writeAll("</header>");
     if (!ctx.request_auth.role.canWrite()) try w.writeAll("<div class=\"read-only\">Read-only session: checklist decisions and evidence are visible, but only writers can change them.</div>");
-    try w.writeAll("<section class=\"review-intro\"><div class=\"intro-card\"><h2>Evidence-driven release review</h2><p>Work through each item as Pass, Fail, N/A, or Needs info. Attach a refdes, net, layer, report, or datasheet section/page and a short interpretation. Open Critical and Major findings remain release risks even when ERC and DRC are clean.</p><p>The generated audit below reuses the same release checks, component profiles, layout ladder, DRC, fabrication readiness, and BOM evidence that feed review packages and dossiers.</p><div class=\"review-links\"><a href=\"/api/schematic-pdf/");
+    try w.writeAll("<section class=\"review-intro\"><div class=\"intro-card\"><h2>Generated evidence review</h2><p>The board is inspected first. Exact machine-verifiable criteria close as Static pass/fail, clearly absent component families close as N/A, and the remainder is routed to an Agent review or Human / measurement queue.</p><p>Saved dispositions are explicit overrides. With no override, the live generated verdict remains authoritative and refreshes with the selected layout, release checks, component profiles, DRC, fabrication readiness, and BOM evidence. Connected review agents receive this same queue and write their evidence-backed dispositions back into this page.</p><div class=\"review-links\"><a href=\"/api/schematic-pdf/");
     try writeUrlEncoded(w, name);
     try w.writeAll("\">Review PDF</a><a href=\"/api/export-review/");
     try writeUrlEncoded(w, name);
@@ -350,9 +219,9 @@ pub fn reviewPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
         try w.writeAll("?layout=");
         try writeUrlEncoded(w, selected);
     }
-    try w.writeAll("\">Fab readiness JSON</a></div></div><div class=\"progress-card\"><div class=\"metric ready\"><strong id=\"metric-ready\">0 / 258</strong><span>ready (Pass + N/A)</span></div><div class=\"metric\"><strong id=\"metric-reviewed\">0 / 258</strong><span>reviewed</span></div><div class=\"metric blocked\"><strong id=\"metric-blocked\">0</strong><span>Fail / Needs info</span></div><div class=\"metric open\"><strong id=\"metric-open\">258</strong><span>open</span></div><div class=\"bar\" aria-label=\"Review readiness\"><span id=\"progress-bar\"></span></div></div></section>");
-    try w.writeAll("<div class=\"toolbar\"><input id=\"review-search\" type=\"search\" placeholder=\"Search checklist, e.g. creepage, MLCC, 11.9…\"><button class=\"filter active\" data-filter=\"all\">All</button><button class=\"filter\" data-filter=\"remaining\">Remaining</button><button class=\"filter\" data-filter=\"fail\">Fail</button><button class=\"filter\" data-filter=\"needs_info\">Needs info</button><button class=\"quiet-btn\" id=\"expand-all\">Expand all</button><button class=\"quiet-btn\" id=\"collapse-all\">Collapse all</button><span class=\"save-state\" id=\"save-state\"></span></div><div id=\"checklist\"></div><div class=\"empty\" id=\"empty\" hidden>No checklist items match this view.</div>");
-    try w.writeAll("<details class=\"audit-card\" open><summary>Automated board audit <span class=\"audit-note\">Live generated evidence; not a substitute for the human checklist</span></summary><div id=\"audit\" class=\"audit-loading\">Running release checks, component profiles, layout progress, DRC, and fabrication readiness…</div></details></main><script>const DESIGN_NAME=");
+    try w.writeAll("\">Fab readiness JSON</a></div></div><div class=\"progress-card\"><div class=\"metric ready\"><strong id=\"metric-ready\">0 / 258</strong><span>ready (Pass + N/A)</span></div><div class=\"metric\"><strong id=\"metric-static\">0</strong><span>closed statically</span></div><div class=\"metric agent\"><strong id=\"metric-agent\">258</strong><span>agent queue</span></div><div class=\"metric manual\"><strong id=\"metric-manual\">0</strong><span>human / measurement</span></div><div class=\"metric blocked\"><strong id=\"metric-blocked\">0</strong><span>Fail / Needs info</span></div><div class=\"metric open\"><strong id=\"metric-open\">258</strong><span>remaining</span></div><div class=\"bar\" aria-label=\"Review readiness\"><span id=\"progress-bar\"></span></div></div></section>");
+    try w.writeAll("<div class=\"toolbar\"><input id=\"review-search\" type=\"search\" placeholder=\"Search criteria and generated evidence…\"><button class=\"filter active\" data-filter=\"all\">All</button><button class=\"filter\" data-filter=\"remaining\">Remaining</button><button class=\"filter\" data-filter=\"fail\">Fail</button><button class=\"filter\" data-filter=\"agent\">Agent queue</button><button class=\"filter\" data-filter=\"manual\">Human</button><button class=\"filter\" data-filter=\"na\">N/A</button><button class=\"filter\" data-filter=\"needs_info\">Needs info</button><button class=\"quiet-btn\" id=\"expand-all\">Expand all</button><button class=\"quiet-btn\" id=\"collapse-all\">Collapse all</button><span class=\"save-state\" id=\"save-state\"></span></div><div id=\"checklist\"></div><div class=\"empty\" id=\"empty\" hidden>No checklist items match this view.</div>");
+    try w.writeAll("<details class=\"audit-card\"><summary>Generated evidence register <span class=\"audit-note\">The detailed release audit behind the item-level verdicts</span></summary><div id=\"audit\" class=\"audit-loading\">Running release checks, component inventory, applicability, layout progress, DRC, and fabrication readiness…</div></details></main><script>const DESIGN_NAME=");
     try json_writer.writeScriptString(w, name);
     try w.writeAll(";const CHECKLIST_MARKDOWN=");
     try json_writer.writeScriptString(w, catalog_markdown);
@@ -368,10 +237,12 @@ pub fn reviewPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
 pub fn auditApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse return jsonError(res, 404, "missing design name");
     if (!designExists(req.arena, ctx.project_dir, name)) return jsonError(res, 404, "no design by that name");
-    const markdown = review_audit.render(req.arena, ctx.project_dir, name, .{ .layout = queryOpt(req, "layout") }) catch |err| switch (err) {
+    const facts = review_audit.collectFacts(req.arena, ctx.project_dir, name, .{ .layout = queryOpt(req, "layout") }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return jsonError(res, 422, @errorName(err)),
     };
+    const markdown = try review_audit.renderFacts(req.arena, facts);
+    const assessments = try review_assessment.build(req.arena, facts);
     const html = renderAuditHtml(req.arena, markdown) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return jsonError(res, 500, "generated audit did not pass the safe Markdown profile"),
@@ -379,6 +250,8 @@ pub fn auditApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handler
     var out: std.Io.Writer.Allocating = .init(res.arena);
     try out.writer.writeAll("{\"ok\":true,\"html\":");
     try json_writer.writeString(&out.writer, html);
+    try out.writer.writeAll(",\"assessment\":");
+    try review_assessment.writeAssessmentJson(&out.writer, assessments);
     try out.writer.writeByte('}');
     res.content_type = .JSON;
     res.header("cache-control", "no-store");
@@ -430,11 +303,12 @@ test "board review state JSON round trips reviewer evidence" {
     const loaded = try loadEntries(arena, root, "demo");
     try std.testing.expectEqual(@as(usize, 1), loaded.len);
     try std.testing.expectEqual(Status.needs_info, loaded[0].status);
+    try std.testing.expectEqual(review_state.Origin.human, loaded[0].origin);
     try std.testing.expectEqualStrings("Gerber read-back pending", loaded[0].evidence);
     try std.testing.expectEqualStrings("reviewer@example.com", loaded[0].updated_by);
 }
 
-// spec: serve/board-review - the page reports ready, reviewed, blocked and open totals, and supports search, remaining/failure filters, and per-section progress
+// spec: serve/board-review - the page reports ready, static pass, agent queue, human/measurement, blocked and open totals, and supports search plus generated-work filters
 // spec: serve/board-review - the automated audit loads separately after the checklist shell paints and renders only through the safe system-review Markdown parser
 // spec: serve/board-review - read-only reviewers see every disposition and generated result but cannot edit controls
 // spec: serve/board-review - the Review page carries the selected saved layout through every physical-board link
@@ -457,12 +331,19 @@ test "board review page exposes progress filters safe audit and read-only contro
 
     const body = request.res.body;
     try std.testing.expect(std.mem.indexOf(u8, body, "id=\"metric-ready\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "id=\"metric-static\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "id=\"metric-agent\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "id=\"metric-manual\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "data-filter=\"remaining\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "data-filter=\"fail\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "data-filter=\"agent\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "data-filter=\"manual\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "class=\"section-progress\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, page_js, "section-progress") != null);
     try std.testing.expect(std.mem.indexOf(u8, page_js, "select.disabled=!CAN_WRITE") != null);
     try std.testing.expect(std.mem.indexOf(u8, page_js, "evidence.disabled=!CAN_WRITE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page_js, "generated-evidence") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page_js, "value.assessment") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "const CAN_WRITE=false") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "Read-only session") != null);
     const checklist_render = std.mem.indexOf(u8, page_js, "render();") orelse return error.TestExpectedChecklistRender;

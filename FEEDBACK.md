@@ -627,3 +627,8 @@ matters when the person re-recording is the author of the change.
 - **friction:** The `drc-open-summary` browser invariant injected fake DRC rows through `PCBDrcRulesApply`, which deliberately starts a 300 ms authoritative server reconcile, then crossed a Playwright round trip before clicking the injected summary. A small legitimate render pass made that timer win consistently, so two otherwise-green `prepare-release` runs spent about five minutes each before failing on real DRC replacing the fixture rows.
 - **workaround:** The invariant now snapshots and clicks the bound summary listener inside one browser task, before the deliberately scheduled reconcile can replace its synthetic state; its mutation self-test still proves an inert listener is caught.
 - **status:** resolved in this change
+
+## 2026-09-02 · codex · generated board-review outcomes and agent queue
+- **friction:** Focused tests and the ordinary Debug build passed after adding two test-bearing review modules, but the first whole-tree commit gate failed only because their dotted module names had no claims in `src/test_shards.zig`. This repeated the missing-shard release failure already recorded twice and cost one approximately 50-second full-gate run.
+- **idea:** Run the shard-manifest coverage test automatically whenever `src/test_root.zig` or a new test-bearing Zig file changes, before launching the full sharded suite.
+- **status:** mitigated by registering both modules; pipeline preflight remains open

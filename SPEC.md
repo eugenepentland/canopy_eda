@@ -6399,23 +6399,28 @@ Read-only: nothing here writes to the project dir.
 
 Public functions: reviewPage, getStateApi, updateStateApi, auditApi
 
-The board Review tab is a board-scoped, evidence-driven release checklist.
-It renders the supplied 13-section research checklist as 258 stable decisions
-and keeps those human dispositions separate from generated facts: the page
-loads the existing Board Review Audit after first paint, so release-profile
+The board Review tab is a board-scoped, generated release checklist. It renders
+the supplied 13-section research checklist as 258 stable decisions, detects
+which component/interface families apply, closes exact machine-provable checks
+as Pass, Fail, or N/A, and queues the remaining evidence packets for either an
+agent or a human/measurement decision. Saved human and agent dispositions are
+explicit overrides on those generated results. The existing Board Review Audit
+still loads after first paint as the detailed source register for release-profile
 checks, component profiles, layout progress, DRC, fabrication readiness and BOM
-evidence stay current without pretending they answer human engineering
-judgments. Each item records Open, Pass, Fail, N/A, or Needs info plus evidence,
-a reviewer note, the authenticated reviewer, and a UTC timestamp in the
+evidence. Each override records Open, Pass, Fail, N/A, or Needs info plus
+evidence, a note, the actor identity/origin, and a UTC timestamp in the
 design-sibling .review.json sidecar.
 
 - the PCB header exposes Review only for board designs and preserves a selected saved layout
 - the Review page carries the selected saved layout through every physical-board link
 - the supplied review catalog retains all 13 sections and 258 discrete decisions
-- the page reports ready, reviewed, blocked and open totals, and supports search, remaining/failure filters, and per-section progress
+- the page reports ready, static pass, agent queue, human/measurement, blocked and open totals, and supports search plus generated-work filters
+- generated applicability closes an absent component or interface family only from evaluated board inventory, while present or uncertain families remain queued unless an analyzer proves the complete criterion
+- generated Pass and Fail decisions cite current ERC, power-budget, layout, fabrication, BOM, identity, test-point, or board-declaration evidence rather than the saved sidecar
 - human dispositions round-trip all evidence fields in bounded JSON
 - a checklist mutation accepts only a catalog item id and fixed status, bounds its evidence and note, requires writer authority plus the review mutation header, and stamps the authenticated identity instead of a body-supplied reviewer
 - concurrent checklist mutations serialize their whole read-modify-write and atomically replace the design-sibling sidecar
+- agents can read the generated review queue and record evidence-backed item dispositions without editing its sidecar
 - the automated audit loads separately after the checklist shell paints and renders only through the safe system-review Markdown parser
 - read-only reviewers see every disposition and generated result but cannot edit controls
 - completeness-waiver: empty inputs (a missing or unknown board name answers 404; a missing sidecar is the valid all-open review state)

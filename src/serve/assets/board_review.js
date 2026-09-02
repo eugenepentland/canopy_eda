@@ -1,9 +1,9 @@
 (function(){
   "use strict";
-  const STATUS_LABELS={open:"Open",pass:"Pass",fail:"Fail",na:"N/A",needs_info:"Needs info"};
+  const STATUS_LABELS={open:"Use generated",pass:"Pass override",fail:"Fail override",na:"N/A override",needs_info:"Needs info"};
   const $=s=>document.querySelector(s);
   const all=(s,r=document)=>Array.from(r.querySelectorAll(s));
-  let state=new Map(),sections=[],activeFilter="all";
+  let state=new Map(),generated=new Map(),sections=[],activeFilter="all",assessmentReady=false;
 
   function plain(text){
     return text.replace(/\*\*/g,"").replace(/\*/g,"").replace(/\x60/g,"").replace(/\[(.*?)\]\((.*?)\)/g,"$1").trim();
@@ -31,26 +31,48 @@
   function el(tag,cls,text){
     const node=document.createElement(tag);if(cls)node.className=cls;if(text!==undefined)node.textContent=text;return node;
   }
-  function current(id){
-    return state.get(id)||{id,status:"open",evidence:"",note:"",updated_by:"",updated_at:""};
+  function saved(id){return state.get(id)||{id,status:"open",evidence:"",note:"",updated_by:"",updated_at:"",origin:"human"}}
+  function machine(id){return generated.get(id)||{id,verdict:"open",method:"agent",applicability:"applies",confidence:0,summary:assessmentReady?"Queued for agent review":"Generated analysis is running…",evidence:"",source:""}}
+  function effective(id){
+    const review=saved(id),auto=machine(id);
+    if(review.status!=="open")return {status:review.status,queue:"none",source:review.origin||"human"};
+    if(auto.verdict!=="open")return {status:auto.verdict,queue:"none",source:auto.method};
+    return {status:"open",queue:auto.method==="manual"?"manual":"agent",source:auto.method};
   }
-  function option(value,label){
-    const o=document.createElement("option");o.value=value;o.textContent=label;return o;
+  function option(value,label){const o=document.createElement("option");o.value=value;o.textContent=label;return o}
+  function machineBadge(auto){
+    if(auto.verdict==="pass")return ["static-pass","Static pass"];
+    if(auto.verdict==="fail")return ["static-fail","Static fail"];
+    if(auto.verdict==="na")return ["static-na","Not applicable"];
+    if(auto.method==="manual")return ["manual","Human / measurement"];
+    return ["agent","Agent review"];
   }
   function renderItem(item){
-    const saved=current(item.id),row=el("article","review-item");row.dataset.id=item.id;row.dataset.status=saved.status;
+    const review=saved(item.id),auto=machine(item.id),eff=effective(item.id),row=el("article","review-item");
+    row.dataset.id=item.id;row.dataset.status=eff.status;row.dataset.queue=eff.queue;row.dataset.method=auto.method;
     const main=el("div","item-main"),id=el("span","item-id",item.id),copy=el("div","item-copy"),text=el("div","item-text",item.text);
     copy.append(text);
-    if(item.severity){const meta=el("div","item-meta"),badge=el("span","severity "+item.severity,item.severity);meta.append(badge);copy.append(meta)}
-    const select=el("select","status-select");select.setAttribute("aria-label","Status for "+item.id);
-    Object.entries(STATUS_LABELS).forEach(([value,label])=>select.append(option(value,label)));select.value=saved.status;select.disabled=!CAN_WRITE;
+    const meta=el("div","item-meta");
+    if(item.severity)meta.append(el("span","severity "+item.severity,item.severity));
+    const [badgeClass,badgeText]=machineBadge(auto);meta.append(el("span","machine-badge "+badgeClass,badgeText));
+    if(auto.confidence)meta.append(el("span","confidence",auto.confidence+"% confidence"));
+    copy.append(meta);
+    const select=el("select","status-select");select.setAttribute("aria-label","Reviewer override for "+item.id);
+    Object.entries(STATUS_LABELS).forEach(([value,label])=>select.append(option(value,label)));select.value=review.status;select.disabled=!CAN_WRITE;
     main.append(id,copy,select);row.append(main);
-    const detail=el("div","item-detail"),evidence=el("input"),note=el("textarea"),save=el("button",null,"Save");
-    evidence.type="text";evidence.placeholder="Evidence: refdes, net, layer, datasheet §/page, or report";evidence.value=saved.evidence;evidence.disabled=!CAN_WRITE;
-    note.placeholder="One-line reviewer note";note.value=saved.note;note.disabled=!CAN_WRITE;save.disabled=!CAN_WRITE;
-    detail.append(evidence,note,save);row.append(detail);
-    const stamp=el("div","item-stamp",saved.updated_at?(saved.updated_by+" · "+saved.updated_at):"Not reviewed yet");row.append(stamp);
-    const markDirty=()=>{save.textContent="Save";setSaveState("Unsaved changes")};
+
+    const generatedBox=el("div","generated-evidence");
+    generatedBox.append(el("strong",null,auto.summary));
+    if(auto.evidence)generatedBox.append(el("span",null,auto.evidence));
+    if(auto.source)generatedBox.append(el("small",null,"Evidence source: "+auto.source));
+    row.append(generatedBox);
+
+    const detail=el("details","item-detail"),detailSummary=el("summary",null,"Reviewer / agent override"),editor=el("div","override-editor"),evidence=el("input"),note=el("textarea"),save=el("button",null,"Save override");
+    evidence.type="text";evidence.placeholder="Additional evidence: refdes, net, layer, datasheet §/page, or report";evidence.value=review.evidence;evidence.disabled=!CAN_WRITE;
+    note.placeholder="Reviewer or agent interpretation";note.value=review.note;note.disabled=!CAN_WRITE;save.disabled=!CAN_WRITE;
+    editor.append(evidence,note,save);detail.append(detailSummary,editor);row.append(detail);
+    const stamp=el("div","item-stamp",review.updated_at?((review.origin==="agent"?"Agent":"Reviewer")+" · "+review.updated_by+" · "+review.updated_at):"No saved override — generated result is authoritative");row.append(stamp);
+    const markDirty=()=>{save.textContent="Save override";setSaveState("Unsaved changes")};
     select.addEventListener("change",markDirty);evidence.addEventListener("input",markDirty);note.addEventListener("input",markDirty);
     save.addEventListener("click",async()=>{
       save.disabled=true;save.textContent="Saving…";setSaveState("Saving…");
@@ -58,10 +80,8 @@
         const payload={id:item.id,status:select.value,evidence:evidence.value.trim(),note:note.value.trim()};
         const response=await fetch("/api/board-review/"+encodeURIComponent(DESIGN_NAME),{method:"POST",headers:{"content-type":"application/json","x-netlisp-review":"1"},body:JSON.stringify(payload)});
         const value=await response.json();if(!response.ok)throw new Error(value.error||("HTTP "+response.status));
-        state.set(item.id,value.entry);row.dataset.status=value.entry.status;stamp.textContent=value.entry.updated_by+" · "+value.entry.updated_at;
-        save.textContent="Saved";setTimeout(()=>save.textContent="Save",1200);setSaveState("Saved");updateProgress();applyFilters();
+        state.set(item.id,value.entry);setSaveState("Saved");render();
       }catch(error){save.textContent="Retry";setSaveState("Save failed");alert(error.message)}
-      finally{save.disabled=!CAN_WRITE}
     });
     return row;
   }
@@ -81,28 +101,27 @@
     updateProgress();applyFilters();
   }
   function counts(items){
-    const c={total:0,open:0,pass:0,fail:0,na:0,needs_info:0};
-    items.forEach(item=>{const row=document.querySelector('.review-item[data-id="'+CSS.escape(item.id)+'"]');if(!row)return;c.total++;c[row.dataset.status||"open"]++});
+    const c={total:0,open:0,pass:0,fail:0,na:0,needs_info:0,agent:0,manual:0,staticClosed:0};
+    items.forEach(item=>{const row=document.querySelector('.review-item[data-id="'+CSS.escape(item.id)+'"]');if(!row)return;c.total++;const status=row.dataset.status||"open";c[status]++;if(row.dataset.queue==="agent")c.agent++;if(row.dataset.queue==="manual")c.manual++;const auto=machine(item.id);if(auto.verdict!=="open")c.staticClosed++});
     return c;
   }
   function updateProgress(){
     const items=sections.flatMap(s=>s.items),c=counts(items),ready=c.pass+c.na,blocked=c.fail+c.needs_info;
-    $("#metric-ready").textContent=ready+" / "+c.total;$("#metric-reviewed").textContent=(c.total-c.open)+" / "+c.total;
+    $("#metric-ready").textContent=ready+" / "+c.total;$("#metric-static").textContent=String(c.staticClosed);
+    $("#metric-agent").textContent=String(c.agent);$("#metric-manual").textContent=String(c.manual);
     $("#metric-blocked").textContent=String(blocked);$("#metric-open").textContent=String(c.open);
     $("#progress-bar").style.width=(c.total?ready*100/c.total:0)+"%";
     sections.forEach(section=>{const sc=counts(section.items);let label=(sc.pass+sc.na)+" / "+sc.total+" ready";
-      const bad=sc.fail+sc.needs_info;if(bad)label+=" · "+bad+" blocked";
+      if(sc.agent)label+=" · "+sc.agent+" agent";if(sc.manual)label+=" · "+sc.manual+" human";const bad=sc.fail+sc.needs_info;if(bad)label+=" · "+bad+" blocked";
       const node=document.querySelector('.section-card[data-section="'+section.number+'"] .section-progress');if(node)node.textContent=label;
     });
   }
-  function searchable(row){
-    const copy=row.querySelector(".item-text");return (row.dataset.id+" "+(copy?copy.textContent:"")).toLowerCase();
-  }
+  function searchable(row){return (row.dataset.id+" "+Array.from(row.querySelectorAll(".item-text,.generated-evidence")).map(x=>x.textContent).join(" ")).toLowerCase()}
   function applyFilters(){
     const term=$("#review-search").value.trim().toLowerCase();let visible=0;
     all(".review-item").forEach(row=>{
-      const status=row.dataset.status||"open";
-      const filter=activeFilter==="all"||(activeFilter==="remaining"?(status!=="pass"&&status!=="na"):status===activeFilter);
+      const status=row.dataset.status||"open",queue=row.dataset.queue||"none";
+      const filter=activeFilter==="all"||(activeFilter==="remaining"?(status!=="pass"&&status!=="na"):activeFilter==="agent"?queue==="agent":activeFilter==="manual"?queue==="manual":activeFilter==="na"?status==="na":status===activeFilter);
       const match=!term||searchable(row).includes(term);row.hidden=!(filter&&match);if(!row.hidden)visible++;
     });
     all(".section-card").forEach(section=>{section.hidden=!all(".review-item",section).some(row=>!row.hidden);if(term&&!section.hidden)section.open=true});
@@ -117,12 +136,14 @@
   async function loadAudit(){
     const host=$("#audit"),query=new URLSearchParams(location.search),layout=query.get("layout");
     let url="/api/board-review-audit/"+encodeURIComponent(DESIGN_NAME);if(layout)url+="?layout="+encodeURIComponent(layout);
-    try{const response=await fetch(url,{headers:{accept:"application/json"}});const value=await response.json();if(!response.ok)throw new Error(value.error||("HTTP "+response.status));host.innerHTML=value.html}
-    catch(error){host.className="audit-error";host.textContent="Automated audit could not be generated: "+error.message}
+    try{
+      const response=await fetch(url,{headers:{accept:"application/json"}}),value=await response.json();if(!response.ok)throw new Error(value.error||("HTTP "+response.status));
+      host.innerHTML=value.html;(value.assessment&&value.assessment.items||[]).forEach(item=>generated.set(item.id,item));assessmentReady=true;setSaveState("Generated analysis current");render();
+    }catch(error){host.className="audit-error";host.textContent="Automated audit could not be generated: "+error.message;setSaveState("Generated analysis unavailable")}
   }
   async function boot(){
     sections=parseCatalog(CHECKLIST_MARKDOWN);
-    try{await loadState()}catch(error){setSaveState("State unavailable");console.error(error)}
+    try{await loadState()}catch(error){setSaveState("Saved state unavailable");console.error(error)}
     render();
     $("#review-search").addEventListener("input",applyFilters);
     all(".filter").forEach(button=>button.addEventListener("click",()=>{all(".filter").forEach(b=>b.classList.remove("active"));button.classList.add("active");activeFilter=button.dataset.filter;applyFilters()}));

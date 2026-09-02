@@ -132,6 +132,11 @@ const tools = [_]ToolEntry{
     // class-profile compliance, the ladder, the fab gate and the notes as one
     // Markdown document a reviewer dispositions.
     .{ .name = "review_audit", .is_mutation = false },
+    // Item-level board review: generated static/N-A verdicts plus bounded
+    // agent/manual work queues. Agents record evidence through the paired
+    // mutation instead of editing the review sidecar.
+    .{ .name = "review_checklist", .is_mutation = false },
+    .{ .name = "record_review_item", .is_mutation = true },
     .{ .name = "compare_layout_to_starred", .is_mutation = false },
     // Static routability preflight: geometrically doomed routing (pads that
     // cannot be entered along their own axis, pads with no legal escape) read
@@ -412,6 +417,7 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "describe_pcb_layout")) return try toolDescribePcbLayout(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "get_layout_progress")) return try toolGetLayoutProgress(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "review_audit")) return try @import("mcp_review_audit.zig").run(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "review_checklist")) return try @import("mcp_board_review.zig").runChecklist(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "compare_layout_to_starred")) return try toolCompareLayoutToStarred(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "routability_preflight")) return try mcp_routability.mcpRoutabilityPreflight(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "route_experiment")) return try mcp_route_experiment.mcpRouteExperiment(allocator, project_dir, args_val, out);
@@ -502,6 +508,7 @@ fn dispatchReview(
     args_val: ?std.json.Value,
     out: *std.ArrayList(u8),
 ) !?bool {
+    if (std.mem.eql(u8, tool_name, "record_review_item")) return try @import("mcp_board_review.zig").recordItem(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "restore_version")) return try toolRestoreVersion(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "export_kicad_sch"))
         return try mcp_kicad_sch.mcpExportKicadSch(allocator, project_dir, args_val, out);
@@ -2779,6 +2786,14 @@ test "get_layout_progress is registered read-only" {
 test "review_audit is registered read-only" {
     try std.testing.expect(isKnownTool("review_audit"));
     try std.testing.expect(!isMutationTool("review_audit"));
+}
+
+// spec: serve/board-review - agents can read the generated review queue and record evidence-backed item dispositions without editing its sidecar
+test "board review agent tools declare read and mutation roles" {
+    try std.testing.expect(isKnownTool("review_checklist"));
+    try std.testing.expect(!isMutationTool("review_checklist"));
+    try std.testing.expect(isKnownTool("record_review_item"));
+    try std.testing.expect(isMutationTool("record_review_item"));
 }
 
 // spec: Web Server - A sexp under src that declares no top-level design-block is judged once and the verdict reused until that file changes

@@ -212,6 +212,8 @@ pub const shards: []const []const []const u8 = &.{
         "placement.topo_plan.test.a l",
         "placement.trace_em.test.",
         "preflight.test.",
+        "board_review_catalog.test.",
+        "review_assessment.test.",
         "review_audit.test.",
         "review_profiles.test.",
         "waiver_register.test.",

@@ -338,6 +338,9 @@ test {
     _ = @import("placement/via_merge.zig");
     _ = @import("png.zig");
     _ = @import("preflight.zig");
+    _ = @import("board_review_catalog.zig");
+    _ = @import("board_review_state.zig");
+    _ = @import("review_assessment.zig");
     _ = @import("review_audit.zig");
     _ = @import("review_profiles.zig");
     _ = @import("waiver_register.zig");
@@ -384,6 +387,7 @@ test {
     _ = @import("serve/autocommit.zig");
     _ = @import("serve/board_backup.zig");
     _ = @import("serve/board_review.zig");
+    _ = @import("serve/mcp_board_review.zig");
     _ = @import("serve/bom_html.zig");
     _ = @import("serve/component_info.zig");
     _ = @import("serve/component_search.zig");

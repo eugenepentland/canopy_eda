@@ -120,6 +120,9 @@ src/board_layers.zig::techRows | fn techRows(self: *const LayerTable) []const Ro
 src/board_layers.zig::tech_row_count value
 src/board_layers.zig::unrestricted value
 src/board_layers.zig::with | fn with(self: LayerSet, sig: SignalIndex) LayerSet
+src/board_review_catalog.zig::item_count value
+src/board_review_catalog.zig::markdown value
+src/board_review_catalog.zig::validItemId | fn validItemId(id: []const u8) bool
 src/board_review_snapshot.zig::AmbientWindow struct_
 src/board_review_snapshot.zig::AssemblyEvidence struct_
 src/board_review_snapshot.zig::AssemblySprite struct_
@@ -152,6 +155,17 @@ src/board_review_snapshot.zig::ThermalModel struct_
 src/board_review_snapshot.zig::build | fn build( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) BuildError!Snapshot
 src/board_review_snapshot.zig::screened | fn screened(self: ThermalCoverage) usize
 src/board_review_snapshot.zig::verifySnapshot | fn verifySnapshot( allocator: std.mem.Allocator, project_dir: []const u8, snapshot: Snapshot, ) bool
+src/board_review_state.zig::Entry struct_
+src/board_review_state.zig::Origin enum_
+src/board_review_state.zig::Status enum_
+src/board_review_state.zig::loadEntries | fn loadEntries(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) LoadEntriesError![]const Entry
+src/board_review_state.zig::max_evidence_bytes value
+src/board_review_state.zig::max_note_bytes value
+src/board_review_state.zig::persistEntry | fn persistEntry( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, mutex: *infra_fs.Mutex, replacement: Entry, ) PersistEntryError!void
+src/board_review_state.zig::renderState | fn renderState(allocator: std.mem.Allocator, entries: []const Entry) RenderStateError![]const u8
+src/board_review_state.zig::saveEntries | fn saveEntries(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, entries: []const Entry) SaveEntriesError!void
+src/board_review_state.zig::statusFromString | fn statusFromString(raw: []const u8) ?Status
+src/board_review_state.zig::writeEntryJson | fn writeEntryJson(w: *std.Io.Writer, entry: Entry) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
 src/board_theme.zig::Channels struct_
 src/board_theme.zig::Entry struct_
 src/board_theme.zig::airwire_ground value
@@ -3678,19 +3692,37 @@ src/review.zig::buildPowerTree | fn buildPowerTree( allocator: std.mem.Allocator
 src/review.zig::buildReview | fn buildReview( allocator: std.mem.Allocator, design_name: []const u8, block: *const DesignBlock, assertions: []const AssertionResult, violations: []const erc_mod.Violation, check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result), ) ReviewError!ReviewDoc
 src/review.zig::isoTimestamp | fn isoTimestamp(allocator: std.mem.Allocator, unix_s: i64) std.mem.Allocator.Error![]const u8
 src/review.zig::slugify | fn slugify(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8
+src/review_assessment.zig::Applicability enum_
+src/review_assessment.zig::Classification struct_
+src/review_assessment.zig::Item struct_
+src/review_assessment.zig::Method enum_
+src/review_assessment.zig::Summary struct_
+src/review_assessment.zig::Verdict enum_
+src/review_assessment.zig::build | fn build(allocator: std.mem.Allocator, facts: review_audit.Facts) std.mem.Allocator.Error![]Item
+src/review_assessment.zig::summarize | fn summarize(items: []const Item) Summary
+src/review_assessment.zig::writeAssessmentJson | fn writeAssessmentJson(w: *std.Io.Writer, items: []const Item) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
+src/review_audit.zig::BoardInventory struct_
+src/review_audit.zig::CapacitorInventory struct_
+src/review_audit.zig::DeviceInventory struct_
 src/review_audit.zig::Digests struct_
 src/review_audit.zig::Fab struct_
 src/review_audit.zig::FabStats struct_
 src/review_audit.zig::Facts struct_
 src/review_audit.zig::FindingRow struct_
 src/review_audit.zig::Identity struct_
+src/review_audit.zig::InterfaceInventory struct_
+src/review_audit.zig::Inventory struct_
 src/review_audit.zig::KindCount struct_
 src/review_audit.zig::Layout struct_
 src/review_audit.zig::Options struct_
 src/review_audit.zig::PartRow struct_
+src/review_audit.zig::PassiveInventory struct_
+src/review_audit.zig::PopulationInventory struct_
+src/review_audit.zig::PowerInventory struct_
 src/review_audit.zig::RenderError value
 src/review_audit.zig::Schematic struct_
 src/review_audit.zig::StageRow struct_
+src/review_audit.zig::collectFacts | fn collectFacts( arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) RenderError!Facts
 src/review_audit.zig::mergeDispositions | fn mergeDispositions( allocator: std.mem.Allocator, rendered: []const u8, previous: []const u8, ) std.mem.Allocator.Error![]u8
 src/review_audit.zig::render | fn render( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) RenderError![]u8
 src/review_audit.zig::renderFacts | fn renderFacts(allocator: std.mem.Allocator, facts: Facts) std.mem.Allocator.Error![]u8
@@ -4126,6 +4158,9 @@ src/serve/library_3d.zig::saveTransformApi | fn saveTransformApi(ctx: *Server, r
 src/serve/library_3d.zig::viewerPage | fn viewerPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/library_search_metadata.zig::extract | fn extract(allocator: std.mem.Allocator, path: []const u8, sub: []const u8) ?[]const u8
 src/serve/matlab_rf_export.zig::pcbMatlabRfApi | fn pcbMatlabRfApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/mcp_board_review.zig::RunError value
+src/serve/mcp_board_review.zig::recordItem | fn recordItem( allocator: std.mem.Allocator, project_dir: []const u8, args: ?std.json.Value, out: *std.ArrayList(u8), ) RunError!bool
+src/serve/mcp_board_review.zig::runChecklist | fn runChecklist( allocator: std.mem.Allocator, project_dir: []const u8, args: ?std.json.Value, out: *std.ArrayList(u8), ) RunError!bool
 src/serve/mcp_build.zig::run | fn run( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, profile: preflight.Profile, severity: ?[]const u8, out: *std.ArrayList(u8), ) RunError!void
 src/serve/mcp_checks.zig::severityPasses | fn severityPasses(v: erc_mod.Violation, filter: ?[]const u8) bool
 src/serve/mcp_checks.zig::toolRunChecks | fn toolRunChecks( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), w: anytype, ) !bool
