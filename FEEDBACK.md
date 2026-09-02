@@ -632,3 +632,8 @@ matters when the person re-recording is the author of the change.
 - **friction:** Focused tests and the ordinary Debug build passed after adding two test-bearing review modules, but the first whole-tree commit gate failed only because their dotted module names had no claims in `src/test_shards.zig`. This repeated the missing-shard release failure already recorded twice and cost one approximately 50-second full-gate run.
 - **idea:** Run the shard-manifest coverage test automatically whenever `src/test_root.zig` or a new test-bearing Zig file changes, before launching the full sharded suite.
 - **status:** mitigated by registering both modules; pipeline preflight remains open
+
+## 2026-09-02 · codex · filleted RF CAM junction repair
+- **friction:** `prepare-release.sh` discarded an otherwise-green exact candidate after one Canvas zoom sample measured 47.3 ms against the 45 ms limit. The same stripped binary immediately passed at 39.6 ms, but recording it required repeating the whole roughly three-minute wrapper.
+- **idea:** Let the browser performance stage retry one marginal threshold breach with the same stripped candidate, failing only if the retry also breaches; preserve both measurements in the candidate log.
+- **status:** open
