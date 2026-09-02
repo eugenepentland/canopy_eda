@@ -356,32 +356,6 @@ const LiveRun = struct {
     stage: RouteStage = .full,
 };
 
-fn retainedCopper(
-    alloc: std.mem.Allocator,
-    prep: pcb_layout_page.RoutePrep,
-    options: anytype,
-) std.mem.Allocator.Error!export_gerber.Copper {
-    const tracks = try alloc.alloc(router.Track, options.existing_tracks.len);
-    for (options.existing_tracks, 0..) |track, i| tracks[i] = .{
-        .x1 = track.x1,
-        .y1 = track.y1,
-        .x2 = track.x2,
-        .y2 = track.y2,
-        .layer = track.layer,
-        .width = track.width,
-        .net = track.net,
-    };
-    const vias = try alloc.alloc(router.Via, options.existing_vias.len);
-    for (options.existing_vias, 0..) |via, i| vias[i] = .{
-        .x = via.x,
-        .y = via.y,
-        .dia = via.dia,
-        .drill = via.drill,
-        .net = via.net,
-    };
-    return .{ .tracks = tracks, .vias = vias, .zones = prep.user_zones };
-}
-
 fn traceMm(tracks: []const router.Track) f64 {
     var total: f64 = 0;
     for (tracks) |track| total += std.math.hypot(track.x2 - track.x1, track.y2 - track.y1);
@@ -420,7 +394,7 @@ fn subcircuitsOnlyOutcome(
         run.prep.rp,
         &options,
     );
-    const copper = try retainedCopper(alloc, run.prep.*, options);
+    const copper = try route_plan.retainedCopper(alloc, options, run.prep.user_zones);
     const tally = try fab_readiness.routableTally(alloc, run.prep.placement, copper);
     const routed = router.RouteResult{
         .tracks = copper.tracks,

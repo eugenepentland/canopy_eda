@@ -33,7 +33,7 @@ pub fn mcpPreviewEscapeAssignment(
     out: *std.ArrayList(u8),
 ) pcb_layout_page.HandlerError!bool {
     const name = argStr(args_val, "name") orelse return fail(out, alloc, "missing required arg: name");
-    const wanted = argStrList(alloc, args_val, "nets");
+    const wanted = pcb_layout_page.mcpArgStrList(alloc, args_val, "nets");
     if (wanted.len < 2) return fail(out, alloc, "nets must name at least two contended nets");
 
     var eval = Evaluator.init(alloc, project_dir);
@@ -194,27 +194,6 @@ fn argStr(args_val: ?std.json.Value, key: []const u8) ?[]const u8 {
     if (av != .object) return null;
     const v = av.object.get(key) orelse return null;
     return if (v == .string) v.string else null;
-}
-
-/// `args.key` as a token list — a JSON string array or a comma-separated
-/// string (trimmed, empties dropped). Absent ⇒ empty slice.
-fn argStrList(alloc: std.mem.Allocator, args_val: ?std.json.Value, key: []const u8) []const []const u8 {
-    const av = args_val orelse return &.{};
-    if (av != .object) return &.{};
-    const v = av.object.get(key) orelse return &.{};
-    var list: std.ArrayList([]const u8) = .empty;
-    if (v == .array) {
-        for (v.array.items) |it| {
-            if (it == .string and it.string.len > 0) list.append(alloc, it.string) catch break;
-        }
-    } else if (v == .string) {
-        var it = std.mem.tokenizeScalar(u8, v.string, ',');
-        while (it.next()) |tok| {
-            const t = std.mem.trim(u8, tok, " \t");
-            if (t.len > 0) list.append(alloc, t) catch break;
-        }
-    }
-    return list.toOwnedSlice(alloc) catch &.{};
 }
 
 fn fail(out: *std.ArrayList(u8), alloc: std.mem.Allocator, msg: []const u8) pcb_layout_page.HandlerError!bool {

@@ -5022,6 +5022,7 @@ Public functions: parseSchematicView, renderToHtml, setupRenderCtx, renderHubSvg
 - A sub circuit backed by a reusable module links to that module's own layout editor, and a path- or inline-sourced one to the design-scoped view of its slice
 - The schematic page escapes the design name everywhere it appears — document title, heading, subtitle filename — and escapes each hub card's ref-des into its data-ref attribute
 - An exported schematic HTML document inlines its drawing CSS, search index, and read-only search/navigation runtime and carries no server-only static asset references
+- The schematic page's inline script blob escapes the less-than sign, so a design name, section name or ref-des carrying a closing script tag cannot terminate the element
 
 ## diagram/types
 
@@ -6111,6 +6112,7 @@ order, preferred/allowed layer masks, waypoints, via budgets).
 - a net whose wave authored waypoints keeps them and receives no planner guide
 - only a topology-flagged wave's nets receive planner guides when a plan mixes flagged and unflagged waves
 - a route_experiment topology override plans a topology for every route wave of that run alone
+- The retained-copper bundle handed to the connectivity oracle carries the board's poured zones, so a net joined only through a pour is not reported open
 - completeness-waiver: large inputs (linear over the placement's nets and the plan's waves; a bigger board only lengthens the policy slice)
 - completeness-waiver: unauthorized access (a pure in-memory lowering; endpoint access control lives in serve/ward_auth)
 - completeness-waiver: i/o failure (no disk or socket — inputs are the already-evaluated block and solved placement)
@@ -6909,6 +6911,7 @@ is what makes the predicate exact rather than approximately right.
 - The saved-routes parser silently culls a track that has collapsed into a sub-micron ball, on the save and the sidecar load alike, judging an arc on all three of its points and keeping one whose points still describe a circle
 - Reading a saved layout back out of its sidecar drops the collapsed sub-micron crumbs its copper carries, so an old board opens healed without its file being edited
 
+- One library basename allowlist admits both the library endpoints' name params and the 3D viewer's footprint params, so a part number carrying a plus sign resolves through either route
 - completeness-waiver: concurrent access (the umbrella section owns no single mutable store; endpoint-specific locking, revision conflicts, atomic sidecar writes, and request-local state are specified and tested in their dedicated serve sections)
 
 - On phone-width screens the PCB layout prioritizes a full-height touch viewport with read-only inspection and layer bottom sheets

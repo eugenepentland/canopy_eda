@@ -167,6 +167,9 @@ src/board_review_state.zig::renderState | fn renderState(allocator: std.mem.Allo
 src/board_review_state.zig::saveEntries | fn saveEntries(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, entries: []const Entry) SaveEntriesError!void
 src/board_review_state.zig::statusFromString | fn statusFromString(raw: []const u8) ?Status
 src/board_review_state.zig::writeEntryJson | fn writeEntryJson(w: *std.Io.Writer, entry: Entry) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
+src/board_shape.zig::ArcCircle value
+src/board_shape.zig::arcCircle value
+src/board_shape.zig::contains value
 src/board_theme.zig::Channels struct_
 src/board_theme.zig::Entry struct_
 src/board_theme.zig::airwire_ground value
@@ -1300,7 +1303,7 @@ src/infra/random.zig::bytes | fn bytes(buf: []u8) std.Io.RandomSecureError!void
 src/json_writer.zig::WriteError value
 src/json_writer.zig::writeEscaped | fn writeEscaped(w: anytype, s: []const u8) WriteError!void
 src/json_writer.zig::writeField | fn writeField(w: anytype, key: []const u8, value: []const u8) WriteError!void
-src/json_writer.zig::writeScriptString | fn writeScriptString(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void
+src/json_writer.zig::writeScriptString | fn writeScriptString(w: anytype, s: []const u8) !void
 src/json_writer.zig::writeString | fn writeString(w: anytype, s: []const u8) WriteError!void
 src/kicad_pcb/board_state.zig::BoardFp struct_
 src/kicad_pcb/board_state.zig::PadAssign struct_
@@ -4164,6 +4167,7 @@ src/serve/library.zig::Kind enum_
 src/serve/library.zig::LibraryRow struct_
 src/serve/library.zig::cseFetchApi | fn cseFetchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/library.zig::deleteLibraryEntryApi | fn deleteLibraryEntryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/library.zig::isSafeLibName | fn isSafeLibName(name: []const u8) bool
 src/serve/library.zig::libraryCardApi | fn libraryCardApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/library.zig::libraryPage | fn libraryPage(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/library.zig::uploadModelApi | fn uploadModelApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -4394,6 +4398,7 @@ src/serve/pcb_layout_page.zig::loadSyncPerimeterMask | fn loadSyncPerimeterMask(
 src/serve/pcb_layout_page.zig::loadSyncRoutes | fn loadSyncRoutes(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?SavedRoutes
 src/serve/pcb_layout_page.zig::loadSyncVias | fn loadSyncVias( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, name: []const u8, ) ?[]const SyncVia
 src/serve/pcb_layout_page.zig::mcpAddTracks | fn mcpAddTracks( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_page.zig::mcpArgStrList | fn mcpArgStrList(alloc: std.mem.Allocator, args_val: ?std.json.Value, key: []const u8) []const []const u8
 src/serve/pcb_layout_page.zig::mcpCleanRouteTopology | fn mcpCleanRouteTopology( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
 src/serve/pcb_layout_page.zig::mcpClearRoutes | fn mcpClearRoutes( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
 src/serve/pcb_layout_page.zig::mcpNormalizeJunctions | fn mcpNormalizeJunctions( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
@@ -4615,6 +4620,8 @@ src/serve/route_plan.zig::lowerOrEmpty | fn lowerOrEmpty( alloc: std.mem.Allocat
 src/serve/route_plan.zig::lowerWithWaves | fn lowerWithWaves( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, placement: optimizer.Placement, ) std.mem.Allocator.Error!LoweredWaves
 src/serve/route_plan.zig::pruneTopologyArtifacts | fn pruneTopologyArtifacts( alloc: std.mem.Allocator, placement: optimizer.Placement, params: router.RouteParams, routed: router.RouteResult, options: route_policy.Options, ) std.mem.Allocator.Error!router.RouteResult
 src/serve/route_plan.zig::resolveScope | fn resolveScope( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, placement: optimizer.Placement, scope: plan_resolve.NetScope, ) std.mem.Allocator.Error!plan_resolve.ResolvedScope
+src/serve/route_plan.zig::retainedCopper | fn retainedCopper( alloc: std.mem.Allocator, options: route_policy.Options, zones: []const pour.UserZone, ) std.mem.Allocator.Error!export_gerber.Copper
+src/serve/route_plan.zig::retainedZones | fn retainedZones( alloc: std.mem.Allocator, placement: optimizer.Placement, options: route_policy.Options, ) std.mem.Allocator.Error![]const pour.UserZone
 src/serve/route_plan.zig::routeExperiment | fn routeExperiment( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, opts: ExperimentOpts, ) std.mem.Allocator.Error!Experiment
 src/serve/route_plan.zig::routeLowered | fn routeLowered( alloc: std.mem.Allocator, placement: optimizer.Placement, params: router.RouteParams, options: route_policy.Options, ) std.mem.Allocator.Error!router.RouteResult
 src/serve/route_plan.zig::routeLoweredCandidate | fn routeLoweredCandidate( alloc: std.mem.Allocator, placement: optimizer.Placement, params: router.RouteParams, options: route_policy.Options, ) std.mem.Allocator.Error!router.RouteResult
@@ -4627,6 +4634,8 @@ src/serve/route_plan.zig::routePlannedScoped | fn routePlannedScoped( alloc: std
 src/serve/route_plan.zig::routePlannedScopedLive | fn routePlannedScopedLive( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, scoped: ScopedRoute, live: LiveRoute, ) std.mem.Allocator.Error!PlannedRun
 src/serve/route_plan.zig::routePlannedZones | fn routePlannedZones( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, zones: []const route_policy.ExistingZone, ) std.mem.Allocator.Error!router.RouteResult
 src/serve/route_plan.zig::routePlannedZonesTimed | fn routePlannedZonesTimed( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, zones: []const route_policy.ExistingZone, timing: ?*route_timing.PhaseTimer, ) std.mem.Allocator.Error!router.RouteResult
+src/serve/route_plan.zig::trackAsExisting | fn trackAsExisting(track: router.Track) route_policy.ExistingTrack
+src/serve/route_plan.zig::viaAsExisting | fn viaAsExisting(via: router.Via) route_policy.ExistingVia
 src/serve/route_result_stats.zig::writeDrc | fn writeDrc( w: *std.Io.Writer, findings: []const drc.Violation, wall_ms: i64, ) std.Io.Writer.Error!void
 src/serve/route_review.zig::DesignReplay struct_
 src/serve/route_review.zig::HandlerError value

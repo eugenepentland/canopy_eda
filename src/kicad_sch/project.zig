@@ -24,6 +24,7 @@
 
 const std = @import("std");
 const emit = @import("emit.zig");
+const json_writer = @import("../json_writer.zig");
 const shape_mod = @import("shape.zig");
 
 const Shape = shape_mod.Shape;
@@ -98,29 +99,11 @@ fn projectFile(arena: std.mem.Allocator, project_name: []const u8) emit.EmitErro
     try w.writeAll("{\n  \"board\": {},\n  \"libraries\": {\n");
     try w.writeAll("    \"pinned_footprint_libs\": [],\n    \"pinned_symbol_libs\": []\n  },\n");
     try w.writeAll("  \"meta\": {\n    \"filename\": ");
-    try jsonString(w, project_name);
+    try json_writer.writeString(w, project_name);
     try w.writeAll(",\n    \"version\": 1\n  },\n");
     try w.writeAll("  \"net_settings\": {},\n  \"pcbnew\": {},\n  \"schematic\": {},\n");
     try w.writeAll("  \"sheets\": [],\n  \"text_variables\": {}\n}\n");
     return out.toOwnedSlice();
-}
-
-/// Write `s` as a JSON string literal. A design name reaches this from a
-/// filename, so the escapes that matter are the quote, the backslash, and any
-/// control byte a hostile name could smuggle in.
-fn jsonString(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    try w.writeByte('"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            else => if (c < 0x20) try w.print("\\u{x:0>4}", .{c}) else try w.writeByte(c),
-        }
-    }
-    try w.writeByte('"');
 }
 
 // ── Tests ─────────────────────────────────────────────────────────
@@ -184,9 +167,14 @@ test "kicad-sch: the project file escapes a hostile design name" {
     defer arena_state.deinit();
     const a = arena_state.allocator();
 
-    const files = try sidecars(a, "od\"d\\name", &.{}, &.{});
+    // The private `jsonString` this once carried is now `json_writer.writeString`
+    // — the sidecar half of the escaper pair. A `.kicad_pro` is read by KiCad and
+    // never by a browser, so `<` stays literal (it is legal JSON), while the
+    // three bytes that WOULD corrupt the file are escaped.
+    const files = try sidecars(a, "od\"d\\n<a>me\x01", &.{}, &.{});
+    try testing.expect(std.mem.indexOf(u8, files[2].bytes, "<a>") != null);
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, files[2].bytes, .{});
     defer parsed.deinit();
     const meta = parsed.value.object.get("meta").?.object.get("filename").?.string;
-    try testing.expectEqualStrings("od\"d\\name.kicad_pro", meta);
+    try testing.expectEqualStrings("od\"d\\n<a>me\x01.kicad_pro", meta);
 }

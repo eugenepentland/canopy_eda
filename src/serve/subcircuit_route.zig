@@ -11,6 +11,7 @@ const std = @import("std");
 const env = @import("../eval/env.zig");
 const export_kicad = @import("../export_kicad.zig");
 const optimizer = @import("../placement/optimizer.zig");
+const board_shape = @import("../board_shape.zig");
 const route_policy = @import("../placement/route_policy.zig");
 const router = @import("../placement/router.zig");
 const route_plan = @import("route_plan.zig");
@@ -550,23 +551,9 @@ fn routedObstacles(
 ) std.mem.Allocator.Error!route_policy.Options {
     var out = options;
     const tracks = try alloc.alloc(route_policy.ExistingTrack, routed.tracks.len);
-    for (routed.tracks, tracks) |track, *slot| slot.* = .{
-        .x1 = track.x1,
-        .y1 = track.y1,
-        .x2 = track.x2,
-        .y2 = track.y2,
-        .layer = track.layer,
-        .width = track.width,
-        .net = track.net,
-    };
+    for (routed.tracks, tracks) |track, *slot| slot.* = route_plan.trackAsExisting(track);
     const vias = try alloc.alloc(route_policy.ExistingVia, routed.vias.len);
-    for (routed.vias, vias) |via, *slot| slot.* = .{
-        .x = via.x,
-        .y = via.y,
-        .dia = via.dia,
-        .drill = via.drill,
-        .net = via.net,
-    };
+    for (routed.vias, vias) |via, *slot| slot.* = route_plan.viaAsExisting(via);
     out.existing_tracks = tracks;
     out.existing_vias = vias;
     return out;
@@ -764,26 +751,12 @@ fn retryFailedSignals(
 
 fn appendTrack(alloc: std.mem.Allocator, out: *std.ArrayList(SeedTrack), track: router.Track) std.mem.Allocator.Error!void {
     if (track.net < 0) return;
-    try out.append(alloc, .{ .net = @intCast(track.net), .copper = .{
-        .x1 = track.x1,
-        .y1 = track.y1,
-        .x2 = track.x2,
-        .y2 = track.y2,
-        .layer = track.layer,
-        .width = track.width,
-        .net = track.net,
-    } });
+    try out.append(alloc, .{ .net = @intCast(track.net), .copper = route_plan.trackAsExisting(track) });
 }
 
 fn appendVia(alloc: std.mem.Allocator, out: *std.ArrayList(SeedVia), via: router.Via) std.mem.Allocator.Error!void {
     if (via.net < 0) return;
-    try out.append(alloc, .{ .net = @intCast(via.net), .copper = .{
-        .x = via.x,
-        .y = via.y,
-        .dia = via.dia,
-        .drill = via.drill,
-        .net = via.net,
-    } });
+    try out.append(alloc, .{ .net = @intCast(via.net), .copper = route_plan.viaAsExisting(via) });
 }
 
 fn sameSeedTrack(items: []const SeedTrack, track: router.Track) bool {
@@ -1300,30 +1273,15 @@ fn foldRailBonds(ctx: SupplyBondContext, net: usize) std.mem.Allocator.Error!voi
     try replaceNetSeeds(ctx, net, seeds.items, barrels.items);
 }
 
-fn polygonContains(poly: []const [2]f64, x: f64, y: f64) bool {
-    if (poly.len < 3) return false;
-    var inside = false;
-    var j = poly.len - 1;
-    for (poly, 0..) |p, i| {
-        const q = poly[j];
-        if ((p[1] > y) != (q[1] > y)) {
-            const cross = (q[0] - p[0]) * (y - p[1]) / (q[1] - p[1]) + p[0];
-            if (x < cross) inside = !inside;
-        }
-        j = i;
-    }
-    return inside;
-}
-
 fn livePourAt(zones: []const route_policy.ExistingZone, net: i32, layer: u8, x: f64, y: f64) bool {
     for (zones) |zone| {
         if (!zone.copper or zone.net != net or zone.layer != layer) continue;
-        if (!polygonContains(zone.polygon, x, y)) continue;
+        if (!board_shape.contains(zone.polygon, x, y)) continue;
         var clipped = false;
         for (zones) |higher| {
             if (!higher.copper or higher.layer != layer or higher.net == net) continue;
             if (higher.priority <= zone.priority) continue;
-            if (polygonContains(higher.polygon, x, y)) {
+            if (board_shape.contains(higher.polygon, x, y)) {
                 clipped = true;
                 break;
             }
@@ -2048,7 +2006,7 @@ test "an authored bypass bond spends no via on its surface path" {
     try testing.expectEqual(@as(u16, 0), bypass_bond_max_vias);
     const source = @embedFile("subcircuit_route.zig");
     const start = std.mem.indexOf(u8, source, "fn appendUncarriedSupplyBonds(").?;
-    const end = std.mem.indexOfPos(u8, source, start, "fn polygonContains(").?;
+    const end = std.mem.indexOfPos(u8, source, start, "fn livePourAt(").?;
     const body = source[start..end];
     try testing.expect(std.mem.indexOf(u8, body, "max_vias = bypass_bond_max_vias") != null);
     try testing.expect(std.mem.indexOf(u8, body, "max_vias = 0") == null);

@@ -3,6 +3,8 @@
 //! (offset/rotation/scale) that the KiCad model export later applies.
 
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
+const library = @import("library.zig");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
@@ -34,20 +36,12 @@ const png_signature = "\x89PNG\r\n\x1a\n";
 const param_footprint = "footprint";
 const escape = @import("../escape.zig");
 
-/// A footprint name is a library basename. Reject anything with path
-/// separators / traversal / markup so the decoded value is safe both as a file
-/// path (no `..`/`/`) and reflected into HTML/JS (no `<`/`"`). Allows the
-/// `,`/`#` reserved chars real footprint names round-trip through the URL.
-fn isSafeFootprint(name: []const u8) bool {
-    if (name.len == 0 or name.len > 128) return false;
-    if (std.mem.indexOf(u8, name, "..") != null) return false;
-    for (name) |c| {
-        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
-            (c >= '0' and c <= '9') or c == '.' or c == '-' or c == '_' or c == ',' or c == '#';
-        if (!ok) return false;
-    }
-    return true;
-}
+/// A footprint name is a library basename, so the `:footprint` route params
+/// are gated by the library's ONE basename allowlist: no path separators or
+/// `..` traversal, and no markup, so the decoded value is safe both as a file
+/// path and reflected into HTML/JS. It also admits `+`, which real
+/// Mini-Circuits basenames on disk carry (`lib/models/yat-6a+.step`).
+const isSafeFootprint = library.isSafeLibName;
 /// JSON tail emitted when the footprint has no parsable pads/courtyard:
 /// closes the (empty) `pads` array and sets `courtyard` null.
 const empty_pads_tail = "],\"courtyard\":null";
@@ -395,10 +389,10 @@ fn writeViewerDataJson(
     rotation: [3]f64,
 ) !void {
     try w.writeAll("{\"footprint\":");
-    try writeJsonString(w, footprint);
+    try json_writer.writeScriptString(w, footprint);
     try w.writeAll(",\"model\":");
     if (model_name) |m| {
-        try writeJsonString(w, m);
+        try json_writer.writeScriptString(w, m);
         // Keep the encoded form in the URL so reserved chars (`,`, `#`, …)
         // round-trip back through the router to the same file.
         try w.print(",\"modelUrl\":\"/api/model-file/{s}\"", .{footprint_url});
@@ -703,14 +697,14 @@ fn writeConfigEntry(
     if (!first.*) try w.writeAll(",\n");
     first.* = false;
     try w.writeAll("  ");
-    try writeJsonString(w, footprint);
+    try json_writer.writeScriptString(w, footprint);
     try w.print(
         ":{{\"offset\":[{d:.4},{d:.4},{d:.4}],\"rotation\":[{d:.4},{d:.4},{d:.4}]",
         .{ offset[0], offset[1], offset[2], rotation[0], rotation[1], rotation[2] },
     );
     if (model) |m| {
         try w.writeAll(",\"model\":");
-        try writeJsonString(w, m);
+        try json_writer.writeScriptString(w, m);
     }
     try w.writeAll("}");
 }
@@ -728,25 +722,6 @@ fn writeFileAtomic(arena: std.mem.Allocator, path: []const u8, content: []const 
 }
 
 // ── helpers ────────────────────────────────────────────────────────
-
-/// The output is embedded inside `<script>window.VIEWER_DATA=…</script>`, so as
-/// well as JSON-escaping this also escapes `<` (→ `<`) to prevent a
-/// `</script>` breakout, and control chars (`\u00XX`).
-fn writeJsonString(w: anytype, s: []const u8) !void {
-    try w.writeByte('"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            '<' => try w.writeAll("\\u003c"),
-            else => if (c < 0x20) try w.print("\\u{x:0>4}", .{c}) else try w.writeByte(c),
-        }
-    }
-    try w.writeByte('"');
-}
 
 fn notFound(res: *httpz.Response) void {
     res.status = 404;
@@ -854,13 +829,39 @@ test "writeModelConfig round-trips through loadModelConfig, preserving other ent
     try std.testing.expectApproxEqAbs(@as(f64, 23.75), cfg2.get("plain").?.offset[0], tol);
 }
 
-test "writeJsonString emits a literal space, escaping only sub-0x20 controls" {
+test "the viewer blob's shared escaper emits a literal space, escaping only sub-0x20 controls" {
     // The `c < 0x20` guard escapes control chars only; a `<`->`<=` flip would
     // also escape 0x20 (space) as \\u0020 instead of writing it verbatim.
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
-    try writeJsonString(&aw.writer, "a b");
+    try json_writer.writeScriptString(&aw.writer, "a b");
     try std.testing.expectEqualStrings("\"a b\"", aw.written());
+
+    // The blob is emitted inside `<script>window.VIEWER_DATA=…</script>`, so
+    // the shared writer must still escape `<` here — the property the private
+    // copy this replaced was written for.
+    var esc: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer esc.deinit();
+    try json_writer.writeScriptString(&esc.writer, "</script>");
+    try std.testing.expectEqualStrings("\"\\u003c/script>\"", esc.written());
+}
+
+// spec: Web Server - One library basename allowlist admits both the library endpoints' name params and the 3D viewer's footprint params, so a part number carrying a plus sign resolves through either route
+test "the viewer's footprint guard IS the library's basename allowlist, plus sign included" {
+    // These were two allowlists that disagreed on exactly one byte: this side's
+    // copy rejected `+`, so a Mini-Circuits basename whose model is already on
+    // disk (`lib/models/yat-6a+.step`) 404'd on the viewer and its model/sprite
+    // routes while the library endpoints accepted it. The decision is to ALLOW
+    // `+` on both sides — it is not a path separator, cannot form `..`, and is
+    // not markup, so it costs nothing on either axis the predicate guards — and
+    // to reach it through ONE function so the two can never disagree again.
+    try std.testing.expectEqual(@intFromPtr(&library.isSafeLibName), @intFromPtr(&isSafeFootprint));
+    try std.testing.expect(isSafeFootprint("yat-6a+"));
+    try std.testing.expect(isSafeFootprint("74ahct1g125gm,132"));
+    // Everything both copies already rejected stays rejected.
+    try std.testing.expect(!isSafeFootprint("../../etc/passwd"));
+    try std.testing.expect(!isSafeFootprint("<script>alert(1)</script>"));
+    try std.testing.expect(!isSafeFootprint("a/b"));
 }
 
 // spec: Web Server - The 3D viewer validates its `:footprint` route param after percent-decoding, so a decoded name carrying traversal or markup reaches neither a read path nor the page
