@@ -451,6 +451,7 @@ test {
     _ = @import("serve/pcb_layout_import.zig");
     _ = @import("serve/pcb_derived.zig");
     _ = @import("serve/pcb_layout_page.zig");
+    _ = @import("serve/pose_identity.zig");
     _ = @import("serve/pcb_subseeds.zig");
     _ = @import("serve/pcb_layout_sync.zig");
     _ = @import("serve/pcb_page_cache.zig");

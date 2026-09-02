@@ -595,6 +595,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.mcp_routability.test.",
         "serve.pcb_describe.test.",
         "serve.pcb_part_json.test.",
+        "serve.pose_identity.test.",
         "serve.rate_limiter.test.",
         "serve.route_result_stats.test.",
         "serve.saved_anchor_migration.test.",
@@ -631,4 +632,15 @@ test {
         if (std.mem.eql(u8, filter, "serve.pcb_subseeds.test.")) claimed = true;
     }
     try std.testing.expect(claimed);
+}
+
+// spec: Development pipeline - The saved-pose identity tests remain claimed by the shard manifest
+test {
+    var claims: usize = 0;
+    for (shards) |shard| {
+        for (shard) |filter| {
+            if (std.mem.eql(u8, filter, "serve.pose_identity.test.")) claims += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), claims);
 }
