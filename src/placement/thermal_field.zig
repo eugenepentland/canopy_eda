@@ -10,8 +10,8 @@
 //! sit, how hot does the COPPER get, and how much of each junction's rise is the
 //! board it stands on rather than the part itself.
 //!
-//! The model is a uniform conducting sheet over the board outline, solved on a
-//! square grid:
+//! The model is a conducting sheet over the exact board outline, solved on an
+//! adaptively selected square grid:
 //!
 //!   * every cell carries its own sheet conductance (`sheetConductance` — the
 //!     stackup's copper and laminate, with the OUTER copper derated by how much
@@ -55,6 +55,7 @@
 
 const std = @import("std");
 const board_layers = @import("../board_layers.zig");
+const board_shape = @import("../board_shape.zig");
 const numeric = @import("../numeric.zig");
 
 // ── Physical constants ────────────────────────────────────────────────────
@@ -133,9 +134,16 @@ const default_transfer_m: f64 = 0.2e-3;
 /// a ~1.6 mm cell — fine enough to separate two adjacent hot parts, coarse
 /// enough that four scenarios solve in milliseconds.
 const cells_long_axis: usize = 64;
-/// Smallest cell the grid uses (mm). Below this the grid resolves detail the
-/// uniform-sheet assumption cannot honestly carry.
-const min_cell_mm: f64 = 1.0;
+/// Minimum cells across the narrow dimension of a powered source. This is the
+/// feature-based refinement trigger: small packages automatically receive a
+/// finer mesh than a large, sparsely loaded board.
+const cells_across_source: f64 = 8.0;
+/// Smallest refined cell (mm). The sheet model cannot justify resolution below
+/// a quarter millimetre, and this bound keeps a detailed outline finite.
+const min_cell_mm: f64 = 0.25;
+/// The legacy/coarse floor retained for boards with no placed heat source and
+/// no non-rectangular outline.
+const base_min_cell_mm: f64 = 1.0;
 /// Largest cell the grid uses (mm). A big board gets more than
 /// `cells_long_axis` cells rather than a cell too coarse to place a hotspot.
 const max_cell_mm: f64 = 4.0;
@@ -148,7 +156,7 @@ pub const max_cells_axis: usize = 512;
 /// converged when no cell's power balance is off by more than this much of what
 /// the whole board dissipates. Scaling by the total is what makes one tolerance
 /// serve a 10 mW board and a 10 W one.
-const residual_tolerance_frac: f64 = 1e-9;
+const residual_tolerance_frac: f64 = 1e-7;
 /// Sweeps the solver will take before giving up. A converged solve takes a few
 /// hundred; this exists so a pathological system reports `converged = false`
 /// rather than hanging a request.
@@ -334,6 +342,8 @@ pub const BoardRect = struct {
     y_mm: f64,
     w_mm: f64,
     h_mm: f64,
+    /// Exact boundary when this rectangle is only the outline's bounding box.
+    outline: []const [2]f64 = &.{},
 };
 
 /// One part as the spreader needs it: what it burns, what its junction hangs
@@ -448,11 +458,21 @@ pub const FieldGrid = struct {
     origin_x_mm: f64,
     origin_y_mm: f64,
     rise_c: []f32,
+    /// One byte per cell: 1 when the cell centre lies on the PCB, 0 outside the
+    /// exact outline. Kept beside the field so renderers and exporters cannot
+    /// accidentally paint rounded-off corners back in.
+    active: []const u8 = &.{},
 
     /// Rise in one cell (°C), 0 for an out-of-range index.
     pub fn at(self: FieldGrid, col: usize, row: usize) f32 {
         if (col >= self.cols or row >= self.rows) return 0;
         return self.rise_c[row * self.cols + col];
+    }
+
+    /// Whether a cell belongs to the exact PCB outline.
+    pub fn isActive(self: FieldGrid, col: usize, row: usize) bool {
+        if (col >= self.cols or row >= self.rows) return false;
+        return self.active.len == 0 or self.active[row * self.cols + col] != 0;
     }
 };
 
@@ -528,7 +548,7 @@ pub fn solveScenarios(
     inputs: Inputs,
 ) std.mem.Allocator.Error![]ScenarioResult {
     const out = try allocator.alloc(ScenarioResult, @typeInfo(Scenario).@"enum".field_names.len);
-    const natural_grid = try makeGrid(allocator, inputs.board);
+    const natural_grid = try makeAdaptiveGrid(allocator, inputs);
     var solver = try buildPackedSolver(allocator, natural_grid, inputs);
 
     // The natural field names the heatsink target. Solve it in every lane on
@@ -549,7 +569,7 @@ pub fn solveScenarios(
     });
     const remaining_converged = solvePacked(&solver);
     for (remaining[0..3], 0..) |scenario, lane| {
-        const grid = try makeGrid(allocator, inputs.board);
+        const grid = try makeAdaptiveGrid(allocator, inputs);
         packedLaneToGrid(&solver, lane, grid);
         out[lane + 1] = try summarizeScenario(allocator, grid, inputs, scenario, if (scenario == .heatsink) target else null, remaining_converged);
     }
@@ -618,7 +638,7 @@ fn runScenario(
     scenario: Scenario,
     target: ?[]const u8,
 ) std.mem.Allocator.Error!ScenarioResult {
-    const grid = try makeGrid(allocator, inputs.board);
+    const grid = try makeAdaptiveGrid(allocator, inputs);
     var solver = try buildSolver(allocator, grid, inputs, scenario, target);
     const converged = solveWork(&solver);
     for (grid.rise_c, solver.rise) |*out, rise| out.* = @floatCast(rise);
@@ -658,8 +678,26 @@ fn summarizeScenario(
 /// cut into `cells_long_axis`, clamped so the model neither resolves detail it
 /// cannot carry nor smears a hotspot across a quarter of the board.
 fn cellSize(long_mm: f64) f64 {
-    if (!std.math.isFinite(long_mm) or long_mm <= 0) return min_cell_mm;
-    return std.math.clamp(long_mm / @as(f64, @floatFromInt(cells_long_axis)), min_cell_mm, max_cell_mm);
+    if (!std.math.isFinite(long_mm) or long_mm <= 0) return base_min_cell_mm;
+    return std.math.clamp(long_mm / @as(f64, @floatFromInt(cells_long_axis)), base_min_cell_mm, max_cell_mm);
+}
+
+/// Feature-driven refinement of the base mesh. Powered packages get at least
+/// `cells_across_source` cells across their narrow dimension; an exact outline
+/// gets twice the base edge resolution so rounded corners do not collapse
+/// into the bounding rectangle. The result remains a regular lattice, which
+/// preserves the conservative finite-volume stencil while adapting resolution
+/// to each board's actual thermal and geometric detail.
+fn adaptiveCellSize(board: BoardRect, parts: []const PartInput, outline: []const [2]f64) f64 {
+    var cell = cellSize(@max(board.w_mm, board.h_mm));
+    for (parts) |part| {
+        if (!(injectedWatts(part) > 0)) continue;
+        const box = part.mount.box orelse continue;
+        const narrow = @min(@abs(box.w_mm), @abs(box.h_mm));
+        if (std.math.isFinite(narrow) and narrow > 0) cell = @min(cell, narrow / cells_across_source);
+    }
+    if (outline.len >= 3) cell = @min(cell, cellSize(@max(board.w_mm, board.h_mm)) / 2.0);
+    return std.math.clamp(cell, min_cell_mm, max_cell_mm);
 }
 
 /// Cells spanning `span_mm` at `cell_mm`, rounded to the nearest whole cell and
@@ -707,11 +745,24 @@ pub fn cellsForBox(shape: GridShape, box: BoardRect) CellBlock {
     };
 }
 
-/// The grid `board` is cut into. Every cell is a board cell: the outline is a
-/// rectangle and the grid is cut from it, so there is nothing outside to
-/// exclude.
+/// The coarse rectangular grid `board` is cut into. Real solves call
+/// `adaptiveGridShape`; this stable base shape remains available to callers
+/// that need a geometry-independent preview lattice.
 pub fn gridShape(board: BoardRect) GridShape {
     const cell = cellSize(@max(board.w_mm, board.h_mm));
+    return .{
+        .cols = cellCount(board.w_mm, cell),
+        .rows = cellCount(board.h_mm, cell),
+        .cell_mm = cell,
+        .origin_x_mm = if (std.math.isFinite(board.x_mm)) board.x_mm else 0,
+        .origin_y_mm = if (std.math.isFinite(board.y_mm)) board.y_mm else 0,
+    };
+}
+
+/// Grid selected for a real solve, refined around its smallest powered package
+/// and its exact outline.
+pub fn adaptiveGridShape(board: BoardRect, parts: []const PartInput) GridShape {
+    const cell = adaptiveCellSize(board, parts, board.outline);
     return .{
         .cols = cellCount(board.w_mm, cell),
         .rows = cellCount(board.h_mm, cell),
@@ -725,7 +776,9 @@ pub fn gridShape(board: BoardRect) GridShape {
 fn makeGrid(allocator: std.mem.Allocator, board: BoardRect) std.mem.Allocator.Error!FieldGrid {
     const shape = gridShape(board);
     const rise = try allocator.alloc(f32, shape.cols * shape.rows);
+    const active = try allocator.alloc(u8, shape.cols * shape.rows);
     @memset(rise, 0);
+    @memset(active, 1);
     return .{
         .cols = shape.cols,
         .rows = shape.rows,
@@ -733,6 +786,30 @@ fn makeGrid(allocator: std.mem.Allocator, board: BoardRect) std.mem.Allocator.Er
         .origin_x_mm = shape.origin_x_mm,
         .origin_y_mm = shape.origin_y_mm,
         .rise_c = rise,
+        .active = active,
+    };
+}
+
+fn makeAdaptiveGrid(allocator: std.mem.Allocator, inputs: Inputs) std.mem.Allocator.Error!FieldGrid {
+    const shape = adaptiveGridShape(inputs.board, inputs.parts);
+    const rise = try allocator.alloc(f32, shape.cols * shape.rows);
+    const active = try allocator.alloc(u8, shape.cols * shape.rows);
+    @memset(rise, 0);
+    for (active, 0..) |*slot, i| {
+        const col: f64 = @floatFromInt(i % shape.cols);
+        const row: f64 = @floatFromInt(i / shape.cols);
+        const x = shape.origin_x_mm + (col + 0.5) * shape.cell_mm;
+        const y = shape.origin_y_mm + (row + 0.5) * shape.cell_mm;
+        slot.* = if (inputs.board.outline.len < 3 or board_shape.contains(inputs.board.outline, x, y)) 1 else 0;
+    }
+    return .{
+        .cols = shape.cols,
+        .rows = shape.rows,
+        .cell_mm = shape.cell_mm,
+        .origin_x_mm = shape.origin_x_mm,
+        .origin_y_mm = shape.origin_y_mm,
+        .rise_c = rise,
+        .active = active,
     };
 }
 
@@ -849,6 +926,9 @@ const PackedConfig = struct {
 /// solver. The arrays are row-major and index-aligned with `shape`.
 pub const Discretized = struct {
     shape: GridShape,
+    /// Active board cells, index-aligned with `shape`; outside-outline cells
+    /// are omitted by finite-element exporters.
+    active: []const u8 = &.{},
     thickness_m: f64,
     /// Equivalent in-plane conductivity (W/m·K). Multiplying by
     /// `thickness_m` recovers the built-in sheet conductance.
@@ -871,7 +951,7 @@ pub fn discretize(
     inputs: Inputs,
     scenario: Scenario,
 ) std.mem.Allocator.Error!Discretized {
-    const grid = try makeGrid(allocator, inputs.board);
+    const grid = try makeAdaptiveGrid(allocator, inputs);
     var target: ?[]const u8 = null;
     if (scenario == .heatsink) {
         if (inputs.heatsink.ref_des.len > 0) {
@@ -908,6 +988,7 @@ pub fn discretize(
             .origin_x_mm = grid.origin_x_mm,
             .origin_y_mm = grid.origin_y_mm,
         },
+        .active = grid.active,
         .thickness_m = thickness,
         .conductivity_w_mk = conductivity,
         .top_face_h_w_m2k = top_face_h,
@@ -938,6 +1019,10 @@ fn fillDiscretizedFaces(
         top_h.* = h * faceFactor(faces[@backingInt(Side.top)]);
         bottom_h.* = h * faceFactor(faces[@backingInt(Side.bottom)]);
     }
+    for (faces_out.top, faces_out.bottom, grid.active) |*top_h, *bottom_h, active| if (active == 0) {
+        top_h.* = 0;
+        bottom_h.* = 0;
+    };
     const cell_m = grid.cell_mm * 1.0e-3;
     const face_area = cell_m * cell_m;
     for (inputs.parts) |part| {
@@ -1132,10 +1217,9 @@ fn buildWork(
     for (inputs.parts) |part| {
         const box = part.mount.box orelse continue;
         const spans = boxSpans(grid, box);
-        const share: f64 = @floatFromInt(spanCells(spans));
         const effect = heatsinkEffect(part, inputs, grid, scenario, target);
         const source_fraction = if (effect) |e| e.source_fraction else 1.0;
-        spread(&work, spans, injectedWatts(part) * source_fraction / share);
+        spread(&work, grid, spans, box, injectedWatts(part) * source_fraction);
         if (effect) |e| {
             const sink_share: f64 = @floatFromInt(spanCells(e.spans));
             sink(&work, e.spans, e.conductance_w_per_k / sink_share);
@@ -1172,6 +1256,9 @@ fn buildSolver(
     } else {
         for (scale, frac) |*conductance, coverage| conductance.* = sheetConductance(sheet, coverage);
     }
+    for (scale, grid.active) |*conductance, active| if (active == 0) {
+        conductance.* = 0;
+    };
     try fillSolverFaces(allocator, to_ambient, grid, inputs, scenario);
 
     // A sink changes the diagonal and, for a package-top path, diverts a known
@@ -1194,8 +1281,8 @@ fn buildSolver(
         while (c < grid.cols) : (c += 1) {
             const i = r * grid.cols + c;
             const here = scale[i];
-            if (c + 1 < grid.cols) stencil[i].east = @floatCast(pairG(here, scale[i + 1]));
-            if (r + 1 < grid.rows) stencil[i].south = @floatCast(pairG(here, scale[i + grid.cols]));
+            if (grid.isActive(c, r) and c + 1 < grid.cols and grid.isActive(c + 1, r)) stencil[i].east = @floatCast(pairG(here, scale[i + 1]));
+            if (grid.isActive(c, r) and r + 1 < grid.rows and grid.isActive(c, r + 1)) stencil[i].south = @floatCast(pairG(here, scale[i + grid.cols]));
         }
     }
     const omega = relaxationFactor(@max(grid.cols, grid.rows));
@@ -1215,9 +1302,7 @@ fn buildSolver(
         const box = part.mount.box orelse continue;
         const effect = heatsinkEffect(part, inputs, grid, scenario, target);
         const watts = injectedWatts(part) * if (effect) |e| e.source_fraction else 1.0;
-        const spans = boxSpans(grid, box);
-        const share: f64 = @floatFromInt(spanCells(spans));
-        addSolverSource(source, scale, grid.cols, spans, watts / share);
+        addSolverSource(source, scale, grid, box, watts);
     }
     // Reconstruct the total represented by the quantized source stream. Global
     // rebalancing and local residuals must conserve the SAME number; using the
@@ -1261,14 +1346,17 @@ fn buildPackedSolver(
             conductance.* = @splat(sheetConductance(sheet, coverage));
         }
     }
+    for (scale, grid.active) |*conductance, active| if (active == 0) {
+        conductance.* = @splat(0);
+    };
     var r: usize = 0;
     while (r < grid.rows) : (r += 1) {
         var c: usize = 0;
         while (c < grid.cols) : (c += 1) {
             const i = r * grid.cols + c;
             const here = scale[i][0];
-            if (c + 1 < grid.cols) stencil[i].east = @floatCast(pairG(here, scale[i + 1][0]));
-            if (r + 1 < grid.rows) stencil[i].south = @floatCast(pairG(here, scale[i + grid.cols][0]));
+            if (grid.isActive(c, r) and c + 1 < grid.cols and grid.isActive(c + 1, r)) stencil[i].east = @floatCast(pairG(here, scale[i + 1][0]));
+            if (grid.isActive(c, r) and r + 1 < grid.rows and grid.isActive(c, r + 1)) stencil[i].south = @floatCast(pairG(here, scale[i + grid.cols][0]));
         }
     }
     return .{
@@ -1309,6 +1397,9 @@ fn configurePackedSolver(
         const factor = faceFactor(faces[0]) + faceFactor(faces[1]);
         ambient.* = @floatCast(open * @as(ScenarioF64, @splat(factor)));
     }
+    for (work.to_ambient, grid.active) |*ambient, active| if (active == 0) {
+        ambient.* = @splat(0);
+    };
     if (config.sink_lane) |lane| {
         for (inputs.parts) |part| {
             const effect = heatsinkEffect(part, inputs, grid, .heatsink, config.target) orelse continue;
@@ -1335,7 +1426,7 @@ fn configurePackedSolver(
                 (if (c > 0) @as(f64, work.stencil[i - 1].east) else 0) + work.stencil[i].east +
                 (if (r > 0) @as(f64, work.stencil[i - work.cols].south) else 0) + work.stencil[i].south;
             const diag = @as(ScenarioF64, @floatCast(work.to_ambient[i])) + @as(ScenarioF64, @splat(edge_sum));
-            work.scale[i] = @as(ScenarioF64, @splat(work.omega)) / diag;
+            work.scale[i] = if (grid.isActive(c, r)) @as(ScenarioF64, @splat(work.omega)) / diag else @splat(0);
         }
     }
 
@@ -1343,27 +1434,18 @@ fn configurePackedSolver(
     @memset(work.rise, @splat(0));
     for (inputs.parts) |part| {
         const box = part.mount.box orelse continue;
-        const spans = boxSpans(grid, box);
-        const share: f64 = @floatFromInt(spanCells(spans));
         var watts: [simd_scenarios]f64 = @splat(injectedWatts(part));
         if (config.sink_lane) |lane| {
             if (heatsinkEffect(part, inputs, grid, .heatsink, config.target)) |effect| {
                 watts[lane] *= effect.source_fraction;
             }
         }
-        const watts_vec: ScenarioF64 = watts;
-        const per_cell = watts_vec / @as(ScenarioF64, @splat(share));
-        r = spans[1].lo;
-        while (r <= spans[1].hi) : (r += 1) {
-            var c = spans[0].lo;
-            while (c <= spans[0].hi) : (c += 1) {
-                const i = r * work.cols + c;
-                work.source[i] += @floatCast(work.scale[i] * per_cell);
-            }
-        }
+        addPackedSource(work.source, work.scale, grid, box, watts);
     }
     var total: ScenarioF64 = @splat(0);
-    for (work.source, work.scale) |source, scale| total += @as(ScenarioF64, @floatCast(source)) / scale;
+    for (work.source, work.scale, grid.active) |source, scale, active| {
+        if (active != 0) total += @as(ScenarioF64, @floatCast(source)) / scale;
+    }
     work.total_power = total;
 }
 
@@ -1400,6 +1482,9 @@ fn fillSolverFaces(
     for (to_ambient, covered) |*g, faces| {
         g.* = @floatCast(open * (faceFactor(faces[0]) + faceFactor(faces[1])));
     }
+    for (to_ambient, grid.active) |*g, active| if (active == 0) {
+        g.* = 0;
+    };
 }
 
 fn addSolverSink(to_ambient: []f32, cols: usize, spans: [2]Span, per_cell: f64) void {
@@ -1410,13 +1495,42 @@ fn addSolverSink(to_ambient: []f32, cols: usize, spans: [2]Span, per_cell: f64) 
     }
 }
 
-fn addSolverSource(source: []f32, scale: []const f64, cols: usize, spans: [2]Span, per_cell: f64) void {
+fn addSolverSource(source: []f32, scale: []const f64, grid: FieldGrid, box: BoardRect, watts: f64) void {
+    const spans = boxSpans(grid, box);
+    const total = blockOverlap(grid, spans, box);
+    if (!(total > 0)) {
+        const i = fallbackCell(grid, spans) orelse return;
+        source[i] += @floatCast(scale[i] * watts);
+        return;
+    }
     var r = spans[1].lo;
     while (r <= spans[1].hi) : (r += 1) {
         var c = spans[0].lo;
         while (c <= spans[0].hi) : (c += 1) {
-            const i = r * cols + c;
-            source[i] += @floatCast(scale[i] * per_cell);
+            const i = r * grid.cols + c;
+            const share = cellBoxOverlap(grid, c, r, box) / total;
+            source[i] += @floatCast(scale[i] * watts * share);
+        }
+    }
+}
+
+fn addPackedSource(source: []ScenarioF32, scale: []const ScenarioF64, grid: FieldGrid, box: BoardRect, watts: [simd_scenarios]f64) void {
+    const spans = boxSpans(grid, box);
+    const total = blockOverlap(grid, spans, box);
+    if (!(total > 0)) {
+        const i = fallbackCell(grid, spans) orelse return;
+        const watts_vec: ScenarioF64 = watts;
+        source[i] += @floatCast(scale[i] * watts_vec);
+        return;
+    }
+    const watts_vec: ScenarioF64 = watts;
+    var r = spans[1].lo;
+    while (r <= spans[1].hi) : (r += 1) {
+        var c = spans[0].lo;
+        while (c <= spans[0].hi) : (c += 1) {
+            const i = r * grid.cols + c;
+            const share: ScenarioF64 = @splat(cellBoxOverlap(grid, c, r, box) / total);
+            source[i] += @floatCast(scale[i] * watts_vec * share);
         }
     }
 }
@@ -1475,6 +1589,9 @@ fn fillFaces(
     for (work.to_ambient, covered) |*g, faces| {
         g.* = open * (faceFactor(faces[0]) + faceFactor(faces[1]));
     }
+    for (work.to_ambient, grid.active) |*g, active| if (active == 0) {
+        g.* = 0;
+    };
 }
 
 /// Flag one side of every cell under a part's box as covered by its body.
@@ -1506,12 +1623,73 @@ fn injectedWatts(part: PartInput) f64 {
     return part.watts;
 }
 
-/// Add `per_cell` watts to every cell of the block.
-fn spread(work: *Work, spans: [2]Span, per_cell: f64) void {
+fn cellBoxOverlap(grid: FieldGrid, col: usize, row: usize, box: BoardRect) f64 {
+    if (!grid.isActive(col, row)) return 0;
+    const bx0 = @min(box.x_mm, box.x_mm + box.w_mm);
+    const bx1 = @max(box.x_mm, box.x_mm + box.w_mm);
+    const by0 = @min(box.y_mm, box.y_mm + box.h_mm);
+    const by1 = @max(box.y_mm, box.y_mm + box.h_mm);
+    const cx0 = grid.origin_x_mm + @as(f64, @floatFromInt(col)) * grid.cell_mm;
+    const cy0 = grid.origin_y_mm + @as(f64, @floatFromInt(row)) * grid.cell_mm;
+    const dx = @max(@min(cx0 + grid.cell_mm, bx1) - @max(cx0, bx0), 0);
+    const dy = @max(@min(cy0 + grid.cell_mm, by1) - @max(cy0, by0), 0);
+    return dx * dy;
+}
+
+fn blockOverlap(grid: FieldGrid, spans: [2]Span, box: BoardRect) f64 {
+    var total: f64 = 0;
     var r = spans[1].lo;
     while (r <= spans[1].hi) : (r += 1) {
         var c = spans[0].lo;
-        while (c <= spans[0].hi) : (c += 1) work.power[r * work.cols + c] += per_cell;
+        while (c <= spans[0].hi) : (c += 1) total += cellBoxOverlap(grid, c, r, box);
+    }
+    return total;
+}
+
+fn fallbackCell(grid: FieldGrid, spans: [2]Span) ?usize {
+    var r = spans[1].lo;
+    while (r <= spans[1].hi) : (r += 1) {
+        var c = spans[0].lo;
+        while (c <= spans[0].hi) : (c += 1) {
+            if (grid.isActive(c, r)) return r * grid.cols + c;
+        }
+    }
+    // A source wholly outside a rounded outline retains the historical
+    // "dock to board" behavior by choosing the active cell nearest the
+    // clamped rectangle span.
+    const target_c = 0.5 * @as(f64, @floatFromInt(spans[0].lo + spans[0].hi));
+    const target_r = 0.5 * @as(f64, @floatFromInt(spans[1].lo + spans[1].hi));
+    var best: ?usize = null;
+    var best_d2 = std.math.inf(f64);
+    for (grid.active, 0..) |active, i| {
+        if (active == 0) continue;
+        const c: f64 = @floatFromInt(i % grid.cols);
+        const row: f64 = @floatFromInt(i / grid.cols);
+        const d2 = (c - target_c) * (c - target_c) + (row - target_r) * (row - target_r);
+        if (d2 < best_d2) {
+            best = i;
+            best_d2 = d2;
+        }
+    }
+    return best;
+}
+
+/// Distribute a source by its actual overlap with each active cell. Unlike the
+/// old inclusive-cell split, a cell merely touching a package edge receives no
+/// heat and the package's geometric centre remains the source centroid.
+fn spread(work: *Work, grid: FieldGrid, spans: [2]Span, box: BoardRect, watts: f64) void {
+    const total = blockOverlap(grid, spans, box);
+    if (!(total > 0)) {
+        const i = fallbackCell(grid, spans) orelse return;
+        work.power[i] += watts;
+        return;
+    }
+    var r = spans[1].lo;
+    while (r <= spans[1].hi) : (r += 1) {
+        var c = spans[0].lo;
+        while (c <= spans[0].hi) : (c += 1) {
+            work.power[r * work.cols + c] += watts * cellBoxOverlap(grid, c, r, box) / total;
+        }
     }
 }
 
@@ -1609,7 +1787,9 @@ fn rebalance(work: *Solver) void {
     }
     if (conductance <= 0) return;
     const delta = (work.total_power - shed) / conductance;
-    for (work.rise) |*rise| rise.* += delta;
+    for (work.rise, work.scale) |*rise, scale| {
+        if (scale > 0) rise.* += delta;
+    }
 }
 
 /// Relax until the field satisfies its power balance, or until
@@ -1625,7 +1805,7 @@ fn solveWork(work: *Solver) bool {
     while (iter < max_iterations) : (iter += 1) {
         const settled = sweep(work, tol);
         rebalance(work);
-        if (settled) break;
+        if (settled and residualSettled(work, tol)) return true;
     }
     return residualSettled(work, tol);
 }
@@ -1682,7 +1862,9 @@ fn packedRebalance(work: *PackedSolver) void {
     }
     const positive = conductance > @as(ScenarioF64, @splat(0));
     const delta = @select(f64, positive, (work.total_power - shed) / conductance, @as(ScenarioF64, @splat(0)));
-    for (work.rise) |*rise| rise.* += delta;
+    for (work.rise, work.scale) |*rise, scale| {
+        if (scale[0] > 0) rise.* += delta;
+    }
 }
 
 fn solvePacked(work: *PackedSolver) bool {
@@ -1691,7 +1873,7 @@ fn solvePacked(work: *PackedSolver) bool {
     while (iter < max_iterations) : (iter += 1) {
         const settled = packedSweep(work, tolerance);
         packedRebalance(work);
-        if (settled) break;
+        if (settled and packedResidualSettled(work, tolerance)) return true;
     }
     return packedResidualSettled(work, tolerance);
 }
@@ -1746,11 +1928,13 @@ fn partField(
     var r = spans[1].lo;
     while (r <= spans[1].hi) : (r += 1) {
         var c = spans[0].lo;
-        while (c <= spans[0].hi) : (c += 1) board_rise = @max(board_rise, grid.at(c, r));
+        while (c <= spans[0].hi) : (c += 1) {
+            if (grid.isActive(c, r)) board_rise = @max(board_rise, grid.at(c, r));
+        }
     }
 
-    const cell_m = grid.cell_mm * 1.0e-3;
-    const land_m2 = @as(f64, @floatFromInt(spanCells(spans))) * cell_m * cell_m;
+    const overlap_mm2 = blockOverlap(grid, spans, part.mount.box orelse transfer.board);
+    const land_m2 = (if (overlap_mm2 > 0) overlap_mm2 else grid.cell_mm * grid.cell_mm) * square_mm_to_m2;
     var row = PartField{
         .ref_des = part.ref_des,
         .origin_key = part.origin_key,
@@ -1861,6 +2045,7 @@ fn hotspotOf(grid: FieldGrid) Hotspot {
     var spot = Hotspot{};
     var best: f32 = -std.math.floatMax(f32);
     for (grid.rise_c, 0..) |rise, i| {
+        if (grid.active.len != 0 and grid.active[i] == 0) continue;
         if (rise <= best) continue;
         best = rise;
         const col: f64 = @floatFromInt(i % grid.cols);
@@ -2295,7 +2480,7 @@ test "the ratings cap tightens the scenario's ambient ceiling" {
     try testing.expectEqualStrings("U1", slack[0].max_ambient.ref_des);
 }
 
-// spec: placement/thermal_field - the grid cuts the outline into square cells of one to four millimetres with at most sixty-four along the longer side
+// spec: placement/thermal_field - the base grid cuts the bounding rectangle into square cells of one to four millimetres with at most sixty-four along the longer side
 test "the grid sizes its cells from the board's longer side" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -2311,12 +2496,12 @@ test "the grid sizes its cells from the board's longer side" {
 
     // A small board bottoms out at the 1 mm floor rather than resolving detail
     // the uniform-sheet model cannot carry; a big one tops out at 4 mm.
-    try testing.expectEqual(min_cell_mm, cellSize(20));
+    try testing.expectEqual(base_min_cell_mm, cellSize(20));
     try testing.expectEqual(max_cell_mm, cellSize(1000));
     // A degenerate or non-finite dimension yields the floor and a single cell,
     // not a division blow-up.
-    try testing.expectEqual(min_cell_mm, cellSize(0));
-    try testing.expectEqual(min_cell_mm, cellSize(std.math.nan(f64)));
+    try testing.expectEqual(base_min_cell_mm, cellSize(0));
+    try testing.expectEqual(base_min_cell_mm, cellSize(std.math.nan(f64)));
     const degenerate = try makeGrid(arena, .{ .x_mm = 0, .y_mm = 0, .w_mm = 0, .h_mm = -5 });
     try testing.expectEqual(@as(usize, 1), degenerate.cols);
     try testing.expectEqual(@as(usize, 1), degenerate.rows);
@@ -2527,6 +2712,29 @@ test "the grid shape is answerable without solving the board" {
     try testing.expectEqual(grid.origin_y_mm, shape.origin_y_mm);
 }
 
+// spec: placement/thermal_field - the solve refines to at least eight cells across a powered package and excludes cells outside an authored polygon from conduction convection rendering and hotspot selection
+test "powered packages refine the mesh and an exact outline masks its corners" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const board = BoardRect{ .x_mm = 0, .y_mm = 0, .w_mm = 40, .h_mm = 20 };
+    const parts = [_]PartInput{.{ .ref_des = "U1", .watts = 1, .mount = mountSquare(10, 10, 4) }};
+    const cut = [_][2]f64{ .{ 5, 0 }, .{ 35, 0 }, .{ 40, 5 }, .{ 40, 15 }, .{ 35, 20 }, .{ 5, 20 }, .{ 0, 15 }, .{ 0, 5 } };
+    var exact_board = board;
+    exact_board.outline = &cut;
+    const shape = adaptiveGridShape(exact_board, &parts);
+    try testing.expect(shape.cell_mm <= 0.5);
+    try testing.expect(shape.cell_mm < gridShape(board).cell_mm);
+
+    const result = try solveScenario(arena, .{ .board = exact_board, .parts = &parts }, .natural);
+    try testing.expect(!result.grid.isActive(0, 0));
+    try testing.expect(result.grid.isActive(result.grid.cols / 2, result.grid.rows / 2));
+    const hot_col = cellIndex(result.hotspot.x_mm, result.grid.origin_x_mm, result.grid.cell_mm, result.grid.cols);
+    const hot_row = cellIndex(result.hotspot.y_mm, result.grid.origin_y_mm, result.grid.cell_mm, result.grid.rows);
+    try testing.expect(result.grid.isActive(hot_col, hot_row));
+}
+
 // spec: placement/thermal_field - the packed four-scenario solver uses less per-cell ladder storage than four independent sheet ambient power and rise arrays
 test "packed scenario storage is smaller than four scalar solver states" {
     const old_per_scenario = 4 * @sizeOf(f64) + @sizeOf(f32);
@@ -2555,10 +2763,13 @@ test "the FEM discretization conserves the built in cell coefficients" {
     }};
     const inputs = Inputs{ .board = board, .parts = &parts };
     const model = try discretize(arena, inputs, .natural);
-    try testing.expectEqual(@as(usize, 1), model.conductivity_w_mk.len);
+    try testing.expectEqual(@as(usize, 16), model.conductivity_w_mk.len);
+    try testing.expectEqual(model.conductivity_w_mk.len, model.active.len);
     const cell_m = model.shape.cell_mm * 1.0e-3;
     const volume = cell_m * cell_m * model.thickness_m;
-    try testing.expectApproxEqRel(@as(f64, 1), model.heat_source_w_m3[0] * volume, 1e-12);
+    var exported_watts: f64 = 0;
+    for (model.heat_source_w_m3) |q| exported_watts += q * volume;
+    try testing.expectApproxEqRel(@as(f64, 1), exported_watts, 1e-12);
     try testing.expectApproxEqRel(
         sheetConductance(defaultSheet(default_spreader_layers), 1),
         model.conductivity_w_mk[0] * model.thickness_m,

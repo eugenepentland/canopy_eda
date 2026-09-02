@@ -4269,14 +4269,16 @@ reserved, or RFU never enter this rule.
 
 ## placement/thermal_field
 
-Public functions: solveScenarios, solveScenario, heatsinkTarget, spreaderLayers, defaultSheet, gridShape, cellsForBox, discretize, sinkToAmbient, finCount
+Public functions: solveScenarios, solveScenario, heatsinkTarget, spreaderLayers, defaultSheet, gridShape, adaptiveGridShape, cellsForBox, discretize, sinkToAmbient, finCount
 
 `eval/thermal.zig` answers the paper question — `Tj = Ta + P·θJA`, one part at a
 time, no board and no neighbours. That is the right screen before a package is
 chosen and the wrong one afterwards, because θJA already contains an assumed
 board: it cannot see a hot buck sitting 3 mm from the MCU, and it cannot say
 that another plane would fix either of them. This module asks the layout
-question instead. The board outline is cut into square cells; every cell
+question instead. The exact board outline is cut into square cells, with the
+base grid refined to resolve powered packages and non-rectangular boundaries;
+cells outside the outline are excluded. Every active cell
 conducts to its four neighbours through a sheet conductance built from the
 stackup's own finished thickness and foil weights, derated where the outer
 copper is not actually poured, and sheds to ambient through its two faces
@@ -4307,7 +4309,8 @@ coupling through the air.
 - a board with nothing to dissipate solves to an all-zero field, converged and free of NaN
 - a junction is computed through the declared theta-jb, else through half the theta-ja with the row flagged estimated, and through nothing at all when neither is declared
 - a scenario's maximum ambient is the tightest junction ceiling and the caller's ratings cap, each naming the part that sets it
-- the grid cuts the outline into square cells of one to four millimetres with at most sixty-four along the longer side
+- the base grid cuts the bounding rectangle into square cells of one to four millimetres with at most sixty-four along the longer side
+- the solve refines to at least eight cells across a powered package and excludes cells outside an authored polygon from conduction convection rendering and hotspot selection
 - the spreading sheet counts the two outer faces plus one layer per inner plane, so a plane-less stack spreads strictly less than the implicit four-layer board
 - the conducting sheet is built from the stackup's own finished thickness and per-foil copper weights, and a caller declaring none keeps the 1.6 mm one-ounce screening convention
 - outer copper is derated cell by cell by the coverage map the caller sampled, so an unpoured cell spreads through the inner planes alone and a fully covered board reproduces the uniform sheet exactly
@@ -4332,8 +4335,9 @@ Public functions: build, parseVtu, compare, comparisonJson, comparisonMarkdown
 
 Portable Elmer FEM handoff for the board thermal screen. The case is a separate
 finite-element discretization of the normalized coefficients the built-in
-solver actually used: one hexahedron through the thickness of every thermal
-grid cell, equivalent sheet conductivity in plane, volumetric component heat,
+solver actually used: one hexahedron through the thickness of every active
+thermal-grid cell (cells outside an exact outline are omitted), equivalent
+sheet conductivity in plane, volumetric component heat,
 the selected still- or forced-air film loss on the two faces, and adiabatic
 edges. The manifest records
 the board, stackup-derived rules, component powers, grid, and coefficient-group
@@ -4349,6 +4353,7 @@ independent validation of PCB material properties.
 - an exported case contains a native hexahedral mesh, the selected natural or forced-air heat equation, normalized thermal-rule manifest, and portable run instructions
 - VTU point coordinates restore Elmer's renumbered nodal temperatures to the native mesh node order
 - component watts are conserved as volumetric heat and each cell's two face losses equal the built-in cell-to-ambient conductance
+- cells clipped away by a rounded or custom outline are omitted from Elmer bodies and face boundaries
 - a comparison reports board maximum and per-part board and junction temperatures in JSON and a side-by-side Markdown table
 - the CLI defaults to 25 C ambient and natural still air, accepts either forced-air rung and a saved layout, and can export without running Elmer
 - the comparison refuses a non-converged built-in field, a failed Elmer process, or a malformed/missing VTU result instead of publishing partial numbers
@@ -5616,7 +5621,7 @@ Everything handed back is ABSOLUTE °C at a caller-chosen ambient, converted her
 from the solver's ambient-free rise field — one solve serves every ambient, and
 the arithmetic that adds the ambient lives in exactly one place.
 
-- the board rectangle is the placement's authored outline, and a design without one falls back to the parts bounding box with the substitution reported
+- the board carries the placement's exact authored outline as well as its bounds, and a design without one falls back to the parts bounding box with the substitution reported
 - screened parts are matched to placed parts by exact ref then by unique leaf, and a row matching nothing is left unplaced for the solver to report as skipped
 - layout thermal rows follow scoped origin identity across ref-des renumbering before considering a recycled exact ref
 - the spreader layer count is the implicit four-layer board when no stackup is declared and the declared inner planes plus two outer faces when one is
@@ -5663,6 +5668,7 @@ exception, since a strictly luminance-monotone ramp cannot end in a saturated
 red at all, and the other three channels are what carry the hot end.
 
 - the heat-zone image is a valid PNG whose pixels differ between two cooling scenarios of the same board
+- an authored non-rectangular outline clips the heat wash and is stroked as its exact polygon instead of the rectangular bounding box
 - the field is painted against one absolute 25 °C to 125 °C scale, clamping temperatures outside it so the same colour means the same heat across boards and cooling scenarios
 - absolute temperatures on the image follow the requested ambient, shifting one for one with it
 - the ramp runs cold to hot through one blue, cyan and yellow band each, ends on red, and clamps outside the unit interval

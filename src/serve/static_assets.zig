@@ -1853,6 +1853,8 @@ test "PCB thermal overlay claims the board overlay seam and reads the cached fie
         "thermal:view", // parent -> frame: scenario / ambient / opacity / labels
         "thermal:state", // frame -> parent: the payload the panel's legend reads
         "pcb-thermal", // the surface name this overlay answers to
+        "ctx.clip()", // the heat wash follows the exact authored board polygon
+        "g.active", // rounded-off mesh cells stay transparent to the viewer
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_thermal_js, marker) != null);
 }

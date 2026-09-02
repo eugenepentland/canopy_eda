@@ -100,6 +100,7 @@ fn sizeOf(results: []const thermal_scenarios.ScenarioResult) usize {
     for (results) |r| {
         total += @sizeOf(thermal_scenarios.ScenarioResult);
         total += r.grid.rise_c.len * @sizeOf(f32);
+        total += r.grid.active.len;
         total += r.parts.len * @sizeOf(thermal_scenarios.PartField);
         for (r.parts) |p| total += p.ref_des.len;
         total += r.skipped.len * @sizeOf([]const u8);
@@ -127,6 +128,7 @@ fn dupeResults(
     for (results, out) |src, *dst| {
         dst.* = src;
         dst.grid.rise_c = try alloc.dupe(f32, src.grid.rise_c);
+        dst.grid.active = try alloc.dupe(u8, src.grid.active);
         const parts = try alloc.alloc(thermal_scenarios.PartField, src.parts.len);
         for (src.parts, parts) |sp, *dp| {
             dp.* = sp;
@@ -145,6 +147,7 @@ fn dupeResults(
 
 fn freeResult(alloc: std.mem.Allocator, r: thermal_scenarios.ScenarioResult) void {
     alloc.free(r.grid.rise_c);
+    alloc.free(r.grid.active);
     for (r.parts) |p| alloc.free(p.ref_des);
     alloc.free(r.parts);
     for (r.skipped) |s| alloc.free(s);
@@ -328,11 +331,13 @@ fn fakeResults(alloc: std.mem.Allocator, rise: f32, cells: usize) ![]thermal_sce
     const out = try alloc.alloc(thermal_scenarios.ScenarioResult, 1);
     const grid = try alloc.alloc(f32, cells);
     @memset(grid, rise);
+    const active_cells = try alloc.alloc(u8, cells);
+    @memset(active_cells, 1);
     const parts = try alloc.alloc(thermal_scenarios.PartField, 1);
     parts[0] = .{ .ref_des = try alloc.dupe(u8, "U1"), .board_rise_c = rise, .tj_rise_c = rise + 5 };
     out[0] = .{
         .scenario = .natural,
-        .grid = .{ .cols = cells, .rows = 1, .cell_mm = 1, .origin_x_mm = 0, .origin_y_mm = 0, .rise_c = grid },
+        .grid = .{ .cols = cells, .rows = 1, .cell_mm = 1, .origin_x_mm = 0, .origin_y_mm = 0, .rise_c = grid, .active = active_cells },
         .parts = parts,
         .hotspot = .{ .rise_c = rise },
         .max_ambient = .{ .c = 125 - rise, .ref_des = try alloc.dupe(u8, "U1") },

@@ -1573,8 +1573,8 @@ test "the thermal board reports its solved temperature under the pointer" {
     const overlay = @embedFile("assets/pcb_thermal.js");
     try testing.expect(containsAll(overlay, &.{
         "function gridTemperatureAt(x, y)",
-        "g.rise_c[cy * g.cols + cx]",
-        "top + (bottom - top) * fy",
+        "g.rise_c[i]",
+        "weighted / total",
         "boardSvg.getScreenCTM()",
         "temp.toFixed(1) + \" °C\"",
         "boardSvg.addEventListener(\"pointerleave\", probeHide)",
