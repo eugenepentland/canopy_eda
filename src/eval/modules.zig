@@ -219,17 +219,9 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
     var footprint_name: []const u8 = "";
     var pinout_name: []const u8 = "";
 
-    // Known structural fields (not properties)
-    const skip_fields = [_][]const u8{
-        "symbol",       footprint_form,
-        "pinout",       "component",
-        "parameter",    "component-family",
-        "bus",          "note",
-        datasheet_form, "datasheet-review",
-        "requirement",  "ignore-requirements",
-        "electrical",   "refdes",
-        thermal_form,
-    };
+    // Known structural fields (not properties), derived from the documented
+    // registry so the reference names exactly what never becomes a property.
+    const skip_fields = &forms_mod.component_reserved_fields;
 
     var props: std.ArrayList(env_mod.Property) = .empty;
     var buses: std.ArrayList(BusDef) = .empty;
@@ -310,7 +302,7 @@ pub fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!v
             // heuristic. The first character is the single-letter prefix.
             const val = cl[1].asText() orelse continue;
             if (val.len > 0) refdes_prefix = val[0];
-        } else if (!env_mod.containsString(&skip_fields, field)) {
+        } else if (!env_mod.containsString(skip_fields, field)) {
             // Unknown, non-structural field -- treat as inline property.
             const val = cl[1].asText() orelse continue;
             try props.append(self.allocator, .{ .key = field, .value = val });

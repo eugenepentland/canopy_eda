@@ -70,14 +70,11 @@ fn hasHierarchicalMarker(forms: []const Node) bool {
 /// Form heads that are deliberately inert in scope-form dispatch and must
 /// not draw an unknown-sub-form warning: identity anchors consumed by the
 /// id machinery (`id`/`ids`), the `(hierarchical-ids)` marker read by
-/// `hasHierarchicalMarker`, and the documented-but-inert `(row N)`/`(col N)`
-/// grid hints carried by sections and hub instances.
+/// `hasHierarchicalMarker`, and the `(row N)`/`(col N)` grid hints carried by
+/// sections and hub instances. The set is the documented marker registry, so
+/// the reference lists exactly what passes silently here.
 fn isInertFormHead(name: []const u8) bool {
-    return std.mem.eql(u8, name, "id") or
-        std.mem.eql(u8, name, "ids") or
-        std.mem.eql(u8, name, "hierarchical-ids") or
-        std.mem.eql(u8, name, "row") or
-        std.mem.eql(u8, name, "col");
+    return forms_mod.isDirectSubForm(forms_mod.marker_form_docs, name);
 }
 
 /// Apply the source-level subcircuit power-plane switch after every body form

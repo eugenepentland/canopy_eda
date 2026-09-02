@@ -428,18 +428,21 @@ pub const scope_form_docs = blk: {
     const sec = ScopeAvailability{ .design_block = false, .section = true, .sub_section = false };
 
     t[@backingInt(ScopeForm.instance)] = .{ .scope = all, .doc = .{
-        .syntax = "(instance \"REF\" component pin… [(power WATTS | (typ WATTS) (max WATTS))])",
-        .summary = "Place a component with inline pin-to-net bindings. `(power …)` states what " ++
-            "this part dissipates, for the thermal screening — see “Thermal declarations”.",
+        .syntax = "(instance \"REF\" component sub-form…)",
+        .summary = "Place a component with inline pin-to-net bindings. Its body grammar — `(pin …)`, " ++
+            "`(near …)`, `(power …)` and the rest — is the “Instance sub-forms” table; any other " ++
+            "`(key \"value\")` child is an inline property override on the placed part.",
     } };
     t[@backingInt(ScopeForm.port)] = .{ .scope = all, .doc = .{
-        .syntax = "(port \"name\" [net] dir [kind] [(rated lo hi)] [(side left|right|top|bottom)])",
+        .syntax = "(port \"name\" [net] dir [kind] [optional] [role R] [protocol P] [class C] sub-form…)",
         .summary = "Declare a block boundary signal. A power/rf port's direction (or an explicit (side …)) tells the PCB " ++
-            "rough placer where the net enters/leaves the module — in → left, out → right.",
+            "rough placer where the net enters/leaves the module — in → left, out → right. The " ++
+            "parenthesised options are the “Port sub-forms” table.",
     } };
     t[@backingInt(ScopeForm.bus_port)] = .{ .scope = all, .doc = .{
-        .syntax = "(bus-port \"prefix\" width dir …)",
-        .summary = "Declare a multi-bit boundary bus that expands to one port per lane.",
+        .syntax = "(bus-port \"prefix\" lo hi [(suffixes S…)] port-modifier…)",
+        .summary = "Declare a multi-bit boundary bus that expands to one port per lane. `(suffixes …)` " ++
+            "emits one port per lane per suffix, e.g. a differential `P`/`N` pair.",
     } };
     t[@backingInt(ScopeForm.note)] = .{ .scope = all, .doc = .{
         .syntax = "(note \"id\" \"text\" [(ref …)])",
@@ -450,9 +453,13 @@ pub const scope_form_docs = blk: {
         .summary = "Functional subsystem card. Inside `(section …)` nests one level into a sub-section.",
     } };
     t[@backingInt(ScopeForm.decouple)] = .{ .scope = all, .doc = .{
-        .syntax = "(decouple \"NET\" [(comp \"val\")] COUNT per-pin [REF|auto] PIN…)",
+        .syntax = "(decouple \"NET\" [(comp \"val\")] COUNT per-pin [REF|auto] PIN…) | " ++
+            "(decouple \"NET\" (per-pin (comp \"val\") FN…)… (bulk (comp \"val\") COUNT)… (bypass …)…)",
         .summary = "Emit COUNT decoupling caps per listed host pin. Component and REF may come from " ++
-            "(decouple-defaults …); a trailing `auto` expands to the pins already declared on the net.",
+            "(decouple-defaults …); a trailing `auto` expands to the pins already declared on the net. " ++
+            "The compact rail form takes sub-forms instead: `(per-pin …)` bypasses each named pin " ++
+            "function (inferring the host), `(bulk COMPONENT COUNT)` adds shared rail capacitance, and " ++
+            "`(bypass …)` takes the positional item list.",
     } };
     t[@backingInt(ScopeForm.series)] = .{ .scope = all, .doc = .{
         .syntax = "(series …)",
@@ -467,8 +474,11 @@ pub const scope_form_docs = blk: {
         .summary = "Tie one or more nets to a canonical name (net-merge).",
     } };
     t[@backingInt(ScopeForm.bus_net)] = .{ .scope = all, .doc = .{
-        .syntax = "(bus-net \"PREFIX\" lo hi \"SUB\") | (bus-net \"PREFIX\" lo hi (suffix \"S\") (over \"SUB\" (port-base \"P\" N)))",
-        .summary = "Tie a lane range to a sub-block bus, including an optional parent suffix and offset child-port family.",
+        .syntax = "(bus-net \"PREFIX\" lo hi \"SUB\") | (bus-net \"PREFIX\" lo hi (suffix \"S\") (over \"SUB\" (port-base \"P\" N))) | " ++
+            "(bus-net \"PREFIX\" lo hi [(suffixes S…)] (over \"SUB\"…) (ports P…))",
+        .summary = "Tie a lane range to a sub-block bus, including an optional parent suffix and offset child-port family. " ++
+            "The strided form distributes the channel range sub-major across every `(over …)` sub-block " ++
+            "and `(ports …)` port family, emitting one tie per `(suffixes …)` entry.",
     } };
     t[@backingInt(ScopeForm.pullup)] = .{ .scope = all, .doc = .{
         .syntax = "(pullup \"SIGNAL\" VALUE \"RAIL\")",
@@ -483,21 +493,24 @@ pub const scope_form_docs = blk: {
         .summary = "Emit a two-resistor divider and optionally assert its calculated tap voltage.",
     } };
     t[@backingInt(ScopeForm.led)] = .{ .scope = all, .doc = .{
-        .syntax = "(led \"NAME\" \"SUPPLY\" COLOR (r VALUE) [(return \"NET\")])",
-        .summary = "Emit a series resistor and LED indicator with semantic labels.",
+        .syntax = "(led \"NAME\" \"SUPPLY\" COLOR (r VALUE) [(return \"NET\")] [(anode \"NET\")])",
+        .summary = "Emit a series resistor and LED indicator with semantic labels. `(anode …)` names " ++
+            "the resistor/diode midpoint explicitly instead of the derived `<NAME>_LED_A`.",
     } };
 
     t[@backingInt(ScopeForm.pins)] = .{ .scope = all, .doc = .{
-        .syntax = "(pins \"REF\" (group \"label\") pin-form…)",
-        .summary = "Group a main-IC's pin assignments under a sub-section.",
+        .syntax = "(pins \"REF\" [(group \"label\")] pin-form…)",
+        .summary = "Group a main-IC's pin assignments under a sub-section. Its children are the " ++
+            "“Pins-block sub-forms” table.",
     } };
     t[@backingInt(ScopeForm.protocol)] = .{ .scope = dsec, .doc = .{
         .syntax = "(protocol atom)",
         .summary = "Tag a section with a protocol keyword (e.g. `usb`, `i2c`).",
     } };
     t[@backingInt(ScopeForm.calc)] = .{ .scope = dsec, .doc = .{
-        .syntax = "(calc …)",
-        .summary = "Inline design math block, surfaced in the review report.",
+        .syntax = "(calc \"name\" (let NAME expr)… [(assert-range value lo hi \"label\")]…)",
+        .summary = "Inline design math block, surfaced in the review report. Each `(let …)` binds and " ++
+            "records a value in the block's own scope; `(assert-range …)` checks one of them.",
     } };
     t[@backingInt(ScopeForm.description)] = .{ .scope = dsec, .doc = .{
         .syntax = "(description \"text\")",
@@ -536,10 +549,11 @@ pub const scope_form_docs = blk: {
             "stack N = ×N identical channels). The functional schematic draws these as its outermost grouping.",
     } };
     t[@backingInt(ScopeForm.sub_block)] = .{ .scope = all, .doc = .{
-        .syntax = "(sub-block \"name\" (module-call args…))",
+        .syntax = "(sub-block \"name\" (module-call args…) | \"path/to/file.sexp\" sub-form…)",
         .summary = "Instantiate a parameterised module inside the design. Its parts flatten into " ++
             "the netlist under the sub-block path prefix and the PCB solver places them with the " ++
-            "rest of the board.",
+            "rest of the board. Its trailing children — `(bridge …)` above all, which wires the " ++
+            "module's ports to board nets — are the “Sub-block sub-forms” table.",
     } };
     t[@backingInt(ScopeForm.verifies)] = .{ .scope = tl, .doc = .{
         .syntax = "(verifies (req \"REF\" REQID) [rationale])",
@@ -563,10 +577,16 @@ pub const scope_form_docs = blk: {
             "N stacked channels — for design-phase diagrams before a real component exists.",
     } };
     t[@backingInt(ScopeForm.layout)] = .{ .scope = tl, .doc = .{
-        .syntax = "(diagram-layout (anchor \"name\") (place \"name\" (right-of|left-of|above|below \"ref\"))…)",
+        .syntax = "(diagram-layout [(anchor \"name\")] [(place \"name\" (right-of|left-of|above|below \"ref\")…)]… " ++
+            "[(row \"a\" \"b\"…)]… [(group \"Label\" \"a\" \"b\"…)]… [(edge left|right \"a\"…)]…)",
         .summary = "Position blocks relative to one another on the SCHEMATIC block diagram " ++
             "(Mermaid-style, free-floating) — nothing to do with PCB placement, which is " ++
-            "the force / rough solver on /pcb-layout.",
+            "the force / rough solver on /pcb-layout. Block keys are section names and " ++
+            "sub-block handles. `(anchor …)` and a bare `(place …)` pin a root; `(row …)` is an " ++
+            "ordered horizontal band; `(group …)` draws a labelled region over its members; " ++
+            "`(edge …)` parks members against one side. Note these `(row …)`/`(group …)` forms are " ++
+            "variadic block-key lists — unrelated to a section's `(row N)` grid hint or the " ++
+            "design-scope `(group \"name\" (\"R1\"…))` member list.",
     } };
     t[@backingInt(ScopeForm.board)] = .{ .scope = tl, .doc = .{
         .syntax = "(board [(part-number \"PN\")] (size W H) [(corner-radius R)] [(outline-approved \"DIGEST\")] " ++
@@ -1041,6 +1061,545 @@ pub const scope_form_docs = blk: {
     break :blk requireAllDocumented(ScopeForm, ScopedFormDoc, t);
 };
 
+// ── Sub-form registries ────────────────────────────────────────────────
+// The tables above cover the head atoms `evalForm` and the scope dispatch
+// switch on. Compound forms carry their OWN grammar one level down —
+// `(instance … (pin …) (near …))`, `(sub-block … (bridge …))`,
+// `(component … (requirement …))` — matched by head atom rather than by an
+// enum, so there is no variant for `requireAllDocumented` to hang off.
+// Each table below is instead the single source of truth for one compound
+// form's children: the evaluator derives its accepted-children /
+// reserved-head-atom list from the table, `docgen.zig` renders the same rows
+// into the reference, and its coverage test fails when a new `isForm("…")`
+// head appears under `src/eval` that no registry names.
+
+/// One documented child of a compound form.
+pub const SubFormDoc = struct {
+    /// Head atom exactly as written in source.
+    name: []const u8,
+    /// The source template a human would write.
+    syntax: []const u8,
+    /// One-line description for the generated reference.
+    summary: []const u8,
+    /// Head atom of the sibling row this one is written inside, or "" when it
+    /// is a direct child of the compound form. A nested row is documented but
+    /// stays out of the accepted-direct-children set, so a misplaced
+    /// `(rename …)` under `(sub-block …)` still warns.
+    within: []const u8 = "",
+    /// Whether the compound form's own body reserves this head atom — refuses
+    /// to re-read it as something else. An `(instance …)` body turns any
+    /// unreserved `(key "value")` child into an inline property, so the
+    /// reserved set is exactly what it must not capture. Direct children are
+    /// always reserved; a nested row sets this only when the outer parser
+    /// guards the atom too.
+    reserved: bool = true,
+};
+
+/// True when `name` is a row of `table`, nested rows included.
+pub fn isSubForm(table: []const SubFormDoc, name: []const u8) bool {
+    for (table) |row| {
+        if (std.mem.eql(u8, row.name, name)) return true;
+    }
+    return false;
+}
+
+/// True when `name` is accepted DIRECTLY under the compound form `table`
+/// describes. Accepted-children checks compare against this.
+pub fn isDirectSubForm(table: []const SubFormDoc, name: []const u8) bool {
+    for (table) |row| {
+        if (row.within.len == 0 and std.mem.eql(u8, row.name, name)) return true;
+    }
+    return false;
+}
+
+/// How many rows of `table` the compound form reserves.
+fn reservedSubFormCount(comptime table: []const SubFormDoc) usize {
+    var n: usize = 0;
+    for (table) |row| {
+        if (row.reserved) n += 1;
+    }
+    return n;
+}
+
+/// The head atoms a compound form reserves — what a parser compares against
+/// before falling back to its catch-all reading. Returned by value so the
+/// caller's `const` owns the array.
+pub fn reservedSubFormNames(comptime table: []const SubFormDoc) [reservedSubFormCount(table)][]const u8 {
+    var out: [reservedSubFormCount(table)][]const u8 = undefined;
+    var n: usize = 0;
+    for (table) |row| {
+        if (!row.reserved) continue;
+        out[n] = row.name;
+        n += 1;
+    }
+    return out;
+}
+
+/// Comptime-reject a table that names one head atom twice — a duplicate would
+/// double a reference row and make the derived name lists ambiguous.
+fn requireUniqueSubFormNames(comptime table: []const SubFormDoc) void {
+    comptime {
+        for (table, 0..) |row, i| {
+            for (table[i + 1 ..]) |other| {
+                if (std.mem.eql(u8, row.name, other.name))
+                    @compileError("duplicate sub-form row '" ++ row.name ++ "'");
+            }
+        }
+    }
+}
+
+/// Comptime-reject a row that nests inside a form the table never declares,
+/// or a direct child marked unreserved (a direct child is reserved by
+/// definition — the parser dispatches on it).
+fn requireSubFormParents(comptime table: []const SubFormDoc) void {
+    comptime {
+        for (table) |row| {
+            if (row.within.len == 0 and !row.reserved)
+                @compileError("direct sub-form '" ++ row.name ++ "' is always reserved");
+            if (row.within.len != 0 and !isSubForm(table, row.within))
+                @compileError("sub-form '" ++ row.name ++ "' nests inside unknown '" ++ row.within ++ "'");
+        }
+    }
+}
+
+/// Validate a sub-form table at compile time and return it, so a declaration
+/// can wrap its literal in this call and get the checks for free.
+pub fn requireWellFormedSubForms(comptime table: []const SubFormDoc) []const SubFormDoc {
+    comptime {
+        requireUniqueSubFormNames(table);
+        requireSubFormParents(table);
+        return table;
+    }
+}
+
+/// Children of an `(instance "REF" component …)` body. `eval/instance.zig`
+/// derives its reserved-head-atom list from this table with
+/// `reservedSubFormNames`: a `(key "value")` child whose head is NOT reserved
+/// here becomes an inline property override on the placed part — which is how
+/// `(mpn "…")`, `(class ldo)` and `(module-bypass "reason")` are written — so
+/// adding a row changes what the evaluator accepts.
+pub const instance_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
+    .{
+        .name = "pin",
+        .syntax = "(pin PAD… \"NET\" [(as \"FN\"…)] [(i-typ A)] [(i-max A)] [(load \"label\")])",
+        .summary = "Wire one or more of this part's pads to a net. A pad token is a physical pad id or a " ++
+            "pinout function name; every pad listed on one form lands on the same net.",
+    },
+    .{
+        .name = "as",
+        .within = "pin",
+        .syntax = "(pin PAD \"NET\" (as \"FN\"…))",
+        .summary = "Assert the pad resolves to these pinout function names — the spelling guard that warns " ++
+            "when the library pinout disagrees. Honoured only on a single-pad `(pin …)`. Reserved at " ++
+            "instance level too, so a stray one is never read as a property.",
+    },
+    .{
+        .name = "i-typ",
+        .within = "pin",
+        .reserved = false,
+        .syntax = "(pin … (i-typ AMPS))",
+        .summary = "Typical current this pad draws or sources, feeding the rail budget and the thermal screen.",
+    },
+    .{
+        .name = "i-max",
+        .within = "pin",
+        .reserved = false,
+        .syntax = "(pin … (i-max AMPS))",
+        .summary = "Worst-case current for the same budgets.",
+    },
+    .{
+        .name = "load",
+        .within = "pin",
+        .reserved = false,
+        .syntax = "(pin … (load \"label\"))",
+        .summary = "Name the load this pad represents so the power budget can attribute the current to it.",
+    },
+    .{
+        .name = "part",
+        .syntax = "(part \"Name\" [(row N)] [(col N)] (pin …)…)",
+        .summary = "Group pins into one labelled unit of a multi-part symbol. Each inner `(pin …)` wires " ++
+            "exactly like a top-level one; the grouping only changes how the schematic draws the part.",
+    },
+    .{
+        .name = "row",
+        .within = "part",
+        .reserved = false,
+        .syntax = "(part … (row N))",
+        .summary = "Grid hint on a part group. Accepted and inert — multi-part units are placed automatically.",
+    },
+    .{
+        .name = "col",
+        .within = "part",
+        .reserved = false,
+        .syntax = "(part … (col N))",
+        .summary = "The column half of the same inert grid hint.",
+    },
+    .{
+        .name = "bus",
+        .syntax = "(bus \"NET_PREFIX\" BUS_NAME)",
+        .summary = "Expand a bus the component's library definition declares: lane i of BUS_NAME is wired " ++
+            "to `NET_PREFIX<i>`.",
+    },
+    .{
+        .name = "note",
+        .syntax = "(note \"text\")",
+        .summary = "Attach a note to this part; it renders on the instance in the schematic.",
+    },
+    .{
+        .name = "power",
+        .syntax = "(power WATTS | (typ WATTS) (max WATTS))",
+        .summary = "What this part dissipates, for the thermal screening — see “Thermal declarations”.",
+    },
+    .{
+        .name = "dnp",
+        .syntax = "(dnp)",
+        .summary = "Do Not Populate: the part keeps its schematic symbol and its footprint on the board, " ++
+            "and leaves the assembly BOM.",
+    },
+    .{
+        .name = "decouples",
+        .syntax = "(decouples \"IC\" PIN) | (decouples rail)",
+        .summary = "Bind this capacitor's power leg to a specific hub pad, or opt the cap out of the " ++
+            "per-pin decoupling lint because it deliberately serves the whole rail. PIN is resolved " ++
+            "against the named IC's pinout, not this part's.",
+    },
+    .{
+        .name = "near",
+        .syntax = "(near \"REF\" PIN [(own PAD)])",
+        .summary = "Place this part beside REF's pad PIN. PIN resolves against the TARGET's pinout, which " ++
+            "is why it is kept raw until every instance exists.",
+    },
+    .{
+        .name = "own",
+        .within = "near",
+        .reserved = false,
+        .syntax = "(near … (own PAD))",
+        .summary = "Which pad of THIS part faces the target — resolved through this part's own pinout.",
+    },
+    .{
+        .name = "strap-ok",
+        .syntax = "(strap-ok PIN \"reason\")",
+        .summary = "Sign off a pin tied straight to a rail, satisfying the `strap_tied_to_rail` ERC rule.",
+    },
+    .{
+        .name = "nc-ok",
+        .syntax = "(nc-ok PIN \"reason\")",
+        .summary = "Sign off a deliberately unconnected pad, satisfying the `no_connect` ERC rule.",
+    },
+    .{
+        .name = "id",
+        .syntax = "(id hex8)",
+        .summary = "Stable identity anchor. The build mints one into the source when it is missing.",
+    },
+});
+
+/// Children of a `(pins "REF" …)` block — the out-of-line way to wire an
+/// already-placed part. `eval/builders.isKnownPinsChild` derives its
+/// accepted set from the direct rows here.
+pub const pins_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
+    .{
+        .name = "pin",
+        .syntax = "(pin PAD… \"NET\" [(as \"FN\"…)] [(i-typ A)] [(i-max A)] [(load \"label\")])",
+        .summary = "Identical to the `(instance … (pin …))` form, including its annotations — the two " ++
+            "paths share one parser. Wiring a pad whose pinout function name differs from the net also " ++
+            "records a function-name alias.",
+    },
+    .{
+        .name = "bus",
+        .syntax = "(bus \"NET_PREFIX\" [(as-prefix \"FN_PREFIX\")] LANE… | (LANE…)…)",
+        .summary = "Wire a run of lanes in one form: lane i lands on `NET_PREFIX<i>`. Lane tokens may be " ++
+            "listed flat or in parenthesised groups; both emit the same nets.",
+    },
+    .{
+        .name = "as-prefix",
+        .within = "bus",
+        .reserved = false,
+        .syntax = "(bus … (as-prefix \"FN_PREFIX\"))",
+        .summary = "Auto-assert lane i as pinout function `FN_PREFIX<i>`, so a wide bus need not be " ++
+            "expanded into one `(pin … (as …))` form per lane just to pass the pin-function check.",
+    },
+    .{
+        .name = "group",
+        .syntax = "(group \"label\")",
+        .summary = "Label every pin this block declares, so the schematic draws them as one named group. " ++
+            "Unrelated to the design-scope `(group …)` member list.",
+    },
+});
+
+/// Children of a `(sub-block "name" (module-call …) …)` form.
+/// `eval/builders.buildSubBlock` derives its accepted set from the direct
+/// rows here, so an unknown child still warns instead of going silently dead.
+pub const sub_block_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
+    .{
+        .name = "bridge",
+        .syntax = "(bridge \"PREFIX\" PORT… [(rename PORT SUFFIX)]…)",
+        .summary = "Wire the sub-block's ports to board nets without one `(net …)` line each: every " ++
+            "bridged port P ties board net `PREFIX<suffix>` to module net `<name>/P`, with <suffix> " ++
+            "defaulting to P. With an empty PREFIX and a `(rename …)` per port the form reads as a " ++
+            "port-to-net map. Power and ground ports are normally left out and wired by the " ++
+            "consolidated `(net …)` rails instead.",
+    },
+    .{
+        .name = "rename",
+        .within = "bridge",
+        .reserved = false,
+        .syntax = "(bridge … (rename PORT SUFFIX))",
+        .summary = "Override one port's board-side suffix, so SPI `CS` can reach board net `…NCS` — or, " ++
+            "with an empty prefix, name the board net outright.",
+    },
+    .{
+        .name = "id",
+        .syntax = "(id hex8)",
+        .summary = "Stable identity anchor for the sub-block itself.",
+    },
+    .{
+        .name = "ids",
+        .syntax = "(ids (\"origin-key\" hex8)…)",
+        .summary = "Sidecar pinning the identities of children minted inside this sub-block. Designs that " ++
+            "declare `(hierarchical-ids)` derive them from the form id instead and need no sidecar.",
+    },
+    .{
+        .name = "reflow",
+        .syntax = "(reflow)",
+        .summary = "Opt this sub-block out of module-layout composition, so the parent lays its contents " ++
+            "out from scratch rather than reusing the module's own arrangement.",
+    },
+});
+
+/// Children of a `(port …)` declaration. The port parser reads these by head
+/// atom and warns on anything else, so the table is documentation rather than
+/// a derived accepted set.
+pub const port_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
+    .{
+        .name = "rated",
+        .syntax = "(rated LO HI)",
+        .summary = "The absolute voltage window this port's net may sit in; the release rating checks " ++
+            "compare the design's proven envelope against it.",
+    },
+    .{
+        .name = "nominal",
+        .syntax = "(nominal VOLTS)",
+        .summary = "The port's nominal voltage. The argument is evaluated, so a regulator module can " ++
+            "publish an output computed from its own feedback-divider parameters. A bare trailing " ++
+            "number means the same thing.",
+    },
+    .{
+        .name = "current",
+        .syntax = "(current TYP [MAX])",
+        .summary = "What the port carries, feeding the rail budget.",
+    },
+    .{
+        .name = "efficiency",
+        .syntax = "(efficiency RATIO) | (efficiency linear)",
+        .summary = "Conversion efficiency of the module behind an output port, so its input draw and " ++
+            "dissipation can be back-computed. `linear` states the pass-through case.",
+    },
+    .{
+        .name = "enable",
+        .syntax = "(enable \"NET\")",
+        .summary = "The net that gates this port, tying the rail to its sequencing.",
+    },
+    .{
+        .name = "electrical",
+        .syntax = "(electrical [(type …)] [(drive …)] [(v-ih-min V)] [(v-il-max V)] [(v-oh-typ V)] " ++
+            "[(v-ol-typ V)] [(max-voltage V)] [(domain NAME)])",
+        .summary = "Logic thresholds and drive class for the port, so the level-compatibility checks can " ++
+            "run across a boundary. Same grammar as a component's `(electrical …)`, minus its pin name.",
+    },
+    .{
+        .name = "side",
+        .syntax = "(side left|right|top|bottom)",
+        .summary = "Where this port's net enters or leaves the module — the PCB rough placer's explicit " ++
+            "flow hint, overriding the direction heuristic.",
+    },
+});
+
+/// Head atoms accepted in design scope that carry identity or layout intent
+/// rather than circuit content. `eval/design_block.isInertFormHead` derives
+/// its set from the direct rows here, so these never draw an
+/// unknown-sub-form warning.
+pub const marker_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
+    .{
+        .name = "id",
+        .syntax = "(id hex8)",
+        .summary = "Stable identity anchor on the enclosing form, minted into the source by the build.",
+    },
+    .{
+        .name = "ids",
+        .syntax = "(ids (\"origin-key\" hex8)…)",
+        .summary = "Enumerated identity sidecar for the children a form emits — decoupling caps, series " ++
+            "elements, repeat iterations, sub-block contents.",
+    },
+    .{
+        .name = "hierarchical-ids",
+        .syntax = "(hierarchical-ids)",
+        .summary = "Design-block marker opting into derived child identity: every emitted child's uuid " ++
+            "comes from its parent form's `(id …)` plus a structural key, so no `(ids …)` sidecar is " ++
+            "written and a renumber cannot shuffle identities.",
+    },
+    .{
+        .name = "row",
+        .syntax = "(row N)",
+        .summary = "Grid row for a section in the system diagram. A section with both a row and a column " ++
+            "seeds the block-diagram layout when no `(diagram-layout …)` is authored.",
+    },
+    .{
+        .name = "col",
+        .syntax = "(col N)",
+        .summary = "Grid column for the same section placement.",
+    },
+});
+
+/// Fields of a `lib/components/<name>.sexp` `(component …)` or
+/// `(component-family …)` definition. `eval/modules.zig` derives its
+/// structural-field list from the direct rows here; any other `(key "value")`
+/// child becomes an inline property carried onto every placed instance, which
+/// is how `(class ldo)`, `(mpn "…")` and `(manufacturer "…")` are written.
+pub const component_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
+    .{
+        .name = "symbol",
+        .syntax = "(symbol \"name\")",
+        .summary = "The schematic symbol to draw, resolved in `lib/symbols/`.",
+    },
+    .{
+        .name = "footprint",
+        .syntax = "(footprint name)",
+        .summary = "The land pattern to place, resolved in `lib/footprints/`.",
+    },
+    .{
+        .name = "pinout",
+        .syntax = "(pinout \"name\")",
+        .summary = "The pad-to-function map in `lib/pinouts/` that lets designs wire this part by " ++
+            "function name. Defaults to the symbol name when omitted.",
+    },
+    .{
+        .name = "description",
+        .syntax = "(description \"text\")",
+        .summary = "One-line part description, surfaced on every instance so renderers need not re-read " ++
+            "the library file.",
+    },
+    .{
+        .name = "parameter",
+        .syntax = "(parameter NAME TYPE)",
+        .summary = "`(component-family …)` only: names the value a call site supplies, e.g. " ++
+            "`(cap-0402 \"100nF\")`.",
+    },
+    .{
+        .name = "refdes",
+        .syntax = "(refdes \"U\")",
+        .summary = "Explicit ref-des class letter for this part's instances, overriding the family-name " ++
+            "heuristic.",
+    },
+    .{
+        .name = "bus",
+        .syntax = "(bus \"name\" PIN…)",
+        .summary = "Name an ordered pin group a design can wire in one step with the instance-level " ++
+            "`(bus …)` sub-form.",
+    },
+    .{
+        .name = "note",
+        .syntax = "(note \"text\")",
+        .summary = "Library note about the part.",
+    },
+    .{
+        .name = "datasheet",
+        .syntax = "(datasheet \"file.pdf\")",
+        .summary = "One declared datasheet — a filename in `lib/datasheets/` or an absolute http(s) URL. " ++
+            "See “Datasheet review preflight”.",
+    },
+    .{
+        .name = "datasheet-review",
+        .syntax = "(datasheet-review (datasheet \"…\") (sha256 \"…\") (status …) (reviewed-by \"…\") " ++
+            "(date \"…\") (category KEY)… [(category-na KEY \"why\")…])",
+        .summary = "Bind this part's requirement review to an exact PDF; replacing the file makes the " ++
+            "review stale. See “Datasheet review preflight” for the full record.",
+    },
+    .{
+        .name = "requirement",
+        .syntax = "(requirement \"text\" [(ref \"file.pdf\" (page N) (quote \"…\"))] [(check …)] [(id \"…\")])",
+        .summary = "A datasheet rule every design placing this part inherits. See “Requirement checks” " ++
+            "for the executable `(check …)` grammar.",
+    },
+    .{
+        .name = "ref",
+        .within = "requirement",
+        .reserved = false,
+        .syntax = "(ref \"file.pdf\" [(page N)] [(quote \"…\")])",
+        .summary = "The citation backing a requirement or a note: which declared PDF, which page, and the " ++
+            "sentence it rests on. The release profile requires one on every requirement.",
+    },
+    .{
+        .name = "page",
+        .within = "ref",
+        .reserved = false,
+        .syntax = "(ref … (page N))",
+        .summary = "1-based page number inside the cited PDF.",
+    },
+    .{
+        .name = "quote",
+        .within = "ref",
+        .reserved = false,
+        .syntax = "(ref … (quote \"…\"))",
+        .summary = "The short source quote copied from that page.",
+    },
+    .{
+        .name = "check",
+        .within = "requirement",
+        .reserved = false,
+        .syntax = "(requirement … (check …))",
+        .summary = "The machine-checkable half of the rule; an unrecognised one warns rather than passing " ++
+            "silently. See “Requirement checks”.",
+    },
+    .{
+        .name = "ignore-requirements",
+        .syntax = "(ignore-requirements)",
+        .summary = "Opt this part out of requirement inheritance entirely — for passives and connectors " ++
+            "whose datasheet carries no design rules.",
+    },
+    .{
+        .name = "electrical",
+        .syntax = "(electrical \"PIN\" [(type …)] [(drive …)] [(v-ih-min V)] [(v-il-max V)] " ++
+            "[(v-oh-typ V)] [(v-ol-typ V)] [(max-voltage V)] [(domain NAME)])",
+        .summary = "Per-pin logic thresholds and drive class, one form per pin, for the " ++
+            "level-compatibility checks.",
+    },
+    .{
+        .name = "thermal",
+        .syntax = "(thermal …)",
+        .summary = "The part's thermal envelope — see “Thermal declarations” for the sub-forms.",
+    },
+});
+
+/// Head atoms an `(instance …)` body must not read as an inline property.
+pub const instance_reserved_forms = reservedSubFormNames(instance_form_docs);
+
+/// Head atoms a `(component …)` / `(component-family …)` body must not read as
+/// an inline property: every structural field the registry documents, plus the
+/// two definition head atoms themselves, so a nested definition is skipped
+/// rather than turned into a property.
+pub const component_reserved_fields = reservedSubFormNames(component_form_docs) ++
+    [_][]const u8{ "component", "component-family" };
+
+/// Every sub-form registry, in the order `docgen.zig` renders them. The
+/// coverage test walks this list, so a new table is checked the moment it is
+/// added here.
+pub const sub_form_tables = [_][]const SubFormDoc{
+    instance_form_docs,
+    pins_form_docs,
+    sub_block_form_docs,
+    port_form_docs,
+    marker_form_docs,
+    component_form_docs,
+};
+
+/// True when any sub-form registry documents `name`.
+pub fn isRegisteredSubForm(name: []const u8) bool {
+    for (sub_form_tables) |table| {
+        if (isSubForm(table, name)) return true;
+    }
+    return false;
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 // spec: eval/forms - SpecialForm.fromAtom resolves every head atom the evaluator dispatches on
@@ -1120,4 +1679,67 @@ test "schemaFor covers all special forms except id" {
             try std.testing.expect(schemaFor(variant) != null);
         }
     }
+}
+
+// spec: eval/forms - The instance sub-form registry reserves exactly the head atoms an instance body must not read as an inline property
+test "instance sub-form registry reserves the instance body head atoms" {
+    // Reserved = every direct child plus `(as …)`, which is written inside
+    // `(pin …)` but guarded at instance level so a stray one is not a property.
+    const expected = [_][]const u8{
+        "pin", "as",        "part", "bus",      "note",  "power",
+        "dnp", "decouples", "near", "strap-ok", "nc-ok", "id",
+    };
+    try std.testing.expectEqual(expected.len, instance_reserved_forms.len);
+    for (expected) |name| {
+        try std.testing.expect(containsName(&instance_reserved_forms, name));
+    }
+    // The pin annotations are documented but NOT reserved: `(load "x")` at
+    // instance level still reads as an inline property, as it always has.
+    try std.testing.expect(isSubForm(instance_form_docs, "load"));
+    try std.testing.expect(!containsName(&instance_reserved_forms, "load"));
+}
+
+// spec: eval/forms - The sub-block sub-form registry accepts bridge, id, ids and reflow directly and keeps rename nested inside bridge
+test "sub-block sub-form registry separates direct children from bridge's rename" {
+    for ([_][]const u8{ "bridge", "id", "ids", "reflow" }) |name| {
+        try std.testing.expect(isDirectSubForm(sub_block_form_docs, name));
+    }
+    // `(rename …)` is legal only inside `(bridge …)`, so a misplaced one must
+    // still fail the accepted-children check and warn.
+    try std.testing.expect(isSubForm(sub_block_form_docs, "rename"));
+    try std.testing.expect(!isDirectSubForm(sub_block_form_docs, "rename"));
+    try std.testing.expect(!isDirectSubForm(sub_block_form_docs, "net"));
+}
+
+// spec: eval/forms - The pins-block sub-form registry accepts pin, bus and group directly and keeps as-prefix nested inside bus
+test "pins-block sub-form registry accepts pin, bus and group" {
+    for ([_][]const u8{ "pin", "bus", "group" }) |name| {
+        try std.testing.expect(isDirectSubForm(pins_form_docs, name));
+    }
+    try std.testing.expect(!isDirectSubForm(pins_form_docs, "as-prefix"));
+    try std.testing.expect(isSubForm(pins_form_docs, "as-prefix"));
+}
+
+// spec: eval/forms - The component sub-form registry reserves every structural field plus both definition head atoms
+test "component registry reserves the structural fields and the definition heads" {
+    for ([_][]const u8{
+        "symbol",     "footprint",           "pinout",      "parameter",
+        "refdes",     "bus",                 "note",        "datasheet",
+        "electrical", "ignore-requirements", "thermal",     "requirement",
+        "component",  "component-family",    "description",
+    }) |name| {
+        try std.testing.expect(containsName(&component_reserved_fields, name));
+    }
+    // A requirement's citation forms are documented but stay unreserved, so a
+    // top-level `(class ldo)`-style property child is unaffected.
+    try std.testing.expect(!containsName(&component_reserved_fields, "ref"));
+    try std.testing.expect(!containsName(&component_reserved_fields, "class"));
+}
+
+/// (test helper) True when `names` holds `needle`.
+fn containsName(names: []const []const u8, needle: []const u8) bool {
+    for (names) |name| {
+        if (std.mem.eql(u8, name, needle)) return true;
+    }
+    return false;
 }

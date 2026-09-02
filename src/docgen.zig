@@ -145,6 +145,18 @@ fn renderTo(writer: anytype) !void {
     }
     try writer.writeAll(".\n");
 
+    try renderScopeForms(writer);
+
+    try renderSubFormSections(writer);
+
+    try renderClassifierKeywords(writer);
+
+    try renderReferenceAppendices(writer);
+}
+
+/// Render the "Design-scope forms" section from `forms.scope_form_docs`, the
+/// same table the design-block / section dispatch switches on.
+fn renderScopeForms(writer: anytype) !void {
     try writer.writeAll(
         \\
         \\## Design-scope forms
@@ -169,16 +181,142 @@ fn renderTo(writer: anytype) !void {
         try writeCell(writer, row.doc.summary);
         try writer.writeAll(" |\n");
     }
+}
 
-    try renderClassifierKeywords(writer);
+/// Render one sub-form registry as a `| Form | Summary |` table. A row that
+/// nests inside a sibling carries its parent in the syntax template, so the
+/// nesting is visible without a second column.
+fn renderSubFormTable(writer: anytype, table: []const forms.SubFormDoc) !void {
+    try writer.writeAll("\n| Form | Summary |\n| --- | --- |\n");
+    for (table) |row| {
+        try writer.writeAll("| `");
+        try writeCell(writer, row.syntax);
+        try writer.writeAll("` | ");
+        try writeCell(writer, row.summary);
+        try writer.writeAll(" |\n");
+    }
+}
 
-    try renderReferenceAppendices(writer);
+/// The compound forms whose bodies have their own grammar one level down.
+/// Each section is rendered from the registry the evaluator derives its
+/// accepted-children list from, so the two cannot drift.
+fn renderSubFormSections(writer: anytype) !void {
+    try renderInstanceSubForms(writer);
+    try renderSubBlockSubForms(writer);
+    try renderPortSubForms(writer);
+    try renderMarkerForms(writer);
 }
 
 fn renderReferenceAppendices(writer: anytype) !void {
+    try renderComponentFields(writer);
     try renderThermalForms(writer);
     try renderRequirementChecks(writer);
     try renderDatasheetReview(writer);
+}
+
+/// Render the `(instance …)` and `(pins …)` body grammars — the two ways a
+/// placed part's pins reach nets.
+fn renderInstanceSubForms(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Instance sub-forms
+        \\
+        \\The body of an `(instance "REF" component …)`. A bare string child is
+        \\positional shorthand for the next physical pad (`(instance "R1"
+        \\(res-0402 "10k") "VIN" "TAP")` wires pads 1 and 2), and any
+        \\`(key "value")` child whose head is NOT one of the reserved forms
+        \\below becomes an inline **property** override on the placed part —
+        \\that is how `(mpn "…")`, `(class ldo)` and
+        \\`(module-bypass "reason")` are written. A property child whose value
+        \\is not a string is dropped with a warning.
+        \\
+        \\Rows written inside a sibling form show that nesting in their
+        \\template.
+        \\
+    );
+    try renderSubFormTable(writer, forms.instance_form_docs);
+    try writer.writeAll(
+        \\
+        \\A `(pins "REF" …)` block wires an already-placed part out of line,
+        \\usually one section down from where the instance is declared. Its
+        \\children:
+        \\
+    );
+    try renderSubFormTable(writer, forms.pins_form_docs);
+}
+
+/// Render the `(sub-block …)` body grammar — above all `(bridge …)`, the
+/// form that wires a module's ports to board nets.
+fn renderSubBlockSubForms(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Sub-block sub-forms
+        \\
+        \\Children of a `(sub-block "name" (module-call …) …)`. Anything else
+        \\is rejected with a warning rather than going silently dead.
+        \\
+        \\`(bridge …)` is how hierarchy is wired. Each bridged port `P` emits
+        \\one net tie between board net `PREFIX<suffix>` and module net
+        \\`<name>/P`, where `<suffix>` is `P` unless `(rename P SUFFIX)`
+        \\overrides it. Two idioms are in use: a shared prefix for a peripheral
+        \\bus (`(bridge "IMU_" SCK MOSI MISO (rename CS NCS))`), and an empty
+        \\prefix with one `(rename PORT NET)` per port, which reads as a
+        \\port-to-net map. Power and ground ports are normally left off the
+        \\list — they stay wired through the consolidated `(net …)` rail forms.
+        \\
+    );
+    try renderSubFormTable(writer, forms.sub_block_form_docs);
+}
+
+/// Render the `(port …)` option grammar.
+fn renderPortSubForms(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Port sub-forms
+        \\
+        \\Parenthesised options of a `(port …)` declaration, in any order after
+        \\the direction. Bare-token options sit alongside them: `optional`
+        \\marks the port as not required by the module contract, a
+        \\signal-type keyword (`power`, `clock`, `rf`, …) sets the port kind,
+        \\`role R` / `protocol P` / `class C` each consume the following token
+        \\as metadata, and a bare number is the nominal voltage. An
+        \\unrecognised option warns.
+        \\
+    );
+    try renderSubFormTable(writer, forms.port_form_docs);
+}
+
+/// Render the identity/layout markers accepted in design scope.
+fn renderMarkerForms(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Identity and layout markers
+        \\
+        \\Head atoms accepted wherever design-scope forms are, carrying
+        \\identity or layout intent rather than circuit content. They are inert
+        \\in the scope dispatch — listed here so they never look like a typo
+        \\and never draw an unknown-sub-form warning.
+        \\
+    );
+    try renderSubFormTable(writer, forms.marker_form_docs);
+}
+
+/// Render the `(component …)` / `(component-family …)` library-definition
+/// fields from the same registry `eval/modules.zig` skips over.
+fn renderComponentFields(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Component library fields
+        \\
+        \\The body of a `lib/components/<name>.sexp` definition. A
+        \\`(component …)` is a fixed part; a `(component-family …)` is
+        \\parameterised by one `(parameter …)` the call site supplies, as in
+        \\`(cap-0402 "100nF")`. Any other `(key "value")` child is an inline
+        \\**property** carried onto every placed instance — `(class ldo)`,
+        \\`(mpn "…")` and `(manufacturer "…")` are all properties, not fields.
+        \\
+    );
+    try renderSubFormTable(writer, forms.component_form_docs);
 }
 
 /// Render the "Section-name classifier keywords" section from the
@@ -508,4 +646,136 @@ test "requirement checks section covers every check form" {
     }
     // And the section is addressable by the CLI get_language_reference tool.
     try std.testing.expect(extractSection(doc, "requirement checks") != null);
+}
+// ── Reference coverage ─────────────────────────────────────────────────
+// The registries above make the reference exhaustive over the head atoms the
+// evaluator DISPATCHES on. They cannot see the head atoms it merely MATCHES
+// on — `node.isForm("bridge")` deep inside a parser — and that is exactly
+// where the reference used to go stale. The test below reads `src/eval` the
+// way the tree actually is, pulls every `isForm("…")` literal out of it, and
+// requires each name to be reachable from the generated reference.
+
+/// One head atom `src/eval` matches on that is deliberately absent from the
+/// reference, with the reason it stays that way. Keep this list empty unless
+/// a name is genuinely internal — the point of the coverage test is that a
+/// user-writable form cannot hide here without an argument for it.
+const UndocumentedForm = struct { name: []const u8, why: []const u8 };
+
+const undocumented_eval_forms = [_]UndocumentedForm{};
+
+/// True when `name` is documented: a dispatch-registry head atom, a sub-form
+/// registry row, or a form the generated reference names in a syntax template
+/// (which is itself always rendered from a registry).
+fn isCoveredForm(doc: []const u8, name: []const u8) bool {
+    if (forms.SpecialForm.fromAtom(name) != null) return true;
+    if (forms.ScopeForm.fromAtom(name) != null) return true;
+    if (forms.isRegisteredSubForm(name)) return true;
+    return referenceNamesForm(doc, name);
+}
+
+/// True when `name` is deliberately left out of the reference.
+fn isDeliberatelyUndocumented(name: []const u8) bool {
+    for (undocumented_eval_forms) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return true;
+    }
+    return false;
+}
+
+/// True when the rendered reference writes `(<name>` as a head atom — the
+/// name must end at the paren-word boundary, so `(rate` never satisfies
+/// `rated` and `(id` never satisfies `ids`.
+fn referenceNamesForm(doc: []const u8, name: []const u8) bool {
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, doc, i, '(')) |open| {
+        i = open + 1;
+        const rest = doc[i..];
+        if (!std.mem.startsWith(u8, rest, name)) continue;
+        const after = rest[name.len..];
+        if (after.len == 0 or !isFormNameChar(after[0])) return true;
+    }
+    return false;
+}
+
+fn isFormNameChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '-' or c == '_';
+}
+
+/// Append `<file>: (<name> …)` for every `isForm("…")` head atom in `source`
+/// that no registry documents. Collecting rather than failing on the first hit
+/// lets the test report the whole gap in one failure.
+fn collectUncoveredForms(
+    alloc: std.mem.Allocator,
+    doc: []const u8,
+    file: []const u8,
+    source: []const u8,
+    out: *std.ArrayList(u8),
+) !void {
+    const marker = "isForm(\"";
+    var rest = source;
+    while (std.mem.indexOf(u8, rest, marker)) |hit| {
+        const start = hit + marker.len;
+        const end = std.mem.indexOfScalarPos(u8, rest, start, '"') orelse return;
+        const name = rest[start..end];
+        rest = rest[end..];
+        if (!isPlausibleFormName(name)) continue;
+        if (isCoveredForm(doc, name) or isDeliberatelyUndocumented(name)) continue;
+        try out.print(alloc, "{s}: ({s} …) is documented by no registry\n", .{ file, name });
+    }
+}
+
+/// True when every byte could belong to a head atom, so the scan skips the
+/// `isForm("…")` that appears inside prose in a doc comment.
+fn isPlausibleFormName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| {
+        if (!isFormNameChar(c)) return false;
+    }
+    return true;
+}
+
+// spec: docgen - Every isForm head atom under src/eval is reachable from a form registry or listed as a deliberate exception
+test "the reference covers every form head the evaluator matches on" {
+    const alloc = std.testing.allocator;
+
+    // Skip outside a project tree, exactly as the sync test above does; the
+    // build's docs-check step runs with a deterministic cwd.
+    var dir = infra_fs.cwd().openDir("src/eval", .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    const doc = try renderLanguageReference(alloc);
+    defer alloc.free(doc);
+
+    var uncovered: std.ArrayList(u8) = .empty;
+    defer uncovered.deinit(alloc);
+
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
+        const source = try dir.readFileAlloc(alloc, entry.name, 4 * 1024 * 1024);
+        defer alloc.free(source);
+        try collectUncoveredForms(alloc, doc, entry.name, source, &uncovered);
+    }
+
+    // Any listed name needs a row in src/eval/forms.zig — or, when it is truly
+    // internal, an entry in `undocumented_eval_forms` with its reason.
+    try std.testing.expectEqualStrings("", uncovered.items);
+}
+
+// spec: docgen - The generated reference renders one sub-form section per compound-form registry
+test "sub-form sections render every registry row" {
+    const alloc = std.testing.allocator;
+    const doc = try renderLanguageReference(alloc);
+    defer alloc.free(doc);
+
+    // `(bridge …)` is the form that was in neither doc before these sections.
+    const sub_block = extractSection(doc, "Sub-block sub-forms").?;
+    try std.testing.expect(std.mem.indexOf(u8, sub_block, "(bridge \"PREFIX\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sub_block, "(rename PORT SUFFIX)") != null);
+
+    // Every row of every registry reaches the page it belongs to.
+    for (forms.sub_form_tables) |table| {
+        for (table) |row| try std.testing.expect(std.mem.indexOf(u8, doc, row.summary) != null);
+    }
+    try std.testing.expect(extractSection(doc, "instance sub-forms") != null);
 }

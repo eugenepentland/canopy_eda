@@ -20,6 +20,7 @@ const NetTie = Evaluator.NetTie;
 const ids = @import("ids.zig");
 const instance_mod = @import("instance.zig");
 const electrical = @import("electrical.zig");
+const forms_mod = @import("forms.zig");
 
 const Node = ast.Node;
 const Value = env_mod.Value;
@@ -570,11 +571,12 @@ fn emitBusLane(
     bus_idx.* += 1;
 }
 
-/// True when a child of a `(pins …)` block is one of the recognised forms
-/// (`pin`/`bus`/`group`). Callers warn-and-skip anything else — those forms
-/// used to be silently dead.
+/// True when a child of a `(pins …)` block is one of the recognised forms.
+/// The set is derived from the documented registry, so the reference lists
+/// exactly what this accepts. Callers warn-and-skip anything else — those
+/// forms used to be silently dead.
 pub fn isKnownPinsChild(node: Node) bool {
-    return node.isForm("pin") or node.isForm("bus") or node.isForm("group");
+    return forms_mod.isDirectSubForm(forms_mod.pins_form_docs, formHeadName(node));
 }
 
 /// Record the unknown-sub-form warning for a non-pin/bus/group child of a
@@ -1286,18 +1288,18 @@ pub fn buildSubBlock(self: *Evaluator, form_children: []const Node, env: *Env) E
         return EvalError.TypeError;
     };
 
-    // Trailing children after the module call: (id …)/(ids …) identity
-    // anchors and (bridge …) net shorthands are consumed elsewhere;
-    // (reflow) opts out of module-layout composition. Anything else is
-    // silently dead — flag it.
+    // Trailing children after the module call, accepted per the documented
+    // registry: (id …)/(ids …) identity anchors and (bridge …) net shorthands
+    // are consumed elsewhere; (reflow) opts out of module-layout composition.
+    // Anything else is silently dead — flag it.
     var reflow = false;
     for (args[2..]) |extra| {
-        if (extra.isForm("id") or extra.isForm("ids") or extra.isForm("bridge")) continue;
-        if (extra.isForm("reflow")) {
-            reflow = true;
+        const head = formHeadName(extra);
+        if (!forms_mod.isDirectSubForm(forms_mod.sub_block_form_docs, head)) {
+            self.warnFmt(extra.span, "unknown sub-form ({s} …) in (sub-block …)", .{head});
             continue;
         }
-        self.warnFmt(extra.span, "unknown sub-form ({s} …) in (sub-block …)", .{formHeadName(extra)});
+        if (std.mem.eql(u8, head, "reflow")) reflow = true;
     }
 
     // Second arg can be:

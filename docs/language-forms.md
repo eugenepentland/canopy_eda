@@ -96,23 +96,23 @@ where each is accepted: **D** = design-block top level,
 
 | Form | Scope | Summary |
 | --- | --- | --- |
-| `(instance "REF" component pin… [(power WATTS \| (typ WATTS) (max WATTS))])` | DSs | Place a component with inline pin-to-net bindings. `(power …)` states what this part dissipates, for the thermal screening — see “Thermal declarations”. |
-| `(port "name" [net] dir [kind] [(rated lo hi)] [(side left\|right\|top\|bottom)])` | DSs | Declare a block boundary signal. A power/rf port's direction (or an explicit (side …)) tells the PCB rough placer where the net enters/leaves the module — in → left, out → right. |
-| `(bus-port "prefix" width dir …)` | DSs | Declare a multi-bit boundary bus that expands to one port per lane. |
+| `(instance "REF" component sub-form…)` | DSs | Place a component with inline pin-to-net bindings. Its body grammar — `(pin …)`, `(near …)`, `(power …)` and the rest — is the “Instance sub-forms” table; any other `(key "value")` child is an inline property override on the placed part. |
+| `(port "name" [net] dir [kind] [optional] [role R] [protocol P] [class C] sub-form…)` | DSs | Declare a block boundary signal. A power/rf port's direction (or an explicit (side …)) tells the PCB rough placer where the net enters/leaves the module — in → left, out → right. The parenthesised options are the “Port sub-forms” table. |
+| `(bus-port "prefix" lo hi [(suffixes S…)] port-modifier…)` | DSs | Declare a multi-bit boundary bus that expands to one port per lane. `(suffixes …)` emits one port per lane per suffix, e.g. a differential `P`/`N` pair. |
 | `(note "id" "text" [(ref …)])` | DSs | Attach a design-time note to the surrounding scope. |
 | `(section "name" ["subtitle"] form…)` | DSs | Functional subsystem card. Inside `(section …)` nests one level into a sub-section. |
-| `(decouple "NET" [(comp "val")] COUNT per-pin [REF\|auto] PIN…)` | DSs | Emit COUNT decoupling caps per listed host pin. Component and REF may come from (decouple-defaults …); a trailing `auto` expands to the pins already declared on the net. |
+| `(decouple "NET" [(comp "val")] COUNT per-pin [REF\|auto] PIN…) \| (decouple "NET" (per-pin (comp "val") FN…)… (bulk (comp "val") COUNT)… (bypass …)…)` | DSs | Emit COUNT decoupling caps per listed host pin. Component and REF may come from (decouple-defaults …); a trailing `auto` expands to the pins already declared on the net. The compact rail form takes sub-forms instead: `(per-pin …)` bypasses each named pin function (inferring the host), `(bulk COMPONENT COUNT)` adds shared rail capacitance, and `(bypass …)` takes the positional item list. |
 | `(series …)` | DSs | Insert a series element (resistor / ferrite / etc.) between two nets. |
 | `(fanout "COMMON" (comp) "NET1" "NET2" … [(id …)])` | DSs | Place one component from a shared COMMON net to each listed net (star of series elements). |
 | `(net "A" "B" …)` | DSs | Tie one or more nets to a canonical name (net-merge). |
-| `(bus-net "PREFIX" lo hi "SUB") \| (bus-net "PREFIX" lo hi (suffix "S") (over "SUB" (port-base "P" N)))` | DSs | Tie a lane range to a sub-block bus, including an optional parent suffix and offset child-port family. |
+| `(bus-net "PREFIX" lo hi "SUB") \| (bus-net "PREFIX" lo hi (suffix "S") (over "SUB" (port-base "P" N))) \| (bus-net "PREFIX" lo hi [(suffixes S…)] (over "SUB"…) (ports P…))` | DSs | Tie a lane range to a sub-block bus, including an optional parent suffix and offset child-port family. The strided form distributes the channel range sub-major across every `(over …)` sub-block and `(ports …)` port family, emitting one tie per `(suffixes …)` entry. |
 | `(pullup "SIGNAL" VALUE "RAIL")` | DSs | Emit a resistor from a signal to a positive rail, retaining pull-up intent. |
 | `(pulldown "SIGNAL" VALUE ["RETURN"])` | DSs | Emit a resistor from a signal to GND (or an explicit return), retaining pull-down intent. |
 | `(divider "VIN" "TAP" "RETURN" R_TOP R_BOTTOM [(expect V TOLERANCE)])` | DSs | Emit a two-resistor divider and optionally assert its calculated tap voltage. |
-| `(led "NAME" "SUPPLY" COLOR (r VALUE) [(return "NET")])` | DSs | Emit a series resistor and LED indicator with semantic labels. |
-| `(pins "REF" (group "label") pin-form…)` | DSs | Group a main-IC's pin assignments under a sub-section. |
+| `(led "NAME" "SUPPLY" COLOR (r VALUE) [(return "NET")] [(anode "NET")])` | DSs | Emit a series resistor and LED indicator with semantic labels. `(anode …)` names the resistor/diode midpoint explicitly instead of the derived `<NAME>_LED_A`. |
+| `(pins "REF" [(group "label")] pin-form…)` | DSs | Group a main-IC's pin assignments under a sub-section. Its children are the “Pins-block sub-forms” table. |
 | `(protocol atom)` | ·Ss | Tag a section with a protocol keyword (e.g. `usb`, `i2c`). |
-| `(calc …)` | ·Ss | Inline design math block, surfaced in the review report. |
+| `(calc "name" (let NAME expr)… [(assert-range value lo hi "label")]…)` | ·Ss | Inline design math block, surfaced in the review report. Each `(let …)` binds and records a value in the block's own scope; `(assert-range …)` checks one of them. |
 | `(description "text")` | ·Ss | One-line section description used in the review report and overview SVG. |
 | `(role input\|output)` | ·S· | Tag a section as a block input or output for the overview diagram. |
 | `(diagram hidden)` | ·S· | Opt this section out of the block-diagram view (schematic card still renders). |
@@ -120,13 +120,13 @@ where each is accepted: **D** = design-block top level,
 | `(category <key>)` | ·S· | Set this section's diagram category (e.g. mcu, power, rf), overriding the name heuristic. |
 | `(group "name" ("R1" "R2" …))` | D·· | Bundle ref-des components for the schematic renderer's visual grouping pass. Members are a LIST of ref-des strings. NOTE: a different, unrelated (group …) form lives inside (diagram-layout …) — there it takes variadic block keys (section names / sub-block handles), e.g. (group "Label" "Block A" "Block B" …), to cluster diagram blocks; that one is parsed inline by the layout form, not this registry entry. |
 | `(function "name" ["caption"] [(stack N)] (hosts "Section A" "Section B" …))` | D·· | Hand-authored functional super-block for the top-level system view: groups the named sections/sheets into one what-it-does block (caption = verb/spec line, stack N = ×N identical channels). The functional schematic draws these as its outermost grouping. |
-| `(sub-block "name" (module-call args…))` | DSs | Instantiate a parameterised module inside the design. Its parts flatten into the netlist under the sub-block path prefix and the PCB solver places them with the rest of the board. |
+| `(sub-block "name" (module-call args…) \| "path/to/file.sexp" sub-form…)` | DSs | Instantiate a parameterised module inside the design. Its parts flatten into the netlist under the sub-block path prefix and the PCB solver places them with the rest of the board. Its trailing children — `(bridge …)` above all, which wires the module's ports to board nets — are the “Sub-block sub-forms” table. |
 | `(verifies (req "REF" REQID) [rationale])` | D·· | Mark a requirement as satisfied by a specific instance. |
 | `(test-point "REF" "NET" [(virtual)] [(purpose "text")] [(required-for tag…)])` | DSs | Place a physical measurement / bring-up pad. Add `(virtual)` for a schematic-only marker. |
 | `(decouple-defaults (ic "REF") (bypass (comp)))` | D·· | Set per-design decouple defaults: a fallback IC ref and bypass cap so (decouple …) can omit both. |
 | `(kicad-pcb "absolute/path/to/board.kicad_pcb")` | D·· | Declare the PCB file the file-based KiCad sync writes board updates to. |
 | `(stub "name" [(role …)] [(mpn …)] [(category key)] [(size W H)] [(channels N)] [(ref "REF")] (signal "name" class "net")…)` | D·· | Declare a placeholder part — auto-placed, sized bounding box, signal-wired, optionally N stacked channels — for design-phase diagrams before a real component exists. |
-| `(diagram-layout (anchor "name") (place "name" (right-of\|left-of\|above\|below "ref"))…)` | D·· | Position blocks relative to one another on the SCHEMATIC block diagram (Mermaid-style, free-floating) — nothing to do with PCB placement, which is the force / rough solver on /pcb-layout. |
+| `(diagram-layout [(anchor "name")] [(place "name" (right-of\|left-of\|above\|below "ref")…)]… [(row "a" "b"…)]… [(group "Label" "a" "b"…)]… [(edge left\|right "a"…)]…)` | D·· | Position blocks relative to one another on the SCHEMATIC block diagram (Mermaid-style, free-floating) — nothing to do with PCB placement, which is the force / rough solver on /pcb-layout. Block keys are section names and sub-block handles. `(anchor …)` and a bare `(place …)` pin a root; `(row …)` is an ordered horizontal band; `(group …)` draws a labelled region over its members; `(edge …)` parks members against one side. Note these `(row …)`/`(group …)` forms are variadic block-key lists — unrelated to a section's `(row N)` grid hint or the design-scope `(group "name" ("R1"…))` member list. |
 | `(board [(part-number "PN")] (size W H) [(corner-radius R)] [(outline-approved "DIGEST")] [(perimeter-fence (via DIA DRILL) (spacing PITCH) (edge-offset OFFSET) (mask-width WIDTH) [(net "GND")] [(keepout CLEARANCE [(blocks components tracks vias)] [(allow-nets "NET"…)])])] [(heatsink (rect X Y W H) (side top\|bottom) (target "SCOPE" "ORIGIN") [(material aluminum_6063\|aluminum_1050\|copper)] [(base-mm N)] [(fin-height-mm N)] [(fin-thickness-mm N)] [(fin-gap-mm N)] [(fin-axis length\|width)] [(pad-thickness-mm N)] [(pad-k-w-mk N)])] (left\|right\|top\|bottom "REF"… \| (rot N "REF")…)… [(corners "REF"…)])` | D·· | Physical board outline + edge hardware: (size W H) is the outline in mm (required — without it the form is inert). (corner-radius R) rounds the outline's corners with radius R mm — the shape flows to Edge.Cuts, the board-edge DRC, and every renderer as a fine polyline. (outline-approved "DIGEST") accepts a saved outline profile this form cannot describe — a notch, a recess, mixed corner radii — by pinning that exact profile's digest, which the fabrication-readiness outline-drift finding prints for copy-paste. It approves the PROFILE only: (size W H) is still compared, and redrawing the outline makes the pin stale rather than silently blessing the new shape. (perimeter-fence …) generates plated vias around that exact outline; DIA and DRILL set their finished diameter and hole, PITCH is their nominal centre spacing, OFFSET is the via-centre distance from the finished edge, and WIDTH removes solder mask inward from the edge only on a face carrying a matching GND pour (F.Mask / B.Mask). Component bodies/courtyards do not interrupt the derived edge hardware: pad proximity is the only component-derived reason to suppress a fence via, and its annulus stays at least 0.2 mm from the pad. Each face's mask opening retains solder mask over foreign pads, tracks, vias, and the GND pour clearance around them. Ordinary copper and drill DRC legality still applies to every via. The fence net defaults to GND. (keepout CLEARANCE …) reserves a visible band beyond the vias' inward copper edge; (blocks …) chooses whether components, tracks, and/or vias are forbidden there (all three by default), while (allow-nets …) admits named copper such as GND. (heatsink …) authors the board's rebuildable default thermal assembly; its rectangle uses board-local millimetres from the outline's top-left, its physical construction feeds the heatsink scenario, and its target is the stable sub-block/source-origin pair rather than a renumberable ref-des. A saved layout can override its physical assembly; removing or rebuilding the sidecar falls back to this declaration. Each (left\|right\|top\|bottom …) list docks those parts flush INSIDE that board edge (the words name physical edges, not sides of an anchor), slid along the edge toward the pads they connect to; (rot N "REF") overrides the default pads-inward rotation. (corners …) pins mounting hardware at the four corners (TL, TR, BR, BL in authored order). The force-solved interior placement is centered in the outline; the rendered views draw the outline rectangle. |
 | `(board-role board\|subcircuit)` | D·· | Explicitly declare whether this design is a fabricable BOARD or a reusable SUBCIRCUIT — drives the home page's Board/Subcircuit role tag + filter. The role is explicit, not auto-detected: a design with no (board-role …) form defaults to subcircuit, so a fabricable board must declare (board-role board). Independent of (board …) (physical outline) and (kicad-pcb …) (sync target), which keep their own jobs and no longer influence the role. |
 | `(power-plane on\|off)` | D·· | Choose whether a subcircuit uses supply planes. Off routes supply rails as ordinary copper while retaining every ground plane and the physical stackup: it suppresses the implicit dominant-supply plane or any authored non-ground (plane …) entries. On restores the planes declared in source. |
@@ -142,6 +142,109 @@ where each is accepted: **D** = design-block top level,
 | `(design-rules [(clearance MM)] [(min-drill MM)] [(mask-margin MM)] [(mask-relief-corner-radius MM)] [(copper-edge MM)] [(component-edge MM)] [(hole-to-hole MM)] [(min-annular MM)] [(mask-web MM)] [(min-width MM)] [(pour-clearance MM)] [(pour-min-width MM)] [(pour-corner-radius MM)] [(ground-via-max MM)] [(track-width MM)] [(via DIA DRILL)] [(via-plating MM)])` | D·· | Board-level DEFAULT design rules (all sub-forms optional; mm): (clearance) copper-to-copper spacing for the router + DRC; (min-drill) smallest legal drilled hole; (mask-margin) solder-mask opening expansion per pad side; (mask-relief-corner-radius) fillets the ends of RF trace openings where they stop at pad dams; (copper-edge) copper-to-board-outline clearance; (component-edge) component-courtyard-to-board-outline clearance; (hole-to-hole) wall-to-wall spacing between two drilled holes; (min-annular) minimum via annular ring (copper radius − drill radius); (mask-web) smallest solder-mask web retained between adjacent openings — a positive strip below it is removed by merging those apertures; (min-width) narrowest legal track; (pour-clearance) the BASE copper-pour isolation gap — how far a solid pour holds off foreign copper (pad/track halos, hole and via antipads) on every ordinary net, and, with no (copper-edge …), its pullback from the board outline; an RF (net-class …) still carves its own per-net exceptions over it (a (ground-gap …) opening, a solved impedance via antipad), which this does not touch. A pour gap authored BELOW the board's copper clearance is accepted but warned — a pour cannot hold a gap the copper rule forbids. (pour-min-width) narrowest retained copper-pour section; (pour-corner-radius) radius used to round pour corners; (ground-via-max) maximum centre distance from every SMD ground pad to a same-net via reaching the ground plane (zero/omitted disables it); (track-width) the default routed trace width; (via DIA DRILL) the default via copper diameter + drill; (via-plating) the minimum finished copper thickness on each barrel wall used by the power-capacity screen. Track width and via geometry seed the autorouter's geometry — an explicit query/panel override still wins for interactive routing, but the fab gate judges the board against these authored rules. All are global defaults — a per-net (net-class …) still overrides width/clearance/via for its own nets. An omitted rule keeps the toolchain's built-in default (clearance 0.127, min-drill 0.2, mask-margin 0.05, mask-relief-corner-radius 0, copper-edge = clearance, component-edge 0.2, hole-to-hole 0.25, min-annular 0.1, mask-web 0.1, min-width 0.1, pour-clearance 0.3, track-width 0.127, via 0.4 / 0.2, via-plating 0.025), so a design with no form uses those defaults. |
 | `(pcb-plan [(topology)] (place (wave "name" [(refs "REF"…)] [(sections "S"…)] [(sub-blocks "slug"…)] [(rest)] [(reason "…")])…) (route [(effort one-shot\|standard)] [(max-route-seconds N)] (wave "name" [(classes atom…)] [(net-classes "name"…)] [(nets "NET"…)] [(preferred-layers "F.Cu"…)] [(allowed-layers "F.Cu"…)] [(max-vias N)] [(waypoints (at X Y "F.Cu")…)] [(repair-waypoints (at X Y "F.Cu")…)] [(branches (branch (at X Y "F.Cu")…)…)] [(guides (escape-from "REF" "PIN" "F.Cu") (between-pins "REF" "PIN" "REF" "PIN" "F.Cu") (beside "REF" north\|south\|east\|west "F.Cu")…)] [(assign-escapes ["F.Cu"] ["HUBREF"] [(reserve)])] [(topology)] [(seed-first)] [(rest)] [(reason "…")])…))` | D·· | Declare the ordered plan for completing the PCB layout: (place …) waves order part placement, (route …) waves order net routing, each wave named and applied in authored order. (max-route-seconds N) gives the entire route transaction a cooperative wall-clock deadline; omitted keeps the historical unbounded-by-clock behavior. A PLACE wave selects parts with (refs …) ref-des, (sections …) section names, (sub-blocks …) sub-block slugs; a ROUTE wave selects nets with (classes …) module-policy criticality atoms (input_rail switch_node clock rf feedback analog, plus ground power control signal — a whole class's nets, no repetition), (net-classes …) authored (net-class …) names, and (nets …) one-off net names. (preferred-layers …) biases those nets toward named signal layers while retaining fallback paths; (allowed-layers …) restricts trace bodies to the named layers while still permitting terminal-pad breakout. (max-vias N) is a hard per-net via budget; an over-budget attempt is rolled back and retried without vias. (waypoints (at X Y "layer")…) constrains a route through ordered physical points; repeating a coordinate on two layers requests a via transition. (repair-waypoints …) writes the same kind of corridor but is tried ONLY after the net's ordinary attempt fails (and again by post-route residual repair), so a rescue corridor can never perturb a net the broad router already closes. (branches (branch (at …)…)…) authors a multi-drop net's guide TREE rather than one corridor: every (branch …) is the path from the tree's shared root terminal out to ONE drop, and limbs that leave the root together share that copper. Which limb serves which drop is worked out from the GEOMETRY — the root is the pad nearest where the limbs all start, and each limb takes the pad nearest where it ends — because the router's terminal order comes out of flattening and is not something a design can name. A tree is a COMPLETE specification: it needs exactly one limb per non-root terminal, and a tree whose limbs land on the same pad twice, end on the root, or cannot cover the net is refused whole (with a plan warning) so the net routes through the ordinary multi-terminal path instead of a wrong corridor. One limb on a two-terminal net is just a (waypoints …) chain and lowers to one. (guides …) expresses the same ordered corridor without board coordinates: (escape-from REF PIN LAYER) leaves that pad toward its nearest courtyard edge and one clearance beyond its copper, edge, (between-pins REF PIN REF PIN LAYER) uses the two pads' midpoint, and (beside REF SIDE LAYER) runs just outside a named courtyard side. Relative guides are resolved after placement and snapped to its grid, so they follow moved or rotated parts. (assign-escapes …) solves the WHOLE wave at once instead: its nets are treated as one contended escape, and the assigner finds their shared hub, cuts a corridor cross-section at the tightest constriction they all still fit through, and gives each net its own parallel lane (lane order follows endpoint order, so no two cross). Use it where several nets leave one connector or QFN through the same channel and routing them one at a time lets the first ones starve the rest. The lanes become SOFT per-net router guides, so an unusable lane costs a net a detour, never the net. Both strings are optional overrides: the copper face to fan out on (default: the hub's own side) and the hub ref (default: the part hosting pads of the most nets in the wave). Its optional (reserve) sub-form makes each assigned lane a HARD reservation as well: the lane's own net routes through it freely and every other net is refused it for the whole run, so a later net cannot take the channel the assignment was built around. Without it the lanes stay soft, which is the default because a reservation can cost the nets it excludes while a guide never can; a lane too fine for the routing raster to tell apart from its neighbour reserves nothing rather than locking the neighbour out. A bare (topology) opts the wave into global topology planning: its nets get a board-wide route topology worked out together before the maze runs, instead of each net being routed in turn and the early ones walling in the late ones. Authored plan-level ((pcb-plan (topology) …)) it applies to EVERY route wave; authored on one wave it applies to that wave alone. Absent, nothing changes. A bare (seed-first) gives a waypoint-guided route wave one bounded first claim before the ordinary whole-board pass; only complete, DRC-safe synthesized copper is retained, and the seed shares the board's route deadline. It is inert without authored waypoints. A bare (rest) is the catch-all (everything not named by an earlier wave in that section; at most one per section), and (reason "…") documents why. Zero or one per design; the member names are recorded verbatim — resolving and existence-checking them is a later step. |
 | `(module-policy (net-class "NET" ground\|power\|input_rail\|switch_node\|clock\|rf\|feedback\|analog\|control\|signal)…)` | D·· | Pin the PCB-layout criticality class of named nets, overriding the name heuristic the placer, the routing order and the `layout_class_inferred` ERC info use (`module_policy.classifyNetName`). One (net-class …) child per net; the net is the FLATTENED name ("sub-block/NET" for a module-internal net) or a bare leaf that matches every module-local net of that name. A pinned net is no longer reported as inferred. Unknown class atoms and malformed children are warned and dropped. |
+
+## Instance sub-forms
+
+The body of an `(instance "REF" component …)`. A bare string child is
+positional shorthand for the next physical pad (`(instance "R1"
+(res-0402 "10k") "VIN" "TAP")` wires pads 1 and 2), and any
+`(key "value")` child whose head is NOT one of the reserved forms
+below becomes an inline **property** override on the placed part —
+that is how `(mpn "…")`, `(class ldo)` and
+`(module-bypass "reason")` are written. A property child whose value
+is not a string is dropped with a warning.
+
+Rows written inside a sibling form show that nesting in their
+template.
+
+| Form | Summary |
+| --- | --- |
+| `(pin PAD… "NET" [(as "FN"…)] [(i-typ A)] [(i-max A)] [(load "label")])` | Wire one or more of this part's pads to a net. A pad token is a physical pad id or a pinout function name; every pad listed on one form lands on the same net. |
+| `(pin PAD "NET" (as "FN"…))` | Assert the pad resolves to these pinout function names — the spelling guard that warns when the library pinout disagrees. Honoured only on a single-pad `(pin …)`. Reserved at instance level too, so a stray one is never read as a property. |
+| `(pin … (i-typ AMPS))` | Typical current this pad draws or sources, feeding the rail budget and the thermal screen. |
+| `(pin … (i-max AMPS))` | Worst-case current for the same budgets. |
+| `(pin … (load "label"))` | Name the load this pad represents so the power budget can attribute the current to it. |
+| `(part "Name" [(row N)] [(col N)] (pin …)…)` | Group pins into one labelled unit of a multi-part symbol. Each inner `(pin …)` wires exactly like a top-level one; the grouping only changes how the schematic draws the part. |
+| `(part … (row N))` | Grid hint on a part group. Accepted and inert — multi-part units are placed automatically. |
+| `(part … (col N))` | The column half of the same inert grid hint. |
+| `(bus "NET_PREFIX" BUS_NAME)` | Expand a bus the component's library definition declares: lane i of BUS_NAME is wired to `NET_PREFIX<i>`. |
+| `(note "text")` | Attach a note to this part; it renders on the instance in the schematic. |
+| `(power WATTS \| (typ WATTS) (max WATTS))` | What this part dissipates, for the thermal screening — see “Thermal declarations”. |
+| `(dnp)` | Do Not Populate: the part keeps its schematic symbol and its footprint on the board, and leaves the assembly BOM. |
+| `(decouples "IC" PIN) \| (decouples rail)` | Bind this capacitor's power leg to a specific hub pad, or opt the cap out of the per-pin decoupling lint because it deliberately serves the whole rail. PIN is resolved against the named IC's pinout, not this part's. |
+| `(near "REF" PIN [(own PAD)])` | Place this part beside REF's pad PIN. PIN resolves against the TARGET's pinout, which is why it is kept raw until every instance exists. |
+| `(near … (own PAD))` | Which pad of THIS part faces the target — resolved through this part's own pinout. |
+| `(strap-ok PIN "reason")` | Sign off a pin tied straight to a rail, satisfying the `strap_tied_to_rail` ERC rule. |
+| `(nc-ok PIN "reason")` | Sign off a deliberately unconnected pad, satisfying the `no_connect` ERC rule. |
+| `(id hex8)` | Stable identity anchor. The build mints one into the source when it is missing. |
+
+A `(pins "REF" …)` block wires an already-placed part out of line,
+usually one section down from where the instance is declared. Its
+children:
+
+| Form | Summary |
+| --- | --- |
+| `(pin PAD… "NET" [(as "FN"…)] [(i-typ A)] [(i-max A)] [(load "label")])` | Identical to the `(instance … (pin …))` form, including its annotations — the two paths share one parser. Wiring a pad whose pinout function name differs from the net also records a function-name alias. |
+| `(bus "NET_PREFIX" [(as-prefix "FN_PREFIX")] LANE… \| (LANE…)…)` | Wire a run of lanes in one form: lane i lands on `NET_PREFIX<i>`. Lane tokens may be listed flat or in parenthesised groups; both emit the same nets. |
+| `(bus … (as-prefix "FN_PREFIX"))` | Auto-assert lane i as pinout function `FN_PREFIX<i>`, so a wide bus need not be expanded into one `(pin … (as …))` form per lane just to pass the pin-function check. |
+| `(group "label")` | Label every pin this block declares, so the schematic draws them as one named group. Unrelated to the design-scope `(group …)` member list. |
+
+## Sub-block sub-forms
+
+Children of a `(sub-block "name" (module-call …) …)`. Anything else
+is rejected with a warning rather than going silently dead.
+
+`(bridge …)` is how hierarchy is wired. Each bridged port `P` emits
+one net tie between board net `PREFIX<suffix>` and module net
+`<name>/P`, where `<suffix>` is `P` unless `(rename P SUFFIX)`
+overrides it. Two idioms are in use: a shared prefix for a peripheral
+bus (`(bridge "IMU_" SCK MOSI MISO (rename CS NCS))`), and an empty
+prefix with one `(rename PORT NET)` per port, which reads as a
+port-to-net map. Power and ground ports are normally left off the
+list — they stay wired through the consolidated `(net …)` rail forms.
+
+| Form | Summary |
+| --- | --- |
+| `(bridge "PREFIX" PORT… [(rename PORT SUFFIX)]…)` | Wire the sub-block's ports to board nets without one `(net …)` line each: every bridged port P ties board net `PREFIX<suffix>` to module net `<name>/P`, with <suffix> defaulting to P. With an empty PREFIX and a `(rename …)` per port the form reads as a port-to-net map. Power and ground ports are normally left out and wired by the consolidated `(net …)` rails instead. |
+| `(bridge … (rename PORT SUFFIX))` | Override one port's board-side suffix, so SPI `CS` can reach board net `…NCS` — or, with an empty prefix, name the board net outright. |
+| `(id hex8)` | Stable identity anchor for the sub-block itself. |
+| `(ids ("origin-key" hex8)…)` | Sidecar pinning the identities of children minted inside this sub-block. Designs that declare `(hierarchical-ids)` derive them from the form id instead and need no sidecar. |
+| `(reflow)` | Opt this sub-block out of module-layout composition, so the parent lays its contents out from scratch rather than reusing the module's own arrangement. |
+
+## Port sub-forms
+
+Parenthesised options of a `(port …)` declaration, in any order after
+the direction. Bare-token options sit alongside them: `optional`
+marks the port as not required by the module contract, a
+signal-type keyword (`power`, `clock`, `rf`, …) sets the port kind,
+`role R` / `protocol P` / `class C` each consume the following token
+as metadata, and a bare number is the nominal voltage. An
+unrecognised option warns.
+
+| Form | Summary |
+| --- | --- |
+| `(rated LO HI)` | The absolute voltage window this port's net may sit in; the release rating checks compare the design's proven envelope against it. |
+| `(nominal VOLTS)` | The port's nominal voltage. The argument is evaluated, so a regulator module can publish an output computed from its own feedback-divider parameters. A bare trailing number means the same thing. |
+| `(current TYP [MAX])` | What the port carries, feeding the rail budget. |
+| `(efficiency RATIO) \| (efficiency linear)` | Conversion efficiency of the module behind an output port, so its input draw and dissipation can be back-computed. `linear` states the pass-through case. |
+| `(enable "NET")` | The net that gates this port, tying the rail to its sequencing. |
+| `(electrical [(type …)] [(drive …)] [(v-ih-min V)] [(v-il-max V)] [(v-oh-typ V)] [(v-ol-typ V)] [(max-voltage V)] [(domain NAME)])` | Logic thresholds and drive class for the port, so the level-compatibility checks can run across a boundary. Same grammar as a component's `(electrical …)`, minus its pin name. |
+| `(side left\|right\|top\|bottom)` | Where this port's net enters or leaves the module — the PCB rough placer's explicit flow hint, overriding the direction heuristic. |
+
+## Identity and layout markers
+
+Head atoms accepted wherever design-scope forms are, carrying
+identity or layout intent rather than circuit content. They are inert
+in the scope dispatch — listed here so they never look like a typo
+and never draw an unknown-sub-form warning.
+
+| Form | Summary |
+| --- | --- |
+| `(id hex8)` | Stable identity anchor on the enclosing form, minted into the source by the build. |
+| `(ids ("origin-key" hex8)…)` | Enumerated identity sidecar for the children a form emits — decoupling caps, series elements, repeat iterations, sub-block contents. |
+| `(hierarchical-ids)` | Design-block marker opting into derived child identity: every emitted child's uuid comes from its parent form's `(id …)` plus a structural key, so no `(ids …)` sidecar is written and a renumber cannot shuffle identities. |
+| `(row N)` | Grid row for a section in the system diagram. A section with both a row and a column seeds the block-diagram layout when no `(diagram-layout …)` is authored. |
+| `(col N)` | Grid column for the same section placement. |
 
 ## Section-name classifier keywords
 
@@ -165,6 +268,36 @@ declaration overrides the heuristic.
 | connector | `Connector`, `Expansion`, `Header`, `Mounting`, `SWD`, `Debug`, `RJ45`, `B2B` |
 
 Valid `(category <key>)` keys: `mcu`, `power`, `memory`, `peripheral`, `connector`, `clock`, `comms`, `sensor`, `analog`, `protection`.
+
+## Component library fields
+
+The body of a `lib/components/<name>.sexp` definition. A
+`(component …)` is a fixed part; a `(component-family …)` is
+parameterised by one `(parameter …)` the call site supplies, as in
+`(cap-0402 "100nF")`. Any other `(key "value")` child is an inline
+**property** carried onto every placed instance — `(class ldo)`,
+`(mpn "…")` and `(manufacturer "…")` are all properties, not fields.
+
+| Form | Summary |
+| --- | --- |
+| `(symbol "name")` | The schematic symbol to draw, resolved in `lib/symbols/`. |
+| `(footprint name)` | The land pattern to place, resolved in `lib/footprints/`. |
+| `(pinout "name")` | The pad-to-function map in `lib/pinouts/` that lets designs wire this part by function name. Defaults to the symbol name when omitted. |
+| `(description "text")` | One-line part description, surfaced on every instance so renderers need not re-read the library file. |
+| `(parameter NAME TYPE)` | `(component-family …)` only: names the value a call site supplies, e.g. `(cap-0402 "100nF")`. |
+| `(refdes "U")` | Explicit ref-des class letter for this part's instances, overriding the family-name heuristic. |
+| `(bus "name" PIN…)` | Name an ordered pin group a design can wire in one step with the instance-level `(bus …)` sub-form. |
+| `(note "text")` | Library note about the part. |
+| `(datasheet "file.pdf")` | One declared datasheet — a filename in `lib/datasheets/` or an absolute http(s) URL. See “Datasheet review preflight”. |
+| `(datasheet-review (datasheet "…") (sha256 "…") (status …) (reviewed-by "…") (date "…") (category KEY)… [(category-na KEY "why")…])` | Bind this part's requirement review to an exact PDF; replacing the file makes the review stale. See “Datasheet review preflight” for the full record. |
+| `(requirement "text" [(ref "file.pdf" (page N) (quote "…"))] [(check …)] [(id "…")])` | A datasheet rule every design placing this part inherits. See “Requirement checks” for the executable `(check …)` grammar. |
+| `(ref "file.pdf" [(page N)] [(quote "…")])` | The citation backing a requirement or a note: which declared PDF, which page, and the sentence it rests on. The release profile requires one on every requirement. |
+| `(ref … (page N))` | 1-based page number inside the cited PDF. |
+| `(ref … (quote "…"))` | The short source quote copied from that page. |
+| `(requirement … (check …))` | The machine-checkable half of the rule; an unrecognised one warns rather than passing silently. See “Requirement checks”. |
+| `(ignore-requirements)` | Opt this part out of requirement inheritance entirely — for passives and connectors whose datasheet carries no design rules. |
+| `(electrical "PIN" [(type …)] [(drive …)] [(v-ih-min V)] [(v-il-max V)] [(v-oh-typ V)] [(v-ol-typ V)] [(max-voltage V)] [(domain NAME)])` | Per-pin logic thresholds and drive class, one form per pin, for the level-compatibility checks. |
+| `(thermal …)` | The part's thermal envelope — see “Thermal declarations” for the sub-forms. |
 
 ## Thermal declarations
 

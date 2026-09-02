@@ -4343,6 +4343,10 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - validateArity flags too-few and too-many arguments and accepts in-range counts
 - schemaFor returns the schema for every special form whose arity is fixed
 - block is the unified definition form; design-block and defmodule remain permanent aliases
+- The instance sub-form registry reserves exactly the head atoms an instance body must not read as an inline property
+- The sub-block sub-form registry accepts bridge, id, ids and reflow directly and keeps rename nested inside bridge
+- The pins-block sub-form registry accepts pin, bus and group directly and keeps as-prefix nested inside bus
+- The component sub-form registry reserves every structural field plus both definition head atoms
 
 ## docgen
 
@@ -4351,6 +4355,8 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - SectionIterator walks every ## heading of the rendered reference in order
 - The generated reference names every category key so (category …) docs follow the classifier map
 - The generated reference has a Requirement checks section rendered from the checker's check_docs table
+- Every isForm head atom under src/eval is reachable from a form registry or listed as a deliberate exception
+- The generated reference renders one sub-form section per compound-form registry
 
 ## eval/fmt
 

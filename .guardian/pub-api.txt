@@ -658,16 +658,31 @@ src/eval/forms.zig::ScopeAvailability struct_
 src/eval/forms.zig::ScopeForm enum_
 src/eval/forms.zig::ScopedFormDoc struct_
 src/eval/forms.zig::SpecialForm enum_
+src/eval/forms.zig::SubFormDoc struct_
 src/eval/forms.zig::builtin_docs value
+src/eval/forms.zig::component_form_docs value
+src/eval/forms.zig::component_reserved_fields value
 src/eval/forms.zig::fromAtom | fn fromAtom(name: []const u8) ?Builtin
 src/eval/forms.zig::fromAtom | fn fromAtom(name: []const u8) ?ScopeForm
 src/eval/forms.zig::fromAtom | fn fromAtom(name: []const u8) ?SpecialForm
+src/eval/forms.zig::instance_form_docs value
+src/eval/forms.zig::instance_reserved_forms value
+src/eval/forms.zig::isDirectSubForm | fn isDirectSubForm(table: []const SubFormDoc, name: []const u8) bool
+src/eval/forms.zig::isRegisteredSubForm | fn isRegisteredSubForm(name: []const u8) bool
+src/eval/forms.zig::isSubForm | fn isSubForm(table: []const SubFormDoc, name: []const u8) bool
+src/eval/forms.zig::marker_form_docs value
+src/eval/forms.zig::pins_form_docs value
+src/eval/forms.zig::port_form_docs value
 src/eval/forms.zig::requireAllDocumented | fn requireAllDocumented( comptime E: type, comptime T: type, comptime table: [@typeInfo(E).@"enum".field_names.len]?T, ) [@typeInfo(E).@"enum".field_names.len]T
+src/eval/forms.zig::requireWellFormedSubForms | fn requireWellFormedSubForms(comptime table: []const SubFormDoc) []const SubFormDoc
+src/eval/forms.zig::reservedSubFormNames | fn reservedSubFormNames(comptime table: []const SubFormDoc) [reservedSubFormCount(table)][]const u8
 src/eval/forms.zig::schemaFor | fn schemaFor(sf: SpecialForm) ?FormSchema
 src/eval/forms.zig::scope_form_docs value
 src/eval/forms.zig::sourceName | fn sourceName(self: SpecialForm) []const u8
 src/eval/forms.zig::special_form_docs value
 src/eval/forms.zig::special_form_schema value
+src/eval/forms.zig::sub_block_form_docs value
+src/eval/forms.zig::sub_form_tables value
 src/eval/forms.zig::validateArity | fn validateArity(schema: FormSchema, arg_count: usize) ?ArityViolation
 src/eval/ids.zig::ChildIdSidecar struct_
 src/eval/ids.zig::LoadedPinout struct_
