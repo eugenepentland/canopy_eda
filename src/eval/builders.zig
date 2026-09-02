@@ -1610,8 +1610,12 @@ pub fn loadDesignFile(self: *Evaluator, path: []const u8) ?[]const Node {
 /// Build a new top-level node slice where the design-block form's children
 /// have the checks-file forms appended. Returns null when the file has no
 /// design-block to splice into (e.g. a `(board …)` source) — the caller
-/// should fall back to the original node list in that case.
-fn spliceChecksIntoDesignBlock(
+/// should fall back to the original node list in that case. Public because the
+/// same splice has to happen when a candidate design is evaluated from BYTES
+/// rather than from disk (`pins_by_name.evalDesignSource`) — a rewrite proof
+/// that skipped the checks file would compare a different design than the one
+/// `evalFile` builds.
+pub fn spliceChecksIntoDesignBlock(
     self: *Evaluator,
     nodes: []const Node,
     checks_nodes: []const Node,

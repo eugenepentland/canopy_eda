@@ -61,6 +61,7 @@ pub const shards: []const []const []const u8 = &.{
         "drc_dump.test.",
         "gerber_dump.test.",
         "netlist_dump.test.",
+        "pins_by_name.test.",
         "drc_reconcile.test.",
         "drc_sweep.test.",
         "placement.drc_compose.test.",

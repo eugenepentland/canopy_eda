@@ -40,6 +40,60 @@ inside `(defmodule …)` sub-blocks: they take a renumber-safe `TP` ref-des and
 are exempt from the `IC has no ground` ERC. A bare `(test-point "TP" "NET")`
 stays a schematic-only marker (no exported pad).
 
+### Pin function names, and `rewrite-pins-by-name`
+
+Every `PIN` token — in `(pin …)`, `(strap-ok …)`, `(nc-ok …)`, `(near …)` and
+`(decouples …)` — is either a physical pad id **or** a pinout **function
+name**, and the evaluator resolves the name through the part's
+`lib/pinouts/<name>.sexp`. The name is the better spelling: it says what the
+pin *is*, it makes a strap or no-connect sign-off read as its own reason, and
+a pinout regeneration that renumbers pads carries it along.
+
+```scheme
+(instance "U1" lt3045edd#pbf
+  (pin 5 "GND")                                ;; ILIM   ← the comment IS the pinout
+  (strap-ok 5 "ILIM->GND selects the default current limit"))
+
+(instance "U1" lt3045edd#pbf
+  (pin ILIM "GND")                             ;; …so write it instead
+  (strap-ok ILIM "ILIM->GND selects the default current limit"))
+```
+
+The **`rewrite-pins-by-name` CLI tool** performs that conversion on a whole
+module or board, in place:
+
+```bash
+netlisp tool rewrite-pins-by-name --project-dir projects/designs \
+  --args '{"file": "lib/modules/bcuda-lt3045-ldo.sexp"}'          # diff only
+netlisp tool rewrite-pins-by-name --project-dir projects/designs \
+  --args '{"file": "src/boards/barracuda/barracuda.sexp", "write": true}'
+```
+
+- Text is spliced at the parser's **byte spans**, so every comment, blank line
+  and column of alignment outside the replaced token survives byte for byte.
+  (The now-redundant trailing `;; ILIM` comments are left for you to delete.)
+- A pad is rewritten **only** when the evaluator's own resolver, re-run on the
+  proposed spelling, returns the very pad the original bound to. That is why
+  `(near "REF" PAD)` and `(decouples "REF" PAD)` — which resolve through the
+  **target's** pinout, pad id first — are rewritten under their own rule, and
+  why a name the tokenizer would re-read as something else (`5V` as an SI
+  value) is quoted or skipped.
+- Skipped, with the reason reported: a function name **repeated on several
+  pads** (it cannot say which one it means), a pad the pinout does not carry,
+  a part with **no pinout file**, and a **positional** part whose pinout names
+  every pad after its own number — a connector's `(pin 09 "09")`, or the
+  generic two-terminal `cap`/`res`/`ind` pinouts.
+- The default is `write:false`: it returns the unified diff and the skip list
+  without touching the file. Either way the ORIGINAL and REWRITTEN sources are
+  both evaluated and flattened, and the write is **refused** unless their
+  netlists and their resolved `(decouples …)`/`(near …)`/`(strap-ok …)`/
+  `(nc-ok …)` bindings match exactly. A file that does not parse or does not
+  evaluate is refused outright.
+- `refs: ["U1"]` narrows the run to named instances.
+
+Prove a run independently the same way the differential tier does:
+`netlisp netlist-dump <name>` before and after, compared with `diff -I '^#'`.
+
 ### Multi-part symbols with grid layout
 
 ```scheme

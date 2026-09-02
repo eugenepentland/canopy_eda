@@ -58,6 +58,7 @@ const render_schematic_png = @import("../render_schematic_png.zig");
 const docgen = @import("../docgen.zig");
 const page_cache = @import("page_cache.zig");
 const mcp_flatten = @import("mcp_flatten.zig");
+const pins_by_name = @import("../pins_by_name.zig");
 const mcp_checks = @import("mcp_checks.zig");
 const schematic_view = @import("mcp_schematic_view.zig");
 const mcp_build = @import("mcp_build.zig");
@@ -244,6 +245,13 @@ const tools = [_]ToolEntry{
     // (datasheet "file.pdf") into lib/components/<name>.sexp, which is what
     // fills Instance.docs.datasheets and satisfies the datasheet coverage check.
     .{ .name = "attach_datasheet", .is_mutation = true },
+    // Rewrite a design/module source's numeric pad tokens into the pinout
+    // FUNCTION NAME the evaluator already resolves them through — spliced at
+    // AST spans so comments and formatting survive byte for byte. `write:false`
+    // (the default) returns the unified diff and the per-pad skip reasons; a
+    // write is refused unless the ORIGINAL and REWRITTEN sources flatten to the
+    // identical netlist and bindings.
+    .{ .name = "rewrite-pins-by-name", .is_mutation = true },
     // Search Component Search Engine and return candidate parts (read-only).
     // Pairs with download_footprint / download_datasheet to import a chosen one.
     .{ .name = "search_components", .is_mutation = false },
@@ -1076,6 +1084,7 @@ fn dispatchVfs(
     if (std.mem.eql(u8, tool_name, "download_datasheet")) return try mcp_parts_tools.toolDownloadDatasheet(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "fetch_datasheet")) return try mcp_parts_tools.toolFetchDatasheet(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "attach_datasheet")) return try toolAttachDatasheet(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "rewrite-pins-by-name")) return try pins_by_name.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     return null;
 }
 

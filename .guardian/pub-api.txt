@@ -482,6 +482,7 @@ src/eval/builders.zig::parseSectionPort | fn parseSectionPort(self: *Evaluator, 
 src/eval/builders.zig::processPinForm | fn processPinForm( self: *Evaluator, pin_form: Node, pins_ref: []const u8, pin_func_map: ?*const std.StringHashMapUnmanaged([]const u8), env: *env_mod.Env, all_pin_nets: *std.ArrayList(PinNetDecl), pg_pins: *std.ArrayList(env_mod.PartPin), net_ties: *std.ArrayList(NetTie), ) EvalError!void
 src/eval/builders.zig::resolveDecoupleTargets | fn resolveDecoupleTargets(self: *Evaluator, instances: []Instance) void
 src/eval/builders.zig::resolveNearTargets | fn resolveNearTargets(self: *Evaluator, instances: []Instance) void
+src/eval/builders.zig::spliceChecksIntoDesignBlock | fn spliceChecksIntoDesignBlock( self: *Evaluator, nodes: []const Node, checks_nodes: []const Node, ) ?[]const Node
 src/eval/builders.zig::warnUnknownPinsChild | fn warnUnknownPinsChild(self: *Evaluator, node: Node) void
 src/eval/builtins.zig::BuiltinError value
 src/eval/builtins.zig::evalBuiltinOp | fn evalBuiltinOp(op: Builtin, args: []const Value) BuiltinError!Value
@@ -1628,6 +1629,7 @@ src/net_name.zig::leaf | fn leaf(name: []const u8) []const u8
 src/net_name.zig::parent | fn parent(name: []const u8) ?[]const u8
 src/netlist_dump.zig::DumpError value
 src/netlist_dump.zig::cmdNetlistDump | fn cmdNetlistDump(allocator: std.mem.Allocator, args: []const []const u8) DumpError!void
+src/netlist_dump.zig::lines | fn lines( arena: std.mem.Allocator, name: []const u8, nets: []flat_netlist.FlatNet, ) DumpError![]const []const u8
 src/numeric.zig::checkedInt | fn checkedInt(comptime T: type, f: f64) ?T
 src/numeric.zig::toCount | fn toCount(f: f64) usize
 src/pad_neck_profile.zig::Profile struct_
@@ -1686,6 +1688,8 @@ src/pdf_afm.zig::textWidth | fn textWidth(font: Font, size: f64, s: []const u8) 
 src/pdf_afm.zig::widthOfEncoded | fn widthOfEncoded(font: Font, size: f64, bytes: []const u8) f64
 src/pdf_verify.zig::ValidateError value
 src/pdf_verify.zig::validate | fn validate(bytes: []const u8) ValidateError!void
+src/pins_by_name.zig::ToolError value
+src/pins_by_name.zig::tool | fn tool( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) ToolError!bool
 src/placement/airwire_geometry.zig::Point struct_
 src/placement/airwire_geometry.zig::max_wire_points value
 src/placement/airwire_geometry.zig::primEdges | fn primEdges(arena: std.mem.Allocator, points: []const [2]f64, out: *std.ArrayList([4]f64)) std.mem.Allocator.Error!void
