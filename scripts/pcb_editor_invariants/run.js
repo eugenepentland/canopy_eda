@@ -210,6 +210,10 @@ const reverts = {
     ["rfDropForTracks([track]);track.w=width;track.net=net;",
       "rfDropForTracks([track]);/* reverted: inspector accepted but did not apply width/net */"],
   ],
+  "drc-open-summary": [
+    ["if(openSummary)openSummary.addEventListener(\"click\",drcShowFirstOpen);",
+      "if(openSummary)openSummary.addEventListener(\"click\",function(){/* reverted: inert summary */});"],
+  ],
 };
 
 function applyRevert(source, id) {
@@ -325,6 +329,52 @@ async function saveAs(board, name) {
 // ── the invariants ───────────────────────────────────────────────────────────
 
 const invariants = [
+  {
+    id: "drc-open-summary",
+    title: "the open-net summary reveals and locates its nearest connection",
+    revert: "drc-open-summary",
+    async run(env, c) {
+      const board = await openBoard(env, env.design("drc-open-summary"));
+      try {
+        await board.settle();
+        const page = board.page;
+        await clickBound(page, '.side-tab[data-sidetab="side-drc"]');
+        const before = await page.evaluate(() => {
+          PCB.drc = [
+            { k: "net open", sev: "warn", x: 12, y: 12, gap: -0.2, clr: 0,
+              a: { net: "OPEN_NET" }, b: { ref: "TP1", pad: "1" }, bridge: [11.9, 12, 12.1, 12] },
+            { k: "courtyard overlap", sev: "warn", x: 18, y: 12, gap: -0.1, clr: 0,
+              a: { ref: "U1" }, b: { ref: "C1" } },
+          ];
+          window.PCBDrcRulesApply(PCB.drc_kinds || []);
+          const group = document.querySelector('.drc-grp[data-drcg="net open"]');
+          if (group && !group.classList.contains("coll")) group.click();
+          const button = document.getElementById("drc-open-summary");
+          return { exists: !!button, text: button && button.textContent,
+            collapsed: !!document.querySelector('.drc-grp[data-drcg="net open"].coll') };
+        });
+        c.eq(before.exists, true, "the open-net count is a button");
+        c.eq(before.text, "1 open net", "the button retains the summary wording");
+        c.eq(before.collapsed, true, "the fixture starts with the open-net group hidden");
+
+        await clickBound(page, "#drc-open-summary");
+        const after = await page.evaluate(() => ({
+          groupCollapsed: !!document.querySelector('.drc-grp[data-drcg="net open"].coll'),
+          netExpanded: !!document.querySelector('.drc-net[data-drcnet="OPEN_NET"]:not(.coll)'),
+          netRowCurrent: !!document.querySelector('.drc-net[data-drcnet="OPEN_NET"].cur:not(.coll)'),
+          gapRowCurrent: !!document.querySelector('.drc-row[data-drc="0"].cur'),
+          message: (document.getElementById("drc-cur") || {}).textContent || "",
+        }));
+        c.eq(after.groupCollapsed, false, "clicking reveals the net-open type group");
+        c.eq(after.netExpanded, true, "clicking expands the first open net");
+        c.eq(after.netRowCurrent, true, "the open-net row is visible and highlighted");
+        c.eq(after.gapRowCurrent, true, "the individual missing connection is visible and highlighted");
+        c.ok(/OPEN_NET/.test(after.message), "the DRC header names the located net", after.message);
+        c.ok(board.errors().length === 0, "no page errors", board.errors());
+      } finally { await board.close(); }
+    },
+  },
+
   {
     id: "trace-properties",
     title: "clicking a trace searches, edits, and persists its width and net",
