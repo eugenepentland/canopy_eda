@@ -612,8 +612,16 @@ const Sandbox = struct {
         const core = self.core;
         const flags = try self.scratch.alloc(bool, core.placement.nets.len);
         const zones = try route_close.userZones(self.scratch, core.placement, core.ctx.zones);
+        // The board is not just its track and via lists. A native arc's chords
+        // are handles whose curved envelope carves the pours, and an RF path's
+        // compact centreline is a handle whose swept polygon is what lands on
+        // the pads — so the gate reads both off the live context rather than
+        // weighing an end state that is missing copper it is about to keep.
+        const curves = try router.liveCurves(self.scratch, core.ctx, core.placement.nets.len);
         const copper = routed_copper.Copper{
             .tracks = core.tracks.items,
+            .arcs = curves.arcs,
+            .rf_paths = curves.rf_paths,
             .vias = core.vias.items,
             .zones = zones,
         };
@@ -627,6 +635,8 @@ const Sandbox = struct {
         const result = router.RouteResult{
             .tracks = core.tracks.items,
             .vias = core.vias.items,
+            .arcs = curves.arcs,
+            .rf_port_outcomes = curves.rf_paths,
             .routed = routed,
             .total = core.placement.nets.len,
         };
@@ -812,6 +822,7 @@ const testing = std.testing;
 const geometry = @import("geometry.zig");
 const flat_netlist = @import("../flat_netlist.zig");
 const route_policy = @import("route_policy.zig");
+const rf_path_solver = @import("rf_path_solver.zig");
 
 test {
     testing.refAllDecls(@This());
@@ -1166,6 +1177,50 @@ test "an armed sandbox is deterministic over the same board" {
     try testing.expectEqual(ra.accepted, rb.accepted);
     try testing.expectEqualSlices(usize, &ra.routed, &rb.routed);
     try expectSameCopper(copper_a, try copperOf(arena, b));
+}
+
+/// A swept RF taper over ALL THREE of `AUX`'s lands — `J1.2`, `J2.2`, `X1.1` —
+/// narrow enough to carry its full cross-section on each 0.5 mm terminal. This
+/// is the copper on the board; the compact centreline a save keeps is a handle.
+const aux_taper_samples = [_]rf_path_solver.Sample{
+    .{ .at = .{ 3, 8.7 }, .s_mm = 0, .curvature = 0, .width_mm = 0.3 },
+    .{ .at = .{ 23, 8.7 }, .s_mm = 20, .curvature = 0, .width_mm = 0.3 },
+    .{ .at = .{ 20, 12 }, .s_mm = 24.5, .curvature = 0, .width_mm = 0.3 },
+};
+
+// spec: placement/congestion - the end-state measurement reads the live context's arcs and swept RF paths, so a net joined only by a taper is not counted open
+test "the end-state measurement counts a net joined only by its RF taper" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    const lim = Limits{ .max_iterations = 3, .price = .{ .present_growth = 1000 } };
+    var parts_a: [8]optimizer.Part = undefined;
+    const plain = try jamCore(arena, &parts_a) orelse return;
+    const without = (try runWith(plain, lim)).routed[0];
+
+    // The same board, with `AUX` finished as one variable-width RF path instead.
+    // The path lives in the routing context, never in the track list — which is
+    // exactly the copper a tracks-and-vias projection loses.
+    var parts_b: [8]optimizer.Part = undefined;
+    const tapered = try jamCore(arena, &parts_b) orelse return;
+    try tapered.ctx.rf.port_outcomes.put(arena, 1, .{
+        .net = 1,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{
+            .sample_count = aux_taper_samples.len,
+            .samples = &aux_taper_samples,
+            .layer = 0,
+        },
+    });
+    const with = (try runWith(tapered, lim)).routed[0];
+
+    // `AUX` — the one net this fixture always leaves open — and only `AUX`.
+    try testing.expectEqual(without + 1, with);
 }
 
 // spec: placement/congestion - the disarmed phase leaves the board and the working set exactly as the rest of the ladder left them

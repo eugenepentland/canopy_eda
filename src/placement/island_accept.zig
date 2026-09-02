@@ -112,10 +112,23 @@ pub const Ledger = struct {
         }
         const candidate = try appended(arena, board, hop.path);
         const gate = try self.gateFor(arena);
+        // Both boards carry their curved copper: this pass runs AFTER the route
+        // finished, so the arcs and swept RF tapers a hop is weighed against are
+        // the ones the oracle joins pads through (`appended` keeps them).
         const merged = try gate.acceptsIslandMerge(
             hop.net_i,
-            .{ .tracks = board.tracks, .vias = board.vias },
-            .{ .tracks = candidate.tracks, .vias = candidate.vias },
+            .{
+                .tracks = board.tracks,
+                .vias = board.vias,
+                .arcs = board.arcs,
+                .rf_paths = board.rf_port_outcomes,
+            },
+            .{
+                .tracks = candidate.tracks,
+                .vias = candidate.vias,
+                .arcs = candidate.arcs,
+                .rf_paths = candidate.rf_port_outcomes,
+            },
         );
         if (!merged) {
             ledgerLog("island hop net_i={d}: refused, no island merge credited", .{hop.net_i});

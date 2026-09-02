@@ -49,6 +49,7 @@ const drc = @import("placement/drc.zig");
 const drc_diffpair = @import("placement/drc_diffpair.zig");
 const route_policy = @import("placement/route_policy.zig");
 const fine_accept = @import("placement/fine_accept.zig");
+const rf_port_report = @import("placement/rf_port_report.zig");
 const vacate_policy = @import("placement/vacate_policy.zig");
 const blocker_nomination = @import("placement/blocker_nomination.zig");
 const numeric = @import("numeric.zig");
@@ -625,10 +626,16 @@ fn uncoupledFindings(violations: []const drc.Violation, p: i32, n: i32) usize {
     return count;
 }
 
-/// One board's copper, either side of a transaction.
+/// One board's copper, either side of a transaction — all four kinds the
+/// connectivity oracle reads (`fine_accept.Board`, which this forwards to).
+/// A transaction here is weighed on FINISHED route results, so both curved
+/// kinds exist and a caller that drops them hands the gate a board whose arcs
+/// carve no pour and whose RF tapers never reach their pads.
 pub const Board = struct {
     tracks: []const router.Track = &.{},
     vias: []const router.Via = &.{},
+    arcs: []const router.Arc = &.{},
+    rf_paths: []const rf_port_report.Outcome = &.{},
 };
 
 /// The connectivity authority a transaction commits under, wrapped so the route
@@ -671,7 +678,7 @@ pub const Gate = struct {
 
     /// Is `after` a strictly better board than `before`?
     pub fn accepts(self: *Gate, before: Board, after: Board) std.mem.Allocator.Error!bool {
-        return self.inner.acceptsReplacement(before.tracks, before.vias, after.tracks, after.vias);
+        return self.inner.acceptsReplacement(innerBoard(before), innerBoard(after));
     }
 
     /// Did `after` join two of `net_i`'s copper islands without costing the
@@ -689,13 +696,15 @@ pub const Gate = struct {
         before: Board,
         after: Board,
     ) std.mem.Allocator.Error!bool {
-        return self.inner.acceptsIslandMerge(
-            net_i,
-            .{ .tracks = before.tracks, .vias = before.vias },
-            .{ .tracks = after.tracks, .vias = after.vias },
-        );
+        return self.inner.acceptsIslandMerge(net_i, innerBoard(before), innerBoard(after));
     }
 };
+
+/// This module's board in the solver's own spelling. One conversion, so the two
+/// verdicts above cannot start disagreeing about which copper kinds travel.
+fn innerBoard(b: Board) fine_accept.Board {
+    return .{ .tracks = b.tracks, .vias = b.vias, .arcs = b.arcs, .rf_paths = b.rf_paths };
+}
 
 /// The connectivity oracle's shape of one still-open net, reduced to what the
 /// eligibility rule reads. Counts rather than a `fab_readiness.OpenNet`, because

@@ -2503,6 +2503,32 @@ fn assembleRouteRun(run: RouteFinish) std.mem.Allocator.Error!RouteRun {
     }, .pass = run.progress.timeline.pass, .timeline = try run.progress.timeline.finish(run.progress.total) };
 }
 
+/// The curved copper a `RouteResult` would carry if the route ended right now.
+pub const Curves = struct { arcs: []const Arc = &.{}, rf_paths: []const rf_port_report.Outcome = &.{} };
+
+/// Read that curved copper off the LIVE routing context, in net order — the
+/// mid-route twin of what `assembleRouteRun` folds into the finished bundle.
+///
+/// The mid-route accept gates (`fine_accept`, `joint_rescue`, `congestion`) ask
+/// the connectivity oracle about copper they hold as plain track/via lists, and
+/// those lists are not the whole board: an arc's chords are handles whose curved
+/// envelope is what carves a pour, and an RF path's compact centreline is a
+/// handle whose swept polygon is what lands on the pads. Both live here rather
+/// than in the lists, so a gate that does not read them weighs a board that is
+/// not the one it is about to keep.
+///
+/// Read at measurement time, never cached: `net_smooth` gains a net's arcs the
+/// moment it routes and loses them the moment it is ripped, and `port_outcomes`
+/// is still EMPTY at every rescue tier — the RF port finisher runs inside
+/// `finishRoute`, after all three of them. So a mid-route gate legitimately gets
+/// no RF paths today, and will get them automatically if that order ever moves.
+pub fn liveCurves(arena: std.mem.Allocator, ctx: *const Ctx, net_count: usize) std.mem.Allocator.Error!Curves {
+    var arcs: std.ArrayList(Arc) = .empty;
+    for (0..net_count) |ni| if (ctx.rf.net_smooth.get(@intCast(ni))) |s| try arcs.appendSlice(arena, s.arcs);
+    const paths = try rf_port_report.collectOrdered(arena, &ctx.rf.port_outcomes, net_count);
+    return .{ .arcs = try arcs.toOwnedSlice(arena), .rf_paths = paths };
+}
+
 fn recordPostPass(
     kind: RouteEventKind,
     progress: *RouteProgress,
@@ -11259,7 +11285,8 @@ fn keepIfClean(run: FineRescueRun, net_i: usize, keep_t: usize, keep_v: usize) s
 /// ungated run (no declared resolution can reach it) keeps today's answer.
 fn gateAccepts(run: FineRescueRun, net_i: usize, keep_t: usize, keep_v: usize) std.mem.Allocator.Error!bool {
     const gate = run.gate orelse return true;
-    const attempt = fine_accept.Attempt{ .tracks = run.tracks.items, .vias = run.vias.items, .keep_t = keep_t, .keep_v = keep_v };
+    const curves = try liveCurves(run.ctx.arena, run.ctx, run.placement.nets.len);
+    const attempt = fine_accept.Attempt{ .tracks = run.tracks.items, .vias = run.vias.items, .arcs = curves.arcs, .rf_paths = curves.rf_paths, .keep_t = keep_t, .keep_v = keep_v };
     return gate.accepts(net_i, attempt);
 }
 
