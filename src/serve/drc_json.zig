@@ -50,6 +50,7 @@ pub fn kindStr(k: drc.Kind) []const u8 {
         .sharp_bend => "sharp RF bend",
         .keepout_violation => "keepout",
         .perimeter_keepout => "perimeter keepout",
+        .board_keepout => "board keepout",
         .net_open => "net open",
     };
 }
@@ -94,7 +95,7 @@ pub const drawer_groups = [_]DrawerGroup{
     .{
         .title = "Keepouts",
         .blurb = "Authored regions that reserve space from selected board features.",
-        .kinds = &.{ .keepout_violation, .perimeter_keepout },
+        .kinds = &.{ .keepout_violation, .perimeter_keepout, .board_keepout },
     },
     .{
         .title = "Connectivity",

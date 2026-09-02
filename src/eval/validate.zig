@@ -7,6 +7,7 @@ const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("env.zig");
 const na = @import("net_analysis.zig");
+const net_suggest = @import("net_suggest.zig");
 const Evaluator = @import("evaluator.zig").Evaluator;
 const EvalError = @import("evaluator.zig").EvalError;
 const DesignBlock = env_mod.DesignBlock;
@@ -77,15 +78,21 @@ fn checkSinglePinNets(self: *Evaluator, block: *const DesignBlock) !void {
         }
     }
 
+    // A dead-end net is very often a typo of a net that IS wired up; offer the
+    // nearest established name rather than only stating the symptom.
+    const established = net_suggest.establishedNets(self.allocator, block) catch &.{};
+
     var iter = net_pin_counts.iterator();
     while (iter.next()) |entry| {
         if (entry.value_ptr.* == 1) {
             const base = entry.key_ptr.*;
             if (net_single_pin.get(base)) |info| {
+                const hint = net_suggest.hint(self.allocator, base, established);
+                defer if (hint.len > 0) self.allocator.free(hint);
                 const msg = std.fmt.allocPrint(
                     self.allocator,
-                    "Dead-end net \"{s}\" — only connected to {s} pin {s}",
-                    .{ base, info.ref_des, info.pin },
+                    "Dead-end net \"{s}\" — only connected to {s} pin {s}{s}",
+                    .{ base, info.ref_des, info.pin, hint },
                 ) catch continue;
                 try self.assertions.append(self.allocator, .{ .passed = false, .message = msg, .is_warning = true });
             }
@@ -217,6 +224,12 @@ pub fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged
     }
 }
 
+// ── Tests ──────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+const sexpr_parser = @import("../sexpr/parser.zig");
+const design_block_mod = @import("design_block.zig");
+
 test "descriptionCharCount counts codepoints, not bytes" {
     // Plain ASCII: byte length and codepoint count agree.
     try std.testing.expectEqual(@as(usize, 5), descriptionCharCount("ABCDE"));
@@ -225,4 +238,97 @@ test "descriptionCharCount counts codepoints, not bytes" {
     // penalised relative to their on-screen length.
     try std.testing.expectEqual(@as(usize, 3), descriptionCharCount("A—B"));
     try std.testing.expectEqual(@as(usize, 5), "A—B".len);
+}
+
+/// Evaluate `src`'s single `(design-block …)` against a two-terminal
+/// `fakeres` part and return the evaluator, so a test can read the lint
+/// assertions it recorded. Caller owns the evaluator.
+fn evalDesign(a: std.mem.Allocator, eval: *Evaluator, src: []const u8) !void {
+    eval.* = Evaluator.init(a, "");
+    try eval.component_cache.put(a, "fakeres", .{
+        .name = "fakeres",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var scope = Env.init(a, null);
+    defer scope.deinit();
+    _ = try design_block_mod.evalDesignBlock(eval, form_children[1..], &scope);
+}
+
+/// The first `is_warning` assertion whose message starts with `prefix`.
+fn findWarning(eval: *const Evaluator, prefix: []const u8) ?[]const u8 {
+    for (eval.assertions.items) |a| {
+        if (!a.is_warning) continue;
+        if (std.mem.startsWith(u8, a.message, prefix)) return a.message;
+    }
+    return null;
+}
+
+// spec: eval/validate - a dead-end net within two edits of a well-connected net suggests that net
+test "dead-end net lint offers a did-you-mean for a near-miss name" {
+    // page_allocator: assertion messages are allocated and never freed.
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalDesign(a, &eval,
+        \\(design-block "test"
+        \\  (instance "R1" fakeres (pin 1 "V_3V3") (pin 2 "GND"))
+        \\  (instance "R2" fakeres (pin 1 "V_3V3") (pin 2 "GND"))
+        \\  (instance "R3" fakeres (pin 1 "V_3V3") (pin 2 "GNND")))
+    );
+    defer eval.deinit();
+    const msg = findWarning(&eval, "Dead-end net \"GNND\"") orelse return error.TestExpectedWarning;
+    try testing.expect(std.mem.endsWith(u8, msg, " — did you mean \"GND\"?"));
+}
+
+// spec: eval/validate - a dead-end net with no near neighbour keeps its plain message
+test "dead-end net lint stays plain when nothing is close" {
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalDesign(a, &eval,
+        \\(design-block "test"
+        \\  (instance "R1" fakeres (pin 1 "V_3V3") (pin 2 "GND"))
+        \\  (instance "R2" fakeres (pin 1 "V_3V3") (pin 2 "GND"))
+        \\  (instance "R3" fakeres (pin 1 "V_3V3") (pin 2 "MOSI")))
+    );
+    defer eval.deinit();
+    const msg = findWarning(&eval, "Dead-end net \"MOSI\"") orelse return error.TestExpectedWarning;
+    try testing.expectEqualStrings("Dead-end net \"MOSI\" — only connected to R3 pin 2", msg);
+}
+
+// spec: eval/validate - a design block with an empty net list produces no dead-end lint at all
+test "an empty design block records no dead-end warnings" {
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    try evalDesign(a, &eval, "(design-block \"test\")");
+    defer eval.deinit();
+    try testing.expectEqual(@as(?[]const u8, null), findWarning(&eval, "Dead-end net"));
+}
+
+/// 80 characters — past `suggest.max_name_len`, so the distance scan must
+/// reject it outright rather than index its fixed rows with it.
+const long_net_name = "NET_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+// spec: eval/validate - an oversized net name is linted with no suggestion and a malformed one is ranked bytewise — the scan never panics and cannot overflow
+test "oversized and malformed net names lint plainly" {
+    const a = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    // A regular (escape-processing) literal: R4's net really does carry two
+    // bytes that are not valid UTF-8, which a multiline literal cannot express.
+    comptime std.debug.assert(long_net_name.len > @import("suggest.zig").max_name_len);
+    try evalDesign(a, &eval, "(design-block \"test\"\n" ++
+        "  (instance \"R1\" fakeres (pin 1 \"V_3V3\") (pin 2 \"GND\"))\n" ++
+        "  (instance \"R2\" fakeres (pin 1 \"V_3V3\") (pin 2 \"GND\"))\n" ++
+        "  (instance \"R3\" fakeres (pin 1 \"V_3V3\") (pin 2 \"" ++ long_net_name ++ "\"))\n" ++
+        "  (instance \"R4\" fakeres (pin 1 \"V_3V3\") (pin 2 \"GN\xff\xfeD\")))\n");
+    defer eval.deinit();
+    const long = findWarning(&eval, "Dead-end net \"NET_AAAA") orelse return error.TestExpectedWarning;
+    try testing.expect(std.mem.indexOf(u8, long, "did you mean") == null);
+    // The malformed name is ranked byte by byte — no decode, no panic — and
+    // lands close enough to GND to carry the same hint any typo would.
+    const bad = findWarning(&eval, "Dead-end net \"GN") orelse return error.TestExpectedWarning;
+    try testing.expect(std.mem.endsWith(u8, bad, " — did you mean \"GND\"?"));
 }

@@ -292,6 +292,7 @@ Public functions: solve
 - (rough …) anchor/group tokens match by ref-des or origin name
 - an authored rough critical-loop parses as a named closed-chain member set and contributes whole-loop compactness to placement ranking
 - partial apply locks every covered part and leaves the rest free
+- an authored board keepout region refuses a component pose on the face it reserves, leaves the other face alone, and charges the guidance hinge for a courtyard that settles inside
 - legalization never moves a locked part; the free side absorbs the push
 - a locked anchor keeps its pose and the ring transforms into its frame
 - a pinned block pushes free blocks aside and never moves
@@ -862,6 +863,37 @@ from the read-only resolve path rather than walking the hierarchy again.
 - completeness-waiver: malformed encoding (the design is parsed by the same evaluator seam the PCB page uses, which rejects malformed input before a net exists to print)
 - completeness-waiver: integer overflow (no arithmetic beyond formatting already-computed net and pad counts)
 - completeness-waiver: panic-free (a design that fails to resolve degrades to a comment line and the next design)
+
+## rewrite-pins-by-name
+
+Public functions: tool
+
+The corpus writes pin pads by number 2699 times against 291 by name, then
+repeats the pinout in a trailing comment — `(pin 5 "GND") ;; ILIM` beside
+`(strap-ok 5 "ILIM->GND …")`. The language already resolves a function name
+through the part's pinout, so writing the name makes the strap and no-connect
+sign-offs self-documenting and turns a pad renumber into a resolvable name
+rather than a silent re-point. The rewrite is spliced at AST byte spans (the
+`id_insert` discipline) so nothing outside the replaced token moves, and it is
+gated twice: per token by re-running the evaluator's own resolver on the
+proposed spelling, and per file by flattening both sources and demanding the
+identical netlist and the identical resolved bindings.
+
+- the rewrite splices at AST spans, so every comment and blank line survives byte for byte, the line count is unchanged, and multi-pad shorthand rewrites each pad independently
+- a function name repeated on several pads is skipped with its reason, and a connector whose pinout names every contact after its own number is left entirely alone
+- strap-ok, nc-ok and a near form's own pad resolve through the declaring part's pinout while near and decouples resolve their target pad through the named part's
+- the rewritten source is accepted only when it evaluates and its flattened netlist and resolved bindings match the original line for line, so a rewrite that moved a pad is refused
+- the default run writes nothing and returns the unified diff, and write true replaces the file atomically with the proven bytes
+- the tool is registered as a mutation and its declared schema round-trips through netlisp tool list
+
+- completeness-waiver: empty inputs (a missing `file`, a file outside lib/modules and src/, and a file with nothing to rewrite each answer with a named result instead of a write)
+- completeness-waiver: large inputs (the source is read under the same 10 MiB library cap the evaluator uses, and the reported skip list is capped with the remainder counted)
+- completeness-waiver: unauthorized access (a local CLI over the caller's own project directory; the path is confined to lib/modules and src/, traversal and absolute paths are refused, and the write is registered as a mutation like every other design edit)
+- completeness-waiver: i/o failure (an unreadable source is refused before anything is planned, and the write is a tmp-then-rename atomic replace so a crash cannot truncate the design)
+- completeness-waiver: concurrent access (single-threaded; the plan is computed and proven against bytes already read, and each evaluation owns its own evaluator and arena)
+- completeness-waiver: malformed encoding (a source that does not parse or does not evaluate is refused, and a function name the tokenizer would read back as anything else is never spliced)
+- completeness-waiver: integer overflow (byte offsets come from the parser's own spans and are bounds-checked against the source before any splice; no input-derived arithmetic)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
 ## bench-page
 
@@ -3159,6 +3191,9 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - component-edge clearance follows the exact rounded outline rather than its rectangular bounding box
 - a pad inside the board rectangle but in a concave notch is measured against the outline polygon
 - a typed perimeter keepout flags only its blocked feature families, admits named nets, and exempts generated fence vias
+- an authored board keepout flags the courtyards, tracks and vias inside it on the face it reserves, admits its allowed nets, and leaves the opposite face alone
+- an authored board keepout blocking only some families ignores the others, and a both-sides region also reserves the inner copper layers
+- a board declaring no authored keepout region runs no region geometry at all
 - flags same-layer track crossings and sub-clearance pairs between nets
 - flags a track crossing a foreign pad on its layer; other-layer SMD pads don't clash
 - parent-rail copper may touch a structurally proven generated per-pin bypass pad, while dotted lookalike nets remain foreign
@@ -3743,6 +3778,8 @@ Public functions: lint, freeFindings
 - flags a near-bound passive sitting more than 5 mm from the exact pad it declared, and clears when it is adjacent
 - reports a near binding that resolved to nothing, naming the cause, so a declaration that did nothing is never silent
 - measures a bottom-side part through the optimizer's own mirrored pad transform, so a flipped decap is judged where the board draws it
+- measures a (check (max-distance …)) requirement against the nearest qualifying passive and clears when one is close enough
+- a distance requirement whose netlist carries no qualifying passive is left to the build-time checker rather than reported per placement
 
 ## placement/routability_lint
 
@@ -4343,6 +4380,10 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - validateArity flags too-few and too-many arguments and accepts in-range counts
 - schemaFor returns the schema for every special form whose arity is fixed
 - block is the unified definition form; design-block and defmodule remain permanent aliases
+- The instance sub-form registry reserves exactly the head atoms an instance body must not read as an inline property
+- The sub-block sub-form registry accepts bridge, id, ids and reflow directly and keeps rename nested inside bridge
+- The pins-block sub-form registry accepts pin, bus and group directly and keeps as-prefix nested inside bus
+- The component sub-form registry reserves every structural field plus both definition head atoms
 
 ## docgen
 
@@ -4351,6 +4392,8 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - SectionIterator walks every ## heading of the rendered reference in order
 - The generated reference names every category key so (category …) docs follow the classifier map
 - The generated reference has a Requirement checks section rendered from the checker's check_docs table
+- Every isForm head atom under src/eval is reachable from a form registry or listed as a deliberate exception
+- The generated reference renders one sub-form section per compound-form registry
 
 ## eval/fmt
 
@@ -4373,6 +4416,12 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - (near "REF" PIN) records the adjacency target with no own pad inferred at parse time
 - (near … (own PAD)) records which of the declaring part's own legs docks against the target
 - a (near …) missing its ref or pin warns and binds nothing rather than half a target
+- an instance sub-form within two edits of a real one is an error naming the spelling meant
+- an unknown sub-form head that is not a near-miss still becomes an inline property
+- a pad token outside the part's known pad set is an error carrying the pad count
+- strap-ok, nc-ok and a (near …) own pad are held to the same pad set as (pin …)
+- a part with neither a pinout nor a footprint has an unknown pad set and every pad token passes
+- a footprint's pad ids check the pads of a part that has no pinout file
 - completeness-waiver: empty inputs (an instance with no net arguments retains the established component-only behavior)
 - completeness-waiver: large inputs (positional pad numbering is a bounded linear walk over the parsed instance children)
 - completeness-waiver: unauthorized access (pure in-process AST lowering with no request, identity, or authorization surface)
@@ -4387,6 +4436,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - pullup and pulldown lower to one resistor with explicit signal and rail nets
 - divider emits two resistors and records a checked expected tap voltage
 - led emits a resistor and diode and accepts an explicit anode net for migrations
+- a shorthand value that is not the family's declared kind is rejected like a family call
 - completeness-waiver: empty inputs (each shorthand diagnoses missing positional arguments and emits no partial circuit)
 - completeness-waiver: large inputs (every form emits at most two parts and scans only its own bounded child list)
 - completeness-waiver: unauthorized access (pure in-process AST lowering with no user, request, or authorization surface)
@@ -4407,6 +4457,10 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - parseCheck dispatches every documented check keyword to its Check variant via check_docs
 - decoupling max-uf prevents bulk capacitors satisfying HF bypass rules
 - decoupling rejects malformed or inverted capacitor bounds
+- cap-rating defaults to the documented ceramic derating ratio when neither bound is written
+- cap-rating rejects unknown, repeated or non-positive bounds
+- max-distance accepts the four passive kinds with an optional value window and rejects an inverted one
+- sequence accepts only the before relation word and a non-negative margin
 
 ## eval/pin_enrichment
 
@@ -4429,6 +4483,36 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - malformed executable requirements and electrical declarations produce diagnostics
 - implementation metadata is evaluable but has no runtime value
 - wrapped module roots retain defmodule provenance independently of their design-block title
+- a warning raised inside an imported module is attributed to the module's own file
+- an error raised inside an imported module is attributed to the module's own file
+
+## eval/value-kind
+
+- every value spelling the design corpus passes to a typed family is accepted
+- a value carrying another quantity's unit or magnitude is rejected for the declared kind
+- a value the unit decoder cannot place is accepted rather than guessed at
+- completeness-waiver: empty inputs (an empty value string decodes to nothing and is accepted, like every other unplaceable spelling)
+- completeness-waiver: large inputs (the decoder reads only the first whitespace token and at most its two suffix letters)
+- completeness-waiver: unauthorized access (a pure string predicate with no user, request, or permission surface)
+- completeness-waiver: i/o failure (classification reads the value string in memory and performs no I/O)
+- completeness-waiver: concurrent access (the predicate holds no state and its inputs are caller-owned slices)
+- completeness-waiver: malformed encoding (a value the decoder cannot place — corrupt, non-UTF-8, or simply unusual — is accepted rather than rejected)
+- completeness-waiver: integer overflow (no arithmetic on the magnitude: the digits are skipped, never parsed into a number)
+- completeness-waiver: panic-free (every path is a bounds-checked slice or a switch with an else, so it cannot panic)
+
+## eval/footprint-pads
+
+- a footprint's pad ids load as a set with numeric and alphanumeric ids normalized alike
+- a missing or padless footprint yields an empty set that reads as unknown rather than as zero pads
+- a footprint is read once and served from the evaluator cache afterwards
+- completeness-waiver: empty inputs (an empty footprint name resolves to no pad record at all, and a padless file to the empty set)
+- completeness-waiver: large inputs (the loader caps the read at the shared footprint byte limit and keeps only pad ids)
+- completeness-waiver: unauthorized access (library reads inside the project directory, with no user or permission surface)
+- completeness-waiver: i/o failure (a read error yields the empty unknown set, so a missing or unreadable footprint never fails a build)
+- completeness-waiver: concurrent access (the cache belongs to one caller-owned evaluator and is shared with nothing)
+- completeness-waiver: malformed encoding (a corrupt or non-footprint file parses to the empty unknown set instead of raising)
+- completeness-waiver: integer overflow (pad ids stay text; the only counter is the hash map's own bounded size)
+- completeness-waiver: panic-free (every failure path returns the empty set, so no allocation or parse error can panic)
 
 ## eval/suggest
 
@@ -4436,10 +4520,34 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - unbound library name yields an import hint naming the missing import
 - a near-miss name yields a did-you-mean suggestion from env and cache candidates
 - a name with no close candidate reports a plain unknown-name message
+- a fixed vocabulary yields the nearest spelling and never suggests an exact match
+
+## eval/net_suggest
+
+- a one-off net name suggests the established net it is closest to
+- a net name beyond edit distance two or equal to a candidate yields no suggestion
+- a neighbour carrying a different index is a numbered sibling, not a suggestion
+- established nets are those with two or more connections plus every declared port
+- the did-you-mean hint is an appendable suffix that is empty without a candidate
+- an oversized or malformed name is skipped or compared bytewise so the scan never panics and cannot overflow its fixed buffers
+- completeness-waiver: unauthorized access (a pure in-memory ranking over names the caller already holds; it opens nothing and checks no identity)
+- completeness-waiver: i/o failure (no file, socket or process is touched — the candidates come from an already-evaluated design block)
+- completeness-waiver: concurrent access (evaluation and ERC are single-threaded, and every call takes its candidates by value and shares no mutable state)
+
+## eval/validate
+
+- a dead-end net within two edits of a well-connected net suggests that net
+- a dead-end net with no near neighbour keeps its plain message
+- a design block with an empty net list produces no dead-end lint at all
+- an oversized net name is linted with no suggestion and a malformed one is ranked bytewise — the scan never panics and cannot overflow
+- completeness-waiver: unauthorized access (post-build lint over an in-memory design block; it opens nothing and checks no identity)
+- completeness-waiver: i/o failure (the validator reads only the already-materialized block, never the filesystem)
+- completeness-waiver: concurrent access (validation runs inline on the single evaluation thread that built the block)
 
 ## eval/evaluator
 
 - A component-family attribute resolves a bound parameter to its value while an unbound vocabulary word stays literal
+- a component-family value contradicting the declared parameter kind is rejected at the call site
 - Evaluates arithmetic expressions from S-expression AST
 - an error inside a module body appends the module call stack to the diagnostic
 - block with a string name evaluates as a design root
@@ -4472,6 +4580,9 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - repeat evaluates every integer in its inclusive range and composes with arithmetic and fmt
 - repeat binds its index lexically without replacing an enclosing binding
 - repeat rejects fractional bounds instead of silently rounding them
+- for evaluates its body once per listed item, binding strings and let-bound values in a fresh scope
+- for binds its item lexically without replacing an enclosing binding
+- for rejects a second argument that is not a parenthesised item list
 - reassignSubBlockIds takes a pinned child id from the (ids …) sidecar and seeds+queues a miss with the legacy derivation
 - reassignSubBlockIdsV4 derives each child id from the sub-block uuid and the child's stable origin_key
 - reassignSubBlockIdsV4 composes nested sub-blocks via the parent uuid and the nested name (sheet-path identity)
@@ -5090,7 +5201,11 @@ Public functions: renderSchematic
 
 ## erc
 
+- a floating net within two edits of a well-connected net suggests that net
 - a net pinned by (module-policy (net-class …)) is not reported as an inferred layout class
+- a declared differential pair with exactly one wired lane is reported as half-connected, naming the wired lane and the open one
+- a declared differential pair wired on both lanes, or on neither, is not reported
+- a sub-block's differential pair tied on only one lane by the parent is reported as half-connected
 - a module-local supply node whose name carries a supply token counts as the IC's power connection
 - EMI coupling intent must bridge its declared domain to ground and cannot also claim supply decoupling
 - an explicitly signal-typed rated input is not a supply rail and does not require decoupling
@@ -5204,6 +5319,10 @@ Public functions: analyze
 
 ## eval/design_block
 
+- two instances authored with one ref-des are an error naming both source locations
+- a repeat body that mints one ref-des twice is a duplicate like any other
+- shorthand-generated ref-des never collide with each other or with authored ones
+- each sub-block is its own ref-des namespace so two modules may both name R1
 - module-policy form pins the placement class of named nets on the design block
 - design-rules captures an optional ground-via maximum distance for SMD ground-pad plane stitching
 - design-rules captures an optional finished via-wall plating thickness for power-capacity analysis
@@ -5236,6 +5355,11 @@ Public functions: analyze
 - a sub-block module's own decouple-defaults bypass wins over the parent's
 - the bypass default cascades transitively through nested sub-blocks while the ic ref stays local
 - bus-port expands one port per index times optional suffix list
+- diff-port expands one base name into a paired _P and _N port carrying the differential kind
+- diff-port replays every trailing port modifier onto both lanes
+- a diff-port suffixes override renames both lanes and a long-form net base is suffixed per lane
+- a section-scope diff-port expands two section ports typed differential
+- a diff-port missing its direction is an arity error naming the form
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
 - kicad-pcb form captures the literal path on the design block
 - stackup form captures layer count and plane assignments on the design block
@@ -5278,6 +5402,8 @@ Public functions: analyze
 - bare top-level pins forms attach electrical pins instead of silently no-oping
 - board form parses outline size, corner radius, edge lists, corners, and typed perimeter keepouts
 - board form accepts an outline-approved digest only in the exact hex shape the drift finding prints, warning and dropping anything else
+- board form parses repeatable authored keepout regions with their side, blocked families, allowed nets, and reason
+- an authored board keepout with a rectangle outside the outline, a non-positive size, an unknown side or blocks word, or a missing rect or side is an evaluation error
 - board-role form sets the explicit board/subcircuit role
 - board-role defaults to subcircuit when the form is absent
 - board-role remains authoritative whether it appears before or after the board geometry form
@@ -5296,6 +5422,9 @@ Public functions: analyze
 - repeat derives distinct stable child ids from its anchor origin key and lexical index
 - repeat ids sidecars override indexed child derivation for UUID-preserving migrations
 - repeat composes with sub-block calls and gives each repeated module a distinct stable hierarchy
+- for materializes its design-scope body once per listed item, composing ref-des and net names from a string item
+- for derives distinct stable child ids from its anchor origin key and the item ordinal
+- a for nested inside a repeat expands the whole product with the outer loop still owning every child identity
 - a bus-port index range whose lane span would overflow the i64 subtraction is diagnosed and expands nothing
 - a zero-based bus-port range still expands and the lane cap admits a span of exactly 4095
 - a frequency-plan declaration is collected during the block body and evaluated after it, publishing its typed report on the evaluator beside the loop-filter ones
@@ -5677,6 +5806,27 @@ Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenr
 - completeness-waiver: malformed encoding (names are opaque UTF-8 byte slices; malformed source is rejected before evaluation)
 - completeness-waiver: integer overflow (the checker only counts slice entries with usize and performs no integer arithmetic)
 - completeness-waiver: panic-free (all analysis allocations return allocator errors and optional lookups are checked)
+
+## req_physical_checks
+
+Public functions: evalCapRating, evalMaxDistance, evalSequence, resolveDistanceRules
+
+- cap-rating passes a capacitor rated above the derived envelope and fails one rated below it
+- cap-rating reports an unrated capacitor and an underivable net envelope as unproven rather than passing either
+- max-distance defers to the layout lint when a qualifying passive exists and fails at build time when the netlist has none
+- resolving a max-distance rule records the measured pad and every qualifying passive on its net for the layout lint
+- sequence passes a derived power-up order that satisfies it and fails one that reverses it
+- sequence reports an undetermined power-up order as unproven and names what would prove it
+- evaluating a design resolves its max-distance requirements onto the instances the placement layer reads
+- parseVolts reads a rating attribute and rejects the foreign units that sit beside it
+- completeness-waiver: empty inputs (an unresolved pin, an empty envelope table, or an empty sequencing model each produce a failed or unproven check result rather than indexing absent data)
+- completeness-waiver: large inputs (the checks scan the already-allocated instance, net and envelope slices linearly and allocate only their diagnostic message and the resolved candidate list)
+- completeness-waiver: unauthorized access (a pure design-analysis layer with no access surface; authorization is enforced before CLI dispatch)
+- completeness-waiver: i/o failure (the primitives perform no I/O; pinout loading is owned by the evaluator and a miss becomes an unresolved-pin result)
+- completeness-waiver: concurrent access (the checks read an immutable design snapshot plus request-local evaluator state; the one mutation, resolveDistanceRules, runs inside the single-threaded post-build pass)
+- completeness-waiver: malformed encoding (typed design data comes from the S-expression parser, while an unreadable voltage or component-value spelling returns null and simply does not qualify)
+- completeness-waiver: integer overflow (voltage, distance and value arithmetic is f64; the only integer is the sequencing order the analyzer already bounds at eight relaxation passes)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
 ## req_derived_checks
 
@@ -6943,6 +7093,8 @@ is what makes the predicate exact rather than approximately right.
 - Every /pcb-layout client reads the page's lexical PCB blob directly, so no board read is gated on the undefined window.PCB
 - The PCB blob carries the resolved board design-rule scalars for a byte-identical client DRC
 - PCB blobs carry fixed perimeter keepout geometry together with its clearance, blocked feature families, and allowed nets
+- PCB blobs carry each authored board keepout region as a solid named rectangle beside the derived perimeter band
+- the pcb-describe board facts list every authored keepout region in world millimetres with its side, blocked families, allowed nets and reason
 - The PCB blob emits each pad's rotation, roundrect ratio, oval slot, and through-hole flag
 - The layout sidecar is snapshotted into history and listed newest-first
 - Layout snapshots are pruned to the newest retention cap
@@ -7112,6 +7264,7 @@ is what makes the predicate exact rather than approximately right.
 - the viewer strokes footprint silk as one pass above the copper pass, and under the assembly review's package bodies
 - one canonical stage list names the board paint order for every renderer
 - the viewer's paint stages mirror the canonical order name for name
+- the board PNG washes and names each authored board keepout region, leaving the rest of the board bare
 - the board PNG paints the canonical stages in order
 - the board PNG fills inner planes from the same pour engine the fabrication outputs use
 - the board PNG strokes a routed arc as a curve and drops the chords it owns

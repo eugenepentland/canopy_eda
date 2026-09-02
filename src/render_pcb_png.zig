@@ -108,6 +108,7 @@ const text_dim = rgbOf(board_theme.text_dim);
 const good_col = rgbOf(board_theme.improvement);
 const grid_col = rgbOf(board_theme.grid_dot);
 const edge_col = rgbOf(board_theme.edge_cuts);
+const keepout_col = rgbOf(board_theme.keepout_region);
 // Blame heatmap ramp: cheap (cool) → expensive (hot).
 const blame_lo = rgbOf(board_theme.blame_low);
 const blame_mid = rgbOf(board_theme.blame_mid);
@@ -471,7 +472,7 @@ const Pass = struct { stage: []const u8, run: ?*const fn (*Ctx) void };
 const board_passes = [_]Pass{
     .{ .stage = "substrate", .run = Ctx.stageSubstrate },
     .{ .stage = "plane_fills", .run = Ctx.stagePlaneFills },
-    .{ .stage = "keepouts", .run = null }, // no keepout model in the PNG
+    .{ .stage = "keepouts", .run = Ctx.stageKeepouts },
     .{ .stage = "groups", .run = null }, // no sub-circuit boxes in the PNG
     .{ .stage = "ratsnest", .run = Ctx.stageRatsnest },
     .{ .stage = "clearance", .run = null }, // no clearance halos in the PNG
@@ -911,6 +912,36 @@ const Ctx = struct {
     /// board's ground and rail planes — most of its copper — were invisible in
     /// the image an agent reasons about, and an inner pour was dropped rather
     /// than painted on the wrong face.
+    /// Authored `(board … (keepout "NAME" …))` regions: a violet wash with the
+    /// author's name across it. The derived perimeter band is deliberately NOT
+    /// drawn here — it is a function of the outline the viewer already shows,
+    /// while an authored region is a fact nothing else on the picture reveals.
+    fn stageKeepouts(self: *Ctx) void {
+        var arena_state = std.heap.ArenaAllocator.init(self.cv.alloc);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const regions = optimizer.boardKeepoutRegions(arena, self.p) catch return;
+        for (regions) |region| self.drawKeepoutRegion(arena, region);
+    }
+
+    fn drawKeepoutRegion(self: *Ctx, arena: std.mem.Allocator, region: optimizer.BoardKeepoutRegion) void {
+        const box = region.corners();
+        const ring = self.projectRing(arena, &box) catch return;
+        self.cv.fillPoly(ring, keepout_col, 0.16);
+        self.cv.strokePath(ring, .closed, self.pw(1), keepout_col, 0.6);
+        var buf: [96]u8 = undefined;
+        const label = std.fmt.bufPrint(&buf, "{s} · {s}", .{ region.spec.name, @tagName(region.spec.side) }) catch region.spec.name;
+        self.cv.text(
+            self.xpx(region.rect.minx + region.rect.w / 2),
+            self.ypx(region.rect.miny + region.rect.h / 2),
+            label,
+            self.pw(7),
+            keepout_col,
+            0.95,
+            .middle,
+        );
+    }
+
     fn stagePlaneFills(self: *Ctx) void {
         var arena_state = std.heap.ArenaAllocator.init(self.cv.alloc);
         defer arena_state.deinit();
@@ -2341,16 +2372,67 @@ test "PNG pour paints the computed fill and leaves a foreign via's antipad bare"
     try std.testing.expect(cv2.buf[in_antipad + 2] > 0x30);
 }
 
+// spec: Web Server - the board PNG washes and names each authored board keepout region, leaving the rest of the board bare
+test "PNG paints an authored board keepout region" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    // A 20 mm board whose right half is reserved.
+    const specs = [_]env.BoardKeepoutSpec{.{
+        .name = "plate",
+        .rect = .{ .x = 10, .y = 0, .w = 10, .h = 20 },
+        .side = .bottom,
+    }};
+    const p = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 20,
+        .maxy = 20,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 20, .h = 20 },
+        .rules = .{ .board_keepouts = &specs },
+    };
+    var cv = try renderCanvas(alloc, p, .{ .width = 600 });
+    defer cv.deinit();
+    // Same projection as the pour test: 600 px / (20 + 2·margin) mm = 25 px/mm,
+    // ×ss internal, with the header band offsetting y.
+    const px_mm: usize = 50;
+    const row = (header_h_px * ss + 5 * px_mm) * cv.iw; // world y = 3
+    // World (16,3) — inside the reserved half. The violet wash lifts red off
+    // the #001023 canvas, which has none.
+    const inside = (row + 18 * px_mm) * 3;
+    try std.testing.expect(cv.buf[inside] > 0x10);
+    // World (4,3) — the free half stays exactly the canvas colour.
+    const outside = (row + 6 * px_mm) * 3;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x10, 0x23 }, cv.buf[outside .. outside + 3]);
+
+    // A board declaring no region paints neither wash nor rim.
+    var bare = p;
+    bare.rules = .{};
+    var cv2 = try renderCanvas(alloc, bare, .{ .width = 600 });
+    defer cv2.deinit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x10, 0x23 }, cv2.buf[inside .. inside + 3]);
+}
+
 // spec: Web Server - the board PNG paints the canonical stages in order
 test "the PNG pass table is the canonical stage list, stage for stage" {
     const order = @import("render_order.zig");
     try std.testing.expectEqual(order.stages.len, board_passes.len);
     for (order.stages, board_passes) |want, got| {
         try std.testing.expectEqualStrings(want.name, got.stage);
-        // The holes are deliberate and named: this renderer has no keepout,
-        // group-box or clearance-halo model, and nothing else may be a hole.
-        const hole = std.mem.eql(u8, got.stage, "keepouts") or
-            std.mem.eql(u8, got.stage, "groups") or
+        // The holes are deliberate and named: this renderer has no group-box
+        // or clearance-halo model, and nothing else may be a hole. The keepout
+        // stage is NOT one: it paints the authored `(board … (keepout …))`
+        // regions (the derived perimeter band stays viewer-only, being a
+        // function of the outline the image already draws).
+        const hole = std.mem.eql(u8, got.stage, "groups") or
             std.mem.eql(u8, got.stage, "clearance");
         try std.testing.expectEqual(hole, got.run == null);
     }
@@ -2506,6 +2588,7 @@ const themed_colors = [_]struct { drawn: Rgb, theme: []const u8 }{
     .{ .drawn = silk_rgb, .theme = board_theme.silk_front },
     .{ .drawn = silk_bot, .theme = board_theme.silk_back },
     .{ .drawn = edge_col, .theme = board_theme.edge_cuts },
+    .{ .drawn = keepout_col, .theme = board_theme.keepout_region },
     .{ .drawn = via_col, .theme = board_theme.via },
     .{ .drawn = via_hole, .theme = board_theme.via_hole },
     .{ .drawn = aw_sig, .theme = board_theme.ratsnest },

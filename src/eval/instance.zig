@@ -11,11 +11,52 @@ const Evaluator = evaluator_mod.Evaluator;
 const EvalError = evaluator_mod.EvalError;
 const ids = @import("ids.zig");
 const pin_roles = @import("../placement/pin_roles.zig");
+const footprint_pads = @import("footprint_pads.zig");
+const suggest = @import("suggest.zig");
 const thermal = @import("thermal.zig");
+const forms_mod = @import("forms.zig");
 const PinNetDecl = evaluator_mod.PinNetDecl;
 
 // ── Constants ─────────────────────────────────────────────────────
 const series_named_ref_min_arity: usize = 5;
+
+/// The `(instance …)` body sub-forms this parser dispatches on, derived from
+/// the documented registry so the reference and the parser cannot disagree.
+/// Any other head falls through to the inline-property branch, so this list is
+/// also half of the vocabulary a typo is measured against.
+const known_forms = forms_mod.instance_reserved_forms;
+
+/// `(row N)` / `(col N)` are legal in an instance body but consumed by the
+/// layout rather than by this parser — they reach the property branch and are
+/// dropped there without a warning. They are still spellings an author can
+/// mistype, so they join the typo vocabulary.
+const grid_hint_forms = [_][]const u8{ "row", "col" };
+
+/// Every legal `(instance …)` sub-form head. A body head close enough to one
+/// of these (see `suggest.Budget.strict`) is a typo, not a property.
+const instance_sub_forms = known_forms ++ grid_hint_forms;
+
+/// What the library knows about one part's pads, as the two independent
+/// records that can carry it: the `lib/pinouts` map (pad id → function name)
+/// when the part has a pinout file, and the name of its footprint, whose
+/// `(pad …)` ids answer for everything else (passives, connectors, mechanical
+/// parts). A part with neither has an unknown pad set and every pad token on
+/// it passes unchecked.
+///
+/// The footprint is named rather than loaded so `requirePad` can read it
+/// LAZILY — a pad that the pinout already accounts for never costs a file
+/// read, and a footprint is read at most once per build (cached on the
+/// evaluator) however many instances place it.
+pub const PartPads = struct {
+    pinout: ?*const std.StringHashMapUnmanaged([]const u8) = null,
+    footprint: []const u8 = "",
+};
+
+/// One pad token under check: the sub-form that named it, the token as
+/// written, and the pad id it resolved to. `raw` and `pad` differ exactly
+/// when the author wrote a pinout function name instead of a pad id, and the
+/// diagnostic quotes the spelling the author used.
+const PadRef = struct { form: []const u8, raw: []const u8, pad: []const u8 };
 
 const Node = ast.Node;
 const Value = env_mod.Value;
@@ -166,6 +207,9 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     // Resolve pinout for reverse lookup (function_name -> pin_id); null when the
     // component has no lib/pinouts file (the pinout-less-wiring guard keys on it).
     const reverse_pinout = resolveReversePinout(self, &inst);
+    // Both pad records this part has, for the pad-existence check. The
+    // footprint is only named here; `requirePad` loads it on demand.
+    const part_pads = PartPads{ .pinout = reverse_pinout, .footprint = resolved.footprint };
 
     // Parse inline pin declarations:
     //   (pin 1 "NET")               -- single pin
@@ -180,7 +224,6 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     var strap_oks: std.ArrayList(env_mod.StrapOk) = .empty;
     var nc_oks: std.ArrayList(env_mod.NcOk) = .empty;
     var power: ?env_mod.PowerDecl = null;
-    const known_forms = [_][]const u8{ "pin", "part", "note", "bus", "id", "as", "dnp", "decouples", "near", "strap-ok", "nc-ok", "power" };
 
     var positional_pad: usize = 1;
     for (args[2..]) |form| {
@@ -192,24 +235,24 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         } else if (form.isForm("note")) {
             try parseInlineNote(self, form, ref_des, env, &inline_notes);
         } else if (form.isForm("pin")) {
-            try parsePinForm(self, form, ref_des, env, &pin_nets, reverse_pinout);
+            try parsePinForm(self, form, ref_des, env, &pin_nets, part_pads);
         } else if (form.isForm("part")) {
             // Multi-part symbol: (part "Name" (row N) (col N) (pin …) …). Each
             // inner (pin …) wires exactly like a top-level pin (so the IC is
             // electrically connected), and the part is recorded on the instance
             // so the schematic renders one labelled box per function group.
-            try parsePartForm(self, form, ref_des, env, &pin_nets, &parts, reverse_pinout);
+            try parsePartForm(self, form, ref_des, env, &pin_nets, &parts, part_pads);
         } else if (form.isForm("dnp")) {
             // (dnp) — mark Do Not Populate. Bare flag form (no value).
             dnp_flag = true;
         } else if (form.isForm("decouples")) {
             try parseDecouples(self, form, ref_des, env, &binds.decouple);
         } else if (form.isForm("near")) {
-            try parseNear(self, form, ref_des, env, reverse_pinout, &binds.near);
+            try parseNear(self, form, ref_des, env, part_pads, &binds.near);
         } else if (form.isForm("strap-ok")) {
-            try parseStrapOk(self, form, ref_des, env, reverse_pinout, &strap_oks);
+            try parseStrapOk(self, form, ref_des, env, part_pads, &strap_oks);
         } else if (form.isForm("nc-ok")) {
-            try parseNcOk(self, form, ref_des, env, reverse_pinout, &nc_oks);
+            try parseNcOk(self, form, ref_des, env, part_pads, &nc_oks);
         } else if (form.isForm("power")) {
             power = thermal.parsePower(form.asList().?) orelse blk: {
                 self.warnFmt(form.span, "(power …) on \"{s}\" — expected (power WATTS) or (power (typ W) (max W))", .{ref_des});
@@ -240,28 +283,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
                 }
             }
         } else {
-            // Unknown form -- treat as inline property: (key "value").
-            // Shapes that can't become a property (bare tokens, 1-element
-            // lists, non-string values) are silently dead — flag them,
-            // except the documented-but-inert (row N)/(col N) grid hints.
-            const fc = form.asList() orelse {
-                self.warnFmt(form.span, "ignored bare token in (instance \"{s}\" …) body", .{ref_des});
-                continue;
-            };
-            if (fc.len < 2) {
-                self.warnFmt(form.span, "ignored sub-form in (instance \"{s}\" …) — properties need a value: (key \"value\")", .{ref_des});
-                continue;
-            }
-            const key = fc[0].asAtom() orelse continue;
-            if (!env_mod.containsString(&known_forms, key)) {
-                const val = (try self.evalNode(fc[1], env)).asString() orelse {
-                    if (!std.mem.eql(u8, key, "row") and !std.mem.eql(u8, key, "col")) {
-                        self.warnFmt(form.span, "ignored sub-form ({s} …) in (instance \"{s}\" …) — property values must be strings", .{ key, ref_des });
-                    }
-                    continue;
-                };
-                try inline_props.append(self.allocator, .{ .key = key, .value = val });
-            }
+            try parseUnknownSubForm(self, form, ref_des, env, &inline_props);
         }
     }
 
@@ -286,6 +308,63 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         .pin_nets = pin_nets.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .inline_notes = inline_notes.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
     };
+}
+
+/// Handle an `(instance …)` body form this parser does not dispatch on: it is
+/// either a typo of a real sub-form (rejected) or an inline property
+/// `(key "value")` (appended to `inline_props`).
+///
+/// Shapes that cannot become a property — a bare token, a 1-element list, a
+/// non-string value — are silently dead, so each warns, except the
+/// documented-but-inert `(row N)` / `(col N)` grid hints.
+fn parseUnknownSubForm(
+    self: *Evaluator,
+    form: Node,
+    ref_des: []const u8,
+    env: *Env,
+    inline_props: *std.ArrayList(env_mod.Property),
+) EvalError!void {
+    const fc = form.asList() orelse {
+        self.warnFmt(form.span, "ignored bare token in (instance \"{s}\" …) body", .{ref_des});
+        return;
+    };
+    if (fc.len > 0) try rejectNearMissSubForm(self, form.span, ref_des, fc[0].asAtom() orelse "");
+    if (fc.len < 2) {
+        self.warnFmt(form.span, "ignored sub-form in (instance \"{s}\" …) — properties need a value: (key \"value\")", .{ref_des});
+        return;
+    }
+    const key = fc[0].asAtom() orelse return;
+    if (env_mod.containsString(&known_forms, key)) return;
+    const val = (try self.evalNode(fc[1], env)).asString() orelse {
+        if (!env_mod.containsString(&grid_hint_forms, key)) {
+            self.warnFmt(form.span, "ignored sub-form ({s} …) in (instance \"{s}\" …) — property values must be strings", .{ key, ref_des });
+        }
+        return;
+    };
+    try inline_props.append(self.allocator, .{ .key = key, .value = val });
+}
+
+/// Reject a body sub-form whose head is one or two edits away from a real
+/// `(instance …)` sub-form.
+///
+/// Everything this parser does not dispatch on becomes an inline property
+/// `(key "value")`, which is what makes `(decuples "U1" 1)` build clean: the
+/// decoupling sign-off it promised was never declared, and a BOM property
+/// named `decuples` took its place. Only a NEAR-MISS is rejected, so a
+/// deliberate property key (`module-bypass`, `emi-couples`) keeps working
+/// exactly as before.
+fn rejectNearMissSubForm(self: *Evaluator, span: ast.Span, ref_des: []const u8, head: []const u8) EvalError!void {
+    // A legal head reaches this branch too — `(id …)` and `(as …)` are
+    // consumed elsewhere and fall through here — and a legal head is never a
+    // typo, however close it sits to another one (`id` is two edits from
+    // `pin`).
+    if (env_mod.containsString(&instance_sub_forms, head)) return;
+    // `.strict`: this verdict is itself the error, so a short head gets one
+    // edit of slack rather than two — `(mpn 42)` is a property, not a `(pin
+    // …)` typo, even though it sits two edits away.
+    const suggestion = suggest.nearestOf(head, &instance_sub_forms, .strict) orelse return;
+    self.setErrorFmt(span, "unknown sub-form ({s} …) in (instance \"{s}\" …) — did you mean ({s} …)?", .{ head, ref_des, suggestion });
+    return EvalError.InvalidForm;
 }
 
 /// Append a well-formed `(note "text")` from an instance body. Keeping this
@@ -377,6 +456,68 @@ fn warnPinoutlessMultiPad(
         "to validate them)", .{ inst.ref_des, inst.component, hint });
 }
 
+/// Error when `pad` is not a pad this part has.
+///
+/// A `(pin 99 "X")` on an 11-pad part used to produce nothing but a
+/// downstream floating-net warning about net `X`; the pad itself reached the
+/// netlist and the KiCad export as a pad no footprint defines. The two
+/// library records that can answer are consulted in cost order: the pinout
+/// map (already resolved and in memory), then the footprint's pad ids (one
+/// cached read). A part with neither record has an unknown pad set, so its
+/// tokens pass unchecked — that is most passives' normal state.
+fn requirePad(self: *Evaluator, pads: PartPads, span: ast.Span, ref_des: []const u8, ref: PadRef) EvalError!void {
+    const pad = ref.pad;
+    if (pad.len == 0) return;
+    const pinout_count = if (pads.pinout) |pm| blk: {
+        if (pm.contains(pad)) return;
+        break :blk pm.count();
+    } else 0;
+    const fp = footprint_pads.get(self, pads.footprint);
+    const fp_count = if (fp) |f| blk: {
+        if (f.contains(pad)) return;
+        break :blk f.count();
+    } else 0;
+    if (pinout_count == 0 and fp_count == 0) return; // pad set unknown — say nothing
+    // The two records overlap, so the larger of them is the honest floor on
+    // how many pads the part has — and the number the author can count.
+    self.setError(span, padErrorMessage(self, pads, ref_des, ref, @max(pinout_count, fp_count)));
+    return EvalError.InvalidForm;
+}
+
+/// The diagnostic for a pad that does not exist, with a did-you-mean when the
+/// token is a near-miss of one of the part's pin FUNCTION names (`VDDA` for
+/// `VDA`) — the spelling authors reach for, and the one a pad-id list cannot
+/// hint at. Error path only, so the candidate scan is never a build cost.
+fn padErrorMessage(self: *Evaluator, pads: PartPads, ref_des: []const u8, ref: PadRef, pad_count: usize) []const u8 {
+    const raw = ref.raw;
+    const hint = nearestPinFunction(self, pads.pinout, raw);
+    const suffix = if (hint) |h|
+        std.fmt.allocPrint(self.allocator, " — did you mean {s}?", .{h}) catch ""
+    else
+        "";
+    return std.fmt.allocPrint(
+        self.allocator,
+        "({s} {s} …) on instance \"{s}\" — this part has no pad {s} ({d} pads){s}",
+        .{ ref.form, raw, ref_des, raw, pad_count, suffix },
+    ) catch "pad does not exist on this part";
+}
+
+/// Nearest pin function name to `raw` across the part's pinout, or null when
+/// the part has no pinout or nothing is within the suggester's edit budget.
+fn nearestPinFunction(self: *Evaluator, pinout: ?*const std.StringHashMapUnmanaged([]const u8), raw: []const u8) ?[]const u8 {
+    // A numeric pad token is a pad id the author got wrong, not a misspelled
+    // function name; and below three characters a two-edit budget reaches
+    // essentially every short function name ("P1" is two edits from "NC").
+    // Both produce confident nonsense, so neither gets a hint.
+    if (raw.len < 3 or isAllDigits(raw)) return null;
+    const map = pinout orelse return null;
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(self.allocator);
+    var it = map.valueIterator();
+    while (it.next()) |v| names.append(self.allocator, v.*) catch return null;
+    return suggest.nearestOf(raw, names.items, .advisory);
+}
+
 /// Parse a `(part "Name" (row N) (col N) (pin … "NET") …)` multi-part-symbol
 /// block on an instance. Each inner `(pin …)` is wired exactly like a
 /// top-level pin (appended to `pin_nets`, so the IC is electrically connected),
@@ -390,7 +531,7 @@ fn parsePartForm(
     env: *Env,
     pin_nets: *std.ArrayList(PinNetDecl),
     parts: *std.ArrayList(env_mod.Part),
-    pinout: ?*const std.StringHashMapUnmanaged([]const u8),
+    pads: PartPads,
 ) EvalError!void {
     const children = form.asList() orelse return;
     if (children.len < 2) return;
@@ -401,7 +542,7 @@ fn parsePartForm(
     // the freshly-appended (pin, net) pairs into a Part (grouped by the part name).
     const before = pin_nets.items.len;
     for (children[2..]) |child| {
-        if (child.isForm("pin")) try parsePinForm(self, child, ref_des, env, pin_nets, pinout);
+        if (child.isForm("pin")) try parsePinForm(self, child, ref_des, env, pin_nets, pads);
     }
     var part_pins: std.ArrayList(env_mod.PartPin) = .empty;
     for (pin_nets.items[before..]) |pn| {
@@ -462,7 +603,7 @@ fn parseNear(
     form: Node,
     ref_des: []const u8,
     env: *Env,
-    reverse_pinout: ?*const std.StringHashMapUnmanaged([]const u8),
+    pads: PartPads,
     out: *env_mod.NearBind,
 ) EvalError!void {
     const nc = form.asList().?;
@@ -488,7 +629,8 @@ fn parseNear(
             continue;
         }
         const raw = ids.pinId(self, oc[1]) orelse "";
-        own = if (reverse_pinout) |rp| (resolvePinName(self, rp, raw, oc[1].span) orelse raw) else raw;
+        own = if (pads.pinout) |rp| (resolvePinName(self, rp, raw, oc[1].span) orelse raw) else raw;
+        try requirePad(self, pads, oc[1].span, ref_des, .{ .form = "own", .raw = raw, .pad = own });
     }
     out.* = .{ .ref = target_ref, .pin = target_pin, .own = own };
 }
@@ -502,7 +644,7 @@ fn parseStrapOk(
     form: Node,
     ref_des: []const u8,
     env: *Env,
-    reverse_pinout: ?*const std.StringHashMapUnmanaged([]const u8),
+    pads: PartPads,
     strap_oks: *std.ArrayList(env_mod.StrapOk),
 ) EvalError!void {
     const sc = form.asList().?;
@@ -511,7 +653,8 @@ fn parseStrapOk(
         return;
     }
     const raw = ids.pinId(self, sc[1]) orelse "";
-    const pad = if (reverse_pinout) |rp| (resolvePinName(self, rp, raw, sc[1].span) orelse raw) else raw;
+    const pad = if (pads.pinout) |rp| (resolvePinName(self, rp, raw, sc[1].span) orelse raw) else raw;
+    try requirePad(self, pads, sc[1].span, ref_des, .{ .form = "strap-ok", .raw = raw, .pad = pad });
     const reason = (try self.evalNode(sc[2], env)).asString() orelse "";
     try strap_oks.append(self.allocator, .{ .pin = pad, .reason = reason });
 }
@@ -525,7 +668,7 @@ fn parseNcOk(
     form: Node,
     ref_des: []const u8,
     env: *Env,
-    reverse_pinout: ?*const std.StringHashMapUnmanaged([]const u8),
+    pads: PartPads,
     nc_oks: *std.ArrayList(env_mod.NcOk),
 ) EvalError!void {
     const sc = form.asList().?;
@@ -534,7 +677,8 @@ fn parseNcOk(
         return;
     }
     const raw = ids.pinId(self, sc[1]) orelse "";
-    const pad = if (reverse_pinout) |rp| (resolvePinName(self, rp, raw, sc[1].span) orelse raw) else raw;
+    const pad = if (pads.pinout) |rp| (resolvePinName(self, rp, raw, sc[1].span) orelse raw) else raw;
+    try requirePad(self, pads, sc[1].span, ref_des, .{ .form = "nc-ok", .raw = raw, .pad = pad });
     const reason = (try self.evalNode(sc[2], env)).asString() orelse "";
     try nc_oks.append(self.allocator, .{ .pin = pad, .reason = reason });
 }
@@ -604,7 +748,7 @@ pub fn parsePinForm(
     ref_des: []const u8,
     env: *Env,
     pin_nets: *std.ArrayList(PinNetDecl),
-    pinout: ?*const std.StringHashMapUnmanaged([]const u8),
+    pads: PartPads,
 ) EvalError!void {
     const pin_children = form.asList() orelse return;
     if (pin_children.len < 3) return;
@@ -626,7 +770,8 @@ pub fn parsePinForm(
         if (pin_node.isForm("as")) continue;
         const raw = ids.pinId(self, pin_node) orelse continue;
         // Resolve: try as function name first (via pinout), fall back to physical pin ID
-        const pn = if (pinout) |pm| (resolvePinName(self, pm, raw, pin_node.span) orelse raw) else raw;
+        const pn = if (pads.pinout) |pm| (resolvePinName(self, pm, raw, pin_node.span) orelse raw) else raw;
+        try requirePad(self, pads, pin_node.span, ref_des, .{ .form = "pin", .raw = raw, .pad = pn });
         try pin_nets.append(self.allocator, .{
             .ref_des = ref_des,
             .pin = pn,
@@ -869,7 +1014,7 @@ pub fn evalSeriesForm(
         var s_inst = instanceFromValue(self, s_comp_val, s_ref, s_comp_offset, s_id) orelse return;
         s_inst.origin_key = s_ref; // stable source name for hierarchical sub-block ids
         try mergeInstanceProperties(self, &s_inst, ta.props.items);
-        ids.registerRefDes(self, s_ref);
+        try ids.noteAuthoredRefDes(self, s_ref, form_children[0].span);
         try instances.append(self.allocator, s_inst);
         try all_pin_nets.append(self.allocator, .{ .ref_des = s_ref, .pin = "1", .net = ta.nets.items[0] });
         try all_pin_nets.append(self.allocator, .{ .ref_des = s_ref, .pin = "2", .net = ta.nets.items[1] });
@@ -1374,4 +1519,175 @@ test "pinout-less multi-pad wiring warns; two-pad passive stays silent" {
     try testing.expectEqual(@as(usize, 1), eval.warnings.items.len);
     try testing.expect(std.mem.indexOf(u8, eval.warnings.items[0].message, "wideband-amp") != null);
     try testing.expect(std.mem.indexOf(u8, eval.warnings.items[0].message, "no pinout") != null);
+}
+
+/// Build `src` against a cached component, for the sub-form / pad-existence
+/// tests below. `pinout` (pad id → function name) is installed under the
+/// component's symbol name when non-empty.
+fn hardeningFixture(
+    alloc: std.mem.Allocator,
+    eval: *Evaluator,
+    env: *Env,
+    comp: evaluator_mod.Evaluator.ComponentData,
+    src: []const u8,
+) !InstanceResult {
+    try eval.component_cache.put(alloc, comp.name, comp);
+    const nodes = try parser_mod.parse(alloc, src);
+    return buildInstance(eval, nodes[0].asList().?, env);
+}
+
+/// A cached component with no pinout and no footprint — an unknown pad set.
+fn bareComponent(name: []const u8) evaluator_mod.Evaluator.ComponentData {
+    return .{ .name = name, .symbol_name = "", .footprint_name = "", .is_family = false, .param_type = "" };
+}
+
+// spec: eval/instance - an instance sub-form within two edits of a real one is an error naming the spelling meant
+test "a typo'd instance sub-form is rejected with a did-you-mean" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    const comp: evaluator_mod.Evaluator.ComponentData = .{
+        .name = "cap-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    };
+    // Before this check `(decuples …)` became an inline BOM property and the
+    // decoupling sign-off it promised was never declared.
+    const src = "(instance \"C1\" (cap-0402 \"1uF\") (pin 1 \"VIN\") (pin 2 \"GND\") (decuples \"U1\" 1))";
+    try testing.expectError(EvalError.InvalidForm, hardeningFixture(alloc, &eval, &env, comp, src));
+    const msg = eval.last_error.?.message;
+    try testing.expect(std.mem.indexOf(u8, msg, "unknown sub-form (decuples …)") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "did you mean (decouples …)?") != null);
+}
+
+// spec: eval/instance - an unknown sub-form head that is not a near-miss still becomes an inline property
+test "a distant unknown sub-form head stays an inline property" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    const comp: evaluator_mod.Evaluator.ComponentData = .{
+        .name = "cap-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "",
+    };
+    // Both keys are real corpus property keys; `(id …)` is a legal head that
+    // reaches the same branch and must never read as a typo of `(pin …)`.
+    const src = "(instance \"C1\" (cap-0402 \"1uF\") (pin 1 \"VIN\") (module-bypass \"yes\") (emi-couples \"shield\") (id abcd1234))";
+    const res = try hardeningFixture(alloc, &eval, &env, comp, src);
+    try testing.expectEqual(@as(usize, 2), res.instance.properties.len);
+    try testing.expectEqualStrings("module-bypass", res.instance.properties[0].key);
+    try testing.expectEqualStrings("emi-couples", res.instance.properties[1].key);
+    try testing.expectEqualStrings("abcd1234", res.instance.id);
+}
+
+/// Install an 11-pad pinout under symbol `sym` and return the component that
+/// uses it. Mirrors a real DFN part: numeric pads with function names.
+fn pinoutComponent(alloc: std.mem.Allocator, eval: *Evaluator, sym: []const u8) !evaluator_mod.Evaluator.ComponentData {
+    var pins: std.StringHashMapUnmanaged([]const u8) = .empty;
+    const rows = [_][2][]const u8{
+        .{ "1", "SYS" },   .{ "2", "BAT" },  .{ "3", "STAT2" }, .{ "4", "CE" },
+        .{ "5", "GND" },   .{ "6", "TSMR" }, .{ "7", "ILIM" },  .{ "8", "ISET" },
+        .{ "9", "STAT1" }, .{ "10", "IN" },  .{ "11", "EP" },
+    };
+    for (rows) |row| try pins.put(alloc, row[0], row[1]);
+    try eval.symbol_pin_cache.put(alloc, sym, pins);
+    return .{ .name = "charger", .symbol_name = sym, .footprint_name = "", .is_family = false, .param_type = "" };
+}
+
+// spec: eval/instance - a pad token outside the part's known pad set is an error carrying the pad count
+test "a pin naming a pad the part does not have is rejected" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    const comp = try pinoutComponent(alloc, &eval, "charger-pins");
+
+    try testing.expectError(EvalError.InvalidForm, hardeningFixture(alloc, &eval, &env, comp, "(instance \"U1\" charger (pin 1 \"VIN\") (pin 99 \"X\"))"));
+    const msg = eval.last_error.?.message;
+    try testing.expect(std.mem.indexOf(u8, msg, "this part has no pad 99") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "(11 pads)") != null);
+    // A numeric pad is never hinted at with a function name: every short name
+    // sits inside a two-edit budget of "99".
+    try testing.expect(std.mem.indexOf(u8, msg, "did you mean") == null);
+
+    // Multi-pin shorthand checks each token, and a function-name near-miss
+    // does get a hint.
+    try testing.expectError(EvalError.InvalidForm, hardeningFixture(alloc, &eval, &env, comp, "(instance \"U1\" charger (pin 1 2 STAT3 \"X\"))"));
+    try testing.expect(std.mem.indexOf(u8, eval.last_error.?.message, "did you mean STAT2?") != null);
+
+    // Every real pad — id or function name — still passes, inside (part …) too.
+    _ = try hardeningFixture(alloc, &eval, &env, comp, "(instance \"U1\" charger (pin 1 2 \"VIN\") (pin ISET \"SET\") (part \"P\" (pin 11 \"GND\")))");
+}
+
+// spec: eval/instance - strap-ok, nc-ok and a (near …) own pad are held to the same pad set as (pin …)
+test "the sign-off sub-forms reject a pad the part does not have" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    const comp = try pinoutComponent(alloc, &eval, "charger-pins-b");
+
+    const bad = [_][]const u8{
+        "(instance \"U1\" charger (pin 1 \"VIN\") (strap-ok 43 \"tied\"))",
+        "(instance \"U1\" charger (pin 1 \"VIN\") (nc-ok 42 \"spare\"))",
+        "(instance \"U1\" charger (pin 1 \"VIN\") (near \"U2\" 3 (own 99)))",
+    };
+    for (bad) |src| try testing.expectError(EvalError.InvalidForm, hardeningFixture(alloc, &eval, &env, comp, src));
+
+    // The same three forms on real pads stay silent.
+    const good = "(instance \"U1\" charger (pin 1 \"VIN\") (strap-ok 5 \"ILIM->GND\") (nc-ok 3 \"spare\") (near \"U2\" 3 (own 2)))";
+    const res = try hardeningFixture(alloc, &eval, &env, comp, good);
+    try testing.expectEqual(@as(usize, 1), res.instance.strap_oks.len);
+    try testing.expectEqual(@as(usize, 1), res.instance.nc_oks.len);
+    try testing.expectEqualStrings("2", res.instance.bind.near.own);
+}
+
+// spec: eval/instance - a part with neither a pinout nor a footprint has an unknown pad set and every pad token passes
+test "a part with no pad record accepts any pad token" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    // No pinout, no footprint: no evidence either way, so no error — this is
+    // the normal state of most passives and of newly imported parts.
+    const res = try hardeningFixture(alloc, &eval, &env, bareComponent("mystery"), "(instance \"U9\" mystery (pin 1 \"A\") (pin 77 \"B\") (pin EPAD \"C\"))");
+    try testing.expectEqual(@as(usize, 3), res.pin_nets.len);
+}
+
+// spec: eval/instance - a footprint's pad ids check the pads of a part that has no pinout file
+test "footprint pads check a pinout-less part" {
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/footprints");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/footprints/r-0402.sexp",
+        .data = "(footprint \"R\" (pad 1 smd rect (pos 0 0) (size 1 1)) (pad 2 smd rect (pos 1 0) (size 1 1)))",
+    });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    var eval = Evaluator.init(alloc, root);
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    const comp: evaluator_mod.Evaluator.ComponentData = .{
+        .name = "res-0402",
+        .symbol_name = "",
+        .footprint_name = "r-0402",
+        .is_family = true,
+        .param_type = "",
+    };
+    _ = try hardeningFixture(alloc, &eval, &env, comp, "(instance \"R1\" (res-0402 \"10k\") (pin 1 \"A\") (pin 2 \"B\"))");
+    try testing.expectError(EvalError.InvalidForm, hardeningFixture(alloc, &eval, &env, comp, "(instance \"R2\" (res-0402 \"10k\") (pin 1 \"A\") (pin 3 \"B\"))"));
+    try testing.expect(std.mem.indexOf(u8, eval.last_error.?.message, "no pad 3 (2 pads)") != null);
 }

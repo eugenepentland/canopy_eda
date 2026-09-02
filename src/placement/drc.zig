@@ -15,6 +15,7 @@ const router = @import("router.zig");
 const drc_diffpair = @import("drc_diffpair.zig");
 const drc_keepout = @import("drc_keepout.zig");
 const drc_perimeter_keepout = @import("drc_perimeter_keepout.zig");
+const drc_board_keepout = @import("drc_board_keepout.zig");
 const drc_match = @import("drc_match.zig");
 const geometry = @import("geometry.zig");
 const keepout = @import("keepout.zig");
@@ -147,6 +148,11 @@ pub const Kind = enum {
     /// `(board … (perimeter-fence … (keepout …)))`. Unlike an RF isolation
     /// preference, this is board-construction geometry and is fab-blocking.
     perimeter_keepout,
+    /// A component, track, or via inside a named region authored by
+    /// `(board … (keepout "NAME" (rect …) (side …) …))` — a heatsink plate's
+    /// footprint, a shield can, a bracket. Mechanical board construction, and
+    /// therefore fab-blocking like the perimeter band it generalizes.
+    board_keepout,
     /// A net whose drawn copper does not all connect — two islands that never
     /// join (fab-fatal, invisible to clearance). Produced by `net_open.zig`,
     /// layered on at the serve seam (`drc_rules.checkFiltered`), not in
@@ -208,7 +214,7 @@ pub fn defaultSeverity(k: Kind) Severity {
         // so this MUST stay a warning or advisory findings would block hand
         // routing. Per-design escalation lives in the viewer's DRC policy drawer.
         .keepout_violation => .warn,
-        .perimeter_keepout => .err,
+        .perimeter_keepout, .board_keepout => .err,
         // Differential-pair coupling / length match (see `drc_diffpair.zig`):
         // both require BOTH legs routed, both are tolerance-window judgements,
         // and neither stops a fab house — deliberately non-blocking.
@@ -776,6 +782,7 @@ fn checkImpl(
     // for. `keepout.anyDeclared` makes it free for every other design.
     try drc_keepout.check(arena, &out, placement, tracks, vias, try keepoutPads(arena, placement, pads));
     try drc_perimeter_keepout.check(arena, &out, placement, tracks, vias);
+    try drc_board_keepout.check(arena, &out, placement, tracks, vias);
     // RF bend discipline: preserve the router's richer findings (including
     // achieved radius on an under-floor arc), then audit the ACTUAL copper as
     // well. Saved layouts persist arcs as track chords and do not persist the

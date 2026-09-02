@@ -605,6 +605,7 @@ test {
     _ = @import("query.zig");
     _ = @import("tool_cli.zig");
     _ = @import("eval/evaluator.zig");
+    _ = @import("eval/board_keepout.zig");
     _ = @import("eval/board_role_cases.zig");
     _ = @import("eval/section_maturity.zig");
     _ = @import("eval/ids.zig");
@@ -627,6 +628,7 @@ test {
     _ = @import("eval/thermal.zig");
     _ = @import("eval/power_sequencing.zig");
     _ = @import("req_checks_cases.zig");
+    _ = @import("req_physical_checks_cases.zig");
     _ = @import("component_classification.zig");
     _ = @import("module_metadata.zig");
     _ = @import("canonical_module_check.zig");
@@ -813,6 +815,8 @@ test {
     _ = @import("placement/rf_shadow.zig");
     _ = @import("eval/stackup_presets.zig");
     _ = @import("placement/drc_keepout.zig");
+    _ = @import("placement/board_keepout.zig");
+    _ = @import("placement/drc_board_keepout.zig");
     _ = @import("placement/drc_perimeter_keepout.zig");
     _ = @import("serve/pcb_keepout_json.zig");
     _ = @import("serve/pour_json.zig");

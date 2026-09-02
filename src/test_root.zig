@@ -63,12 +63,14 @@ test {
     _ = @import("drc_dump.zig");
     _ = @import("gerber_dump.zig");
     _ = @import("netlist_dump.zig");
+    _ = @import("pins_by_name.zig");
     _ = @import("drc_reconcile.zig");
     _ = @import("drc_sweep.zig");
     _ = @import("drc_session.zig");
     _ = @import("emit.zig");
     _ = @import("erc.zig");
     _ = @import("escape.zig");
+    _ = @import("eval/board_keepout.zig");
     _ = @import("eval/board_role_cases.zig");
     _ = @import("eval/builders.zig");
     _ = @import("eval/builtins.zig");
@@ -84,6 +86,7 @@ test {
     _ = @import("eval/micro_forms.zig");
     _ = @import("eval/modules.zig");
     _ = @import("eval/net_analysis.zig");
+    _ = @import("eval/net_suggest.zig");
     _ = @import("eval/pin_enrichment.zig");
     _ = @import("eval/power_budget.zig");
     _ = @import("eval/power_sequencing.zig");
@@ -92,6 +95,8 @@ test {
     _ = @import("eval/section_maturity.zig");
     _ = @import("eval/stackup_presets.zig");
     _ = @import("eval/suggest.zig");
+    _ = @import("eval/value_kind.zig");
+    _ = @import("eval/footprint_pads.zig");
     _ = @import("eval/test_point.zig");
     _ = @import("eval/thermal.zig");
     _ = @import("eval/validate.zig");
@@ -217,6 +222,8 @@ test {
     _ = @import("placement/drc_diffpair.zig");
     _ = @import("placement/drc_keepout.zig");
     _ = @import("placement/drc_match.zig");
+    _ = @import("placement/board_keepout.zig");
+    _ = @import("placement/drc_board_keepout.zig");
     _ = @import("placement/drc_perimeter_keepout.zig");
     _ = @import("placement/drc_pour.zig");
     _ = @import("placement/drc_scope.zig");
@@ -350,6 +357,8 @@ test {
     _ = @import("render_svg/section_inset.zig");
     _ = @import("req_checks_cases.zig");
     _ = @import("req_derived_checks.zig");
+    _ = @import("req_physical_checks.zig");
+    _ = @import("req_physical_checks_cases.zig");
     _ = @import("review.zig");
     _ = @import("review_md.zig");
     _ = @import("system_review.zig");

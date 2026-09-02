@@ -65,6 +65,7 @@ const pose_snapshot = @import("pose_snapshot.zig");
 const pose_math = @import("pose_math.zig");
 const edge_rotation = @import("edge_rotation.zig");
 const courtyard_close = @import("courtyard_close.zig");
+const board_keepout = @import("board_keepout.zig");
 const airwire_geometry = @import("airwire_geometry.zig");
 const port_escape = @import("port_escape.zig");
 const drc = @import("drc.zig");
@@ -557,6 +558,10 @@ pub const BoardArc = struct { p1: [2]f64, pm: [2]f64, p2: [2]f64 };
 pub const BoardRules = struct {
     /// Board-derived perimeter via fence and solder-mask opening declaration.
     perimeter_fence: env.PerimeterFenceSpec = .{},
+    /// Author-declared interior keepout regions from `(board … (keepout …))`,
+    /// board-local mm from the outline's top-left. `board_keepout.resolve`
+    /// lifts them into the world frame; empty ⇒ every region path is a no-op.
+    board_keepouts: []const env.BoardKeepoutSpec = &.{},
     /// Net names that have a dedicated copper plane, from `(stackup …)`.
     /// **Null = no stackup declared** — the router keeps its legacy implicit
     /// model (ground nets get plane vias). An **empty slice** is a declared
@@ -874,6 +879,22 @@ pub const resolvedNetRules = net_rules.resolvedNetRules;
 /// A `(board …)` outline rectangle in world mm (top-left + size).
 pub const BoardRect = courtyard_close.Rect;
 
+/// One authored `(board … (keepout …))` region in world millimetres, re-exported
+/// so a consumer that already holds a `Placement` needn't reach past this module
+/// into the geometry helper for the type name.
+pub const BoardKeepoutRegion = board_keepout.Region;
+
+/// This placement's authored keepout regions, lifted into world coordinates.
+/// The ONE resolution every surface reads — placer, DRC, page blob, PNG and
+/// `/api/pcb-describe` — so the rectangle a reader is shown is the rectangle
+/// that was enforced.
+pub fn boardKeepoutRegions(
+    arena: std.mem.Allocator,
+    p: Placement,
+) std.mem.Allocator.Error![]const BoardKeepoutRegion {
+    return board_keepout.regionsOf(arena, p);
+}
+
 /// Which copper side a part sits on. `top` is the default. A `bottom` part is
 /// drawn/placed mirrored about its own vertical axis (footprint-local x
 /// negates *before* rotation) — the view stays "looking down at the top", the
@@ -1015,6 +1036,12 @@ const GroupTerm = struct {
 /// harmless no-op. Slices live in the solve's arena (valid for that solve only).
 const PlacementGuidance = struct {
     keepouts: []const KeepTerm = &.{},
+    /// Authored `(board … (keepout …))` regions in WORLD millimetres. Empty
+    /// until the outline frame exists — a board-local rectangle cannot be
+    /// positioned while the solver is still deciding where the board goes, so
+    /// `publishBoardKeepouts` fills this in the moment `packBoard` (or the
+    /// seeded layout's own poses) fixes the frame.
+    board_keepouts: []const board_keepout.Region = &.{},
     /// Per-net "this is a switcher input rail" flag (index-aligned), derived
     /// from the module topology when no discrete inductor reveals the switcher.
     input_rail: []const bool = &.{},
@@ -6468,6 +6495,22 @@ fn boardRectFromPoses(
     };
 }
 
+/// Lift the board's authored `(keepout …)` rectangles into the world frame of
+/// `rect` and publish them on the solve's guidance, so `overlapsAny` refuses a
+/// courtyard there and `guidanceCost` charges one that settles inside. A board
+/// declaring none leaves the guidance untouched and pays nothing.
+fn publishBoardKeepouts(
+    arena: std.mem.Allocator,
+    block: *const DesignBlock,
+    rect: ?BoardRect,
+) std.mem.Allocator.Error!void {
+    if (block.board.keepouts.len == 0) return;
+    const regions = try board_keepout.resolve(arena, rect, block.board.keepouts);
+    if (regions.len == 0) return;
+    g_guidance.board_keepouts = regions;
+    g_guidance.active = true;
+}
+
 /// The authored exact outline for a resolved board rectangle: a corner radius
 /// yields native quarter arcs plus the bounded-sagitta fallback polygon; a
 /// plain size yields null because the rectangle itself is exact.
@@ -6514,6 +6557,7 @@ fn boardRulesWith(
     }
     return .{
         .perimeter_fence = block.board.perimeter_fence,
+        .board_keepouts = block.board.keepouts,
         .plane_nets = try planeNetsOf(arena, block),
         .net = rules,
         .copper_layers = if (block.stackup.present) block.stackup.layers else 0,
@@ -6681,6 +6725,11 @@ pub fn solve(
                 .board = block.board,
                 .edge_inset = designRulesOf(block).edge.component,
             });
+            // The outline frame now exists, so board-local keepout rectangles
+            // can finally be positioned. Publish before the auto-fill below:
+            // that pass is the first placer step that could drop a part into a
+            // reserved region, and `overlapsAny` now refuses to let it.
+            try publishBoardKeepouts(arena, block, board_rect);
             // The dock just landed the connectors; parts whose only anchors
             // are ON those connectors (CC pull-downs, LED resistors) couldn't
             // fill during the spec pass — give them a second pin-hug pass.
@@ -6693,6 +6742,11 @@ pub fn solve(
         // local routed tuck on it (the same monotonic, safety-netted pass the auto
         // solve finishes with), then the same priority-cap tuck. Lets a good hand
         // layout be improved without losing it.
+        // The seed's own poses fix the frame, so the regions can be resolved
+        // before the polish moves anything into one.
+        if (board_live and block.board.keepouts.len > 0) {
+            try publishBoardKeepouts(arena, block, try boardRectFromPoses(arena, parts, prep.instances, block.board, null));
+        }
         routedPolish(arena, parts, &prep.idx_of, nets, built.loops, params);
         tightenPriorityLoops(arena, parts, built.loops, nets, prep.priority);
     }
@@ -8141,9 +8195,14 @@ fn routedPolishPart(
     return improved;
 }
 
-/// True if `p`'s courtyard overlaps any other part's (rotation-aware).
-/// Parts on opposite board sides never collide.
+/// Is `p`'s pose infeasible? The ONE predicate every greedy candidate search
+/// asks (auto-fill, the tuck passes, `courtyard_close`), so a rule added here
+/// reaches all of them at once. Two reasons a pose fails: its courtyard
+/// overlaps another part's (rotation-aware; opposite board sides never
+/// collide), or it lands in an authored `(board … (keepout …))` region that
+/// forbids components on its face.
 fn overlapsAny(parts: []const Part, p: *const Part) bool {
+    if (board_keepout.blockingPart(g_guidance.board_keepouts, p.*) != null) return true;
     for (parts) |*o| {
         if (o == p) continue;
         if (o.side != p.side) continue;
@@ -8509,6 +8568,7 @@ fn objectiveCost(
 /// absent from the reported/compared metrics so it changes where the optimizer
 /// looks without changing how the result is judged. Terms:
 ///   • keep-out  — Σ KEEPOUT_W·max(0, min − courtyard gap)
+///   • board keep-out — Σ KEEPOUT_W·(courtyard depth into an authored region)
 ///   • input-loop boost — extra loop inductance weight on an inferred input rail
 ///   • group cohesion — Σ group_w·(member→centroid distance) per `(group …)`,
 ///     a per-member pull (force on every member, not just the bbox extremes) —
@@ -8530,6 +8590,12 @@ fn guidanceCost(
     for (L.keepouts) |k| {
         const g = partGap(parts[k.a], parts[k.b]);
         if (g < k.min_mm) c += keepout_w * (k.min_mm - g);
+    }
+    // Authored regions charge the same hinge on penetration depth, so the
+    // relaxation is pushed OUT of a reserved rectangle instead of only being
+    // refused there by `overlapsAny` after it has already settled inside.
+    if (L.board_keepouts.len > 0) {
+        for (parts) |p| c += keepout_w * board_keepout.partDepth(L.board_keepouts, p);
     }
     if (L.input_rail.len == nets.len) {
         for (loops) |lp| {
@@ -11775,6 +11841,48 @@ test "partialApplyLock pins matched parts only" {
     try testing.expect(parts[0].locked);
     try testing.expectEqual(@as(f64, 10), parts[0].x);
     try testing.expect(!parts[1].locked);
+}
+
+// spec: placement/optimizer - an authored board keepout region refuses a component pose on the face it reserves, leaves the other face alone, and charges the guidance hinge for a courtyard that settles inside
+test "an authored board keepout keeps a part out of its face" {
+    // A 10 x 10 mm board whose right half of the BOTTOM face is reserved.
+    const specs = [_]env.BoardKeepoutSpec{.{
+        .name = "plate",
+        .rect = .{ .x = 5, .y = 0, .w = 5, .h = 10 },
+        .side = .bottom,
+    }};
+    const regions = try board_keepout.resolve(
+        testing.allocator,
+        BoardRect{ .minx = 100, .miny = 200, .w = 10, .h = 10 },
+        &specs,
+    );
+    defer testing.allocator.free(@constCast(regions));
+    // Board-local (5,0) sits at world (105,200) — the same lift the authored
+    // heatsink takes, so the two forms describe the same millimetre.
+    try testing.expectApproxEqAbs(@as(f64, 105), regions[0].rect.minx, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 200), regions[0].rect.miny, 1e-9);
+
+    const saved = g_guidance;
+    defer g_guidance = saved;
+    g_guidance = .{ .board_keepouts = regions, .active = true };
+
+    // Bottom-side part squarely inside the region: refused, and charged.
+    var inside = [_]Part{
+        .{ .ref_des = "Q2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 107, .y = 205, .side = .bottom },
+    };
+    try testing.expect(overlapsAny(&inside, &inside[0]));
+    try testing.expect(guidanceCost(&inside, &.{}, &.{}, .{}) > 0);
+
+    // The SAME footprint on the top face is ordinary board — the region names
+    // one face, and a keepout that ignored the face would sterilise both.
+    inside[0].side = .top;
+    try testing.expect(!overlapsAny(&inside, &inside[0]));
+    try testing.expectEqual(@as(f64, 0), guidanceCost(&inside, &.{}, &.{}, .{}));
+
+    // Bottom face again, but in the free half of the board.
+    inside[0].side = .bottom;
+    inside[0].x = 102;
+    try testing.expect(!overlapsAny(&inside, &inside[0]));
 }
 
 // spec: placement/optimizer - legalization never moves a locked part; the free side absorbs the push

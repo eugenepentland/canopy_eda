@@ -174,6 +174,7 @@ src/board_theme.zig::edge_cuts value
 src/board_theme.zig::focus_accent value
 src/board_theme.zig::grid_dot value
 src/board_theme.zig::improvement value
+src/board_theme.zig::keepout_region value
 src/board_theme.zig::loop_return value
 src/board_theme.zig::pad_npth value
 src/board_theme.zig::pad_pth value
@@ -458,6 +459,9 @@ src/erc.zig::loadPinoutMap | fn loadPinoutMap(allocator: std.mem.Allocator, path
 src/erc.zig::runErc | fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8) std.mem.Allocator.Error![]const Violation
 src/erc.zig::writeViolationsJson | fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
 src/escape.zig::writeXml | fn writeXml(w: anytype, s: []const u8) !void
+src/eval/board_keepout.zig::edge_tolerance_mm value
+src/eval/board_keepout.zig::parseAll | fn parseAll( self: *Evaluator, form_children: []const Node, w: f64, h: f64, ) EvalError![]const env.BoardKeepoutSpec
+src/eval/board_keepout.zig::sideFromAtom | fn sideFromAtom(word: []const u8) ?env.BoardKeepoutSide
 src/eval/board_role.zig::parse | fn parse(evaluator: anytype, children: []const Node) BoardRole
 src/eval/board_role.zig::parsePowerPlane | fn parsePowerPlane(evaluator: anytype, children: []const Node) bool
 src/eval/builders.zig::DecoupleEmitContext struct_
@@ -470,7 +474,9 @@ src/eval/builders.zig::buildSubBlock | fn buildSubBlock(self: *Evaluator, form_c
 src/eval/builders.zig::emitBulkDecouples | fn emitBulkDecouples( self: *Evaluator, component_node: Node, count_node: Node, net_name: []const u8, env: *Env, ctx: DecoupleEmitContext, ) EvalError!void
 src/eval/builders.zig::emitDecoupleItems | fn emitDecoupleItems( self: *Evaluator, items: []const Node, net_name: []const u8, env: *Env, instances: *std.ArrayList(Instance), all_pin_nets: *std.ArrayList(PinNetDecl), form_id: []const u8, sidecar: *ids.ChildIdSidecar, ) EvalError!void
 src/eval/builders.zig::expandSectionBusPort | fn expandSectionBusPort( self: *Evaluator, bp_children: []const Node, env: *env_mod.Env, out: *std.ArrayList(env_mod.SectionPort), ) EvalError!void
+src/eval/builders.zig::expandSectionDiffPort | fn expandSectionDiffPort( self: *Evaluator, dp_children: []const Node, env: *env_mod.Env, out: *std.ArrayList(env_mod.SectionPort), ) EvalError!void
 src/eval/builders.zig::expandTopLevelBusPort | fn expandTopLevelBusPort( self: *Evaluator, bp_children: []const Node, env: *Env, out: *std.ArrayList(Port), ) EvalError!void
+src/eval/builders.zig::expandTopLevelDiffPort | fn expandTopLevelDiffPort( self: *Evaluator, dp_children: []const Node, env: *Env, out: *std.ArrayList(Port), ) EvalError!void
 src/eval/builders.zig::findPinFuncMap | fn findPinFuncMap(self: *Evaluator, inst_items: []const Instance, pins_ref: []const u8) ?*const std.StringHashMapUnmanaged([]const u8)
 src/eval/builders.zig::isKnownPinsChild | fn isKnownPinsChild(node: Node) bool
 src/eval/builders.zig::loadDesignFile | fn loadDesignFile(self: *Evaluator, path: []const u8) ?[]const Node
@@ -480,6 +486,7 @@ src/eval/builders.zig::parseSectionPort | fn parseSectionPort(self: *Evaluator, 
 src/eval/builders.zig::processPinForm | fn processPinForm( self: *Evaluator, pin_form: Node, pins_ref: []const u8, pin_func_map: ?*const std.StringHashMapUnmanaged([]const u8), env: *env_mod.Env, all_pin_nets: *std.ArrayList(PinNetDecl), pg_pins: *std.ArrayList(env_mod.PartPin), net_ties: *std.ArrayList(NetTie), ) EvalError!void
 src/eval/builders.zig::resolveDecoupleTargets | fn resolveDecoupleTargets(self: *Evaluator, instances: []Instance) void
 src/eval/builders.zig::resolveNearTargets | fn resolveNearTargets(self: *Evaluator, instances: []Instance) void
+src/eval/builders.zig::spliceChecksIntoDesignBlock | fn spliceChecksIntoDesignBlock( self: *Evaluator, nodes: []const Node, checks_nodes: []const Node, ) ?[]const Node
 src/eval/builders.zig::warnUnknownPinsChild | fn warnUnknownPinsChild(self: *Evaluator, node: Node) void
 src/eval/builtins.zig::BuiltinError value
 src/eval/builtins.zig::evalBuiltinOp | fn evalBuiltinOp(op: Builtin, args: []const Value) BuiltinError!Value
@@ -496,6 +503,8 @@ src/eval/env.zig::BlockDef struct_
 src/eval/env.zig::BlockOrigin enum_
 src/eval/env.zig::BlockRole enum_
 src/eval/env.zig::BoardHeatsinkSpec struct_
+src/eval/env.zig::BoardKeepoutSide enum_
+src/eval/env.zig::BoardKeepoutSpec struct_
 src/eval/env.zig::BoardRole enum_
 src/eval/env.zig::BoardSpec struct_
 src/eval/env.zig::CalcBlock struct_
@@ -512,6 +521,8 @@ src/eval/env.zig::DatasheetReviewStatus enum_
 src/eval/env.zig::DecoupleBind struct_
 src/eval/env.zig::DesignBlock struct_
 src/eval/env.zig::DesignRulesSpec struct_
+src/eval/env.zig::DistanceKind enum_
+src/eval/env.zig::DistanceRule struct_
 src/eval/env.zig::Drive enum_
 src/eval/env.zig::EdgeRules struct_
 src/eval/env.zig::EdgeSide enum_
@@ -622,6 +633,7 @@ src/eval/env.zig::parseNoteRef | fn parseNoteRef(node: ast.Node) ?NoteRef
 src/eval/env.zig::put | fn put(self: *Env, name: []const u8, value: Value) !void
 src/eval/env.zig::requirementIdForText | fn requirementIdForText(allocator: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error![]const u8
 src/eval/evaluator.zig::AltFunc struct_
+src/eval/evaluator.zig::AuthoredRef struct_
 src/eval/evaluator.zig::BusDef struct_
 src/eval/evaluator.zig::ComponentData struct_
 src/eval/evaluator.zig::DecoupleDefaults struct_
@@ -650,6 +662,8 @@ src/eval/fmt.zig::DirectiveArg enum_
 src/eval/fmt.zig::FmtError value
 src/eval/fmt.zig::directives value
 src/eval/fmt.zig::format | fn format(allocator: std.mem.Allocator, template: []const u8, args: []const Value) FmtError![]const u8
+src/eval/footprint_pads.zig::PadIds value
+src/eval/footprint_pads.zig::get | fn get(self: *Evaluator, fp_name: []const u8) ?*const PadIds
 src/eval/forms.zig::ArityViolation struct_
 src/eval/forms.zig::Builtin enum_
 src/eval/forms.zig::FormDoc struct_
@@ -658,16 +672,31 @@ src/eval/forms.zig::ScopeAvailability struct_
 src/eval/forms.zig::ScopeForm enum_
 src/eval/forms.zig::ScopedFormDoc struct_
 src/eval/forms.zig::SpecialForm enum_
+src/eval/forms.zig::SubFormDoc struct_
 src/eval/forms.zig::builtin_docs value
+src/eval/forms.zig::component_form_docs value
+src/eval/forms.zig::component_reserved_fields value
 src/eval/forms.zig::fromAtom | fn fromAtom(name: []const u8) ?Builtin
 src/eval/forms.zig::fromAtom | fn fromAtom(name: []const u8) ?ScopeForm
 src/eval/forms.zig::fromAtom | fn fromAtom(name: []const u8) ?SpecialForm
+src/eval/forms.zig::instance_form_docs value
+src/eval/forms.zig::instance_reserved_forms value
+src/eval/forms.zig::isDirectSubForm | fn isDirectSubForm(table: []const SubFormDoc, name: []const u8) bool
+src/eval/forms.zig::isRegisteredSubForm | fn isRegisteredSubForm(name: []const u8) bool
+src/eval/forms.zig::isSubForm | fn isSubForm(table: []const SubFormDoc, name: []const u8) bool
+src/eval/forms.zig::marker_form_docs value
+src/eval/forms.zig::pins_form_docs value
+src/eval/forms.zig::port_form_docs value
 src/eval/forms.zig::requireAllDocumented | fn requireAllDocumented( comptime E: type, comptime T: type, comptime table: [@typeInfo(E).@"enum".field_names.len]?T, ) [@typeInfo(E).@"enum".field_names.len]T
+src/eval/forms.zig::requireWellFormedSubForms | fn requireWellFormedSubForms(comptime table: []const SubFormDoc) []const SubFormDoc
+src/eval/forms.zig::reservedSubFormNames | fn reservedSubFormNames(comptime table: []const SubFormDoc) [reservedSubFormCount(table)][]const u8
 src/eval/forms.zig::schemaFor | fn schemaFor(sf: SpecialForm) ?FormSchema
 src/eval/forms.zig::scope_form_docs value
 src/eval/forms.zig::sourceName | fn sourceName(self: SpecialForm) []const u8
 src/eval/forms.zig::special_form_docs value
 src/eval/forms.zig::special_form_schema value
+src/eval/forms.zig::sub_block_form_docs value
+src/eval/forms.zig::sub_form_tables value
 src/eval/forms.zig::validateArity | fn validateArity(schema: FormSchema, arg_count: usize) ?ArityViolation
 src/eval/ids.zig::ChildIdSidecar struct_
 src/eval/ids.zig::LoadedPinout struct_
@@ -684,6 +713,7 @@ src/eval/ids.zig::getSymbolPins | fn getSymbolPins(self: *Evaluator, lookup_name
 src/eval/ids.zig::isStandardRefDes | fn isStandardRefDes(ref_des: []const u8) bool
 src/eval/ids.zig::loadPinoutFile | fn loadPinoutFile(self: *Evaluator, path: []const u8) ?LoadedPinout
 src/eval/ids.zig::nextRefDes | fn nextRefDes(self: *Evaluator, prefix: u8) EvalError![]const u8
+src/eval/ids.zig::noteAuthoredRefDes | fn noteAuthoredRefDes(self: *Evaluator, ref_des: []const u8, span: ast.Span) EvalError!void
 src/eval/ids.zig::parseChildIdSidecar | fn parseChildIdSidecar(self: *Evaluator, parent_children: []const Node) ChildIdSidecar
 src/eval/ids.zig::parseId | fn parseId(children: []const Node) ?[]const u8
 src/eval/ids.zig::pinId | fn pinId(self: *Evaluator, node: Node) ?[]const u8
@@ -694,6 +724,7 @@ src/eval/ids.zig::reassignSubBlockIdsV4 | fn reassignSubBlockIdsV4(self: *Evalua
 src/eval/ids.zig::registerRefDes | fn registerRefDes(self: *Evaluator, ref_des: []const u8) void
 src/eval/ids.zig::renameSectionRefs | fn renameSectionRefs(sections: []env_mod.Section, rename_map: *std.StringHashMapUnmanaged([]const u8)) void
 src/eval/instance.zig::InstanceResult struct_
+src/eval/instance.zig::PartPads struct_
 src/eval/instance.zig::PinMatch struct_
 src/eval/instance.zig::PinTail struct_
 src/eval/instance.zig::ResolvedComponent struct_
@@ -705,7 +736,7 @@ src/eval/instance.zig::evalSeriesForm | fn evalSeriesForm( self: *Evaluator, for
 src/eval/instance.zig::instanceFromValue | fn instanceFromValue(self: *Evaluator, val: Value, ref_des: []const u8, source_offset: u32, id: []const u8) ?Instance
 src/eval/instance.zig::matchPinName | fn matchPinName(pinout: *const std.StringHashMapUnmanaged([]const u8), name: []const u8) ?PinMatch
 src/eval/instance.zig::mergeInstanceProperties | fn mergeInstanceProperties( self: *Evaluator, inst: *Instance, overrides: []const env_mod.Property, ) std.mem.Allocator.Error!void
-src/eval/instance.zig::parsePinForm | fn parsePinForm( self: *Evaluator, form: Node, ref_des: []const u8, env: *Env, pin_nets: *std.ArrayList(PinNetDecl), pinout: ?*const std.StringHashMapUnmanaged([]const u8), ) EvalError!void
+src/eval/instance.zig::parsePinForm | fn parsePinForm( self: *Evaluator, form: Node, ref_des: []const u8, env: *Env, pin_nets: *std.ArrayList(PinNetDecl), pads: PartPads, ) EvalError!void
 src/eval/instance.zig::parsePinTail | fn parsePinTail(self: *Evaluator, pin_children: []const Node, env: *Env) EvalError!PinTail
 src/eval/instance.zig::parseTrailingArgs | fn parseTrailingArgs(self: *Evaluator, children: []const Node, env: *Env) EvalError!TrailingArgs
 src/eval/instance.zig::resolveComponent | fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent
@@ -743,6 +774,9 @@ src/eval/net_envelopes.zig::Declaration struct_
 src/eval/net_envelopes.zig::Result struct_
 src/eval/net_envelopes.zig::build | fn build( allocator: std.mem.Allocator, block: *const DesignBlock, declarations: []const Declaration, ) std.mem.Allocator.Error!Result
 src/eval/net_envelopes.zig::ferriteBridges | fn ferriteBridges( allocator: std.mem.Allocator, instances: []const flat_netlist.FlatInstance, nets: []const flat_netlist.FlatNet, ) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]const u8)
+src/eval/net_suggest.zig::didYouMean | fn didYouMean(name: []const u8, candidates: []const []const u8) ?[]const u8
+src/eval/net_suggest.zig::establishedNets | fn establishedNets( allocator: std.mem.Allocator, block: *const env_mod.DesignBlock, ) std.mem.Allocator.Error![]const []const u8
+src/eval/net_suggest.zig::hint | fn hint( allocator: std.mem.Allocator, name: []const u8, candidates: []const []const u8, ) []const u8
 src/eval/pin_enrichment.zig::enrichPinFunctions | fn enrichPinFunctions( allocator: Allocator, block: *DesignBlock, project_dir: []const u8, ) Allocator.Error!void
 src/eval/power_budget.zig::BranchLoad struct_
 src/eval/power_budget.zig::Rail struct_
@@ -766,6 +800,7 @@ src/eval/rails.zig::schematic_supply_prefixes value
 src/eval/rails.zig::supply_pad_prefixes value
 src/eval/rails.zig::system_rail value
 src/eval/section_maturity.zig::creditSections | fn creditSections( sections: []env_mod.Section, sub_blocks: []const env_mod.SubBlock, groups: []const env_mod.Group, layout_groups: []const env_mod.LayoutGroup, body_forms: []const Node, ) void
+src/eval/special_forms.zig::ForSpec struct_
 src/eval/special_forms.zig::RepeatIterator struct_
 src/eval/special_forms.zig::RepeatSpec struct_
 src/eval/special_forms.zig::checkArity | fn checkArity(self: *Evaluator, sf: forms.SpecialForm, args: []const Node) EvalError!void
@@ -773,14 +808,21 @@ src/eval/special_forms.zig::checkAritySpan | fn checkAritySpan(self: *Evaluator,
 src/eval/special_forms.zig::evalAssert | fn evalAssert(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalAssertRange | fn evalAssertRange(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalFmt | fn evalFmt(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
+src/eval/special_forms.zig::evalFor | fn evalFor(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalIf | fn evalIf(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalLet | fn evalLet(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalRepeat | fn evalRepeat(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::iterator | fn iterator(self: RepeatSpec) RepeatIterator
 src/eval/special_forms.zig::next | fn next(self: *RepeatIterator) ?i64
+src/eval/special_forms.zig::parseFor | fn parseFor(self: *Evaluator, args: []const Node) EvalError!ForSpec
 src/eval/special_forms.zig::parseRepeat | fn parseRepeat(self: *Evaluator, args: []const Node, env: *Env) EvalError!RepeatSpec
 src/eval/stackup_presets.zig::resolve | fn resolve(allocator: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!?env.StackupSpec
 src/eval/stackup_presets.zig::writeCatalogJson | fn writeCatalogJson(w: *std.Io.Writer, current: env.StackupSpec) std.Io.Writer.Error!void
+src/eval/suggest.zig::Budget enum_
+src/eval/suggest.zig::editDistance | fn editDistance(a: []const u8, b: []const u8) usize
+src/eval/suggest.zig::max_edit_distance value
+src/eval/suggest.zig::max_name_len value
+src/eval/suggest.zig::nearestOf | fn nearestOf(name: []const u8, candidates: []const []const u8, budget: Budget) ?[]const u8
 src/eval/suggest.zig::unboundMessage | fn unboundMessage(self: *Evaluator, name: []const u8, env: *const Env) []const u8
 src/eval/test_point.zig::EvalContext struct_
 src/eval/test_point.zig::evalForm | fn evalForm( self: *Evaluator, form_children: []const Node, env: *Env, ctx: EvalContext, ) EvalError!?Instance
@@ -808,6 +850,8 @@ src/eval/thermal.zig::thermal_field_docs value
 src/eval/validate.zig::trackNetFormSource | fn trackNetFormSource(self: *Evaluator, form_children: []const Node, env: *Env, sources: *std.StringHashMapUnmanaged(u32)) void
 src/eval/validate.zig::validateDesign | fn validateDesign(self: *Evaluator, block: *const DesignBlock) EvalError!void
 src/eval/validate.zig::warnCombinableNets | fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged(u32)) EvalError!void
+src/eval/value_kind.zig::accepts | fn accepts(param_type: []const u8, value: []const u8) bool
+src/eval/value_kind.zig::mismatchMessage | fn mismatchMessage( allocator: std.mem.Allocator, family: []const u8, param_type: []const u8, value: []const u8, ) []const u8
 src/exit.zig::failure | fn failure() noreturn
 src/exit.zig::failure_status value
 src/exit.zig::fatal | fn fatal(comptime fmt: []const u8, args: anytype) noreturn
@@ -1606,6 +1650,7 @@ src/net_name.zig::leaf | fn leaf(name: []const u8) []const u8
 src/net_name.zig::parent | fn parent(name: []const u8) ?[]const u8
 src/netlist_dump.zig::DumpError value
 src/netlist_dump.zig::cmdNetlistDump | fn cmdNetlistDump(allocator: std.mem.Allocator, args: []const []const u8) DumpError!void
+src/netlist_dump.zig::lines | fn lines( arena: std.mem.Allocator, name: []const u8, nets: []flat_netlist.FlatNet, ) DumpError![]const []const u8
 src/numeric.zig::checkedInt | fn checkedInt(comptime T: type, f: f64) ?T
 src/numeric.zig::toCount | fn toCount(f: f64) usize
 src/pad_neck_profile.zig::Profile struct_
@@ -1664,6 +1709,8 @@ src/pdf_afm.zig::textWidth | fn textWidth(font: Font, size: f64, s: []const u8) 
 src/pdf_afm.zig::widthOfEncoded | fn widthOfEncoded(font: Font, size: f64, bytes: []const u8) f64
 src/pdf_verify.zig::ValidateError value
 src/pdf_verify.zig::validate | fn validate(bytes: []const u8) ValidateError!void
+src/pins_by_name.zig::ToolError value
+src/pins_by_name.zig::tool | fn tool( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) ToolError!bool
 src/placement/airwire_geometry.zig::Point struct_
 src/placement/airwire_geometry.zig::max_wire_points value
 src/placement/airwire_geometry.zig::primEdges | fn primEdges(arena: std.mem.Allocator, points: []const [2]f64, out: *std.ArrayList([4]f64)) std.mem.Allocator.Error!void
@@ -1697,6 +1744,18 @@ src/placement/blocker_nomination.zig::ranked | fn ranked(self: Table, alloc: std
 src/placement/blocker_nomination.zig::sweepHops | fn sweepHops(t: *Table, alloc: std.mem.Allocator, s: Sweep) std.mem.Allocator.Error!void
 src/placement/blocker_nomination.zig::trackGap | fn trackGap(hops: []const Hop, c: router.Track) f64
 src/placement/blocker_nomination.zig::viaGap | fn viaGap(hops: []const Hop, v: router.Via) f64
+src/placement/board_keepout.zig::Region struct_
+src/placement/board_keepout.zig::allowsNet | fn allowsNet(self: Region, name: []const u8) bool
+src/placement/board_keepout.zig::anyDeclared | fn anyDeclared(placement: optimizer.Placement) bool
+src/placement/board_keepout.zig::blockingPart | fn blockingPart(regions: []const Region, part: optimizer.Part) ?Region
+src/placement/board_keepout.zig::corners | fn corners(self: Region) [4][2]f64
+src/placement/board_keepout.zig::coversLayer | fn coversLayer(self: Region, layer: u8) bool
+src/placement/board_keepout.zig::coversSide | fn coversSide(self: Region, side: optimizer.Side) bool
+src/placement/board_keepout.zig::hitsPart | fn hitsPart(region: Region, part: optimizer.Part) bool
+src/placement/board_keepout.zig::insetAt | fn insetAt(self: Region, x: f64, y: f64) f64
+src/placement/board_keepout.zig::partDepth | fn partDepth(regions: []const Region, part: optimizer.Part) f64
+src/placement/board_keepout.zig::regionsOf | fn regionsOf( arena: std.mem.Allocator, placement: optimizer.Placement, ) std.mem.Allocator.Error![]const Region
+src/placement/board_keepout.zig::resolve | fn resolve( arena: std.mem.Allocator, rect: ?optimizer.BoardRect, specs: []const env.BoardKeepoutSpec, ) std.mem.Allocator.Error![]const Region
 src/placement/bypass_intent.zig::Legs struct_
 src/placement/bypass_intent.zig::Seg struct_
 src/placement/bypass_intent.zig::any | fn any(self: Legs) bool
@@ -1948,6 +2007,7 @@ src/placement/drc.zig::errorCount | fn errorCount(violations: []const Violation)
 src/placement/drc.zig::partyIndex | fn partyIndex(i: usize) i32
 src/placement/drc.zig::segSegDist | fn segSegDist(ax1: f64, ay1: f64, ax2: f64, ay2: f64, bx1: f64, by1: f64, bx2: f64, by2: f64) f64
 src/placement/drc.zig::staging_exempt_mm value
+src/placement/drc_board_keepout.zig::check | fn check( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), placement: optimizer.Placement, tracks: []const router.Track, vias: []const router.Via, ) std.mem.Allocator.Error!void
 src/placement/drc_compose.zig::CheckReport struct_
 src/placement/drc_compose.zig::CopperCheck struct_
 src/placement/drc_compose.zig::Delta value
@@ -2440,6 +2500,7 @@ src/placement/octilinear.zig::tol_sin value
 src/placement/octilinear.zig::turned | fn turned(lat: Lattice, from_key: usize, to_key: usize) u32
 src/placement/octilinear.zig::turnedAlways | fn turnedAlways(lat: Lattice, from_key: usize, to_key: usize) u32
 src/placement/optimizer.zig::BoardArc struct_
+src/placement/optimizer.zig::BoardKeepoutRegion value
 src/placement/optimizer.zig::BoardRect value
 src/placement/optimizer.zig::BoardRules struct_
 src/placement/optimizer.zig::Breakdown struct_
@@ -2473,6 +2534,7 @@ src/placement/optimizer.zig::SeedMode enum_
 src/placement/optimizer.zig::Side enum_
 src/placement/optimizer.zig::Stub struct_
 src/placement/optimizer.zig::authoredRoughObjective | fn authoredRoughObjective(p: Placement, rough: env.RoughSpec) f64
+src/placement/optimizer.zig::boardKeepoutRegions | fn boardKeepoutRegions( arena: std.mem.Allocator, p: Placement, ) std.mem.Allocator.Error![]const BoardKeepoutRegion
 src/placement/optimizer.zig::carriesPlane | fn carriesPlane(self: BoardRules, name: []const u8) bool
 src/placement/optimizer.zig::clearanceBetween | fn clearanceBetween(self: *const BoardRules, a: i32, b: i32, base: f64) f64
 src/placement/optimizer.zig::clearanceForNet | fn clearanceForNet(self: *const BoardRules, net: i32, base: f64) f64
@@ -3570,17 +3632,31 @@ src/render_thermal_png.zig::Options struct_
 src/render_thermal_png.zig::View value
 src/render_thermal_png.zig::rampColor | fn rampColor(t: f64) Rgb
 src/render_thermal_png.zig::render | fn render( alloc: std.mem.Allocator, p: optimizer.Placement, view: View, opts: Options, ) png.Error![]u8
+src/req_checks.zig::PinLocation struct_
 src/req_checks.zig::Result struct_
 src/req_checks.zig::Status enum_
 src/req_checks.zig::applyVerifications | fn applyVerifications( map: *std.StringHashMapUnmanaged([]Result), block: *const DesignBlock, instances: []const Instance, ) void
 src/req_checks.zig::deinit | fn deinit( allocator: std.mem.Allocator, m: *std.StringHashMapUnmanaged([]Result), ) void
+src/req_checks.zig::fail | fn fail(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) Result
+src/req_checks.zig::instancePinOnNet | fn instancePinOnNet(block: *const DesignBlock, inst: Instance, net_name: []const u8) bool
+src/req_checks.zig::netBase | fn netBase(name: []const u8) []const u8
+src/req_checks.zig::netForPinFn | fn netForPinFn( eval: *Evaluator, block: *const DesignBlock, inst: Instance, pin_fn: []const u8, ) ?[]const u8
+src/req_checks.zig::netsAlias | fn netsAlias(a: []const u8, b: []const u8) bool
+src/req_checks.zig::padAndNetForPin | fn padAndNetForPin( eval: *Evaluator, block: *const DesignBlock, inst: Instance, pin_fn: []const u8, ) ?PinLocation
 src/req_checks.zig::parseMicroFarads | fn parseMicroFarads(s: []const u8) ?f64
 src/req_checks.zig::parseMicroHenries | fn parseMicroHenries(s: []const u8) ?f64
 src/req_checks.zig::parseOhms | fn parseOhms(s: []const u8) ?f64
+src/req_checks.zig::parseValueFor | fn parseValueFor(kind: env_mod.SeriesKind, s: []const u8) ?f64
+src/req_checks.zig::parseVolts | fn parseVolts(s: []const u8) ?f64
+src/req_checks.zig::passMsg | fn passMsg(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) Result
 src/req_checks.zig::resistorIsDcEquivalent | fn resistorIsDcEquivalent(ohms: f64) bool
 src/req_checks.zig::runChecks | fn runChecks( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, ) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]Result)
 src/req_derived_checks.zig::Result struct_
 src/req_derived_checks.zig::evaluate | fn evaluate( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, inst: Instance, check: env.Check, ) Result
+src/req_physical_checks.zig::evalCapRating | fn evalCapRating( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, inst: Instance, check: CapRatingCheck, ) Result
+src/req_physical_checks.zig::evalMaxDistance | fn evalMaxDistance( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, inst: Instance, check: MaxDistanceCheck, ) Result
+src/req_physical_checks.zig::evalSequence | fn evalSequence( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, inst: Instance, check: SequenceCheck, ) Result
+src/req_physical_checks.zig::resolveDistanceRules | fn resolveDistanceRules(eval: *Evaluator, block: *const DesignBlock) void
 src/review.zig::AssertionReport struct_
 src/review.zig::AssertionStatus enum_
 src/review.zig::BomEntry struct_

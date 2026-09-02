@@ -5,9 +5,15 @@
 **Machine-checked reference: [docs/language-forms.md](docs/language-forms.md).**
 Auto-generated from the evaluator's dispatch tables — every special form,
 builtin operator, fmt directive, SI numeric suffix, design-scope form (with
-arity + allowed scopes), and section-classifier keyword. It cannot drift
-(see Build System above), so consult it for the grammar inventory; the
-subsections below cover conventions and idiomatic usage only.
+arity + allowed scopes), and section-classifier keyword, plus the compound
+forms whose bodies have a grammar of their own: `(instance …)` and
+`(pins …)` sub-forms, `(sub-block …)` children (including `(bridge …)`),
+`(port …)` options, the identity/layout markers, and the
+`(component …)` library fields. Those tables are the same lists the
+evaluator derives its accepted-children checks from, and a coverage test
+walks `src/eval` for head atoms no registry names, so the reference cannot
+drift. Consult it for the grammar inventory; the subsections below cover
+conventions and idiomatic usage only.
 
 ### Instance with inline pin-net connections
 
@@ -33,6 +39,60 @@ Test points (`(instance "TP_X" testpoint (pin 1 "NET"))`) are first-class
 inside `(defmodule …)` sub-blocks: they take a renumber-safe `TP` ref-des and
 are exempt from the `IC has no ground` ERC. A bare `(test-point "TP" "NET")`
 stays a schematic-only marker (no exported pad).
+
+### Pin function names, and `rewrite-pins-by-name`
+
+Every `PIN` token — in `(pin …)`, `(strap-ok …)`, `(nc-ok …)`, `(near …)` and
+`(decouples …)` — is either a physical pad id **or** a pinout **function
+name**, and the evaluator resolves the name through the part's
+`lib/pinouts/<name>.sexp`. The name is the better spelling: it says what the
+pin *is*, it makes a strap or no-connect sign-off read as its own reason, and
+a pinout regeneration that renumbers pads carries it along.
+
+```scheme
+(instance "U1" lt3045edd#pbf
+  (pin 5 "GND")                                ;; ILIM   ← the comment IS the pinout
+  (strap-ok 5 "ILIM->GND selects the default current limit"))
+
+(instance "U1" lt3045edd#pbf
+  (pin ILIM "GND")                             ;; …so write it instead
+  (strap-ok ILIM "ILIM->GND selects the default current limit"))
+```
+
+The **`rewrite-pins-by-name` CLI tool** performs that conversion on a whole
+module or board, in place:
+
+```bash
+netlisp tool rewrite-pins-by-name --project-dir projects/designs \
+  --args '{"file": "lib/modules/bcuda-lt3045-ldo.sexp"}'          # diff only
+netlisp tool rewrite-pins-by-name --project-dir projects/designs \
+  --args '{"file": "src/boards/barracuda/barracuda.sexp", "write": true}'
+```
+
+- Text is spliced at the parser's **byte spans**, so every comment, blank line
+  and column of alignment outside the replaced token survives byte for byte.
+  (The now-redundant trailing `;; ILIM` comments are left for you to delete.)
+- A pad is rewritten **only** when the evaluator's own resolver, re-run on the
+  proposed spelling, returns the very pad the original bound to. That is why
+  `(near "REF" PAD)` and `(decouples "REF" PAD)` — which resolve through the
+  **target's** pinout, pad id first — are rewritten under their own rule, and
+  why a name the tokenizer would re-read as something else (`5V` as an SI
+  value) is quoted or skipped.
+- Skipped, with the reason reported: a function name **repeated on several
+  pads** (it cannot say which one it means), a pad the pinout does not carry,
+  a part with **no pinout file**, and a **positional** part whose pinout names
+  every pad after its own number — a connector's `(pin 09 "09")`, or the
+  generic two-terminal `cap`/`res`/`ind` pinouts.
+- The default is `write:false`: it returns the unified diff and the skip list
+  without touching the file. Either way the ORIGINAL and REWRITTEN sources are
+  both evaluated and flattened, and the write is **refused** unless their
+  netlists and their resolved `(decouples …)`/`(near …)`/`(strap-ok …)`/
+  `(nc-ok …)` bindings match exactly. A file that does not parse or does not
+  evaluate is refused outright.
+- `refs: ["U1"]` narrows the run to named instances.
+
+Prove a run independently the same way the differential tier does:
+`netlisp netlist-dump <name>` before and after, compared with `diff -I '^#'`.
 
 ### Multi-part symbols with grid layout
 
@@ -68,10 +128,15 @@ these four cases to decide whether something becomes a section:
    (pin …) …)`, plus `(role …)`, `(protocol …)`, and `(note …)` entries
    for firmware contracts and datasheet rationale. The peripheral's own
    pin-level implementation is sealed in a `(defmodule …)` under
-   `lib/modules/` and brought in as a `(sub-block …)`. **Structural constraint:** `(sub-block …)`
-   forms are *not* evaluated inside `(section …)`; place the sub-block at
-   design-block top level immediately after its section (e.g. `(section
-   "USB" …)` then `(sub-block "usb" (usb-c-hs))`).
+   `lib/modules/` and brought in as a `(sub-block …)`. A `(sub-block …)`
+   evaluates correctly *inside* a `(section …)` and inside a sub-section —
+   its parts flatten into the netlist and its `(bridge …)` ties are applied
+   exactly as at design-block top level, and the enclosing section
+   additionally records it as a hosted block for the system-overview
+   diagram. House style in `stm32n6.sexp` still puts the sub-block at top
+   level immediately after its section (e.g. `(section "USB" …)` then
+   `(sub-block "usb" (usb-c-hs))`) so the consolidated rail `(net …)` forms
+   that wire it sit beside it; both placements are supported.
 2. **Self-contained hardware with no main-IC interface** — test points,
    mounting standoffs, fiducials. Make a section that directly
    `(instance …)`s the parts; there is no pin map and no sub-block.
@@ -91,7 +156,9 @@ these four cases to decide whether something becomes a section:
 One section per coherent subsystem — don't merge unrelated functions, and
 don't split one subsystem (or one rail) across two sections. Section
 bodies may also carry `(port …)` boundary declarations, `(calc …)` design
-math, and `(bus …)` multi-bit shorthand; see `stm32n6.sexp` for each.
+math, and multi-bit shorthand — `(bus-port …)` / `(bus-net …)` at section
+scope, and `(bus …)` inside a `(pins …)` block or an `(instance …)` body;
+see `stm32n6.sexp` for each.
 
 **Section-labeling conventions.** Every section has a *name* (short
 functional role) and an optional *subtitle* (one-line technical summary).
@@ -264,6 +331,96 @@ extra categories, a missing `(thermal …)` on a dissipating class, and a
 `(frequency-plan …)` form in gate mode. The release profile also demands at
 least one cited `(requirement …)` on every active part and surfaces the
 evaluator's own warnings (an unknown sub-form is an error).
+
+### Physical requirement checks: `cap-rating`, `max-distance`, `sequence`
+
+Most of the library's `(requirement "…")` prose is reviewer-judged. Three
+`(check …)` primitives make the three biggest prose clusters — capacitor
+voltage rating, placement distance, and power sequencing — executable. Each
+reads evidence the older primitives do not: the derived DC envelope of a net,
+the saved layout's geometry, and the derived rail power-up order. The full
+grammar table is generated into `docs/language-forms.md`; below is what each
+one is for, with a real library requirement converted.
+
+**`(cap-rating (pin "A") (pin "B") [(min-ratio X)] [(min-v V)])`** — every
+capacitor bridging the nets on pins A and B must carry a voltage-rating
+attribute at least `X` times the worst-case DC potential `eval/net_envelopes`
+derives across those two nets, and at least `V` volts. Writing neither bound
+applies **1.5x**, the conventional ceramic derating floor: an X5R/X7R part
+sitting at its own marked rating has already lost most of its capacitance to DC
+bias, so a bare 1.0x rule passes parts that do not work.
+
+```lisp
+;; BQ25185DLHR: "IN (pin 10) operates from 3.2 V to 5.5 V for charging;
+;;  absolute maximum is -2 V to 18.5 V (VIN_OVP). The input cap must be
+;;  rated for the worst-case IN voltage."
+(requirement "The input cap must be rated for the worst-case IN voltage."
+  (ref "BQ25185DLHR.pdf")
+  (check (cap-rating (pin "IN") (pin "GND") (min-ratio 1.5))))
+```
+
+Three outcomes, and only one of them is green. A rated cap below the bound is
+an **error**. A cap carrying no voltage attribute is **unproven** — never a
+pass, because nothing was measured; author the rating
+(`(cap-0402 "1uF" x7r "10%" "16V")`) and it decides. A net whose envelope the
+tool cannot derive is **unproven** too, naming the net: give the rail a
+`(port … (nominal …))` upstream, or state it outright with
+`(net-envelope "VBUS" (rated 0 5.5) "USB VBUS")`.
+
+**`(max-distance (pin "P") (kind C|R|L|any) (mm D) [(min-value X)] [(max-value Y)])`**
+— the nearest matching passive on pin P's net must sit within D mm of that pad
+**in the saved layout**. The value window is in the kind's natural unit (Ω / µH
+/ µF), exactly like `series-element`.
+
+```lisp
+;; ADP7118: "Input decoupling: place a 1 uF ceramic capacitor from VIN to
+;;  GND as close to the device as possible."
+(requirement "Input decoupling: place a 1 uF ceramic capacitor from VIN to GND as close to the device as possible."
+  (ref "adp7118.pdf" (page 14))
+  (check (max-distance (pin "VIN") (kind C) (mm 3.0) (min-value 0.9))))
+```
+
+`netlisp check` has no geometry, so this rule is **layout-deferred** there: the
+finding is informational and says which lint carries the verdict. The one thing
+the netlist *can* settle it settles — a net with no qualifying passive at all
+is an **error**, because no placement could ever satisfy the rule. The
+measurement itself is the **`req-distance-far` layout lint** (a warning,
+alongside `decap-far` and `bound-far`), which reports the nearest qualifying
+passive, its gap and the budget, and appears in `/api/pcb-describe`'s `lint[]`
+and in `describe_pcb_layout`. Pin, pad and candidate list are resolved once in
+the evaluator (`req_physical_checks.resolveDistanceRules`) and shared, the same
+contract `(near …)` uses, so the checker and the lint cannot disagree about
+which pad or which parts a rule is about.
+
+**`(sequence (pin "A") before (pin "B") [(margin-ms N)])`** — the supply rail on
+pin A must come up before the rail on pin B, judged against the power-up order
+`eval/power_sequencing` derives from the design's `(enable …)` declarations and
+PG chains.
+
+```lisp
+;; BNO080/085: "VDD must reach its specified level before or at the same
+;;  time as VDDIO during power-up; reverse sequencing is not permitted"
+(requirement "VDD must reach its specified level before or at the same time as VDDIO during power-up; reverse sequencing is not permitted"
+  (ref "BNO080_085_Datasheet-3196201.pdf" (page 45))
+  (check (sequence (pin "VDD") before (pin "VDDIO"))))
+```
+
+A determined order that satisfies the rule passes; a determined order that
+reverses it is an **error**. Everything else is **unproven**, naming both rails
+and what would settle it — an `(enable "NET")` on the regulator's output port,
+or a PG chain to the upstream rail. Two rails the enable graph leaves at the
+same order count as undetermined, not as a pass: neither gates the other.
+`margin-ms` is recorded and echoed in the verdict but **not enforced** — the
+sequencing model derives a topological order, not ramp times, so there is
+nothing in it a millisecond could be compared against.
+
+Because none of the three can always reach a verdict, requirement results carry
+two outcomes beyond pass/fail/pending: `unproven` (a **warning** in every
+profile, including release — it is authoring work or an explicit
+`(verifies …)` sign-off away from closing) and `layout_deferred`
+(**informational**, since no schematic edit can clear it). Both show as their
+own pill in the review UI and as their own status in `netlisp check`; run with
+`--severity info` to see the deferred ones.
 
 ### Decoupling shorthand
 
@@ -604,13 +761,94 @@ matches every module-local net of that name. A pinned class is final — the
 hub-plus-inductor switch-node upgrade does not apply — and a pinned net is no
 longer reported as inferred. Unknown class atoms are warned and dropped.
 
-### Lint warnings
+### Lint warnings and authoring errors
 
 Unknown sub-forms / enum words inside known forms (e.g. `(role inptu)`, a
 section-only form at top level) no longer vanish silently — `netlisp build`
 prints `file:line:col: warning: …` to stderr. Eval errors now name the form
 with expected arity, suggest `(import …)` or nearest-name for unbound
 components, and print the module call stack.
+
+Three `(instance …)` mistakes that used to build clean are **errors**, each
+pointing at `file:line:col`:
+
+- **A typo'd body sub-form.** Any head this parser does not dispatch on
+  becomes an inline BOM property `(key "value")`, so `(decuples "U1" 1)` used
+  to build a property named `decuples` and declare no decoupling at all. A
+  head within two edits of a real sub-form (`pin`, `part`, `note`, `bus`,
+  `id`, `as`, `dnp`, `decouples`, `near`, `strap-ok`, `nc-ok`, `power`, `row`,
+  `col`) is now rejected with a did-you-mean. Property keys that are not
+  near-misses — `(module-bypass "…")`, `(emi-couples "…")` — keep working.
+
+- **A value that is not the family's declared kind.** A `component-family`
+  declares `(parameter "value" capacitance | resistance | inductance |
+  impedance | string)`, and the value is now checked against it, so
+  `(cap-0402 "4.7k")` is rejected. The rule is one-sided: a value is refused
+  only when it positively parses as *another* quantity — a number plus a unit
+  (`F` / `H` / `R` / `Ω`) or a bare SI prefix that cannot belong to the
+  declared kind (`k`, `M`, `G` are resistance; `f`, `p`, `n`, `u` are
+  capacitance or inductance; `m` is plausible for all three). Anything else is
+  accepted in silence: a bare number (`10`, `0.01`), a sentinel (`DNP`), a
+  part number, a `(fmt "~R" …)` result, a trailing rating (`"10uF 25V"`), a
+  bead's `"600R@100MHz"`, and a letter used as a decimal point (`24R9`). A
+  family declaring `string` (or no kind at all) is never checked.
+
+- **A pad the part does not have.** `(pin 99 "X")` on an 11-pad part used to
+  produce only a downstream floating-net warning while the pad itself reached
+  the netlist and the KiCad export. The pad set now comes from the part's
+  `lib/pinouts/<name>.sexp` and its `lib/footprints/<name>.sexp` `(pad …)`
+  ids; a token outside both is an error naming the pad count, with a
+  did-you-mean when it looks like a misspelled pin function. The same check
+  covers `(strap-ok PAD …)`, `(nc-ok PAD …)` and `(near … (own PAD))`. A part
+  with **neither** record has an unknown pad set and every token on it passes,
+  so newly imported parts and pinout-less passives are unaffected.
+
+**`file` is the file the form actually lives in.** A warning or error raised
+while an imported `lib/modules/*.sexp` or `lib/components/*.sexp` body
+evaluates is reported against *that* file and its own line, not against the
+design that imported it — so a retired form inside a shared module names the
+module you have to edit, and the module call stack still says which call
+reached it:
+
+```text
+lib/modules/adp7118-ldo.sexp:44:5: warning: unknown sub-form (placement …) in (design-block …)
+lib/modules/probe-ldo.sexp:5:17: error: (port …) expects a direction or net after the name
+  in module 'probe-ldo' (called at 4:21)
+```
+
+(Forms spliced in from a sibling `<design>.checks.sexp` are the one exception:
+they still report against the design path.)
+
+### Duplicate ref-des
+
+Two instances **authored** with the same ref-des in one block — including two
+`(repeat …)` iterations that mint the same token — are a build error naming
+both places, raised before ref-des auto-assignment can renumber the second one
+into a confusing `pin_multi_net` further downstream:
+
+```text
+src/board.sexp:8:3: error: duplicate ref-des "R1" — already declared at src/board.sexp:5:3;
+  a ref-des must be unique within its block (each (sub-block …) is its own namespace)
+```
+
+Scope is the **block**, so two instantiations of one module may each name their
+own `R1`; the sub-block pass renumbers them apart. Shorthand-generated parts
+(`(decouple …)`, `(series …)`, `(fanout …)`, `(pullup …)`, `(divider …)`,
+`(led …)`) draw from the auto ref-des counters and never collide. ERC's
+`duplicate_refdes` check stays in place for collisions that only appear after
+the hierarchy is flattened.
+
+### Did-you-mean for net names
+
+A net with exactly one connection (and no declared port) that is within two
+character edits of an *established* net — one with two or more connections, or
+a declared port — carries the near-miss in its finding, so a typo reads as a
+typo instead of as a mysterious dead end:
+
+```text
+WARN: Dead-end net "GNND" — only connected to C1 pin 2 — did you mean "GND"?
+warning   floating_net   [GNND] — Floating net "GNND" — only one connection — did you mean "GND"?
+```
 
 ### Sub-block identity: legacy sidecar vs. hierarchical (opt-in)
 
@@ -647,6 +885,70 @@ The two schemes coexist per-design. Switching an existing design to
 `(hierarchical-ids)` changes its child ids (different derivation), so it is a
 one-time board re-stamp — adopt deliberately, not casually.
 
+### Board keepout regions
+
+`(board … (keepout "NAME" …))` reserves a rectangle of board. It is the
+*authored* keepout, as opposed to the two derived ones: `(perimeter-fence …
+(keepout CLEARANCE …))` is a band computed from the outline, and
+`(net-class … (keepout MM))` is an RF halo computed from copper. This form
+states a mechanical fact instead — a heatsink plate's footprint, a shield can,
+a bracket, a connector's mating shroud — so nothing about the outline, the
+fence, or the routing can move it.
+
+```scheme
+(keepout "NAME"
+  (rect X Y W H)                     ;; board-local mm from the outline's top-left
+  (side top|bottom|both)
+  [(blocks components tracks vias)]  ;; default: all three
+  [(allow-nets "GND" …)]
+  [(reason "why the space is reserved")])
+```
+
+The form is repeatable — a board may declare as many regions as it has
+obstructions.
+
+- **Frame.** `(rect X Y W H)` is board-local millimetres measured from the
+  outline's top-left, the same frame `(heatsink (rect …))` uses, because both
+  are read off the same mechanical drawing. The rectangle must lie wholly
+  inside the declared `(size W H)` outline.
+- **Face.** `top` / `bottom` reserve one assembly face and that face's copper
+  (`F.Cu` / `B.Cu`); `both` reserves the whole board thickness, inner copper
+  layers included. A through via crosses every layer, so it is measured
+  against a region whatever face that region names.
+- **What it enforces.** The placer refuses to put a component courtyard inside
+  a region on a face it reserves (and the force solve is pushed out of one),
+  DRC reports a fab-blocking `board keepout` violation for any courtyard,
+  track segment, or via that lands there, and `(allow-nets …)` admits named
+  copper anyway — a plate bonded to ground still wants its stitching.
+- **What it shows.** The region is drawn and labelled on `/pcb-layout` and in
+  the PCB PNG, and `/api/pcb-describe` lists it under `board.keepouts` in world
+  millimetres with its side, blocked families, allowed nets, and reason.
+- **Errors, not warnings.** A rectangle outside the outline, a non-positive
+  size, an unknown side or `blocks` word, an unknown sub-form, or a missing
+  `(rect …)` / `(side …)` stops the build with `file:line:col`. The derived
+  keepouts degrade to a warning because there is something to fall back to;
+  a silently dropped authored region reads on every surface exactly like a
+  board that never reserved the space.
+
+The motivating case is the Barracuda RF board, whose bottom frontend face
+carries a conduction plate. Its outline is 81.0 × 24.8 mm, and the plate
+occupies `x = 174.0 … 189.0`, `y = 89.6 … 98.5` in that board's layout frame
+(outline `x 126.5 … 207.5`, `y 89.6 … 114.4`) — board-local `x = 47.5`,
+`y = 0`, `w = 15.0`, `h = 8.9`:
+
+```scheme
+(board
+  (part-number "BARRACUDA-RF")
+  (size 81.0 24.8)
+  (corner-radius 2.0)
+  (keepout "bottom frontend heatsink plate"
+    (rect 47.5 0.0 15.0 8.9)
+    (side bottom)
+    (allow-nets "GND")
+    (reason "bottom-side heatsink plate over the frontend/LNA region must stay part-free"))
+  …)
+```
+
 ### Ports
 
 ```scheme
@@ -655,3 +957,141 @@ one-time board re-stamp — adopt deliberately, not casually.
 ;; Long form when net differs from name:
 (port "VOUT" vout-str  out  (rated 0.6 16.0))
 ```
+
+### Differential port pairs: `(diff-port …)`
+
+A differential boundary signal is two ports that must stay identical apart
+from one suffix. `(diff-port …)` writes the pair once — it expands to
+`BASE_P` and `BASE_N`, replays every trailing modifier (direction, kind,
+`optional`, `(rated …)`, `(side …)`, `(electrical …)`, a long-form net base)
+onto both lanes, and defaults their kind to `differential`, so the result is
+indistinguishable from the two hand-written lines it replaces.
+
+```scheme
+;; lib/modules/ad7380-channel.sexp declares its four analog inputs as eight
+;; lines that differ only in one letter:
+(port "AINA_EXT_P" in differential)
+(port "AINA_EXT_N" in differential)
+(port "AINB_EXT_P" in differential)
+(port "AINB_EXT_N" in differential)
+(port "AINC_EXT_P" in differential)
+(port "AINC_EXT_N" in differential)
+(port "AIND_EXT_P" in differential)
+(port "AIND_EXT_N" in differential)
+
+;; The same eight ports, as four paired declarations:
+(diff-port "AINA_EXT" in)
+(diff-port "AINB_EXT" in)
+(diff-port "AINC_EXT" in)
+(diff-port "AIND_EXT" in)
+```
+
+Unlike two hand-written ports, the expansion **records the pairing** on both
+lanes. ERC reads it as a both-or-neither contract: wiring `AINA_EXT_P` and
+leaving `AINA_EXT_N` open — inside the module, or from a parent that ties only
+one lane of a sub-block — is reported as `diff_pair_half_connected`. A
+hand-written `_P`/`_N` pair carries no pairing and is never second-guessed.
+
+Two spellings beyond the default:
+
+```scheme
+;; Non-default lane suffixes (the corpus also uses "+"/"-" and bare P/N):
+(diff-port "RFIN1" in rf (suffixes "+" "-"))     ;; → RFIN1+ / RFIN1-
+
+;; Long form — the net base is suffixed per lane, like the name:
+(diff-port "RFIN1" "LNA_IN" in)                  ;; RFIN1_P on net LNA_IN_P
+```
+
+An explicit signal-type word (`rf`, `clock`, …) wins over the `differential`
+default; the pairing lives in its own field, not in that word.
+
+### Iterating a list: `(for name (item…) body…)`
+
+`(repeat name start end body…)` counts integers. `(for …)` walks a literal
+list, so a loop variable can be a channel letter, a lane suffix, or any
+expression — including `(let …)`-bound values. Each item is evaluated in the
+enclosing scope, then bound in a fresh child scope for one pass over the body.
+Both forms work in expression position and in a `(design-block …)` body.
+
+```scheme
+;; The anti-alias filter block of lib/modules/ad7380-channel.sexp — sixteen
+;; hand-copied instance lines, four per channel — as one loop nest:
+(for ch ("A" "B" "C" "D")
+  (for leg ("P" "N")
+    (instance (fmt "R_F~a~a" ch leg) (res-0201 "33R")
+      (pin 1 (fmt "AIN~a_EXT_~a" ch leg)) (pin 2 (fmt "AIN~a_~a" ch leg)))
+    (instance (fmt "C_F~a~a" ch leg) (cap-0201 "68pF")
+      (pin 1 (fmt "AIN~a_~a" ch leg)) (pin 2 "GND"))))
+
+;; A string item composes ref-des names through (fmt …) and drops straight
+;; into a net name:
+(for ch ("A" "B" "C" "D")
+  (instance (fmt "R_SD~a" ch) (res-0201 "100R")
+    (pin 1 (fmt "SDO~a_RAW" ch)) (pin 2 (fmt "SDO~a" ch))))
+```
+
+Identity works exactly as it does for `repeat`: the `(for …)` form owns one
+source-resident `(id …)` anchor, and each generated child's id derives from
+that anchor plus its `origin_key` and the item's **0-based ordinal**, so ids
+are stable across rebuilds without minting an impossible `(id …)` per
+iteration. A `(ids ("R_FAP@0" <hex8>) …)` sidecar on the loop form pins
+migrated identities when a hand-unrolled block is folded into a `for`.
+
+### Sub-block port wiring: `(bridge …)`
+
+```scheme
+;; Prefix idiom — one board net per port, sharing a peripheral prefix.
+(sub-block "imu" (icm42688)
+  (bridge "IMU_" SCK MOSI MISO (rename CS NCS)))
+;;   →  (net "IMU_SCK"  "imu/SCK")
+;;      (net "IMU_MOSI" "imu/MOSI")
+;;      (net "IMU_MISO" "imu/MISO")
+;;      (net "IMU_NCS"  "imu/CS")
+
+;; Empty-prefix idiom — the form reads as a port → board-net map.
+(sub-block "dsa" (bcuda-dsa-hmc1119)
+  (bridge "" (rename LPF_RF IF1_LNA) (rename DSA_RF IF1_DSA)
+             V_3V3A (rename SPI_DSA_SCK SPI_SCK) SPI_DSA_CSN GND)
+  (id a625bd1e))
+```
+
+`(bridge "PREFIX" PORT… (rename PORT SUFFIX)…)` is how hierarchy is wired.
+Each bridged port `P` emits **one net tie** between the board net
+`PREFIX<suffix>` and the module net `<sub-block-name>/P`, where `<suffix>`
+is `P` itself unless a `(rename P SUFFIX)` overrides it. It collapses the
+per-port `(net "BOARD_NET" "sub/PORT")` lines a peripheral sub-block would
+otherwise need at the design top level, and it is exactly equivalent to
+writing them out — nothing else changes.
+
+Two idioms are in use, both above:
+
+- **Shared prefix** for a peripheral whose board nets are named after it.
+  Bare port names pass through (`SCK` → `IMU_SCK`); a `(rename …)` covers
+  the odd one out (`CS` → `IMU_NCS`).
+- **Empty prefix + one `(rename PORT NET)` per port**, which reads as a
+  port-to-net map and is the dominant style on `barracuda.sexp`. A bare
+  port name there means "same name on both sides" (`GND`, `V_3V3A`).
+
+Power and ground ports are usually left *off* the bridge list and wired
+through the consolidated `(net …)` rail forms instead — one `(net …)` per
+rail, so the validator does not see a rail split across sections. Bridge
+them only when the module's rail name genuinely differs from the board's
+(`(rename V_3V3 V_3V3_LMX)`).
+
+A `(sub-block …)` accepts only `(bridge …)`, `(id …)`, `(ids …)` and
+`(reflow)` as trailing children; anything else warns. See
+[docs/language-forms.md § Sub-block sub-forms](language-forms.md).
+
+### The four unrelated `(group …)` forms
+
+`group` is overloaded across four grammars that share nothing but the word:
+
+| Where | Shape | Meaning |
+| --- | --- | --- |
+| Design-block scope | `(group "name" ("R1" "R2" …))` | Bundle ref-des components for the schematic renderer's visual grouping pass. Members are a **list**. |
+| `(diagram-layout …)` | `(group "Label" "a" "b" …)` | Labelled region over **variadic block keys** (section names / sub-block handles) on the block diagram. |
+| `(pins "REF" …)` | `(group "label")` | Label every pin the block declares so the schematic draws them as one named group. |
+| `(rough …)` | `(group "name" "REF"…)` | A PCB rough-placement cluster of ref-des strings. |
+
+The generated reference lists each in its own table; when in doubt, check
+the arity — a parenthesised member list means the design-scope form.

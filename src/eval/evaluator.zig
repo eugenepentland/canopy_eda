@@ -20,6 +20,8 @@ const frequency_plan = @import("../frequency_plan.zig");
 const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
 const forms = @import("forms.zig");
+const footprint_pads = @import("footprint_pads.zig");
+const value_kind = @import("value_kind.zig");
 const SpecialForm = forms.SpecialForm;
 const Builtin = forms.Builtin;
 pub const ids = @import("ids.zig");
@@ -48,6 +50,12 @@ pub const EvalDiagnostic = struct {
     /// Human-readable summary. Borrowed; lives as long as the source
     /// buffer or the static string the caller passed in.
     message: []const u8,
+    /// Path of the file `span` points into — the imported module or component
+    /// when the error came from one, so a diagnostic raised inside
+    /// `lib/modules/x.sexp` is not reported against the design that imported
+    /// it. Empty when the evaluator had no file in hand (raw `evalSource`);
+    /// callers fall back to the design source they started from.
+    file: []const u8 = "",
 };
 
 /// One frame of the module call stack — the module being evaluated and
@@ -67,6 +75,10 @@ pub const EvalWarning = struct {
     /// Human-readable summary. Allocated from the evaluator's allocator
     /// and intentionally never freed (project memory convention).
     message: []const u8,
+    /// Path of the file `span` points into — same contract as
+    /// `EvalDiagnostic.file`: the module/component file when the warning was
+    /// raised inside one, empty when unknown.
+    file: []const u8 = "",
 };
 
 pub const EvalError = error{
@@ -159,6 +171,12 @@ pub const Evaluator = struct {
     symbol_pin_cache: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged([]const u8)),
     /// Cache of per-pin alternate functions: symbol_name -> (pin_id -> []AltFunc)
     symbol_alt_cache: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged([]const AltFunc)),
+    /// Cache of footprint pad ids: footprint_name -> set of pad ids. Filled
+    /// lazily by `footprint_pads.get` — the pad-existence check reads it for
+    /// parts that have no `lib/pinouts` file, so a footprint is read at most
+    /// once per build however many instances place it. An empty entry means
+    /// "pads unknown" (file missing / not a footprint form), never "no pads".
+    footprint_pad_cache: std.StringHashMapUnmanaged(footprint_pads.PadIds),
     /// Auto ref-des counter per prefix letter
     auto_refdes: std.AutoHashMapUnmanaged(u8, u32),
     /// Auto ref-des counter for test points. They carry a 2-letter "TP" prefix
@@ -210,6 +228,29 @@ pub const Evaluator = struct {
     /// file in a fresh env until the process stack overflows. Inserted on
     /// entry, removed on exit.
     imports_in_progress: std.StringHashMapUnmanaged(void) = .empty,
+    /// Path of the source file whose nodes are being evaluated right now.
+    /// `evalFile` sets it to the design, `resolveImport` to the library file
+    /// it is loading, and `callModule` to the file a module was DEFINED in
+    /// (module bodies evaluate long after their file was read) — each saving
+    /// and restoring the enclosing value. `setError`/`warnFmt` stamp it onto
+    /// every diagnostic so a warning about a retired form inside
+    /// `lib/modules/x.sexp` names that file and line, not the design's.
+    current_file: []const u8 = "",
+    /// Ref-des authored so far in the CURRENT block scope, mapped to where it
+    /// was written. `materializeBlock` swaps in a fresh map per block — each
+    /// `(sub-block …)` / module body is its own namespace — and restores the
+    /// enclosing block's on exit. Second entry for one ref-des is the
+    /// duplicate-ref-des error, raised before auto-assignment renumbers it
+    /// into a confusing downstream symptom.
+    authored_refs: std.StringHashMapUnmanaged(AuthoredRef) = .empty,
+
+    /// Where a ref-des was authored: the span of the form that declared it,
+    /// plus the file that form lives in (a module body's forms are not in the
+    /// design file). Recorded per block scope in `authored_refs`.
+    pub const AuthoredRef = struct {
+        span: ast.Span,
+        file: []const u8,
+    };
 
     pub const PendingId = struct {
         /// Byte offset of the opening paren of the form
@@ -306,6 +347,7 @@ pub const Evaluator = struct {
             .component_cache = .empty,
             .symbol_pin_cache = .empty,
             .symbol_alt_cache = .empty,
+            .footprint_pad_cache = .empty,
             .auto_refdes = .empty,
             .pending_ids = .empty,
             .pending_child_ids = .empty,
@@ -326,6 +368,7 @@ pub const Evaluator = struct {
         self.warnings.deinit(self.allocator);
         self.module_stack.deinit(self.allocator);
         self.imports_in_progress.deinit(self.allocator);
+        self.authored_refs.deinit(self.allocator);
         // Every `loaded_files` key is a dup this evaluator owns (both insertion
         // sites — `builders.loadFile` and the import path — copy the caller's
         // path, because the read-set outlives the call that produced it). The
@@ -337,6 +380,7 @@ pub const Evaluator = struct {
         self.component_cache.deinit(self.allocator);
         self.symbol_pin_cache.deinit(self.allocator);
         self.symbol_alt_cache.deinit(self.allocator);
+        self.footprint_pad_cache.deinit(self.allocator);
         self.auto_refdes.deinit(self.allocator);
         self.pending_ids.deinit(self.allocator);
         self.pending_child_ids.deinit(self.allocator);
@@ -351,6 +395,12 @@ pub const Evaluator = struct {
         const nodes = builders.loadDesignFile(self, path) orelse return EvalError.ImportError;
         var env = Env.init(self.allocator, null);
         defer env.deinit();
+        // Diagnostics raised while this file's own forms evaluate belong to it.
+        // (A spliced `<name>.checks.sexp` form is an exception the span-vs-file
+        // pairing cannot express today; it still reports against the design.)
+        const saved_file = self.current_file;
+        self.current_file = path;
+        defer self.current_file = saved_file;
         modules.loadPassivesPrelude(self, &env);
         return self.evalNodes(nodes, &env);
     }
@@ -411,7 +461,11 @@ pub const Evaluator = struct {
     /// `  in module 'x' (called at L:C)` context line appended per
     /// frame, innermost first.
     pub fn setError(self: *Evaluator, span: ast.Span, message: []const u8) void {
-        self.last_error = .{ .span = span, .message = self.withModuleContext(message) };
+        self.last_error = .{
+            .span = span,
+            .message = self.withModuleContext(message),
+            .file = self.current_file,
+        };
     }
 
     /// Append the module-call-stack context lines to `message`. Returns
@@ -445,7 +499,7 @@ pub const Evaluator = struct {
     /// failures silently drop the warning — never the build.
     pub fn warnFmt(self: *Evaluator, span: ast.Span, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
-        self.warnings.append(self.allocator, .{ .span = span, .message = msg }) catch return;
+        self.warnings.append(self.allocator, .{ .span = span, .message = msg, .file = self.current_file }) catch return;
     }
 
     fn evalForm(self: *Evaluator, children: []const Node, env: *Env) EvalError!Value {
@@ -461,6 +515,7 @@ pub const Evaluator = struct {
         if (SpecialForm.fromAtom(head_name)) |sf| return switch (sf) {
             .let => special_forms.evalLet(self, args, env),
             .repeat => special_forms.evalRepeat(self, args, env),
+            .for_ => special_forms.evalFor(self, args, env),
             .if_ => special_forms.evalIf(self, args, env),
             .import => modules.evalImport(self, args, env),
             .defmodule => modules.evalDefmodule(self, args, env),
@@ -517,6 +572,10 @@ pub const Evaluator = struct {
                     self.setErrorFmt(args[0].span, "({s} …) value must be a string, e.g. ({s} \"100nF\")", .{ head_name, head_name });
                     return EvalError.TypeError;
                 };
+                if (!value_kind.accepts(comp.param_type, val_str)) {
+                    self.setError(args[0].span, value_kind.mismatchMessage(self.allocator, head_name, comp.param_type, val_str));
+                    return EvalError.TypeError;
+                }
                 // Collect additional args as schematic attributes
                 var attrs: std.ArrayList([]const u8) = .empty;
                 for (args[1..]) |attr_node| {
@@ -987,6 +1046,38 @@ test "evaluator releases owned assertion messages" {
     try std.testing.expectEqualStrings("owned result 42", eval.assertions.items[0].message);
 }
 
+// spec: eval/evaluator - a component-family value contradicting the declared parameter kind is rejected at the call site
+test "a family call rejects a value of the wrong declared kind" {
+    // page_allocator: the diagnostic string is allocated and never freed
+    // (project memory convention), so a checked allocator would report it.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    try eval.component_cache.put(alloc, "cap-0402", .{
+        .name = "cap-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "capacitance",
+    });
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    const bad = try parser.parse(alloc, "(cap-0402 \"4.7k\")");
+    defer parser.freeNodes(alloc, bad);
+    try std.testing.expectError(EvalError.TypeError, eval.evalNode(bad[0], &env));
+    const msg = eval.last_error.?.message;
+    try std.testing.expect(std.mem.indexOf(u8, msg, "\"4.7k\" is not a capacitance value") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "(parameter \"value\" capacitance)") != null);
+
+    // The declared kind's own spellings still evaluate to a component instance.
+    const good = try parser.parse(alloc, "(cap-0402 \"100nF\")");
+    defer parser.freeNodes(alloc, good);
+    const val = try eval.evalNode(good[0], &env);
+    try std.testing.expectEqualStrings("100nF", val.component_instance.value);
+}
+
 // ── Passives-prelude fixtures ─────────────────────────────────────────
 
 const passives_prelude_files = [_]struct { name: []const u8, body: []const u8 }{
@@ -1150,4 +1241,56 @@ test {
     _ = builders;
     _ = forms;
     _ = suggest;
+}
+
+// spec: eval/evaluator - for evaluates its body once per listed item, binding strings and let-bound values in a fresh scope
+// spec: eval/evaluator - for binds its item lexically without replacing an enclosing binding
+test "eval for iterates a literal item list and binds each item lexically" {
+    // page_allocator: each iteration's fmt/assert strings intentionally live
+    // for the evaluator lifetime (project allocation convention).
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    const nodes = try parser.parse(alloc,
+        \\(let tail "IF")
+        \\(let ch 99)
+        \\(for ch ("A" "B" tail)
+        \\  (assert (!= ch "") (fmt "lane ~a" ch))
+        \\  (fmt "R_F~aP" ch))
+        \\ch
+    );
+    defer parser.freeNodes(alloc, nodes);
+
+    _ = try eval.evalNode(nodes[0], &env);
+    _ = try eval.evalNode(nodes[1], &env);
+    const result = try eval.evalNode(nodes[2], &env);
+    try std.testing.expectEqualStrings("R_FIFP", result.asString().?);
+    try std.testing.expectEqual(@as(usize, 3), eval.assertions.items.len);
+    try std.testing.expectEqualStrings("lane A", eval.assertions.items[0].message);
+    try std.testing.expectEqualStrings("lane IF", eval.assertions.items[2].message);
+    // The loop scope is a child env, so the enclosing `ch` survives untouched.
+    try std.testing.expectEqual(@as(f64, 99.0), (try eval.evalNode(nodes[3], &env)).asNumber().?);
+}
+
+// spec: eval/evaluator - for rejects a second argument that is not a parenthesised item list
+test "eval for requires a parenthesised item list" {
+    // page_allocator: the source-located diagnostic intentionally owns its
+    // formatted message for the evaluator lifetime.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    const nodes = try parser.parse(alloc, "(for ch \"A\" (fmt \"~a\" ch))");
+    defer parser.freeNodes(alloc, nodes);
+
+    try std.testing.expectError(EvalError.InvalidForm, eval.evalNode(nodes[0], &env));
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try std.testing.expect(std.mem.indexOf(u8, diag.message, "parenthesised item list") != null);
 }

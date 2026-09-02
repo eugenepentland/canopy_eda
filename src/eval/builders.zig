@@ -20,6 +20,7 @@ const NetTie = Evaluator.NetTie;
 const ids = @import("ids.zig");
 const instance_mod = @import("instance.zig");
 const electrical = @import("electrical.zig");
+const forms_mod = @import("forms.zig");
 
 const Node = ast.Node;
 const Value = env_mod.Value;
@@ -308,6 +309,172 @@ fn synthesizeBuildPortArgs(allocator: std.mem.Allocator, name: []const u8, rest:
     return buf.toOwnedSlice(allocator) catch EvalError.OutOfMemory;
 }
 
+// ── (diff-port …) ──────────────────────────────────────────────────
+// Every differential boundary signal in the corpus is two hand-written
+// `(port …)` lines that must stay byte-identical apart from one suffix
+// letter. `(diff-port …)` writes the pair once, and — unlike two hand-written
+// ports — records that the lanes belong together (`Port.diff_pair_of`) so ERC
+// can hold them to a both-or-neither connection rule.
+
+/// Lane suffixes used when the form declares no `(suffixes …)` override —
+/// the spelling hand-written pairs in the design corpus already use.
+const default_diff_suffixes = [2][]const u8{ "_P", "_N" };
+
+/// Signal-type word stamped on both lanes when the author names none, so a
+/// `(diff-port …)` expansion is indistinguishable from the two `(port "…_P"
+/// in differential)` lines it replaces. An explicit kind (`rf`, `clock`, …)
+/// still wins — the pairing lives in `diff_pair_of`, not in this word.
+const diff_port_kind = "differential";
+
+/// Parsed shape of one `(diff-port …)` form: the shared base name, the
+/// optional long-form net base, the two lane suffixes, and the modifier
+/// children replayed verbatim onto both lanes.
+const DiffPortExpansion = struct {
+    base: []const u8,
+    /// Long form `(diff-port "NAME" "NET" dir …)` — each lane's net becomes
+    /// `NET<suffix>`. Null for the short form, where net follows name.
+    net_base: ?[]const u8,
+    suffixes: [2][]const u8,
+    /// Port modifiers shared by both lanes, with `(suffixes …)` removed.
+    rest: []const Node,
+};
+
+/// Expand `(diff-port "BASE" [net] dir …)` into the two top-level `Port`s it
+/// stands for. Both lanes are built by `buildPort` from synthesized children,
+/// so every modifier (`optional`, `(rated …)`, `(side …)`, `(electrical …)`,
+/// …) behaves exactly as it would on a hand-written port.
+pub fn expandTopLevelDiffPort(
+    self: *Evaluator,
+    dp_children: []const Node,
+    env: *Env,
+    out: *std.ArrayList(Port),
+) EvalError!void {
+    const exp = try parseDiffPortHeader(self, dp_children, env) orelse return;
+    for (exp.suffixes) |suffix| {
+        const args = try synthesizeDiffPortArgs(self.allocator, exp, suffix);
+        var port = try buildPort(self, args, env);
+        if (port.kind.len == 0) port.kind = diff_port_kind;
+        port.diff_pair_of = exp.base;
+        try out.append(self.allocator, port);
+    }
+}
+
+/// Section-scope variant of `expandTopLevelDiffPort`: the same two lanes as
+/// `SectionPort`s for the block diagram. `parseSectionPort` defaults an
+/// unstated signal type to `.signal`; a diff-port lane defaults to
+/// `.differential` instead.
+pub fn expandSectionDiffPort(
+    self: *Evaluator,
+    dp_children: []const Node,
+    env: *env_mod.Env,
+    out: *std.ArrayList(env_mod.SectionPort),
+) EvalError!void {
+    const exp = try parseDiffPortHeader(self, dp_children, env) orelse return;
+    for (exp.suffixes) |suffix| {
+        const args = try synthesizeDiffPortArgs(self.allocator, exp, suffix);
+        const children = try synthesizeSectionPortChildrenFromArgs(self.allocator, args);
+        if (try parseSectionPort(self, children, env)) |p| {
+            var sp = p;
+            if (sp.signal_type == .signal) sp.signal_type = .differential;
+            try out.append(self.allocator, sp);
+        }
+    }
+}
+
+fn parseDiffPortHeader(self: *Evaluator, dp_children: []const Node, env: *Env) EvalError!?DiffPortExpansion {
+    // dp_children[0] is the `diff-port` atom; [1] is the base name and [2] is
+    // either the long-form net base or the direction keyword.
+    if (dp_children.len < 3) {
+        const span = if (dp_children.len > 0) dp_children[0].span else ast.Span.zero;
+        self.setError(span, "(diff-port …) expects at least a base name and a direction, e.g. (diff-port \"AINA_EXT\" in)");
+        return EvalError.ArityError;
+    }
+    const base_val = try self.evalNode(dp_children[1], env);
+    const base = base_val.asString() orelse {
+        self.setError(dp_children[1].span, "(diff-port …) base name must be a string");
+        return EvalError.TypeError;
+    };
+    var rest = dp_children[2..];
+    var net_base: ?[]const u8 = null;
+    if (try diffPortNetBase(self, rest[0], env)) |nb| {
+        net_base = nb;
+        rest = rest[1..];
+    }
+    return .{
+        .base = base,
+        .net_base = net_base,
+        .suffixes = diffPortSuffixes(self, rest),
+        .rest = try stripSuffixesForm(self.allocator, rest),
+    };
+}
+
+/// The long-form net base, when the child right after the name is one (a
+/// string, or a non-direction atom that evaluates to one). Null means the
+/// short form, where each lane's net is its own name.
+fn diffPortNetBase(self: *Evaluator, node: Node, env: *Env) EvalError!?[]const u8 {
+    if (node.asString()) |s| return s;
+    const atom = node.asAtom() orelse return null;
+    if (isDirectionKeyword(atom)) return null;
+    const value = try self.evalNode(node, env);
+    return value.asString() orelse {
+        self.setError(node.span, "(diff-port …) net must be a string");
+        return EvalError.TypeError;
+    };
+}
+
+/// The lane suffixes: an explicit `(suffixes P N)` anywhere among the
+/// modifiers, else `_P`/`_N`. A malformed override warns and falls back.
+fn diffPortSuffixes(self: *Evaluator, rest: []const Node) [2][]const u8 {
+    for (rest) |node| {
+        if (!node.isForm("suffixes")) continue;
+        const sf = node.asList().?;
+        if (sf.len >= 3) {
+            const p = sf[1].asText();
+            const n = sf[2].asText();
+            if (p != null and n != null) return .{ p.?, n.? };
+        }
+        self.warnFmt(node.span, "(suffixes …) in (diff-port …) expects exactly two lane suffixes — using {s}/{s}", .{ default_diff_suffixes[0], default_diff_suffixes[1] });
+    }
+    return default_diff_suffixes;
+}
+
+/// `rest` with any `(suffixes …)` child removed — that form configures the
+/// expansion and is not a port modifier `buildPort` would recognise.
+fn stripSuffixesForm(allocator: std.mem.Allocator, rest: []const Node) EvalError![]const Node {
+    var has = false;
+    for (rest) |node| has = has or node.isForm("suffixes");
+    if (!has) return rest;
+    var buf: std.ArrayList(Node) = .empty;
+    for (rest) |node| {
+        if (node.isForm("suffixes")) continue;
+        try buf.append(allocator, node);
+    }
+    return buf.toOwnedSlice(allocator) catch EvalError.OutOfMemory;
+}
+
+/// One lane's `buildPort` args: suffixed name, the suffixed net when the long
+/// form gave a net base, then the shared modifiers.
+fn synthesizeDiffPortArgs(allocator: std.mem.Allocator, exp: DiffPortExpansion, suffix: []const u8) EvalError![]Node {
+    var buf: std.ArrayList(Node) = .empty;
+    const name = std.fmt.allocPrint(allocator, "{s}{s}", .{ exp.base, suffix }) catch return EvalError.OutOfMemory;
+    try buf.append(allocator, Node.string(ast.Span.zero, name));
+    if (exp.net_base) |nb| {
+        const net = std.fmt.allocPrint(allocator, "{s}{s}", .{ nb, suffix }) catch return EvalError.OutOfMemory;
+        try buf.append(allocator, Node.string(ast.Span.zero, net));
+    }
+    for (exp.rest) |n| try buf.append(allocator, n);
+    return buf.toOwnedSlice(allocator) catch EvalError.OutOfMemory;
+}
+
+/// Re-front `buildPort`-shaped args with the dummy `port` head atom
+/// `parseSectionPort` skips.
+fn synthesizeSectionPortChildrenFromArgs(allocator: std.mem.Allocator, args: []const Node) EvalError![]Node {
+    var buf: std.ArrayList(Node) = .empty;
+    try buf.append(allocator, Node.atom(ast.Span.zero, "port"));
+    for (args) |n| try buf.append(allocator, n);
+    return buf.toOwnedSlice(allocator) catch EvalError.OutOfMemory;
+}
+
 /// Parse (calc "name" (let ...) ...) block.
 pub fn parseSectionCalc(self: *Evaluator, sf_children: []const Node, env: *env_mod.Env) EvalError!?env_mod.CalcBlock {
     if (sf_children.len < 2) return null;
@@ -570,11 +737,12 @@ fn emitBusLane(
     bus_idx.* += 1;
 }
 
-/// True when a child of a `(pins …)` block is one of the recognised forms
-/// (`pin`/`bus`/`group`). Callers warn-and-skip anything else — those forms
-/// used to be silently dead.
+/// True when a child of a `(pins …)` block is one of the recognised forms.
+/// The set is derived from the documented registry, so the reference lists
+/// exactly what this accepts. Callers warn-and-skip anything else — those
+/// forms used to be silently dead.
 pub fn isKnownPinsChild(node: Node) bool {
-    return node.isForm("pin") or node.isForm("bus") or node.isForm("group");
+    return forms_mod.isDirectSubForm(forms_mod.pins_form_docs, formHeadName(node));
 }
 
 /// Record the unknown-sub-form warning for a non-pin/bus/group child of a
@@ -1286,18 +1454,18 @@ pub fn buildSubBlock(self: *Evaluator, form_children: []const Node, env: *Env) E
         return EvalError.TypeError;
     };
 
-    // Trailing children after the module call: (id …)/(ids …) identity
-    // anchors and (bridge …) net shorthands are consumed elsewhere;
-    // (reflow) opts out of module-layout composition. Anything else is
-    // silently dead — flag it.
+    // Trailing children after the module call, accepted per the documented
+    // registry: (id …)/(ids …) identity anchors and (bridge …) net shorthands
+    // are consumed elsewhere; (reflow) opts out of module-layout composition.
+    // Anything else is silently dead — flag it.
     var reflow = false;
     for (args[2..]) |extra| {
-        if (extra.isForm("id") or extra.isForm("ids") or extra.isForm("bridge")) continue;
-        if (extra.isForm("reflow")) {
-            reflow = true;
+        const head = formHeadName(extra);
+        if (!forms_mod.isDirectSubForm(forms_mod.sub_block_form_docs, head)) {
+            self.warnFmt(extra.span, "unknown sub-form ({s} …) in (sub-block …)", .{head});
             continue;
         }
-        self.warnFmt(extra.span, "unknown sub-form ({s} …) in (sub-block …)", .{formHeadName(extra)});
+        if (std.mem.eql(u8, head, "reflow")) reflow = true;
     }
 
     // Second arg can be:
@@ -1442,8 +1610,12 @@ pub fn loadDesignFile(self: *Evaluator, path: []const u8) ?[]const Node {
 /// Build a new top-level node slice where the design-block form's children
 /// have the checks-file forms appended. Returns null when the file has no
 /// design-block to splice into (e.g. a `(board …)` source) — the caller
-/// should fall back to the original node list in that case.
-fn spliceChecksIntoDesignBlock(
+/// should fall back to the original node list in that case. Public because the
+/// same splice has to happen when a candidate design is evaluated from BYTES
+/// rather than from disk (`pins_by_name.evalDesignSource`) — a rewrite proof
+/// that skipped the checks file would compare a different design than the one
+/// `evalFile` builds.
+pub fn spliceChecksIntoDesignBlock(
     self: *Evaluator,
     nodes: []const Node,
     checks_nodes: []const Node,
@@ -1803,4 +1975,92 @@ test "bus-port still expands an ordinary index range" {
     try testing.expect((try parseBusPortHeader(&eval, over_cap, &env)) == null);
     try testing.expectEqual(@as(usize, 1), eval.warnings.items.len);
     try testing.expect(std.mem.indexOf(u8, eval.warnings.items[0].message, "exceeds the 4096-lane cap") != null);
+}
+
+// spec: eval/design_block - diff-port expands one base name into a paired _P and _N port carrying the differential kind
+// spec: eval/design_block - diff-port replays every trailing port modifier onto both lanes
+test "diff-port expands both lanes with the differential kind and shared modifiers" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(alloc, "(diff-port \"AINA_EXT\" in optional (rated -2.5 2.5) (side left))");
+    var ports: std.ArrayList(Port) = .empty;
+    try expandTopLevelDiffPort(&eval, nodes[0].asList().?, &env, &ports);
+
+    try testing.expectEqual(@as(usize, 2), ports.items.len);
+    try testing.expectEqualStrings("AINA_EXT_P", ports.items[0].name);
+    try testing.expectEqualStrings("AINA_EXT_N", ports.items[1].name);
+    for (ports.items) |p| {
+        // Short form: each lane's net is its own name, exactly as the two
+        // hand-written (port "AINA_EXT_P" in differential) lines produced.
+        try testing.expectEqualStrings(p.name, p.net);
+        try testing.expectEqualStrings("in", p.direction);
+        try testing.expectEqualStrings("differential", p.kind);
+        try testing.expectEqualStrings("AINA_EXT", p.diff_pair_of);
+        try testing.expect(p.optional);
+        try testing.expectEqual(@as(f64, -2.5), p.rated_min.?);
+        try testing.expectEqual(@as(f64, 2.5), p.rated_max.?);
+        try testing.expectEqualStrings("left", p.side);
+    }
+}
+
+// spec: eval/design_block - a diff-port suffixes override renames both lanes and a long-form net base is suffixed per lane
+test "diff-port honours a suffixes override and a long-form net base" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(alloc, "(diff-port \"RFIN1\" \"LNA_IN\" in rf (suffixes \"+\" \"-\"))");
+    var ports: std.ArrayList(Port) = .empty;
+    try expandTopLevelDiffPort(&eval, nodes[0].asList().?, &env, &ports);
+
+    try testing.expectEqual(@as(usize, 2), ports.items.len);
+    try testing.expectEqualStrings("RFIN1+", ports.items[0].name);
+    try testing.expectEqualStrings("LNA_IN+", ports.items[0].net);
+    try testing.expectEqualStrings("RFIN1-", ports.items[1].name);
+    try testing.expectEqualStrings("LNA_IN-", ports.items[1].net);
+    // An explicit signal-type word wins; the pairing lives in diff_pair_of.
+    try testing.expectEqualStrings("rf", ports.items[0].kind);
+    try testing.expectEqualStrings("RFIN1", ports.items[1].diff_pair_of);
+}
+
+// spec: eval/design_block - a section-scope diff-port expands two section ports typed differential
+test "expandSectionDiffPort types both lanes differential" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(alloc, "(diff-port \"ADF_CH1\" out)");
+    var ports: std.ArrayList(env_mod.SectionPort) = .empty;
+    try expandSectionDiffPort(&eval, nodes[0].asList().?, &env, &ports);
+
+    try testing.expectEqual(@as(usize, 2), ports.items.len);
+    try testing.expectEqualStrings("ADF_CH1_P", ports.items[0].name);
+    try testing.expectEqualStrings("ADF_CH1_N", ports.items[1].name);
+    for (ports.items) |p| {
+        try testing.expectEqual(env_mod.PortDirection.out, p.direction);
+        try testing.expectEqual(env_mod.SignalType.differential, p.signal_type);
+    }
+}
+
+// spec: eval/design_block - a diff-port missing its direction is an arity error naming the form
+test "diff-port without a direction is an arity error" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(alloc, "(diff-port \"AINA_EXT\")");
+    var ports: std.ArrayList(Port) = .empty;
+    try testing.expectError(EvalError.ArityError, expandTopLevelDiffPort(&eval, nodes[0].asList().?, &env, &ports));
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "(diff-port …)") != null);
 }

@@ -156,9 +156,10 @@ fn designBlockOf(arena: std.mem.Allocator, eval: *Evaluator, args: Args) *env_mo
 
 /// Print the stashed compiler-style diagnostic when one exists, then exit.
 fn fatalEval(eval: *const Evaluator, source_path: []const u8, err: anyerror) noreturn {
+    // A diagnostic raised inside an imported module names that module's file.
     if (eval.last_error) |diag| exit.fatal(
         "{s}:{d}:{d}: error: {s}\n",
-        .{ source_path, diag.span.line, diag.span.col, diag.message },
+        .{ if (diag.file.len > 0) diag.file else source_path, diag.span.line, diag.span.col, diag.message },
     );
     exit.fatal("import-kicad-layout: evaluate error: {s}\n", .{@errorName(err)});
 }

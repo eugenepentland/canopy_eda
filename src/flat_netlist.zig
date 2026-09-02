@@ -58,6 +58,13 @@ pub const FlatInstance = struct {
     /// shared by several ICs has several parts carrying a pad of that number,
     /// and matching on the string picks whichever the net happens to list first.
     bind: env_mod.InstanceBinds = .{},
+    /// The part's `(check (max-distance …))` requirements, already resolved
+    /// against the built block (`req_physical_checks.resolveDistanceRules`):
+    /// pad, candidate ref-des, budget. Carried so the layout lint can measure
+    /// a datasheet placement rule without loading a pinout or parsing a
+    /// component value. Default empty, like `bind`, so literal builders may
+    /// omit it.
+    distance_rules: []const env_mod.DistanceRule = &.{},
 };
 
 /// One net in the flattened design with a hierarchically-prefixed name and
@@ -123,6 +130,25 @@ fn prefixedOrEmpty(allocator: std.mem.Allocator, prefix: []const u8, name: []con
     return prefixed(allocator, prefix, name);
 }
 
+/// Re-prefix every candidate ref-des in a part's resolved distance rules, so
+/// a rule declared inside a module names the flattened parts the lint will
+/// measure rather than a same-named part in another sub-block.
+fn prefixedDistanceRules(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    rules: []const env_mod.DistanceRule,
+) std.mem.Allocator.Error![]const env_mod.DistanceRule {
+    if (rules.len == 0 or prefix.len == 0) return rules;
+    const out = try allocator.alloc(env_mod.DistanceRule, rules.len);
+    for (rules, out) |rule, *slot| {
+        const refs = try allocator.alloc([]const u8, rule.candidates.len);
+        for (rule.candidates, refs) |ref, *dest| dest.* = try prefixed(allocator, prefix, ref);
+        slot.* = rule;
+        slot.candidates = refs;
+    }
+    return out;
+}
+
 /// Walk the design tree and append a `FlatInstance` for every component,
 /// joining `prefix` onto each ref-des as it descends into sub-blocks so
 /// references stay unique. Each instance carries the BOM-assigned UUID
@@ -171,6 +197,10 @@ pub fn collectInstances(
                     .own = inst.bind.near.own,
                 },
             },
+            // A distance rule's candidates are siblings in the part's OWN
+            // block, so they take exactly the prefix its ref-des takes — the
+            // same reasoning `bind` records just above.
+            .distance_rules = try prefixedDistanceRules(allocator, prefix, inst.distance_rules),
         });
     }
     for (block.sub_blocks) |sb| {

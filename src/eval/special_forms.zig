@@ -154,6 +154,51 @@ pub fn evalRepeat(self: *Evaluator, args: []const Node, env: *Env) EvalError!Val
     return result;
 }
 
+/// Parsed shape of `(for name (item…) body…)` — `repeat`'s list-valued
+/// sibling. The items stay un-evaluated here so each one is evaluated in the
+/// enclosing scope at the moment its iteration starts, exactly as `repeat`
+/// evaluates its bounds before binding: a body-local `(let …)` can therefore
+/// never leak into the next item.
+pub const ForSpec = struct {
+    name: []const u8,
+    items: []const Node,
+    body: []const Node,
+};
+
+/// Validate `(for …)`'s binding name and item list. Public for the same
+/// reason `parseRepeat` is: design-block materialization drives the identical
+/// lexical semantics through its own scope-form builders. Needs no `env` —
+/// unlike `repeat`'s computed bounds, a `for`'s iteration count is the
+/// literal length of a source list, so it is also bounded by construction.
+pub fn parseFor(self: *Evaluator, args: []const Node) EvalError!ForSpec {
+    try checkArity(self, .for_, args);
+    const name = args[0].asAtom() orelse {
+        self.setError(args[0].span, "(for …) first argument must be a bare name, e.g. (for ch (\"A\" \"B\") …)");
+        return EvalError.InvalidForm;
+    };
+    const items = args[1].asList() orelse {
+        self.setError(args[1].span, "(for …) second argument must be a parenthesised item list, e.g. (for ch (\"A\" \"B\" \"C\") …)");
+        return EvalError.InvalidForm;
+    };
+    return .{ .name = name, .items = items, .body = args[2..] };
+}
+
+/// Evaluate an expression-level `(for …)` and return the final body value
+/// (`.nil` for an empty item list). Each iteration gets a fresh child
+/// environment, so the loop variable and body-local lets are lexical.
+pub fn evalFor(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
+    const spec = try parseFor(self, args);
+    var result: Value = .nil;
+    for (spec.items) |item| {
+        const value = try self.evalNode(item, env);
+        var loop_env = Env.init(self.allocator, env);
+        defer loop_env.deinit();
+        try loop_env.put(spec.name, value);
+        for (spec.body) |form| result = try self.evalNode(form, &loop_env);
+    }
+    return result;
+}
+
 /// Evaluate `(if cond then else)`: short-circuits — only the matching
 /// branch is evaluated, mirroring Lisp semantics so designers can guard
 /// expensive sub-block calls behind compile-time flags.

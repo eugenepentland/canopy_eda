@@ -9,6 +9,7 @@ const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");
 const na = @import("eval/net_analysis.zig");
+const net_suggest = @import("eval/net_suggest.zig");
 const rails_mod = @import("eval/rails.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
@@ -82,6 +83,7 @@ pub const ViolationKind = enum {
     layout_class_inferred,
     components_not_grouped,
     verification_orphaned,
+    diff_pair_half_connected,
 };
 
 /// One electrical-rule-check finding. `kind` selects the rule, `severity`
@@ -107,6 +109,7 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkPinMultiNet(allocator, block, &violations);
     try checkFloatingNets(allocator, block, &violations);
     try checkUnconnectedPorts(allocator, block, &violations);
+    try checkDiffPortPairs(allocator, block, &violations);
     try checkMissingValues(allocator, block, &violations);
     try checkMissingFootprints(allocator, block, &violations);
     try checkMissingDecoupling(allocator, block, &violations);
@@ -970,6 +973,7 @@ fn checkFloatingNets(
 ) !void {
     // Build port net set (these connect externally, not dead-ends)
     var port_nets: std.StringHashMapUnmanaged(void) = .empty;
+    defer port_nets.deinit(allocator);
     for (block.ports) |port| {
         try port_nets.put(allocator, port.net, {});
         try port_nets.put(allocator, port.name, {});
@@ -977,6 +981,7 @@ fn checkFloatingNets(
 
     // Also collect optional section ports — their nets are allowed to float
     var optional_nets: std.StringHashMapUnmanaged(void) = .empty;
+    defer optional_nets.deinit(allocator);
     for (block.sections) |sec| {
         try collectOptionalPortNets(allocator, &optional_nets, sec);
     }
@@ -987,6 +992,7 @@ fn checkFloatingNets(
 
     // Also exclude nets that participate in net_ties (sub-block connections)
     var tied_nets: std.StringHashMapUnmanaged(void) = .empty;
+    defer tied_nets.deinit(allocator);
     for (block.net_ties) |nt| {
         const base_a = na.baseNetName(nt.a);
         const base_b = na.baseNetName(nt.b);
@@ -994,8 +1000,10 @@ fn checkFloatingNets(
         try tied_nets.put(allocator, base_b, {});
     }
 
-    // Count pins per base net name
+    // Count pins per base net name. Keys are slices into the block's own net
+    // names, so a violation may borrow one after the map is torn down.
     var net_pin_counts: std.StringHashMapUnmanaged(u32) = .empty;
+    defer net_pin_counts.deinit(allocator);
     for (block.nets) |net| {
         const base = na.baseNetName(net.name);
         if (port_nets.contains(base)) continue;
@@ -1005,12 +1013,20 @@ fn checkFloatingNets(
         gop.value_ptr.* += @intCast(net.pins.len);
     }
 
+    // Candidate names for the did-you-mean hint: a one-connection net is very
+    // often a typo of a net that IS wired up, and "Floating net" alone never
+    // says so.
+    const established = try net_suggest.establishedNets(allocator, block);
+    defer allocator.free(established);
+
     var iter = net_pin_counts.iterator();
     while (iter.next()) |entry| {
         if (entry.value_ptr.* == 1) {
             // Skip nets declared as optional ports
             if (optional_nets.contains(entry.key_ptr.*)) continue;
-            const msg = std.fmt.allocPrint(allocator, "Floating net \"{s}\" — only one connection", .{entry.key_ptr.*}) catch continue;
+            const hint = net_suggest.hint(allocator, entry.key_ptr.*, established);
+            defer if (hint.len > 0) allocator.free(hint);
+            const msg = std.fmt.allocPrint(allocator, "Floating net \"{s}\" — only one connection{s}", .{ entry.key_ptr.*, hint }) catch continue;
             try violations.append(allocator, .{
                 .kind = .floating_net,
                 .severity = .warning,
@@ -1078,15 +1094,7 @@ fn checkBlockUnconnectedPorts(
     // Check the parent block's own required ports — they should have at least
     // one internal connection (via nets or net_ties)
     var connected_port_nets: std.StringHashMapUnmanaged(void) = .empty;
-    for (block.nets) |net| {
-        const base = na.baseNetName(net.name);
-        if (net.pins.len > 0) try connected_port_nets.put(allocator, base, {});
-    }
-    // Net ties also count as connections for parent ports
-    for (block.net_ties) |nt| {
-        try connected_port_nets.put(allocator, na.baseNetName(nt.a), {});
-        try connected_port_nets.put(allocator, na.baseNetName(nt.b), {});
-    }
+    try collectConnectedPortNets(allocator, block, &connected_port_nets);
 
     for (block.ports) |port| {
         const base = na.baseNetName(port.net);
@@ -1105,6 +1113,131 @@ fn checkBlockUnconnectedPorts(
             });
         }
     }
+}
+
+/// Base net names with at least one internal connection in `block`: a net
+/// carrying pins, or either side of a net tie. Declared once so the
+/// required-port rule and the differential both-or-neither rule below agree on
+/// what "this port is wired" means.
+fn collectConnectedPortNets(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    out: *std.StringHashMapUnmanaged(void),
+) !void {
+    for (block.nets) |net| {
+        if (net.pins.len == 0) continue;
+        try out.put(allocator, na.baseNetName(net.name), {});
+    }
+    for (block.net_ties) |nt| {
+        try out.put(allocator, na.baseNetName(nt.a), {});
+        try out.put(allocator, na.baseNetName(nt.b), {});
+    }
+}
+
+/// `(diff-port …)` states a both-or-neither contract: wiring one lane of a
+/// declared differential pair and leaving its twin open is a half-finished
+/// edit, not a deliberate connection, and the required-port rule alone cannot
+/// say so — it never fires at all when the pair is `optional`, and when it does
+/// it reports a lone port with no hint that a twin exists. Only ports the
+/// author declared as a pair carry `diff_pair_of`, so a hand-written
+/// `(port "X_P" …)` / `(port "X_N" …)` pair is never second-guessed here.
+fn checkDiffPortPairs(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayList(Violation),
+) !void {
+    try checkBlockDiffPortPairs(allocator, block, violations);
+    for (block.sub_blocks) |sb| try checkDiffPortPairs(allocator, sb.block, violations);
+}
+
+fn checkBlockDiffPortPairs(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayList(Violation),
+) !void {
+    // This block's own pairs, judged by internal connectivity.
+    var connected_nets: std.StringHashMapUnmanaged(void) = .empty;
+    try collectConnectedPortNets(allocator, block, &connected_nets);
+    try reportHalfConnectedPairs(allocator, block.ports, "", &connected_nets, violations);
+
+    // Each sub-block's pairs, judged by the paths the parent tied.
+    var connected_paths: std.StringHashMapUnmanaged(void) = .empty;
+    for (block.net_ties) |nt| {
+        try connected_paths.put(allocator, nt.a, {});
+        try connected_paths.put(allocator, nt.b, {});
+    }
+    for (block.sub_blocks) |sb| {
+        try reportHalfConnectedPairs(allocator, sb.block.ports, sb.name, &connected_paths, violations);
+    }
+}
+
+/// Emit one finding per declared pair with exactly one connected lane.
+/// `sub_block` is empty when judging a block's own ports, and the sub-block's
+/// name when judging its ports from the parent's net ties.
+fn reportHalfConnectedPairs(
+    allocator: std.mem.Allocator,
+    ports: []const env_mod.Port,
+    sub_block: []const u8,
+    connected: *const std.StringHashMapUnmanaged(void),
+    violations: *std.ArrayList(Violation),
+) !void {
+    for (ports, 0..) |lane, i| {
+        if (lane.diff_pair_of.len == 0) continue;
+        const twin = findPairTwin(ports[i + 1 ..], lane.diff_pair_of) orelse continue;
+        const lane_wired = diffLaneConnected(allocator, lane, sub_block, connected);
+        if (lane_wired == diffLaneConnected(allocator, twin, sub_block, connected)) continue;
+        const wired = if (lane_wired) lane else twin;
+        const open = if (lane_wired) twin else lane;
+        const msg = halfConnectedMessage(allocator, lane.diff_pair_of, sub_block, wired.name, open.name) orelse continue;
+        try violations.append(allocator, .{
+            .kind = .diff_pair_half_connected,
+            .severity = .warning,
+            .message = msg,
+            .net = open.net,
+        });
+    }
+}
+
+fn findPairTwin(rest: []const env_mod.Port, pair_key: []const u8) ?env_mod.Port {
+    for (rest) |p| {
+        if (std.mem.eql(u8, p.diff_pair_of, pair_key)) return p;
+    }
+    return null;
+}
+
+/// Whether one lane counts as wired. Fails open (reports connected) when the
+/// path string cannot be built, so an allocation failure never invents a
+/// violation.
+fn diffLaneConnected(
+    allocator: std.mem.Allocator,
+    lane: env_mod.Port,
+    sub_block: []const u8,
+    connected: *const std.StringHashMapUnmanaged(void),
+) bool {
+    if (sub_block.len == 0) return connected.contains(na.baseNetName(lane.net));
+    const path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ sub_block, lane.name }) catch return true;
+    return connected.contains(path);
+}
+
+fn halfConnectedMessage(
+    allocator: std.mem.Allocator,
+    pair_key: []const u8,
+    sub_block: []const u8,
+    wired: []const u8,
+    open: []const u8,
+) ?[]const u8 {
+    if (sub_block.len == 0) {
+        return std.fmt.allocPrint(
+            allocator,
+            "Differential pair \"{s}\" is half-connected — \"{s}\" is wired but \"{s}\" is left open; connect both lanes or neither",
+            .{ pair_key, wired, open },
+        ) catch null;
+    }
+    return std.fmt.allocPrint(
+        allocator,
+        "Differential pair \"{s}\" on sub-block \"{s}\" is half-connected — \"{s}/{s}\" is wired but \"{s}/{s}\" is left open; connect both lanes or neither",
+        .{ pair_key, sub_block, sub_block, wired, sub_block, open },
+    ) catch null;
 }
 
 /// Check for instances missing a value (passives need values). Recurses
@@ -5098,4 +5231,128 @@ test "orphaned verification inside a sub-block is flagged" {
         if (v.kind != .verification_orphaned) continue;
         try std.testing.expectEqualStrings("U7", v.ref_des);
     }
+}
+
+/// Build a one-block design whose `AUX` differential pair is declared with
+/// `(diff-port …)` and whose lanes are wired according to `wired_p`/`wired_n`.
+/// A net carrying a pin is what `collectConnectedPortNets` reads as "wired".
+fn diffPairBlock(alloc: std.mem.Allocator, wired_p: bool, wired_n: bool) !DesignBlock {
+    var nets: std.ArrayList(Net) = .empty;
+    if (wired_p) try nets.append(alloc, .{ .name = "AUX_P", .pins = &.{.{ .ref_des = "R1", .pin = "1" }} });
+    if (wired_n) try nets.append(alloc, .{ .name = "AUX_N", .pins = &.{.{ .ref_des = "R2", .pin = "1" }} });
+    const ports = try alloc.alloc(env_mod.Port, 2);
+    ports[0] = .{ .name = "AUX_P", .net = "AUX_P", .direction = "in", .kind = "differential", .optional = true, .diff_pair_of = "AUX" };
+    ports[1] = .{ .name = "AUX_N", .net = "AUX_N", .direction = "in", .kind = "differential", .optional = true, .diff_pair_of = "AUX" };
+    return .{
+        .name = "pair",
+        .instances = &.{},
+        .nets = try nets.toOwnedSlice(alloc),
+        .ports = ports,
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+}
+
+fn diffPairFindings(alloc: std.mem.Allocator, block: *const DesignBlock) ![]const Violation {
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkDiffPortPairs(alloc, block, &violations);
+    return violations.toOwnedSlice(alloc);
+}
+
+// spec: erc - a declared differential pair with exactly one wired lane is reported as half-connected, naming the wired lane and the open one
+// spec: erc - a declared differential pair wired on both lanes, or on neither, is not reported
+test "half-connected differential pair is flagged and a matched pair is not" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const half = try diffPairBlock(alloc, true, false);
+    const half_findings = try diffPairFindings(alloc, &half);
+    try std.testing.expectEqual(@as(usize, 1), half_findings.len);
+    try std.testing.expectEqual(ViolationKind.diff_pair_half_connected, half_findings[0].kind);
+    try std.testing.expectEqualStrings("AUX_N", half_findings[0].net);
+    try std.testing.expect(std.mem.indexOf(u8, half_findings[0].message, "\"AUX_P\" is wired") != null);
+    try std.testing.expect(std.mem.indexOf(u8, half_findings[0].message, "\"AUX_N\" is left open") != null);
+
+    const both = try diffPairBlock(alloc, true, true);
+    try std.testing.expectEqual(@as(usize, 0), (try diffPairFindings(alloc, &both)).len);
+    const neither = try diffPairBlock(alloc, false, false);
+    try std.testing.expectEqual(@as(usize, 0), (try diffPairFindings(alloc, &neither)).len);
+}
+
+// spec: erc - a sub-block's differential pair tied on only one lane by the parent is reported as half-connected
+test "sub-block differential pair tied on one lane is flagged" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const sub = try alloc.create(DesignBlock);
+    sub.* = try diffPairBlock(alloc, true, true);
+    const sub_blocks = try alloc.alloc(env_mod.SubBlock, 1);
+    sub_blocks[0] = .{ .name = "adc1", .block = sub };
+    const ties = try alloc.alloc(env_mod.NetTie, 1);
+    ties[0] = .{ .a = "BOARD_AUX_P", .b = "adc1/AUX_P" };
+    const parent: DesignBlock = .{
+        .name = "board",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = sub_blocks,
+        .net_ties = ties,
+    };
+
+    const findings = try diffPairFindings(alloc, &parent);
+    try std.testing.expectEqual(@as(usize, 1), findings.len);
+    try std.testing.expectEqual(ViolationKind.diff_pair_half_connected, findings[0].kind);
+    try std.testing.expect(std.mem.indexOf(u8, findings[0].message, "sub-block \"adc1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, findings[0].message, "\"adc1/AUX_N\" is left open") != null);
+}
+
+// spec: erc - a floating net within two edits of a well-connected net suggests that net
+test "floating net finding offers a did-you-mean for a near-miss name" {
+    const allocator = std.testing.allocator;
+    const gnd_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "C1", .pin = "2" },
+    };
+    const typo_pins = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "9" }};
+    const far_pins = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "8" }};
+    const nets = [_]Net{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "GNND", .pins = &typo_pins },
+        .{ .name = "MOSI", .pins = &far_pins },
+    };
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &.{},
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkFloatingNets(allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| allocator.free(v.message);
+        violations.deinit(allocator);
+    }
+    var saw_hint = false;
+    for (violations.items) |v| {
+        if (std.mem.eql(u8, v.net, "GNND")) {
+            try std.testing.expectEqualStrings(
+                "Floating net \"GNND\" — only one connection — did you mean \"GND\"?",
+                v.message,
+            );
+            saw_hint = true;
+        }
+        // A one-connection net with no near neighbour keeps the bare message.
+        if (std.mem.eql(u8, v.net, "MOSI")) {
+            try std.testing.expectEqualStrings("Floating net \"MOSI\" — only one connection", v.message);
+        }
+    }
+    try std.testing.expect(saw_hint);
 }

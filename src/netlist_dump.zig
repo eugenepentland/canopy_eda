@@ -93,7 +93,12 @@ fn padTokens(arena: std.mem.Allocator, net: flat_netlist.FlatNet) std.mem.Alloca
 
 /// Render the whole flattened netlist as sorted lines. `nets` is sorted IN
 /// PLACE, so the caller's list comes back in dump order too.
-fn lines(
+///
+/// Public because the netlist is also the identity claim other surfaces need to
+/// hold constant — `pins_by_name` proves a pad-token rewrite by comparing these
+/// exact lines before and after. Rendering them any other way would let the two
+/// answers drift.
+pub fn lines(
     arena: std.mem.Allocator,
     name: []const u8,
     nets: []flat_netlist.FlatNet,

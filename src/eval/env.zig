@@ -78,6 +78,12 @@ pub const BlockDef = struct {
     body: []const ast.Node,
     /// Import scope from the module file
     imports: *Env,
+    /// File the `(defmodule …)` was read from. A module body evaluates long
+    /// after its file was loaded, so `callModule` restores this as the
+    /// evaluator's current file — otherwise every diagnostic raised inside the
+    /// module would be attributed to whichever design happened to call it.
+    /// Empty for definitions evaluated from a buffer with no path.
+    source_file: []const u8 = "",
 };
 
 /// A pin reference in a net.
@@ -155,6 +161,11 @@ pub const Port = struct {
     /// (e.g. "this mezzanine pin is 3.3 V CMOS") show up in ERC even when the
     /// far-side device lives in a different design.
     electrical: ?ElectricalDecl = null,
+    /// Pair key shared by the two lanes a `(diff-port "BASE" …)` expands to —
+    /// the form's base name, identical on the `_P` and `_N` port. Empty on a
+    /// hand-written `(port …)`, so it is also the "this port was declared as
+    /// half of a differential pair" flag ERC's both-or-neither rule keys on.
+    diff_pair_of: []const u8 = "",
 
     /// True when this port carries supply-rail specs — a nominal voltage, a
     /// rated range, a current capacity, or an efficiency. Declared once here
@@ -467,6 +478,74 @@ pub const Check = union(enum) {
         current_ua: f64,
         tolerance_pct: f64,
     },
+    /// `(cap-rating (pin "A") (pin "B") [(min-ratio X)] [(min-v V)])` — every
+    /// capacitor bridging the nets on pins A and B must carry a voltage-rating
+    /// attribute of at least `min_ratio` times the worst-case DC potential the
+    /// design derives across those two nets (`eval/net_envelopes`), and at
+    /// least `min_v` volts. A cap with no rating is never a pass, and a net
+    /// with no derivable envelope is reported unproven rather than assumed
+    /// safe. Covers "the input cap must be rated for the worst-case IN
+    /// voltage" style datasheet prose.
+    cap_rating: struct {
+        pin_a: []const u8,
+        pin_b: []const u8,
+        /// Multiple of the derived envelope every bridging cap must carry.
+        /// `0` disables the ratio arm (only `(min-v …)` was written).
+        min_ratio: f64,
+        /// Absolute floor in volts. `0` disables the absolute arm.
+        min_v: f64,
+    },
+    /// `(max-distance (pin "P") (kind C|R|L|any) (mm D) [(min-value X)]
+    /// [(max-value Y)])` — the nearest matching passive on pin P's net must
+    /// sit within D mm of that pad in the SAVED LAYOUT. `netlisp check` has no
+    /// geometry, so the requirement checker reports it layout-deferred and the
+    /// measurement itself is the `req-distance-far` lint in
+    /// `src/placement/layout_lint.zig`.
+    max_distance: struct {
+        pin: []const u8,
+        kind: DistanceKind,
+        max_mm: f64,
+        /// Value-window filter in the kind's natural unit (ohms / uH / uF),
+        /// exactly like `series_element`. Null ends are unbounded.
+        min_value: ?f64 = null,
+        max_value: ?f64 = null,
+    },
+    /// `(sequence (pin "A") before (pin "B") [(margin-ms N)])` — the supply
+    /// rail on pin A must come up before the rail on pin B, judged against
+    /// `eval/power_sequencing`'s derived order. `margin_ms` is recorded and
+    /// reported but only enforced once the sequencing model carries timing.
+    sequence: struct {
+        pin_a: []const u8,
+        pin_b: []const u8,
+        margin_ms: f64 = 0,
+    },
+};
+
+/// Passive class a `(max-distance …)` rule accepts, by ref-des prefix. `any`
+/// matches every two-terminal passive class the schematic recognises, for the
+/// datasheet rules that say "the coupling element" without naming R, L or C.
+pub const DistanceKind = enum { C, R, L, any };
+
+/// One `(check (max-distance …))` requirement resolved against the built
+/// block: the pad the distance is measured from, and the ref-des of every
+/// passive that already satisfies the rule's kind/value filter on that pad's
+/// net. Resolved once in the evaluator (`builders.resolveDistanceRules`) and
+/// carried to the placement layer through `flat_netlist.FlatInstance`, so the
+/// layout lint never loads a pinout or parses a component value — the same
+/// "resolve once, share" contract `placement/near_bind.zig` documents.
+pub const DistanceRule = struct {
+    /// Requirement id, so a lint finding points back at the datasheet rule.
+    req_id: []const u8,
+    /// Physical pad on the declaring part the distance is measured from.
+    pad: []const u8,
+    /// Every passive satisfying the kind/value filter on that pad's net.
+    /// Empty means the netlist cannot satisfy the rule at any placement,
+    /// which the requirement checker reports as a failure at build time.
+    candidates: []const []const u8 = &.{},
+    max_mm: f64,
+    /// Human spelling of the kind/value filter, for the lint message
+    /// (e.g. `C in [0.010, 0.100] uF`).
+    what: []const u8 = "",
 };
 
 /// Element kind for `series-element` checks. Determines which ref-des prefix
@@ -593,6 +672,10 @@ pub const Instance = struct {
     electrical: []const ElectricalDecl = &.{},
     /// Schematic-level attributes (e.g., "np0", "x7r" for dielectric type)
     attrs: []const []const u8 = &.{},
+    /// `(check (max-distance …))` requirements resolved against this
+    /// placement — see `DistanceRule`. Empty for every part that declares
+    /// none, which is almost all of them.
+    distance_rules: []const DistanceRule = &.{},
     /// Optional multi-part breakdown. Empty = single-part (render as one hub).
     parts: []const Part = &.{},
     /// Byte offset of the component family name in the source file.
@@ -1300,6 +1383,34 @@ pub const PerimeterKeepoutSpec = struct {
     allow_nets: []const []const u8 = &.{},
 };
 
+/// Board face(s) an authored `(board … (keepout …))` region reserves. `both`
+/// is the honest default for a mechanical obstruction that owns the whole
+/// board thickness there; `top`/`bottom` reserve one assembly face only.
+pub const BoardKeepoutSide = enum { top, bottom, both };
+
+/// One author-declared board-interior keepout region — the mechanical
+/// counterpart of the perimeter band. Its rectangle is board-local mm from the
+/// outline's top-left, the SAME frame `BoardHeatsinkSpec.rect` uses, because
+/// the regions these describe (a heatsink plate's footprint, a shield can, a
+/// bracket) are read off the same mechanical drawing. Unlike the perimeter
+/// keepout it is not derived from anything: the author states the rectangle,
+/// so nothing about the outline or the fence can move it.
+pub const BoardKeepoutSpec = struct {
+    /// Author's label, printed by DRC, the describe endpoint and the renderers.
+    name: []const u8,
+    rect: struct { x: f64, y: f64, w: f64, h: f64 },
+    side: BoardKeepoutSide,
+    /// Which physical families the region excludes. Defaults to all three; an
+    /// explicit `(blocks …)` narrows it.
+    blocks: PerimeterKeepoutBlocks = .{ .components = true, .tracks = true, .vias = true },
+    /// Copper admitted through anyway, by net name (a heatsink plate that is
+    /// bonded to GND still wants its stitching).
+    allow_nets: []const []const u8 = &.{},
+    /// Optional `(reason "…")` — why the space is reserved, carried to every
+    /// surface that names the region so a reader never has to find the commit.
+    reason: []const u8 = "",
+};
+
 /// A plated-through via fence generated continuously around the board outline.
 /// Dimensions are millimetres. `edge_offset` is measured from the finished
 /// edge to each via centre; `mask_width` is the solder-mask-free band measured
@@ -1366,6 +1477,8 @@ pub const BoardSpec = struct {
     corners: []const PlacementItem = &.{},
     /// Optional board-edge via fence and exposed-mask band.
     perimeter_fence: PerimeterFenceSpec = .{},
+    /// Author-declared interior keepout regions, in authored order.
+    keepouts: []const BoardKeepoutSpec = &.{},
     /// Authored default heatsink. A saved layout may override this assembly;
     /// deleting/rebuilding the sidecar falls back here.
     heatsink: ?BoardHeatsinkSpec = null,

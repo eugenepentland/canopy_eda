@@ -1486,6 +1486,8 @@ fn badge(status: req_checks.Status) []const u8 {
         .verified => "VERIFIED",
         .na => "PENDING",
         .fail => "FAIL",
+        .unproven => "UNPROVEN",
+        .layout_deferred => "LAYOUT",
     };
 }
 

@@ -24,11 +24,13 @@ const builders = @import("builders.zig");
 const special_forms = @import("special_forms.zig");
 const rails_mod = @import("rails.zig");
 const net_envelopes = @import("net_envelopes.zig");
+const physical_checks = @import("../req_physical_checks.zig");
 const test_point_mod = @import("test_point.zig");
 const micro_forms = @import("micro_forms.zig");
 const pin_enrichment = @import("pin_enrichment.zig");
 const forms_mod = @import("forms.zig");
 const board_role_mod = @import("board_role.zig");
+const board_keepout_mod = @import("board_keepout.zig");
 const net_analysis = @import("net_analysis.zig");
 const section_maturity = @import("section_maturity.zig");
 const stackup_presets = @import("stackup_presets.zig");
@@ -70,14 +72,11 @@ fn hasHierarchicalMarker(forms: []const Node) bool {
 /// Form heads that are deliberately inert in scope-form dispatch and must
 /// not draw an unknown-sub-form warning: identity anchors consumed by the
 /// id machinery (`id`/`ids`), the `(hierarchical-ids)` marker read by
-/// `hasHierarchicalMarker`, and the documented-but-inert `(row N)`/`(col N)`
-/// grid hints carried by sections and hub instances.
+/// `hasHierarchicalMarker`, and the `(row N)`/`(col N)` grid hints carried by
+/// sections and hub instances. The set is the documented marker registry, so
+/// the reference lists exactly what passes silently here.
 fn isInertFormHead(name: []const u8) bool {
-    return std.mem.eql(u8, name, "id") or
-        std.mem.eql(u8, name, "ids") or
-        std.mem.eql(u8, name, "hierarchical-ids") or
-        std.mem.eql(u8, name, "row") or
-        std.mem.eql(u8, name, "col");
+    return forms_mod.isDirectSubForm(forms_mod.marker_form_docs, name);
 }
 
 /// Apply the source-level subcircuit power-plane switch after every body form
@@ -155,6 +154,17 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     // and all existing id/ids tokens so generateId never re-mints one.
     ids.prescanRefDes(self, body_forms);
     ids.prescanIds(self, body_forms);
+
+    // Ref-des uniqueness is per BLOCK: two modules may each name their own
+    // "R1" (the sub-block pass renumbers them apart later), but one block
+    // declaring "R1" twice is an authoring error. Swap in this block's own
+    // namespace and give the enclosing block its map back on exit.
+    const saved_authored_refs = self.authored_refs;
+    self.authored_refs = .empty;
+    defer {
+        self.authored_refs.deinit(self.allocator);
+        self.authored_refs = saved_authored_refs;
+    }
 
     // `(hierarchical-ids)` opts this design (and the modules it sub-blocks) into
     // Option-4 sub-block identity. Inherit from any enclosing design and restore
@@ -262,6 +272,13 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     // `pin_function_required` in ERC.
     pin_enrichment.enrichPinFunctions(self.allocator, block, self.project_dir) catch return EvalError.OutOfMemory;
 
+    // `(check (max-distance …))` requirements become measurable layout rules
+    // only now: the pinout resolves the pin to a pad, and the ref-des the
+    // candidate passives are named by are final only after the two
+    // auto-assign passes above. Recurses, so a sub-block's parts are resolved
+    // in the ref-des space its parent gave them.
+    physical_checks.resolveDistanceRules(self, block);
+
     // Validate: warn about dead-end nets, etc.
     try validate.validateDesign(self, block);
 
@@ -363,43 +380,90 @@ fn evalBlockRepeat(
     build: *BlockBuildState,
 ) EvalError!void {
     const spec = try special_forms.parseRepeat(self, form_children[1..], env);
-    const repeat_id = try ids.getOrCreateFormId(self, form_children);
-    const sidecar = ids.parseChildIdSidecar(self, form_children);
+    const loop = try beginBlockLoop(self, form_children);
     var it = spec.iterator();
     while (it.next()) |index| {
         var loop_env = Env.init(self.allocator, env);
         defer loop_env.deinit();
         try loop_env.put(spec.name, .{ .number = @floatFromInt(index) });
+        try evalBlockLoopIteration(self, spec.body, &loop_env, build, loop, index);
+    }
+}
 
-        const first_instance = build.instances.items.len;
-        const first_sub_block = build.sub_blocks.items.len;
-        const first_section = build.sections.items.len;
-        // Child forms share one source location across every iteration. Drop
-        // their normal pending writes and retain only the repeat form's anchor.
-        const pending_id_len = self.pending_ids.items.len;
-        const pending_child_id_len = self.pending_child_ids.items.len;
-        evalBlockBodyForms(self, spec.body, &loop_env, build) catch |err| {
-            self.pending_ids.items.len = pending_id_len;
-            self.pending_child_ids.items.len = pending_child_id_len;
-            return err;
-        };
+/// Expand a design-scope `(for name (item…) body…)`. Same machinery as
+/// `evalBlockRepeat` — one source-resident anchor, children derived from it
+/// plus their `origin_key` — with the lexical index being the item's 0-based
+/// ordinal rather than a loop counter, so `(ids ("C_A@0" token) …)` migrates a
+/// hand-unrolled block exactly as it does for `repeat`.
+fn evalBlockFor(
+    self: *Evaluator,
+    form_children: []const Node,
+    env: *Env,
+    build: *BlockBuildState,
+) EvalError!void {
+    const spec = try special_forms.parseFor(self, form_children[1..]);
+    const loop = try beginBlockLoop(self, form_children);
+    for (spec.items, 0..) |item, ordinal| {
+        const value = try self.evalNode(item, env);
+        var loop_env = Env.init(self.allocator, env);
+        defer loop_env.deinit();
+        try loop_env.put(spec.name, value);
+        try evalBlockLoopIteration(self, spec.body, &loop_env, build, loop, @intCast(ordinal));
+    }
+}
+
+/// The identity anchor a design-scope loop form owns: one source-resident
+/// `(id …)` plus its optional `(ids …)` migration sidecar.
+const BlockLoopIdentity = struct {
+    anchor: []const u8,
+    sidecar: ids.ChildIdSidecar,
+};
+
+fn beginBlockLoop(self: *Evaluator, form_children: []const Node) EvalError!BlockLoopIdentity {
+    return .{
+        .anchor = try ids.getOrCreateFormId(self, form_children),
+        .sidecar = ids.parseChildIdSidecar(self, form_children),
+    };
+}
+
+/// Materialize one loop iteration's body and stamp every child it produced
+/// with an identity derived from the loop's anchor and this lexical index.
+fn evalBlockLoopIteration(
+    self: *Evaluator,
+    body: []const Node,
+    loop_env: *Env,
+    build: *BlockBuildState,
+    loop: BlockLoopIdentity,
+    index: i64,
+) EvalError!void {
+    const first_instance = build.instances.items.len;
+    const first_sub_block = build.sub_blocks.items.len;
+    const first_section = build.sections.items.len;
+    // Child forms share one source location across every iteration. Drop
+    // their normal pending writes and retain only the loop form's anchor.
+    const pending_id_len = self.pending_ids.items.len;
+    const pending_child_id_len = self.pending_child_ids.items.len;
+    evalBlockBodyForms(self, body, loop_env, build) catch |err| {
         self.pending_ids.items.len = pending_id_len;
         self.pending_child_ids.items.len = pending_child_id_len;
+        return err;
+    };
+    self.pending_ids.items.len = pending_id_len;
+    self.pending_child_ids.items.len = pending_child_id_len;
 
-        const new_instances = build.instances.items[first_instance..];
-        for (new_instances) |*inst| {
-            const origin = if (inst.origin_key.len > 0) inst.origin_key else inst.ref_des;
-            inst.id = try repeatChildId(self, repeat_id, &sidecar, origin, index);
-        }
-        for (build.sub_blocks.items[first_sub_block..]) |*sb| {
-            const subblock_uuid = try repeatChildId(self, repeat_id, &sidecar, sb.name, index);
-            try ids.reassignSubBlockIdsV4(self, sb.block, subblock_uuid);
-        }
-        // Sections retain value copies of their member instances. Mirror the
-        // freshly-derived IDs into those copies so every renderer/export path
-        // observes the same identity as the top-level instance slice.
-        syncRepeatedSectionIds(build.sections.items[first_section..], new_instances);
+    const new_instances = build.instances.items[first_instance..];
+    for (new_instances) |*inst| {
+        const origin = if (inst.origin_key.len > 0) inst.origin_key else inst.ref_des;
+        inst.id = try repeatChildId(self, loop.anchor, &loop.sidecar, origin, index);
     }
+    for (build.sub_blocks.items[first_sub_block..]) |*sb| {
+        const subblock_uuid = try repeatChildId(self, loop.anchor, &loop.sidecar, sb.name, index);
+        try ids.reassignSubBlockIdsV4(self, sb.block, subblock_uuid);
+    }
+    // Sections retain value copies of their member instances. Mirror the
+    // freshly-derived IDs into those copies so every renderer/export path
+    // observes the same identity as the top-level instance slice.
+    syncRepeatedSectionIds(build.sections.items[first_section..], new_instances);
 }
 
 fn repeatChildId(
@@ -452,6 +516,10 @@ fn evalBlockBodyForm(
             try evalBlockRepeat(self, form_children, env, build);
             return;
         },
+        .for_ => {
+            try evalBlockFor(self, form_children, env, build);
+            return;
+        },
         else => {},
     };
 
@@ -463,7 +531,7 @@ fn evalBlockBodyForm(
     switch (sf) {
         .instance => {
             const result = try instance_mod.buildInstance(self, form_children, env);
-            ids.registerRefDes(self, result.instance.ref_des);
+            try ids.noteAuthoredRefDes(self, result.instance.ref_des, form.span);
             try build.instances.append(self.allocator, result.instance);
             for (result.pin_nets) |pn| try build.all_pin_nets.append(self.allocator, pn);
             for (result.inline_notes) |note| try build.notes.append(self.allocator, note);
@@ -474,6 +542,7 @@ fn evalBlockBodyForm(
             try build.ports.append(self.allocator, port);
         },
         .bus_port => try builders.expandTopLevelBusPort(self, form_children, env, build.ports),
+        .diff_port => try builders.expandTopLevelDiffPort(self, form_children, env, build.ports),
         .note => try build.notes.append(self.allocator, try builders.buildNote(self, form_children[1..], env)),
         .group => {
             const group = try builders.buildGroup(self, form_children[1..], env);
@@ -518,7 +587,7 @@ fn evalBlockBodyForm(
             if (parseKicadPcbPath(form_children)) |p| build.kicad_pcb_path.* = p;
         },
         .stub => if (try parseStub(self, form_children)) |p| {
-            ids.registerRefDes(self, p.part.ref_des);
+            try ids.noteAuthoredRefDes(self, p.part.ref_des, form.span);
             try build.instances.append(self.allocator, p.instance);
             for (p.pin_nets) |pn| try build.all_pin_nets.append(self.allocator, pn);
             try build.parts.append(self.allocator, p.part);
@@ -1198,9 +1267,10 @@ fn evalSection(
                 if (sf_children.len >= 2) sec_category = sf_children[1].asText() orelse "";
             },
             .bus_port => try builders.expandSectionBusPort(self, sf_children, env, &sec_ports),
+            .diff_port => try builders.expandSectionDiffPort(self, sf_children, env, &sec_ports),
             .instance => {
                 const result = try instance_mod.buildInstance(self, sf_children, env);
-                ids.registerRefDes(self, result.instance.ref_des);
+                try ids.noteAuthoredRefDes(self, result.instance.ref_des, sf_children[0].span);
                 try instances.append(self.allocator, result.instance);
                 try sec_instances.append(self.allocator, result.instance);
                 for (result.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
@@ -1390,9 +1460,10 @@ fn evalSubSection(
 
         switch (sft) {
             .bus_port => try builders.expandSectionBusPort(self, ssf_children, env, &sub_ports),
+            .diff_port => try builders.expandSectionDiffPort(self, ssf_children, env, &sub_ports),
             .instance => {
                 const result = try instance_mod.buildInstance(self, ssf_children, env);
-                ids.registerRefDes(self, result.instance.ref_des);
+                try ids.noteAuthoredRefDes(self, result.instance.ref_des, ssf_children[0].span);
                 try instances.append(self.allocator, result.instance);
                 try sec_instances.append(self.allocator, result.instance);
                 try sub_instances.append(self.allocator, result.instance);
@@ -2290,6 +2361,9 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
             heatsink = try parseBoardHeatsink(self, child, c[1..]);
             continue;
         }
+        // Authored interior keepouts are read after this loop: they validate
+        // against the outline, which (size W H) may declare further down.
+        if (std.mem.eql(u8, head, "keepout")) continue;
         if (std.mem.eql(u8, head, "corners")) {
             for (c[1..]) |item_node| {
                 const ref = item_node.asString() orelse item_node.asAtom() orelse continue;
@@ -2306,6 +2380,7 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
         .sides = board_sides,
         .corners = corners.toOwnedSlice(self.allocator) catch &.{},
         .perimeter_fence = perimeter_fence,
+        .keepouts = try board_keepout_mod.parseAll(self, form_children[1..], w, h),
         .heatsink = heatsink,
         .present = true,
     };
@@ -6518,4 +6593,208 @@ test "decouple per-pin children carry a first-class host ref and pad" {
     // The function name resolved to EN's pad, and the binding survives even
     // though this child's origin key is the label `C_EN`, not `100nF@5#0`.
     try testing.expectEqual(@as(usize, 1), by_function);
+}
+
+// spec: eval/design_block - for materializes its design-scope body once per listed item, composing ref-des and net names from a string item
+test "for materializes one instance per string item" {
+    const alloc = std.heap.page_allocator;
+    const source =
+        \\(design-block "Anti-alias filters"
+        \\  (hierarchical-ids)
+        \\  (for ch ("A" "B" "C" "D")
+        \\    (instance (fmt "R_F~aP" ch) (cap-0402 "33R")
+        \\      (pin 1 (fmt "AIN~a_EXT_P" ch))
+        \\      (pin 2 (fmt "AIN~a_P" ch)))
+        \\    (id abcd1234)))
+    ;
+    var eval: Evaluator = undefined;
+    const block = try evalRepeatFixture(alloc, &eval, source);
+    defer eval.deinit();
+
+    // `origin_key` is the authored name (ref-des renumbering runs afterwards),
+    // so it is what proves the item drove the (fmt …) instance name.
+    try testing.expectEqual(@as(usize, 4), block.instances.len);
+    try testing.expectEqualStrings("R_FAP", block.instances[0].origin_key);
+    try testing.expectEqualStrings("R_FDP", block.instances[3].origin_key);
+    // A string item is usable directly as a net-name fragment.
+    try testing.expect(hasNetNamed(block.nets, "AINA_EXT_P"));
+    try testing.expect(hasNetNamed(block.nets, "AIND_P"));
+    // One source-resident anchor for the whole loop, no per-item id writes.
+    try testing.expectEqual(@as(usize, 0), eval.pending_ids.items.len);
+}
+
+// spec: eval/design_block - for derives distinct stable child ids from its anchor origin key and the item ordinal
+test "for hierarchical ids are stable across evaluations" {
+    const alloc = std.heap.page_allocator;
+    const source =
+        \\(design-block "Anti-alias filters"
+        \\  (hierarchical-ids)
+        \\  (for ch ("A" "B" "C")
+        \\    (instance (fmt "C_F~a" ch) (cap-0402 "68pF")
+        \\      (pin 1 (fmt "AIN~a" ch)) (pin 2 "GND"))
+        \\    (id bcde2345)))
+    ;
+    var eval_a: Evaluator = undefined;
+    const block_a = try evalRepeatFixture(alloc, &eval_a, source);
+    defer eval_a.deinit();
+    var eval_b: Evaluator = undefined;
+    const block_b = try evalRepeatFixture(alloc, &eval_b, source);
+    defer eval_b.deinit();
+
+    try testing.expectEqual(@as(usize, 3), block_a.instances.len);
+    try testing.expect(!std.mem.eql(u8, block_a.instances[0].id, block_a.instances[1].id));
+    for (block_a.instances, block_b.instances) |a, b| {
+        try testing.expectEqualStrings(a.ref_des, b.ref_des);
+        try testing.expectEqualStrings(a.id, b.id);
+    }
+}
+
+// spec: eval/design_block - a for nested inside a repeat expands the whole product with the outer loop still owning every child identity
+test "for nested inside repeat expands the index x item product" {
+    const alloc = std.heap.page_allocator;
+    const source =
+        \\(design-block "Channel matrix"
+        \\  (hierarchical-ids)
+        \\  (repeat idx 1 2
+        \\    (for leg ("P" "N")
+        \\      (instance (fmt "C_~a~a" idx leg) (cap-0402 "68pF")
+        \\        (pin 1 (fmt "AIN~a_~a" idx leg)) (pin 2 "GND")))
+        \\    (id cdef3456)))
+    ;
+    var eval_a: Evaluator = undefined;
+    const block_a = try evalRepeatFixture(alloc, &eval_a, source);
+    defer eval_a.deinit();
+    var eval_b: Evaluator = undefined;
+    const block_b = try evalRepeatFixture(alloc, &eval_b, source);
+    defer eval_b.deinit();
+
+    try testing.expectEqual(@as(usize, 4), block_a.instances.len);
+    try testing.expectEqualStrings("C_1P", block_a.instances[0].origin_key);
+    try testing.expectEqualStrings("C_1N", block_a.instances[1].origin_key);
+    try testing.expectEqualStrings("C_2N", block_a.instances[3].origin_key);
+    // The outer repeat re-stamps every child the inner for produced, so all
+    // four identities are distinct and reproduce across evaluations.
+    try expectDistinctInstanceIds(block_a.instances);
+    for (block_a.instances, block_b.instances) |a, b| {
+        try testing.expectEqualStrings(a.id, b.id);
+    }
+}
+
+fn expectDistinctInstanceIds(instances: []const Instance) !void {
+    for (instances, 0..) |a, i| {
+        for (instances[i + 1 ..]) |b| try testing.expect(!std.mem.eql(u8, a.id, b.id));
+    }
+}
+
+/// Evaluator seeded with the two-terminal `fakeres` part the ref-des tests
+/// instantiate. Caller owns the returned evaluator and must `deinit` it.
+fn evalWithFakeRes(a: std.mem.Allocator) !Evaluator {
+    var eval = Evaluator.init(a, "");
+    try eval.component_cache.put(a, "fakeres", .{
+        .name = "fakeres",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    return eval;
+}
+
+/// Evaluate `src`'s single top-level `(design-block …)` with `eval`, returning
+/// whatever `evalDesignBlock` returns so a test can assert on the error.
+fn designBlockResult(a: std.mem.Allocator, eval: *Evaluator, src: []const u8) !EvalError!Value {
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var scope = env_mod.Env.init(a, null);
+    defer scope.deinit();
+    return evalDesignBlock(eval, form_children[1..], &scope);
+}
+
+// spec: eval/design_block - two instances authored with one ref-des are an error naming both source locations
+test "duplicate authored ref-des is diagnosed with both locations" {
+    const a = std.heap.page_allocator;
+    var eval = try evalWithFakeRes(a);
+    defer eval.deinit();
+    const src =
+        \\(design-block "test"
+        \\  (instance "R1" fakeres (pin 1 "VIN") (pin 2 "OUT"))
+        \\  (instance "R1" fakeres (pin 1 "OUT") (pin 2 "GND")))
+    ;
+    try testing.expectError(EvalError.InvalidForm, try designBlockResult(a, &eval, src));
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    // The recorded span is the SECOND declaration; the message names the first.
+    try testing.expectEqual(@as(u32, 3), diag.span.line);
+    try testing.expect(std.mem.indexOf(u8, diag.message, "duplicate ref-des \"R1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, diag.message, ":2:3") != null);
+}
+
+// spec: eval/design_block - a repeat body that mints one ref-des twice is a duplicate like any other
+test "repeat-generated duplicate ref-des is diagnosed" {
+    const a = std.heap.page_allocator;
+    var eval = try evalWithFakeRes(a);
+    defer eval.deinit();
+    const src =
+        \\(design-block "test"
+        \\  (repeat i 1 2
+        \\    (instance "R1" fakeres (pin 1 "VIN") (pin 2 "GND"))))
+    ;
+    try testing.expectError(EvalError.InvalidForm, try designBlockResult(a, &eval, src));
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "duplicate ref-des \"R1\"") != null);
+}
+
+// spec: eval/design_block - shorthand-generated ref-des never collide with each other or with authored ones
+test "generated ref-des from decouple series and micro-forms are not duplicates" {
+    const a = std.heap.page_allocator;
+    var eval = try evalWithFakeRes(a);
+    defer eval.deinit();
+    try eval.component_cache.put(a, "fakecap", .{
+        .name = "fakecap",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "capacitance",
+    });
+    const src =
+        \\(design-block "test"
+        \\  (instance "R1" fakeres (pin 1 "V_3V3") (pin 2 "GND"))
+        \\  (instance "R2" fakeres (pin 1 "V_3V3") (pin 2 "SIG"))
+        \\  (decouple "V_3V3" (fakecap "100nF") 3 per-pin "R1" 1)
+        \\  (series (fakecap "10nF") "SIG" "SIG_F")
+        \\  (fanout "V_3V3" (fakecap "1uF") "V_A" "V_B"))
+    ;
+    const block = (try (try designBlockResult(a, &eval, src))).design_block;
+    // Two authored + three decouple + one series + two fanout parts, all with
+    // distinct ref-des and no duplicate diagnostic.
+    try testing.expectEqual(@as(usize, 8), block.instances.len);
+    try testing.expectEqual(@as(?evaluator_mod.EvalDiagnostic, null), eval.last_error);
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(a);
+    for (block.instances) |inst| {
+        const gop = try seen.getOrPut(a, inst.ref_des);
+        try testing.expect(!gop.found_existing);
+    }
+}
+
+// spec: eval/design_block - each sub-block is its own ref-des namespace so two modules may both name R1
+test "sub-block ref-des namespaces are independent" {
+    const a = std.heap.page_allocator;
+    var eval = try evalWithFakeRes(a);
+    defer eval.deinit();
+    const src =
+        \\(defmodule leg ()
+        \\  (design-block "leg"
+        \\    (instance "R1" fakeres (pin 1 "A") (pin 2 "B"))))
+        \\(design-block "test"
+        \\  (instance "R1" fakeres (pin 1 "VIN") (pin 2 "GND"))
+        \\  (sub-block "left" (leg))
+        \\  (sub-block "right" (leg)))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    var scope = env_mod.Env.init(a, null);
+    defer scope.deinit();
+    const value = try eval.evalNodes(nodes, &scope);
+    const block = value.design_block;
+    try testing.expectEqual(@as(usize, 2), block.sub_blocks.len);
+    try testing.expectEqual(@as(?evaluator_mod.EvalDiagnostic, null), eval.last_error);
 }
