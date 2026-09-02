@@ -125,7 +125,19 @@ fn segmentPiece(arena: std.mem.Allocator, a: Sample, b: Sample) std.mem.Allocato
     return .{ .poly = poly, .width_mm = @max(a.width_mm, b.width_mm) };
 }
 
-fn joinPiece(arena: std.mem.Allocator, samples: []const Sample, i: usize) std.mem.Allocator.Error!?Piece {
+/// The convex, clockwise join polygon between the two butt-ended segment
+/// envelopes meeting at sample `i`, or null when the turn is degenerate (the
+/// four offset corners collapse onto fewer than three distinct points, i.e.
+/// the centreline runs straight through).
+///
+/// The four candidates all lie on one circle centred at the sample, so an
+/// angular sort IS their convex hull once duplicate directions are removed.
+///
+/// Public because `path_copper` lowers the same join into its own outline and
+/// had grown a second copy of this hull: two derivations of one piece of
+/// fabricated copper that could disagree about the corner a pour fills and the
+/// corner a DRC probe measures.
+pub fn joinHull(arena: std.mem.Allocator, samples: []const Sample, i: usize) std.mem.Allocator.Error!?[]const [2]f64 {
     const at = samples[i].at;
     const before = unit(.{ at[0] - samples[i - 1].at[0], at[1] - samples[i - 1].at[1] });
     const after = unit(.{ samples[i + 1].at[0] - at[0], samples[i + 1].at[1] - at[1] });
@@ -162,7 +174,12 @@ fn joinPiece(arena: std.mem.Allocator, samples: []const Sample, i: usize) std.me
             k -= 1;
         }
     }
-    return .{ .poly = try arena.dupe([2]f64, ordered[0..count]), .width_mm = samples[i].width_mm };
+    return try arena.dupe([2]f64, ordered[0..count]);
+}
+
+fn joinPiece(arena: std.mem.Allocator, samples: []const Sample, i: usize) std.mem.Allocator.Error!?Piece {
+    const poly = try joinHull(arena, samples, i) orelse return null;
+    return .{ .poly = poly, .width_mm = samples[i].width_mm };
 }
 
 /// Exact union pieces for a sampled sweep: one trapezoid per sample span and

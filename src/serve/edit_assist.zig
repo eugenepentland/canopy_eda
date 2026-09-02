@@ -30,6 +30,7 @@ const Server = serve_root.Server;
 const edit = @import("edit.zig");
 const HandlerError = edit.HandlerError;
 const paths = @import("../paths.zig");
+const sexp_form_bounds = @import("../sexp_form_bounds.zig");
 const lib_limits = @import("../lib_limits.zig");
 
 const header_cors = "access-control-allow-origin";
@@ -323,34 +324,6 @@ fn paramNames(group: []const u8) []const u8 {
 
 // ── POST /api/diagram-layout/:name ────────────────────────────────
 
-/// Index of the ')' matching the '(' at `open`, skipping strings and `;`
-/// comments. Returns null when unbalanced.
-fn matchParen(source: []const u8, open: usize) ?usize {
-    var depth: usize = 0;
-    var i = open;
-    var in_str = false;
-    while (i < source.len) : (i += 1) {
-        const c = source[i];
-        if (in_str) {
-            if (c == '\\') {
-                i += 1;
-            } else if (c == '"') in_str = false;
-            continue;
-        }
-        switch (c) {
-            '"' => in_str = true,
-            ';' => while (i < source.len and source[i] != '\n') : (i += 1) {},
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if (depth == 0) return i;
-            },
-            else => {},
-        }
-    }
-    return null;
-}
-
 /// True when only whitespace precedes byte `pos` on its line — i.e. the form
 /// at `pos` opens a line, so it isn't inside a `;` comment or trailing another
 /// token. Keeps a commented "(layout …)" mention from being mistaken for the
@@ -379,7 +352,7 @@ fn findLayoutForm(source: []const u8) ?struct { start: usize, end: usize } {
             const after = start + head.len;
             const delim_ok = after >= source.len or std.mem.indexOfScalar(u8, " \n\t()", source[after]) != null;
             if (delim_ok and atLineStart(source, start)) {
-                const close = matchParen(source, start) orelse continue;
+                const close = sexp_form_bounds.closeIndex(source, start) orelse continue;
                 return .{ .start = start, .end = close + 1 };
             }
         }
@@ -447,7 +420,7 @@ pub fn saveDiagramLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
         try w.writeAll(form);
         try w.writeAll(source[span.end..]);
     } else if (std.mem.indexOf(u8, source, "(design-block")) |db| {
-        const close = matchParen(source, db) orelse {
+        const close = sexp_form_bounds.closeIndex(source, db) orelse {
             res.status = 400;
             res.body = "{\"ok\":false,\"error\":\"unbalanced design-block\"}";
             return;

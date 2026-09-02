@@ -19,6 +19,7 @@ const edit_mod = @import("edit.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const datasheet_ref = @import("datasheet_ref.zig");
+const form_child_indent = @import("form_child_indent.zig");
 
 /// Error set for the HTTP handler.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -47,7 +48,7 @@ pub fn spliceDatasheet(
 
     // Insert before the closing `)` with the file's child indent.
     const insert_at = form_end - 1;
-    const indent = detectIndent(source, form_start);
+    const indent = form_child_indent.firstChild(source, form_start);
 
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
@@ -140,19 +141,6 @@ fn findFormEnd(source: []const u8, open_pos: usize) ?usize {
         }
     }
     return null;
-}
-
-/// Indent prefix of the first child line inside the component form, falling
-/// back to two spaces for single-line definitions.
-fn detectIndent(source: []const u8, form_start: usize) []const u8 {
-    var i: usize = form_start;
-    while (i < source.len and source[i] != '\n') : (i += 1) {}
-    if (i >= source.len) return "  ";
-    i += 1;
-    const indent_start = i;
-    while (i < source.len and (source[i] == ' ' or source[i] == '\t')) : (i += 1) {}
-    if (i == indent_start) return "  ";
-    return source[indent_start..i];
 }
 
 // ── HTTP handler ─────────────────────────────────────────────────────────

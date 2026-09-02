@@ -22,13 +22,13 @@ const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
 const drc = @import("drc.zig");
 const match_group = @import("match_group.zig");
-const copper_length = @import("copper_length.zig");
+const net_copper = @import("net_copper.zig");
 
 /// The routed copper the measure reads. Vias are needed as well as tracks: a
 /// net's electrical path crosses layers only through a barrel, so a track-only
 /// view cannot tell joined copper from stacked copper — and the barrel is itself
 /// part of the length here (see `match_group.viaLengthMm`).
-pub const Copper = struct { tracks: []const router.Track, vias: []const router.Via };
+pub const Copper = net_copper.Copper;
 
 /// Measure every declared `(match-group …)` on this placement. Empty — and free
 /// — when the design declares none, which is every board in the corpus today.
@@ -58,21 +58,12 @@ fn measureNet(
     net_i: usize,
     via_len: f64,
 ) std.mem.Allocator.Error!match_group.Member {
-    const ni: i32 = @intCast(net_i);
-    var segs: std.ArrayList(copper_length.Seg) = .empty;
-    for (copper.tracks) |t| {
-        if (t.net != ni) continue;
-        try segs.append(arena, .{ .a = .{ t.x1, t.y1 }, .b = .{ t.x2, t.y2 }, .layer = t.layer });
-    }
-    var vias: std.ArrayList(copper_length.Via) = .empty;
-    for (copper.vias) |v| {
-        if (v.net == ni) try vias.append(arena, .{ .at = .{ v.x, v.y } });
-    }
-    const len = try match_group.netLengthMm(arena, segs.items, vias.items, via_len);
+    const own = try net_copper.collect(arena, copper, @intCast(net_i));
+    const len = try match_group.netLengthMm(arena, own.segs, own.vias, via_len);
     return .{
         .net_i = net_i,
         .length_mm = len orelse 0,
-        .vias = vias.items.len,
+        .vias = own.vias.len,
         .routed = len != null,
     };
 }

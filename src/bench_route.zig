@@ -29,6 +29,7 @@
 const std = @import("std");
 const clock = @import("infra/clock.zig");
 const infra_fs = @import("infra/fs.zig");
+const bench_args = @import("bench_args.zig");
 const optimizer = @import("placement/optimizer.zig");
 const drc = @import("placement/drc.zig");
 const drc_rules = @import("serve/drc_rules.zig");
@@ -625,47 +626,36 @@ pub fn writeBreakdown(w: *std.Io.Writer, results: []const BoardResult) std.Io.Wr
     }
 }
 
-/// The harness's parsed command line.
+/// The harness's parsed command line: the flags every bench harness shares
+/// (`--project-dir`, `--json`, `--baseline`, positional design names — see
+/// `bench_args`), plus this one's own.
 const Args = struct {
-    project_dir: []const u8 = ".",
+    cli: bench_args.Common = .{},
     route_space: []const u8 = "lattice",
-    json: bool = false,
     breakdown: bool = false,
-    /// Committed baseline JSON (`--json` output from an earlier run). When set,
-    /// the run is compared against it and a scored-board regression (or a
-    /// geomean drop) fails the command with a non-zero exit — the durable,
-    /// CI-runnable "is the router better or worse than the last recorded
-    /// baseline" gate. See `docs/autorouter-audit-round-two.md` §3a.
-    baseline: ?[]const u8 = null,
-    named: []const []const u8 = &.{},
 };
 
-/// Parse `--project-dir <dir>`, the path-director A/B selector, output flags,
-/// and any positional design names.
+/// Parse the shared bench flags plus the path-director A/B selector and the
+/// per-phase breakdown switch.
 fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocator.Error!Args {
     var out = Args{};
-    var named: std.ArrayList([]const u8) = .empty;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--project-dir")) {
-            i += 1;
-            if (i < args.len) out.project_dir = args[i];
-        } else if (std.mem.eql(u8, args[i], "--route-space")) {
-            i += 1;
-            if (i < args.len and (std.mem.eql(u8, args[i], "field") or std.mem.eql(u8, args[i], "margin"))) out.route_space = "field";
-        } else if (std.mem.eql(u8, args[i], "--json")) {
-            out.json = true;
-        } else if (std.mem.eql(u8, args[i], "--breakdown")) {
-            out.breakdown = true;
-        } else if (std.mem.eql(u8, args[i], "--baseline")) {
-            i += 1;
-            if (i < args.len) out.baseline = args[i];
-        } else if (!std.mem.startsWith(u8, args[i], "--")) {
-            try named.append(arena, args[i]);
-        }
-    }
-    out.named = try named.toOwnedSlice(arena);
+    try out.cli.parse(arena, args, &out, takeExtra);
     return out;
+}
+
+/// bench-route's own flags. `--route-space` names the path director; only the
+/// field space has to be selected, since lattice is the default.
+fn takeExtra(out: *Args, args: []const []const u8, i: *usize) bool {
+    if (std.mem.eql(u8, args[i.*], "--route-space")) {
+        i.* += 1;
+        if (i.* < args.len and (std.mem.eql(u8, args[i.*], "field") or std.mem.eql(u8, args[i.*], "margin"))) out.route_space = "field";
+        return true;
+    }
+    if (std.mem.eql(u8, args[i.*], "--breakdown")) {
+        out.breakdown = true;
+        return true;
+    }
+    return false;
 }
 
 /// Route every named board, each in its own arena so a corpus run holds one
@@ -911,21 +901,21 @@ pub fn cmdBenchRoute(allocator: std.mem.Allocator, args: []const []const u8) Ben
     const arena = arena_state.allocator();
 
     const parsed = try parseArgs(arena, args);
-    const names = if (parsed.named.len > 0)
-        parsed.named
+    const names = if (parsed.cli.named.items.len > 0)
+        parsed.cli.named.items
     else
-        try corpus(arena, parsed.project_dir);
-    const results = try benchAll(allocator, arena, parsed.project_dir, names, parsed.breakdown, parsed.route_space);
+        try corpus(arena, parsed.cli.project_dir);
+    const results = try benchAll(allocator, arena, parsed.cli.project_dir, names, parsed.breakdown, parsed.route_space);
 
     var buf: [4096]u8 = undefined;
     var fw = std.Io.File.stdout().writer(infra_fs.currentIo(), &buf);
-    if (parsed.json) try writeJson(&fw.interface, results) else try writeTable(&fw.interface, results);
+    if (parsed.cli.json) try writeJson(&fw.interface, results) else try writeTable(&fw.interface, results);
     if (parsed.breakdown) try writeBreakdown(&fw.interface, results);
 
     // The durable regression gate: compare scored boards to a committed
     // baseline and fail (non-zero exit) on any regression. Record a baseline
     // with `netlisp bench-route --project-dir … --json > baseline.json`.
-    if (parsed.baseline) |path| {
+    if (parsed.cli.baseline) |path| {
         // loadBaseline/checkBaseline carry their own read/parse/allocator errors;
         // any failure here is a gate failure, folded into BaselineRegression so
         // the command exits non-zero (a missing/corrupt baseline is never a pass).
@@ -944,13 +934,13 @@ const testing = std.testing;
 
 // spec: bench-route - --route-space field selects the signed-margin path director while lattice remains the default
 test "route-space CLI selects field and defaults to lattice" {
-    const default_args = try parseArgs(testing.allocator, &.{});
-    defer testing.allocator.free(default_args.named);
+    var default_args = try parseArgs(testing.allocator, &.{});
+    defer default_args.cli.named.deinit(testing.allocator);
     try testing.expectEqualStrings("lattice", default_args.route_space);
-    const field_args = try parseArgs(testing.allocator, &.{ "--route-space", "field", "barracuda" });
-    defer testing.allocator.free(field_args.named);
+    var field_args = try parseArgs(testing.allocator, &.{ "--route-space", "field", "barracuda" });
+    defer field_args.cli.named.deinit(testing.allocator);
     try testing.expectEqualStrings("field", field_args.route_space);
-    try testing.expectEqualStrings("barracuda", field_args.named[0]);
+    try testing.expectEqualStrings("barracuda", field_args.cli.named.items[0]);
 }
 
 // spec: bench-route - a board's completion fraction is its routed share of routable nets, and a board with nothing to route counts complete

@@ -6,9 +6,9 @@
 
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
-const clock = @import("../infra/clock.zig");
 const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
+const sortable_stamp = @import("sortable_stamp.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const sexp_file_template = "{s}/{s}.sexp";
@@ -40,24 +40,6 @@ pub const HistoryError = error{
     infra_fs.Iterator.Error ||
     infra_fs.File.ReadError;
 
-fn makeTimestamp(allocator: std.mem.Allocator) ![]u8 {
-    const sec = clock.timestamp();
-    const epoch_sec: u64 = if (sec < 0) 0 else @intCast(sec);
-    const es = std.time.epoch.EpochSeconds{ .secs = epoch_sec };
-    const day = es.getEpochDay();
-    const year_day = day.calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-    const day_sec = es.getDaySeconds();
-    return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}-{d:0>2}-{d:0>2}", .{
-        @as(u32, year_day.year),
-        month_day.month.numeric(),
-        @as(u32, month_day.day_index) + 1,
-        day_sec.getHoursIntoDay(),
-        day_sec.getMinutesIntoHour(),
-        day_sec.getSecondsIntoMinute(),
-    });
-}
-
 /// Copy the current .sexp for `name` into
 /// projects/designs/history/<name>/<timestamp>/. Returns the snapshot id
 /// (caller owns). Returns null when the source file doesn't exist yet (nothing
@@ -77,7 +59,7 @@ pub fn snapshot(
         else => return e,
     };
 
-    const id = try makeTimestamp(allocator);
+    const id = try sortable_stamp.now(allocator);
     errdefer allocator.free(id);
 
     const dir = try std.fmt.allocPrint(allocator, "{s}/history/{s}/{s}", .{ project_dir, name, id });
@@ -198,7 +180,7 @@ pub fn snapshotLayouts(
         else => return e,
     };
 
-    const id = try makeTimestamp(allocator);
+    const id = try sortable_stamp.now(allocator);
     errdefer allocator.free(id);
 
     const base = try layoutHistoryDir(allocator, project_dir, name);

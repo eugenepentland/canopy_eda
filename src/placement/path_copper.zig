@@ -129,49 +129,13 @@ fn segmentRegion(arena: std.mem.Allocator, a: Sample, b: Sample) std.mem.Allocat
     return region;
 }
 
-/// A convex, clockwise join between the two butt-ended segment envelopes at
-/// one centreline sample. The four candidates all lie on one circle, so an
-/// angular sort is their convex hull after duplicate directions are removed.
+/// The convex, clockwise join between the two butt-ended segment envelopes at
+/// one centreline sample — `variable_width_copper`'s hull, which is the
+/// authority on the same corner for the pour and via-fence lowerings. Empty
+/// where that reports a degenerate turn, since this caller unions regions and
+/// an empty region contributes nothing.
 fn joinRegion(arena: std.mem.Allocator, samples: []const Sample, i: usize) std.mem.Allocator.Error![]const [2]f64 {
-    const at = samples[i].at;
-    const before = unit(.{ at[0] - samples[i - 1].at[0], at[1] - samples[i - 1].at[1] });
-    const after = unit(.{ samples[i + 1].at[0] - at[0], samples[i + 1].at[1] - at[1] });
-    const half = @max(samples[i].width_mm, eps) / 2;
-    const na = [2]f64{ -before[1] * half, before[0] * half };
-    const nb = [2]f64{ -after[1] * half, after[0] * half };
-    const candidates = [_][2]f64{
-        .{ at[0] + na[0], at[1] + na[1] },
-        .{ at[0] - na[0], at[1] - na[1] },
-        .{ at[0] + nb[0], at[1] + nb[1] },
-        .{ at[0] - nb[0], at[1] - nb[1] },
-    };
-    var ordered: [4][2]f64 = undefined;
-    var count: usize = 0;
-    for (candidates) |candidate| {
-        var duplicate = false;
-        for (ordered[0..count]) |point| {
-            if (samePoint(point, candidate)) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (duplicate) continue;
-        ordered[count] = candidate;
-        count += 1;
-    }
-    if (count < 3) return &.{};
-    var j: usize = 1;
-    while (j < count) : (j += 1) {
-        var k = j;
-        while (k > 0) {
-            const before_angle = std.math.atan2(ordered[k - 1][1] - at[1], ordered[k - 1][0] - at[0]);
-            const angle = std.math.atan2(ordered[k][1] - at[1], ordered[k][0] - at[0]);
-            if (before_angle >= angle) break;
-            std.mem.swap([2]f64, &ordered[k - 1], &ordered[k]);
-            k -= 1;
-        }
-    }
-    return arena.dupe([2]f64, ordered[0..count]);
+    return try variable_width_copper.joinHull(arena, samples, i) orelse &.{};
 }
 
 fn orientCross(a: [2]f64, b: [2]f64, c: [2]f64) f64 {

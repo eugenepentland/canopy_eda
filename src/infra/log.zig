@@ -26,7 +26,7 @@ const std = @import("std");
 /// behaviour, so a progress line can never fail a request.
 pub fn progress(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
-    write(&buf, std.fmt.bufPrint(&buf, "[I] " ++ fmt ++ "\n", args));
+    emitLine(&buf, std.fmt.bufPrint(&buf, "[I] " ++ fmt ++ "\n", args));
 }
 
 /// Emit a `[W] ` -prefixed diagnostic line on stderr. Use for
@@ -38,14 +38,19 @@ pub fn progress(comptime fmt: []const u8, args: anytype) void {
 /// last-resort diagnostics channel, so a truncated signal beats silence.
 pub fn warn(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
-    write(&buf, std.fmt.bufPrint(&buf, "[W] " ++ fmt ++ "\n", args));
+    emitLine(&buf, std.fmt.bufPrint(&buf, "[W] " ++ fmt ++ "\n", args));
 }
 
 /// Put one already-prefixed, newline-terminated line on stderr, or its
 /// truncated head when the message overflowed `buf`. Shared by both levels so
 /// they behave identically; it takes the format RESULT rather than a format
 /// string + `anytype` args so the module stays inside its `anytype` budget.
-fn write(buf: []u8, res: std.fmt.BufPrintError![]u8) void {
+///
+/// Public because `src/exit.zig` needs exactly this last-resort channel for a
+/// fatal diagnostic and had grown its own copy of it — a copy that had to
+/// restate the 4 KiB buffer, the ellipsis marker and the swallow-the-error
+/// rule, and so could drift from the one every other diagnostic uses.
+pub fn emitLine(buf: []u8, res: std.fmt.BufPrintError![]u8) void {
     const stderr = std.Io.File.stderr();
     if (res) |msg| {
         stderr.writeStreamingAll(@import("fs.zig").currentIo(), msg) catch return;

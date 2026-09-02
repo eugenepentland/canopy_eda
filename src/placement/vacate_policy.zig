@@ -38,6 +38,7 @@
 //! transaction can see which copper the tier declined to touch and why.
 
 const std = @import("std");
+const rank_admit = @import("rank_admit.zig");
 
 /// Why a net is cheap to put back. Ordered by cheapness — `pour_carried` first,
 /// because its restoration is underwritten by copper the transaction never
@@ -260,14 +261,11 @@ pub const Refused = struct {
     why: Refusal,
 };
 
-/// What the tier decided about every net near the seed's corridors.
-pub const Decision = struct {
-    /// The nets to strip, cheapest first — the transaction's routing order after
-    /// the seed itself.
-    picked: []const Nomination,
-    /// Every other net that was near enough to consider, with its reason.
-    refused: []const Refused,
-};
+/// What the tier decided about every net near the seed's corridors: the nets
+/// to strip (cheapest first — the transaction's routing order after the seed
+/// itself) and every other net that was near enough to consider, with its
+/// reason.
+pub const Decision = rank_admit.Decision(Nomination, Refused);
 
 /// Is this net cheap enough to vacate for `seed`, and if not, why not?
 ///
@@ -383,43 +381,21 @@ pub fn selectMany(
     seeds: []const Seed,
     lim: Limits,
 ) std.mem.Allocator.Error!Decision {
-    var ok: std.ArrayList(Nomination) = .empty;
-    defer ok.deinit(alloc);
-    var no: std.ArrayList(Refused) = .empty;
-    errdefer no.deinit(alloc);
-    for (facts) |f| {
-        switch (judgeAll(f, seeds, lim)) {
-            .accept => |k| try ok.append(alloc, .{
-                .net_i = f.net_i,
-                .kind = k,
-                .elements = f.elements,
-                .dist = f.dist,
-            }),
-            .refuse => |r| try no.append(alloc, .{ .net_i = f.net_i, .why = r }),
-        }
-    }
-    std.mem.sort(Nomination, ok.items, {}, cheaperFirst);
-    // Admit greedily under both bounds, SKIPPING an over-budget candidate rather
-    // than stopping — a poured rail too big for the budget must not shut out the
-    // two-element stubs ranked behind it, which are the rest of the corridor.
-    var picked: std.ArrayList(Nomination) = .empty;
-    errdefer picked.deinit(alloc);
-    var spent: usize = 0;
-    for (ok.items) |n| {
-        if (picked.items.len >= lim.max_nets) {
-            try no.append(alloc, .{ .net_i = n.net_i, .why = .capped });
-        } else if (spent + n.elements > lim.max_total_elements) {
-            try no.append(alloc, .{ .net_i = n.net_i, .why = .over_budget });
-        } else {
-            spent += n.elements;
-            try picked.append(alloc, n);
-        }
-    }
-    // Owned slices, so a caller on a real allocator can free exactly what it was
-    // handed (an arena caller simply drops them).
-    return .{
-        .picked = try picked.toOwnedSlice(alloc),
-        .refused = try no.toOwnedSlice(alloc),
+    return rank_admit.select(alloc, Nomination, Refused, NetFacts, Cluster, nominate, cheaperFirst, facts, .{ .seeds = seeds, .lim = lim }, .{
+        .max_items = lim.max_nets,
+        .max_total_elements = lim.max_total_elements,
+    });
+}
+
+/// What `judgeAll` needs about the transaction as a whole.
+const Cluster = struct { seeds: []const Seed, lim: Limits };
+
+/// `judgeAll`'s verdict as a nomination: the ranking evidence this tier carries
+/// is the accepted net's restore `Kind`, element count and corridor distance.
+fn nominate(cluster: Cluster, f: NetFacts) rank_admit.Verdict(Nomination, Refusal) {
+    return switch (judgeAll(f, cluster.seeds, cluster.lim)) {
+        .accept => |k| .{ .accept = .{ .net_i = f.net_i, .kind = k, .elements = f.elements, .dist = f.dist } },
+        .refuse => |r| .{ .refuse = r },
     };
 }
 

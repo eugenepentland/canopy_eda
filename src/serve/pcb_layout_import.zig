@@ -6,13 +6,11 @@
 //! rules all come from that module's pub seams.
 
 const std = @import("std");
-const infra_fs = @import("../infra/fs.zig");
 const clock = @import("../infra/clock.zig");
-const paths = @import("../paths.zig");
 const outline_mod = @import("../placement/outline.zig");
 const import_layout = @import("../kicad_pcb/import_layout.zig");
 const page = @import("pcb_layout_page.zig");
-const sidecar_store = @import("../layout_sidecar_store.zig");
+const sidecar_publish = @import("layout_sidecar_publish.zig");
 
 /// The sidecar track element type, derived through the pub `SavedRoutes`
 /// field so the 8-field struct itself can stay private to the page module
@@ -40,24 +38,27 @@ pub fn writeImportedStarredLayout(
     name: []const u8,
     imported: import_layout.Imported,
 ) bool {
+    // The conversion is pure and stays outside the hold; the merge below runs
+    // inside it, because reading the rows it merges into is half of the
+    // read-modify-write the sidecar lock serialises.
     const layout = importedSavedLayout(alloc, imported) catch return false;
-    // Read-modify-write: the rev, the cache slot and the existing rows are all
-    // read, merged, and republished as `rev + 1`. The conversion above is pure,
-    // so the hold starts here and covers only the transaction — a concurrent
-    // save landing mid-merge would otherwise be overwritten whole. None of the
-    // readers below takes this lock, so the hold cannot re-enter itself.
-    const guard = sidecar_store.lockSidecar(name, null);
-    defer guard.unlock();
-    const rev = page.readLayoutRev(alloc, project_dir, name, null);
-    const cache = page.readCacheSlot(alloc, project_dir, name);
-    const merged = mergeStarred(alloc, page.readLayouts(alloc, project_dir, name), layout) catch return false;
-    const path = paths.designSiblingPath(alloc, project_dir, name, page.layouts_ext) catch return false;
-    defer alloc.free(path);
-    var aw: std.Io.Writer.Allocating = .init(alloc);
-    const w = &aw.writer;
-    page.writeLayoutsFileJsonRev(w, merged, cache, rev + 1) catch return false;
-    writeFileAtomic(path, aw.written()) catch return false;
-    return true;
+    const target = Target{ .project_dir = project_dir, .name = name, .layout = layout };
+    return sidecar_publish.publish(alloc, project_dir, name, .{}, target, mergedRows);
+}
+
+/// What `mergedRows` needs to read the design's current rows and fold the
+/// imported board's star into them.
+const Target = struct {
+    project_dir: []const u8,
+    name: []const u8,
+    layout: page.SavedLayout,
+};
+
+/// The design's existing rows with the imported board as their sole ★. Read
+/// inside the publish hold — see `writeImportedStarredLayout`.
+fn mergedRows(target: Target, alloc: std.mem.Allocator) ?[]const page.SavedLayout {
+    const existing = page.readLayouts(alloc, target.project_dir, target.name);
+    return mergeStarred(alloc, existing, target.layout) catch null;
 }
 
 /// `existing` with `entry` as its sole starred layout: overwriting the row of
@@ -151,16 +152,6 @@ fn importedOutline(outline: import_layout.Outline) ?page.SavedOutline {
     const bb = outline_mod.bboxRect(outline.pts);
     if (!(bb.w > 0) or !(bb.h > 0)) return null;
     return .{ .x = bb.minx, .y = bb.miny, .w = bb.w, .h = bb.h, .pts = outline.pts };
-}
-
-/// Atomic tmp→rename sidecar write — twin of `pcb_layout_page.writeFileAll`
-/// (kept private there): a reader always sees the old or new file whole.
-fn writeFileAtomic(path: []const u8, data: []const u8) !void {
-    var write_buf: [4096]u8 = undefined;
-    var atomic = try infra_fs.cwd().atomicFile(path, .{ .write_buffer = &write_buf });
-    defer atomic.deinit();
-    try atomic.file_writer.interface.writeAll(data);
-    try atomic.finish();
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

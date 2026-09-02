@@ -19,6 +19,7 @@ const json_writer = @import("json_writer.zig");
 const pll_loop = @import("pll_loop.zig");
 const review = @import("review.zig");
 const system_review = @import("system_review.zig");
+const system_review_markers = @import("system_review_markers.zig");
 const review_assets = @import("system_review_assets.zig");
 const review_html = @import("system_review_html.zig");
 const review_md = @import("system_review_md.zig");
@@ -858,7 +859,7 @@ fn readActiveDocument(
 }
 
 fn validateAuthoredMarkdown(allocator: std.mem.Allocator, source: []const u8) !void {
-    const without_markers = try stripGeneratedMarkerLines(allocator, source);
+    const without_markers = try system_review_markers.stripMarkerLines(allocator, source);
     defer allocator.free(without_markers);
     var parsed = try review_md.parse(allocator, without_markers, .{});
     defer parsed.deinit();
@@ -2005,7 +2006,7 @@ fn expandGeneratedRegions(
             try ensureMarkdownSize(&out, max_rendered_document_bytes);
             continue;
         }
-        if (generatedMarkerId(line)) |id| {
+        if (system_review_markers.openId(line)) |id| {
             skipping = true;
             try writeGeneratedSection(&out, analysis, id, max_rendered_document_bytes);
             continue;
@@ -2014,33 +2015,6 @@ fn expandGeneratedRegions(
         try ensureMarkdownSize(&out, max_rendered_document_bytes);
     }
     return out.written();
-}
-
-fn stripGeneratedMarkerLines(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    var lines = std.mem.splitScalar(u8, source, '\n');
-    var in_fence = false;
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        var marker = false;
-        if (in_fence) {
-            if (std.mem.eql(u8, trimmed, "```")) in_fence = false;
-        } else if (std.mem.startsWith(u8, trimmed, "```")) {
-            in_fence = true;
-        } else {
-            marker = generatedMarkerId(trimmed) != null or
-                std.mem.eql(u8, trimmed, system_review.generated_region_close);
-        }
-        if (!marker) try out.writer.print("{s}\n", .{line});
-    }
-    return out.toOwnedSlice();
-}
-
-fn generatedMarkerId(line: []const u8) ?[]const u8 {
-    const suffix = " -->";
-    if (!std.mem.startsWith(u8, line, system_review.generated_region_open) or
-        !std.mem.endsWith(u8, line, suffix)) return null;
-    return line[system_review.generated_region_open.len .. line.len - suffix.len];
 }
 
 /// Expand one `<!-- netlisp:generated <id> -->` region.

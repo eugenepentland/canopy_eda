@@ -8,8 +8,8 @@
 
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
-const clock = @import("../infra/clock.zig");
 const log = @import("../infra/log.zig");
+const sortable_stamp = @import("sortable_stamp.zig");
 
 /// How many timestamped board backups (`<path>.bak-<stamp>`) to keep per
 /// `.kicad_pcb`. Older ones are pruned best-effort after each backup.
@@ -31,24 +31,6 @@ fn backupDirPath(arena: std.mem.Allocator, path: []const u8) std.mem.Allocator.E
 fn boardExists(path: []const u8) bool {
     infra_fs.cwd().access(path, .{}) catch return false;
     return true;
-}
-
-/// Render an epoch-seconds value as `YYYY-MM-DDTHH-MM-SS` — the same
-/// filesystem-safe, lexicographically-sortable stamp the history snapshots
-/// use, so sorting backup filenames sorts them chronologically.
-fn formatBackupStamp(arena: std.mem.Allocator, epoch_sec: u64) std.mem.Allocator.Error![]u8 {
-    const es = std.time.epoch.EpochSeconds{ .secs = epoch_sec };
-    const year_day = es.getEpochDay().calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-    const day_sec = es.getDaySeconds();
-    return std.fmt.allocPrint(arena, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}-{d:0>2}-{d:0>2}", .{
-        @as(u32, year_day.year),
-        month_day.month.numeric(),
-        @as(u32, month_day.day_index) + 1,
-        day_sec.getHoursIntoDay(),
-        day_sec.getMinutesIntoHour(),
-        day_sec.getSecondsIntoMinute(),
-    });
 }
 
 /// Best-effort cap on the number of `<path>.bak-*` siblings: keeps the
@@ -116,8 +98,9 @@ pub const RollBackupError = std.mem.Allocator.Error || infra_fs.Dir.MakeError ||
 /// propagates: better to fail loudly than to overwrite with no fallback.
 pub fn rollBackup(arena: std.mem.Allocator, path: []const u8) RollBackupError!void {
     if (!boardExists(path)) return;
-    const now = clock.timestamp();
-    const stamp = try formatBackupStamp(arena, if (now < 0) 0 else @intCast(now));
+    // The same stamp the history snapshots carry, so sorting backup filenames
+    // sorts them chronologically.
+    const stamp = try sortable_stamp.now(arena);
     const backup_dir = try backupDirPath(arena, path);
     try infra_fs.cwd().makePath(backup_dir);
     const base = std.fs.path.basename(path);
@@ -158,7 +141,7 @@ pub fn writeFileAtomic(arena: std.mem.Allocator, path: []const u8, contents: []c
 test "formatBackupStamp renders epoch zero as a sortable filesystem-safe stamp" {
     var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer aa.deinit();
-    const stamp = try formatBackupStamp(aa.allocator(), 0);
+    const stamp = try sortable_stamp.fromEpochSeconds(aa.allocator(), 0);
     try std.testing.expectEqualStrings("1970-01-01T00-00-00", stamp);
 }
 

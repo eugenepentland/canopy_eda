@@ -22,6 +22,7 @@ const router = @import("router.zig");
 const drc = @import("drc.zig");
 const diff_pairs = @import("diff_pairs.zig");
 const copper_length = @import("copper_length.zig");
+const net_copper = @import("net_copper.zig");
 
 /// Fallback trace width (mm) when a pair's P copper reports none — the router's
 /// default track width, so the derived pitch matches an un-overridden net.
@@ -137,10 +138,9 @@ fn appendUncoupled(
     }
 }
 
-/// The routed copper both rules read. Bundled because the length measure needs
-/// the VIAS too — a leg's electrical path crosses layers only through a barrel,
-/// so a track-only view cannot tell joined copper from stacked copper.
-pub const Copper = struct { tracks: []const router.Track, vias: []const router.Via };
+/// The routed copper both rules read (`net_copper.Copper`, re-exported so a
+/// caller of this rule need not know where the shape lives).
+pub const Copper = net_copper.Copper;
 
 /// A net's EFFECTIVE routed length (mm): the shortest path across its own merged
 /// copper between its two most distant copper ends.
@@ -165,18 +165,10 @@ pub fn effectiveNetLength(
     copper: Copper,
     ni: i32,
 ) std.mem.Allocator.Error!f64 {
-    var segs: std.ArrayList(copper_length.Seg) = .empty;
-    for (copper.tracks) |t| {
-        if (t.net != ni) continue;
-        try segs.append(arena, .{ .a = .{ t.x1, t.y1 }, .b = .{ t.x2, t.y2 }, .layer = t.layer });
-    }
-    if (segs.items.len == 0) return 0;
-    var vias: std.ArrayList(copper_length.Via) = .empty;
-    for (copper.vias) |v| {
-        if (v.net == ni) try vias.append(arena, .{ .at = .{ v.x, v.y } });
-    }
-    const ends = copper_length.farthestEnds(segs.items);
-    const path = try copper_length.shortest(arena, segs.items, vias.items, ends[0], ends[1]);
+    const own = try net_copper.collect(arena, copper, ni);
+    if (own.segs.len == 0) return 0;
+    const ends = copper_length.farthestEnds(own.segs);
+    const path = try copper_length.shortest(arena, own.segs, own.vias, ends[0], ends[1]);
     return path orelse netLength(copper.tracks, ni);
 }
 

@@ -337,7 +337,14 @@ fn functionalSignalAnchor(net: []const u8) bool {
     return true;
 }
 
-fn groupsSharePassiveAnchor(self: *const RenderCtx, a: PinGroup, b: PinGroup) bool {
+/// Do two pin groups hang off the SAME functional signal through their
+/// passives? Two groups that do belong side by side with no gap — they are one
+/// island of the schematic, not two.
+///
+/// Public because the section-inset view draws the same island rule and had
+/// grown a byte-identical copy of it under another name; a divergence there
+/// would gap the zoomed view differently from the hub it zooms into.
+pub fn groupsSharePassiveAnchor(self: *const RenderCtx, a: PinGroup, b: PinGroup) bool {
     for (a.conns) |a_conn| {
         const a_pin = switch (a_conn.endpoint) {
             .pin => |pin| pin,

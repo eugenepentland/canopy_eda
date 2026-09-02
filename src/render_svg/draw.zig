@@ -9,6 +9,10 @@ const ctx_mod = @import("context.zig");
 const FlatInst = ctx_mod.FlatInst;
 const Endpoint = ctx_mod.Endpoint;
 const escape = @import("../escape.zig");
+/// Case-insensitive substring search. One implementation, shared with the
+/// section-name classifier that first needed it — this file used to carry the
+/// same scan with `toLower` written out by hand.
+const containsCI = @import("../render_block_types.zig").containsCI;
 
 const Allocator = std.mem.Allocator;
 
@@ -409,26 +413,6 @@ pub fn classifyComponent(inst: FlatInst) ?[]const u8 {
     if (ref.len > 0 and ref[0] == 'Q') return "transistor";
     if (ref.len > 0 and ref[0] == 'D') return "led";
     return null;
-}
-
-/// Case-insensitive substring search.
-pub fn containsCI(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len > haystack.len) return false;
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) : (i += 1) {
-        var match = true;
-        for (needle, 0..) |nc, j| {
-            const hc = haystack[i + j];
-            const a = if (hc >= 'A' and hc <= 'Z') hc + 32 else hc;
-            const b = if (nc >= 'A' and nc <= 'Z') nc + 32 else nc;
-            if (a != b) {
-                match = false;
-                break;
-            }
-        }
-        if (match) return true;
-    }
-    return false;
 }
 
 /// Compare pin IDs for sorting: try numeric, fall back to string.
