@@ -468,7 +468,7 @@ const Ctx = struct {
         const scenario = try thermal_scenarios.scenarioLabel(
             alloc,
             self.view.row.scenario,
-            self.view.row.heatsink,
+            self.view.row.cooling.heatsink,
         );
         var buf: [200]u8 = undefined;
         const caption = std.fmt.bufPrint(&buf, "{s} - ambient {d:.0}C - max ambient {s}", .{

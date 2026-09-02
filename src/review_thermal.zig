@@ -425,7 +425,10 @@ pub fn scenarioCells(
 ) std.mem.Allocator.Error!ScenarioCells {
     const hot = row.hottest();
     return .{
-        .scenario = try thermal_scenarios.scenarioLabel(allocator, row.scenario, thermal_scenarios.sinkOf(ladder)),
+        .scenario = if (row.scenario == .fan and row.cooling.fan.model.len > 0)
+            try std.fmt.allocPrint(allocator, "Fan {s} ({d:.1} m/s at PCB)", .{ row.cooling.fan.model, row.cooling.fan.velocity_m_s })
+        else
+            try thermal_scenarios.scenarioLabel(allocator, row.scenario, thermal_scenarios.sinkOf(ladder)),
         .hottest = if (hot) |h| h.ref else dash,
         .tj = try degCell(allocator, if (hot) |h| h.tj_c else null),
         .max_ambient = try degCell(allocator, row.max_ambient.c),
@@ -529,17 +532,31 @@ fn writeScenarioRow(w: anytype, row: thermal_scenarios.Row) json_writer.WriteErr
     try w.writeAll(",\"ref\":");
     try writeStringOrNull(w, row.max_ambient.ref);
     try w.writeAll("},\"heatsink\":");
-    if (row.heatsink.ref.len == 0) {
+    if (row.cooling.heatsink.ref.len == 0) {
         try w.writeAll("null");
     } else {
         try w.writeAll("{\"ref\":");
-        try json_writer.writeString(w, row.heatsink.ref);
-        try w.print(",\"side\":\"{s}\",\"face\":", .{@tagName(row.heatsink.side)});
-        if (row.heatsink.face) |face|
+        try json_writer.writeString(w, row.cooling.heatsink.ref);
+        try w.print(",\"side\":\"{s}\",\"face\":", .{@tagName(row.cooling.heatsink.side)});
+        if (row.cooling.heatsink.face) |face|
             try w.print("\"{s}\"", .{@tagName(face)})
         else
             try w.writeAll("null");
         try w.writeAll("}");
+    }
+    try w.writeAll(",\"fan\":");
+    if (row.cooling.fan.model.len == 0) {
+        try w.writeAll("null");
+    } else {
+        try w.writeAll("{\"model\":");
+        try json_writer.writeString(w, row.cooling.fan.model);
+        try w.writeAll(",\"face\":");
+        if (row.cooling.fan.face) |face| try w.print("\"{s}\"", .{@tagName(face)}) else try w.writeAll("null");
+        try w.print(",\"velocity_m_s\":{d},\"operating_flow_m3_s\":{d},\"estimated_pressure_pa\":{d}}}", .{
+            row.cooling.fan.velocity_m_s,
+            row.cooling.fan.operating_flow_m3_s,
+            row.cooling.fan.estimated_pressure_pa,
+        });
     }
     try w.writeAll(",\"parts\":[");
     for (row.parts, 0..) |part, i| {

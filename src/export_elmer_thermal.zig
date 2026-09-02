@@ -282,13 +282,13 @@ fn writeManifest(alloc: std.mem.Allocator, input: Input, groups: Groups) Error![
     if (input.layout_name.len == 0) try w.writeAll("null") else try json_writer.writeString(w, input.layout_name);
     const scenario = input.builtin.scenario;
     try w.print(",\n  \"scenario\":{{\"name\":\"{s}\",\"ambientC\":{d},\"airSpeedMps\":", .{ @tagName(scenario), input.ambient_c });
-    if (airSpeedMps(scenario)) |speed| try w.print("{d}", .{speed}) else try w.writeAll("null");
-    try w.print(",\"stillAir\":{s},\"faceFilmWm2K\":{d},\"edgeCondition\":\"adiabatic\"}},\n", .{
-        if (scenario == .natural or scenario == .heatsink) "true" else "false",
-        scenario.filmCoefficient(),
-    });
+    const speed = if (scenario == .fan) thermal_field.fanVelocity(input.solver_inputs.cooling.fan) else airSpeedMps(scenario);
+    if (speed) |value| try w.print("{d}", .{value}) else try w.writeAll("null");
+    try w.print(",\"stillAir\":{s},\"faceFilmWm2K\":", .{if (scenario == .natural or scenario == .heatsink) "true" else "false"});
+    if (scenario == .fan) try w.writeAll("null") else try w.print("{d}", .{scenario.filmCoefficient()});
+    try w.writeAll(",\"edgeCondition\":\"adiabatic\"},\n");
     if (scenario == .heatsink) {
-        const hs = input.solver_inputs.heatsink;
+        const hs = input.solver_inputs.cooling.heatsink;
         const ref_des = appliedHeatsinkRef(input);
         const theta_sa = thermal_field.sinkToAmbient(hs);
         const fin_count = thermal_field.finCount(hs.geometry);
@@ -308,6 +308,18 @@ fn writeManifest(alloc: std.mem.Allocator, input: Input, groups: Groups) Error![
         });
     } else {
         try w.writeAll("  \"heatsink\":null,\n");
+    }
+    if (scenario == .fan) {
+        const fan = input.solver_inputs.cooling.fan;
+        const rect = fan.footprint orelse thermal_field.BoardRect{ .x_mm = 0, .y_mm = 0, .w_mm = 0, .h_mm = 0 };
+        try w.writeAll("  \"fan\":{\"model\":");
+        try json_writer.writeString(w, fan.model);
+        try w.print(",\"face\":\"{s}\",\"footprintMm\":[{d},{d},{d},{d}],\"distanceMm\":{d},\"freeAirFlowM3s\":{d},\"maxStaticPressurePa\":{d},\"operatingFlowFraction\":{d},\"operatingFlowM3s\":{d},\"estimatedPressurePa\":{d},\"velocityAtBoardMps\":{d}}},\n", .{
+            @tagName(fan.face),     rect.x_mm,                  rect.y_mm,                   rect.w_mm,           rect.h_mm,               fan.distance_mm,
+            fan.free_air_flow_m3_s, fan.max_static_pressure_pa, fan.operating_flow_fraction, fan.operatingFlow(), fan.estimatedPressure(), thermal_field.fanVelocity(fan),
+        });
+    } else {
+        try w.writeAll("  \"fan\":null,\n");
     }
     try w.print("  \"board\":{{\"xMm\":{d},\"yMm\":{d},\"widthMm\":{d},\"heightMm\":{d},\"modeledThicknessM\":{d}}},\n", .{
         input.solver_inputs.board.x_mm,
@@ -349,13 +361,19 @@ fn writeManifest(alloc: std.mem.Allocator, input: Input, groups: Groups) Error![
 fn writeReadme(alloc: std.mem.Allocator, input: Input) Error![]const u8 {
     const cooling = coolingLabel(input.builtin.scenario);
     const assembly = if (input.builtin.scenario == .heatsink) blk: {
-        const hs = input.solver_inputs.heatsink;
+        const hs = input.solver_inputs.cooling.heatsink;
         break :blk try std.fmt.allocPrint(alloc, "\nHeatsink assembly: **{s}** contact on **{s}** at the PCB **{s}** face; {d} x {d} mm **{s}** base, {d} mm base thickness + {d} mm fins ({d} derived fins, {d} mm thick / {d} mm gap), estimated theta-SA {d} C/W, with a {d} mm / {d} W/mK thermal pad.\n", .{
             @tagName(hs.side),            appliedHeatsinkRef(input), physicalSinkFace(input, appliedHeatsinkRef(input)),
             hs.geometry.width_mm,         hs.geometry.length_mm,     @tagName(hs.material),
             hs.geometry.base_mm,          hs.geometry.fin_height_mm, thermal_field.finCount(hs.geometry),
             hs.geometry.fin_thickness_mm, hs.geometry.fin_gap_mm,    thermal_field.sinkToAmbient(hs),
             hs.pad.thickness_mm,          hs.pad.conductivity_w_mk,
+        });
+    } else if (input.builtin.scenario == .fan) blk: {
+        const fan = input.solver_inputs.cooling.fan;
+        break :blk try std.fmt.allocPrint(alloc, "\nFan assembly: **{s}** aimed at the PCB **{s}** face from {d} mm; catalog endpoints {d} m3/s free-air and {d} Pa shutoff, screened at {d:.0}% delivered flow ({d} m3/s, {d:.1} m/s area-average velocity at the board).\n", .{
+            fan.model,                  @tagName(fan.face),                fan.distance_mm,     fan.free_air_flow_m3_s,
+            fan.max_static_pressure_pa, 100 * fan.operating_flow_fraction, fan.operatingFlow(), thermal_field.fanVelocity(fan),
         });
     } else "";
     return std.fmt.allocPrint(
@@ -370,7 +388,7 @@ fn writeReadme(alloc: std.mem.Allocator, input: Input) Error![]const u8 {
 }
 
 fn appliedHeatsinkRef(input: Input) []const u8 {
-    if (input.solver_inputs.heatsink.ref_des.len > 0) return input.solver_inputs.heatsink.ref_des;
+    if (input.solver_inputs.cooling.heatsink.ref_des.len > 0) return input.solver_inputs.cooling.heatsink.ref_des;
     for (input.builtin.parts) |part| {
         if (part.junction_path != .board) return part.ref_des;
     }
@@ -378,9 +396,9 @@ fn appliedHeatsinkRef(input: Input) []const u8 {
 }
 
 fn physicalSinkFace(input: Input, ref_des: []const u8) []const u8 {
-    if (input.solver_inputs.heatsink.physical_face) |face| return @tagName(face);
+    if (input.solver_inputs.cooling.heatsink.physical_face) |face| return @tagName(face);
     const part = findPart(input.solver_inputs.parts, ref_des) orelse return "unknown";
-    const face = switch (input.solver_inputs.heatsink.side) {
+    const face = switch (input.solver_inputs.cooling.heatsink.side) {
         .package_top => part.mount.side,
         .board_backside => if (part.mount.side == .top) thermal_field.Side.bottom else thermal_field.Side.top,
     };
@@ -389,7 +407,7 @@ fn physicalSinkFace(input: Input, ref_des: []const u8) []const u8 {
 
 fn airSpeedMps(scenario: thermal_field.Scenario) ?f64 {
     return switch (scenario) {
-        .natural, .heatsink => null,
+        .natural, .fan, .heatsink => null,
         .airflow_1ms => 1,
         .airflow_2ms => 2,
     };
@@ -398,6 +416,7 @@ fn airSpeedMps(scenario: thermal_field.Scenario) ?f64 {
 fn coolingLabel(scenario: thermal_field.Scenario) []const u8 {
     return switch (scenario) {
         .natural => "natural still air",
+        .fan => "the specified fan",
         .airflow_1ms => "1 m/s airflow",
         .airflow_2ms => "2 m/s airflow",
         .heatsink => "a heatsink",
@@ -678,7 +697,7 @@ test "Elmer export emits a native hexahedral mesh and still-air case" {
     sink_input.builtin.scenario = .heatsink;
     sink_input.builtin.parts = &sink_rows;
     sink_input.solver_inputs.parts = &sink_parts;
-    sink_input.solver_inputs.heatsink = .{
+    sink_input.solver_inputs.cooling.heatsink = .{
         .ref_des = "U15",
         .side = .package_top,
         .physical_face = .top,

@@ -87,6 +87,12 @@ const covered_face_fraction: f64 = 0.4;
 const h_airflow_1ms: f64 = 22.0;
 /// Film coefficient per face at roughly 2 m/s of forced air (W/m²K).
 const h_airflow_2ms: f64 = 35.0;
+/// Lateral growth of a free axial-fan jet per millimetre of outlet-to-board
+/// standoff. A 0.1 half-angle is the deliberately blunt screening convention:
+/// it conserves the authored delivered flow while making distance widen and
+/// slow the footprint instead of pretending an 80 mm fan is a uniform room
+/// breeze.
+const fan_jet_spread_per_side: f64 = 0.1;
 /// Sink-to-ambient resistance of the heatsink scenario (K/W) — a small stamped
 /// sink in natural convection, the sort that clips onto a TO-263 or gets stuck
 /// to a QFN. Deliberately modest: a scenario that assumes a fan-cooled extrusion
@@ -305,11 +311,51 @@ pub const Heatsink = struct {
     pad: ThermalPad = .{},
 };
 
+/// One axial fan aimed normal to a PCB face. `footprint` is the projection of
+/// its outlet frame onto the board at zero standoff. The two catalog maxima are
+/// kept separately because they are opposite endpoints of the P-Q curve, not a
+/// simultaneously available operating point. `operating_flow_fraction` makes
+/// the installed-flow assumption explicit until a measured/system-curve value
+/// can replace it.
+pub const Fan = struct {
+    model: []const u8 = "",
+    footprint: ?BoardRect = null,
+    face: Side = .top,
+    distance_mm: f64 = 0,
+    free_air_flow_m3_s: f64 = 0,
+    max_static_pressure_pa: f64 = 0,
+    operating_flow_fraction: f64 = 0,
+
+    /// True when the fan has enough finite geometry and flow data to solve.
+    pub fn enabled(self: Fan) bool {
+        const rect = self.footprint orelse return false;
+        if (!(rect.w_mm > 0 and rect.h_mm > 0)) return false;
+        if (!std.math.isFinite(self.free_air_flow_m3_s) or self.free_air_flow_m3_s <= 0) return false;
+        return std.math.isFinite(self.operating_flow_fraction) and self.operating_flow_fraction > 0;
+    }
+
+    /// Installed volume flow used by the screen (m^3/s).
+    pub fn operatingFlow(self: Fan) f64 {
+        if (!self.enabled()) return 0;
+        return self.free_air_flow_m3_s * std.math.clamp(self.operating_flow_fraction, 0, 1);
+    }
+
+    /// Pressure remaining on the quadratic endpoint-only P-Q approximation.
+    /// This is audit metadata, not a substitute for the manufacturer's curve.
+    pub fn estimatedPressure(self: Fan) f64 {
+        if (!self.enabled()) return 0;
+        if (!std.math.isFinite(self.max_static_pressure_pa) or self.max_static_pressure_pa <= 0) return 0;
+        const f = std.math.clamp(self.operating_flow_fraction, 0, 1);
+        return self.max_static_pressure_pa * (1 - f * f);
+    }
+};
+
 /// The cooling scenarios, worst-first. `natural` is the board as designed;
 /// the two airflow rungs raise the film coefficient; `heatsink` keeps still air
 /// and bolts a sink to the one part with the least junction margin.
 pub const Scenario = enum {
     natural,
+    fan,
     airflow_1ms,
     airflow_2ms,
     heatsink,
@@ -319,7 +365,7 @@ pub const Scenario = enum {
     /// part's cells, not a change to the board's convection.
     pub fn filmCoefficient(self: Scenario) f64 {
         return switch (self) {
-            .natural, .heatsink => h_natural,
+            .natural, .fan, .heatsink => h_natural,
             .airflow_1ms => h_airflow_1ms,
             .airflow_2ms => h_airflow_2ms,
         };
@@ -428,13 +474,20 @@ pub const Inputs = struct {
     /// uniform board instead.
     coverage: ?Coverage = null,
     parts: []const PartInput = &.{},
-    /// Physical assembly used by the heatsink scenario.
-    heatsink: Heatsink = .{},
+    /// Optional physical cooling assemblies used by their named scenarios.
+    cooling: CoolingAssembly = .{},
     /// The board's ratings ceiling, which caps every scenario's `max_ambient`
     /// however cool the junctions run. Pass `eval/thermal.zig`'s
     /// min-over-`operating_max` here; it is deliberately NOT recomputed, so the
     /// lumped screen and the field agree about what the parts are rated for.
     ratings_cap: AmbientLimit = .{},
+};
+
+/// Physical cooling declarations kept together so the board solver's primary
+/// inputs remain the board, stackup, copper and parts.
+pub const CoolingAssembly = struct {
+    heatsink: Heatsink = .{},
+    fan: Fan = .{},
 };
 
 /// The solved rise field: `rows × cols` cells in row-major order, each holding
@@ -508,14 +561,29 @@ pub const ScenarioResult = struct {
     /// Explicit assembly placement for the heatsink rung; null on the other
     /// scenarios. These fields let presentation surfaces name the physical
     /// face instead of assuming every sink is backside-mounted.
-    heatsink_ref: []const u8 = "",
-    heatsink_side: ?HeatsinkSide = null,
-    heatsink_face: ?Side = null,
+    cooling: ScenarioCooling = .{},
+};
+
+/// Scenario-specific physical assembly metadata for reports and exports.
+pub const ScenarioCooling = struct {
+    heatsink: struct {
+        ref: []const u8 = "",
+        side: ?HeatsinkSide = null,
+        face: ?Side = null,
+    } = .{},
+    fan: struct {
+        model: []const u8 = "",
+        face: ?Side = null,
+        velocity_m_s: f64 = 0,
+        operating_flow_m3_s: f64 = 0,
+        estimated_pressure_pa: f64 = 0,
+    } = .{},
 };
 
 // ── The ladder ────────────────────────────────────────────────────────────
 
-/// Solve all four scenarios over `inputs`, returned in `Scenario` enum order.
+/// Solve the four screening scenarios plus the authored fan scenario when one
+/// is enabled, returned in `Scenario` enum order.
 ///
 /// `natural` is solved first because the heatsink scenario needs its answer: the
 /// sink goes on the part with the WORST junction margin in still air, which is
@@ -527,7 +595,8 @@ pub fn solveScenarios(
     allocator: std.mem.Allocator,
     inputs: Inputs,
 ) std.mem.Allocator.Error![]ScenarioResult {
-    const out = try allocator.alloc(ScenarioResult, @typeInfo(Scenario).@"enum".field_names.len);
+    const has_fan = inputs.cooling.fan.enabled();
+    const out = try allocator.alloc(ScenarioResult, if (has_fan) 5 else 4);
     const natural_grid = try makeGrid(allocator, inputs.board);
     var solver = try buildPackedSolver(allocator, natural_grid, inputs);
 
@@ -548,11 +617,19 @@ pub fn solveScenarios(
         .target = target,
     });
     const remaining_converged = solvePacked(&solver);
-    for (remaining[0..3], 0..) |scenario, lane| {
+    var offset: usize = 0;
+    if (has_fan) {
+        out[1] = try runScenario(allocator, inputs, .fan, null);
+        offset = 1;
+    }
+    for (remaining[0..2], 0..) |scenario, lane| {
         const grid = try makeGrid(allocator, inputs.board);
         packedLaneToGrid(&solver, lane, grid);
-        out[lane + 1] = try summarizeScenario(allocator, grid, inputs, scenario, if (scenario == .heatsink) target else null, remaining_converged);
+        out[lane + 1 + offset] = try summarizeScenario(allocator, grid, inputs, scenario, null, remaining_converged);
     }
+    const sink_grid = try makeGrid(allocator, inputs.board);
+    packedLaneToGrid(&solver, 2, sink_grid);
+    out[3 + offset] = try summarizeScenario(allocator, sink_grid, inputs, .heatsink, target, remaining_converged);
     return out;
 }
 
@@ -575,9 +652,9 @@ pub fn solveScenario(
 }
 
 fn configuredHeatsinkTarget(inputs: Inputs, parts: []const PartField) ?[]const u8 {
-    if (inputs.heatsink.ref_des.len == 0) return heatsinkTarget(parts);
+    if (inputs.cooling.heatsink.ref_des.len == 0) return heatsinkTarget(parts);
     for (parts) |part| {
-        if (std.mem.eql(u8, part.ref_des, inputs.heatsink.ref_des)) return part.ref_des;
+        if (std.mem.eql(u8, part.ref_des, inputs.cooling.heatsink.ref_des)) return part.ref_des;
     }
     return null;
 }
@@ -637,7 +714,7 @@ fn summarizeScenario(
     const rows = try partRows(allocator, grid, .{
         .sheet = resolvedSheet(inputs),
         .board = inputs.board,
-    }, inputs.parts, .{ .scenario = scenario, .target = target, .heatsink = inputs.heatsink });
+    }, inputs.parts, .{ .scenario = scenario, .target = target, .heatsink = inputs.cooling.heatsink });
     return .{
         .scenario = scenario,
         .grid = grid,
@@ -646,9 +723,20 @@ fn summarizeScenario(
         .hotspot = hotspotOf(grid),
         .max_ambient = maxAmbient(rows.parts, inputs.ratings_cap),
         .converged = converged,
-        .heatsink_ref = if (scenario == .heatsink) target orelse "" else "",
-        .heatsink_side = if (scenario == .heatsink and target != null) inputs.heatsink.side else null,
-        .heatsink_face = if (scenario == .heatsink and target != null) inputs.heatsink.physical_face else null,
+        .cooling = .{
+            .heatsink = .{
+                .ref = if (scenario == .heatsink) target orelse "" else "",
+                .side = if (scenario == .heatsink and target != null) inputs.cooling.heatsink.side else null,
+                .face = if (scenario == .heatsink and target != null) inputs.cooling.heatsink.physical_face else null,
+            },
+            .fan = .{
+                .model = if (scenario == .fan) inputs.cooling.fan.model else "",
+                .face = if (scenario == .fan and inputs.cooling.fan.enabled()) inputs.cooling.fan.face else null,
+                .velocity_m_s = if (scenario == .fan) fanVelocity(inputs.cooling.fan) else 0,
+                .operating_flow_m3_s = if (scenario == .fan) inputs.cooling.fan.operatingFlow() else 0,
+                .estimated_pressure_pa = if (scenario == .fan) inputs.cooling.fan.estimatedPressure() else 0,
+            },
+        },
     };
 }
 
@@ -874,8 +962,8 @@ pub fn discretize(
     const grid = try makeGrid(allocator, inputs.board);
     var target: ?[]const u8 = null;
     if (scenario == .heatsink) {
-        if (inputs.heatsink.ref_des.len > 0) {
-            target = inputs.heatsink.ref_des;
+        if (inputs.cooling.heatsink.ref_des.len > 0) {
+            target = inputs.cooling.heatsink.ref_des;
         } else {
             const still = try runScenario(allocator, inputs, .natural, null);
             target = heatsinkTarget(still.parts);
@@ -933,10 +1021,9 @@ fn fillDiscretizedFaces(
         const box = part.mount.box orelse continue;
         markFace(grid.cols, covered, boxSpans(grid, box), part.mount.side);
     }
-    const h = scenario.filmCoefficient();
-    for (faces_out.top, faces_out.bottom, covered) |*top_h, *bottom_h, faces| {
-        top_h.* = h * faceFactor(faces[@backingInt(Side.top)]);
-        bottom_h.* = h * faceFactor(faces[@backingInt(Side.bottom)]);
+    for (faces_out.top, faces_out.bottom, covered, 0..) |*top_h, *bottom_h, faces, i| {
+        top_h.* = faceFilmCoefficient(inputs, scenario, grid, i, .top) * faceFactor(faces[@backingInt(Side.top)]);
+        bottom_h.* = faceFilmCoefficient(inputs, scenario, grid, i, .bottom) * faceFactor(faces[@backingInt(Side.bottom)]);
     }
     const cell_m = grid.cell_mm * 1.0e-3;
     const face_area = cell_m * cell_m;
@@ -973,7 +1060,7 @@ fn heatsinkEffect(
 ) ?HeatsinkEffect {
     if (!isTarget(scenario, target, part.ref_des)) return null;
     const part_box = part.mount.box orelse return null;
-    const hs = inputs.heatsink;
+    const hs = inputs.cooling.heatsink;
     return switch (hs.side) {
         .package_top => blk: {
             const jc = validNonnegative(part.theta_jc.top) orelse break :blk null;
@@ -1389,7 +1476,7 @@ fn fillSolverFaces(
     scenario: Scenario,
 ) std.mem.Allocator.Error!void {
     const cell_m = grid.cell_mm * 1.0e-3;
-    const open = scenario.filmCoefficient() * cell_m * cell_m;
+    const area = cell_m * cell_m;
     const covered = try allocator.alloc([2]bool, to_ambient.len);
     defer allocator.free(covered);
     @memset(covered, .{ false, false });
@@ -1397,8 +1484,12 @@ fn fillSolverFaces(
         const box = part.mount.box orelse continue;
         markFace(grid.cols, covered, boxSpans(grid, box), part.mount.side);
     }
-    for (to_ambient, covered) |*g, faces| {
-        g.* = @floatCast(open * (faceFactor(faces[0]) + faceFactor(faces[1])));
+    for (to_ambient, covered, 0..) |*g, faces, i| {
+        var conductance: f64 = 0;
+        inline for ([_]Side{ .top, .bottom }, 0..) |face, fi| {
+            conductance += faceFilmCoefficient(inputs, scenario, grid, i, face) * area * faceFactor(faces[fi]);
+        }
+        g.* = @floatCast(conductance);
     }
 }
 
@@ -1463,7 +1554,7 @@ fn fillFaces(
     scenario: Scenario,
 ) std.mem.Allocator.Error!void {
     const cell_m = grid.cell_mm * 1.0e-3;
-    const open = scenario.filmCoefficient() * cell_m * cell_m;
+    const area = cell_m * cell_m;
     const covered = try allocator.alloc([2]bool, work.sheet.len);
     defer allocator.free(covered);
     @memset(covered, .{ false, false });
@@ -1472,9 +1563,56 @@ fn fillFaces(
         const box = part.mount.box orelse continue;
         markFace(work.cols, covered, boxSpans(grid, box), part.mount.side);
     }
-    for (work.to_ambient, covered) |*g, faces| {
-        g.* = open * (faceFactor(faces[0]) + faceFactor(faces[1]));
+    for (work.to_ambient, covered, 0..) |*g, faces, i| {
+        g.* = 0;
+        inline for ([_]Side{ .top, .bottom }, 0..) |face, fi| {
+            g.* += faceFilmCoefficient(inputs, scenario, grid, i, face) * area * faceFactor(faces[fi]);
+        }
     }
+}
+
+/// Effective jet footprint at the PCB. Standoff widens both dimensions by a
+/// conservative free-jet half-angle while preserving the fan centre.
+fn fanImpactRect(fan: Fan) ?BoardRect {
+    const base = fan.footprint orelse return null;
+    if (!fan.enabled()) return null;
+    const z = if (std.math.isFinite(fan.distance_mm)) @max(fan.distance_mm, 0) else 0;
+    const grow = fan_jet_spread_per_side * z;
+    return .{
+        .x_mm = base.x_mm - grow,
+        .y_mm = base.y_mm - grow,
+        .w_mm = base.w_mm + 2 * grow,
+        .h_mm = base.h_mm + 2 * grow,
+    };
+}
+
+/// Area-average jet velocity at the PCB (m/s), from the explicitly assumed
+/// installed volume flow divided by the distance-expanded footprint.
+pub fn fanVelocity(fan: Fan) f64 {
+    const rect = fanImpactRect(fan) orelse return 0;
+    const area_m2 = rect.w_mm * rect.h_mm * square_mm_to_m2;
+    if (!(area_m2 > 0)) return 0;
+    return fan.operatingFlow() / area_m2;
+}
+
+/// Film coefficient fitted through the existing 1 m/s and 2 m/s screening
+/// rungs: h(0)=10, h(1)=22, h(2)=35 W/m^2K. The velocity is capped because this
+/// board-sheet model is not a high-speed impingement CFD solver.
+pub fn fanFilmCoefficient(fan: Fan) f64 {
+    const v = std.math.clamp(fanVelocity(fan), 0, 20);
+    return h_natural + 11.5 * v + 0.5 * v * v;
+}
+
+fn faceFilmCoefficient(inputs: Inputs, scenario: Scenario, grid: FieldGrid, i: usize, face: Side) f64 {
+    if (scenario != .fan or face != inputs.cooling.fan.face) return scenario.filmCoefficient();
+    const impact = fanImpactRect(inputs.cooling.fan) orelse return h_natural;
+    const col = i % grid.cols;
+    const row = i / grid.cols;
+    const x = grid.origin_x_mm + (@as(f64, @floatFromInt(col)) + 0.5) * grid.cell_mm;
+    const y = grid.origin_y_mm + (@as(f64, @floatFromInt(row)) + 0.5) * grid.cell_mm;
+    const inside = x >= impact.x_mm and x <= impact.x_mm + impact.w_mm and
+        y >= impact.y_mm and y <= impact.y_mm + impact.h_mm;
+    return if (inside) fanFilmCoefficient(inputs.cooling.fan) else h_natural;
 }
 
 /// Flag one side of every cell under a part's box as covered by its body.
@@ -2004,12 +2142,12 @@ test "heatsink side selects the package path pad resistance and FEM face" {
     const base = Inputs{
         .board = test_board,
         .parts = &parts,
-        .heatsink = .{ .ref_des = "U1", .pad = .{ .thickness_mm = 0.5, .conductivity_w_mk = 6 } },
+        .cooling = .{ .heatsink = .{ .ref_des = "U1", .pad = .{ .thickness_mm = 0.5, .conductivity_w_mk = 6 } } },
     };
     const natural = try solveScenario(arena, base, .natural);
 
     var top_inputs = base;
-    top_inputs.heatsink.side = .package_top;
+    top_inputs.cooling.heatsink.side = .package_top;
     const top = try solveScenario(arena, top_inputs, .heatsink);
     try testing.expectEqual(JunctionPath.package_top, top.parts[0].junction_path);
     try testing.expect(top.parts[0].tj_rise_c.? < natural.parts[0].tj_rise_c.?);
@@ -2019,7 +2157,7 @@ test "heatsink side selects the package path pad resistance and FEM face" {
     try testing.expect(top_model.top_face_h_w_m2k[hot_i] > top_model.bottom_face_h_w_m2k[hot_i]);
 
     var back_inputs = base;
-    back_inputs.heatsink.side = .board_backside;
+    back_inputs.cooling.heatsink.side = .board_backside;
     const back = try solveScenario(arena, back_inputs, .heatsink);
     try testing.expectEqual(JunctionPath.package_bottom, back.parts[0].junction_path);
     try testing.expect(back.parts[0].tj_rise_c.? < natural.parts[0].tj_rise_c.?);
@@ -2027,7 +2165,7 @@ test "heatsink side selects the package path pad resistance and FEM face" {
     try testing.expect(back_model.bottom_face_h_w_m2k[hot_i] > back_model.top_face_h_w_m2k[hot_i]);
 
     var thick_pad = top_inputs;
-    thick_pad.heatsink.pad.thickness_mm = 5;
+    thick_pad.cooling.heatsink.pad.thickness_mm = 5;
     const insulated = try solveScenario(arena, thick_pad, .heatsink);
     try testing.expect(insulated.parts[0].tj_rise_c.? > top.parts[0].tj_rise_c.?);
 }
@@ -2065,13 +2203,13 @@ test "drawn heatsink geometry drives resistance and exact contact" {
     var inputs = Inputs{
         .board = test_board,
         .parts = &parts,
-        .heatsink = aluminum,
+        .cooling = .{ .heatsink = aluminum },
     };
-    inputs.heatsink.ref_des = "U1";
-    inputs.heatsink.side = .board_backside;
-    inputs.heatsink.contact = .{ .x_mm = 4, .y_mm = 4, .w_mm = 6, .h_mm = 6 };
+    inputs.cooling.heatsink.ref_des = "U1";
+    inputs.cooling.heatsink.side = .board_backside;
+    inputs.cooling.heatsink.contact = .{ .x_mm = 4, .y_mm = 4, .w_mm = 6, .h_mm = 6 };
     const model = try discretize(arena, inputs, .heatsink);
-    const contact_cells = cellsForBox(model.shape, inputs.heatsink.contact.?);
+    const contact_cells = cellsForBox(model.shape, inputs.cooling.heatsink.contact.?);
     const contact_i = contact_cells.row_lo * model.shape.cols + contact_cells.col_lo;
     try testing.expect(model.bottom_face_h_w_m2k[contact_i] > model.top_face_h_w_m2k[contact_i]);
 }
@@ -2158,6 +2296,55 @@ test "the cooling ladder is strictly monotone" {
     // …and still hotter than 1 m/s of air over the whole board, which is the
     // point of offering both rungs rather than one.
     try testing.expect(r[0].hotspot.rise_c > r[3].hotspot.rise_c);
+}
+
+// spec: placement/thermal_field - an authored fan adds a spatial cooling rung whose selected face, projected position, standoff and installed-flow assumption drive the per-cell film coefficient
+test "an authored fan cools only its distance-expanded footprint on one face" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const parts = [_]PartInput{.{
+        .ref_des = "U1",
+        .watts = 2,
+        .theta_jb = 8,
+        .tj_max = 125,
+        .mount = .{ .box = .{ .x_mm = 4, .y_mm = 8, .w_mm = 4, .h_mm = 4 } },
+    }};
+    const fan = Fan{
+        .model = "9A0812G4D011",
+        .footprint = .{ .x_mm = 0, .y_mm = 0, .w_mm = 20, .h_mm = 20 },
+        .face = .top,
+        .distance_mm = 0,
+        .free_air_flow_m3_s = 0.008,
+        .max_static_pressure_pa = 80.4,
+        .operating_flow_fraction = 0.5,
+    };
+    const inputs = Inputs{
+        .board = .{ .x_mm = 0, .y_mm = 0, .w_mm = 40, .h_mm = 20 },
+        .parts = &parts,
+        .cooling = .{ .fan = fan },
+    };
+    const model = try discretize(arena, inputs, .fan);
+    const left = model.shape.rows / 2 * model.shape.cols + model.shape.cols / 4;
+    const right = model.shape.rows / 2 * model.shape.cols + 3 * model.shape.cols / 4;
+    try testing.expect(model.top_face_h_w_m2k[left] > h_natural);
+    try testing.expectEqual(h_natural, model.top_face_h_w_m2k[right]);
+    try testing.expectEqual(h_natural, model.bottom_face_h_w_m2k[right]);
+
+    const ladder = try solveScenarios(arena, inputs);
+    try testing.expectEqual(@as(usize, 5), ladder.len);
+    try testing.expectEqual(Scenario.fan, ladder[1].scenario);
+    try testing.expectEqualStrings(fan.model, ladder[1].cooling.fan.model);
+    try testing.expect(ladder[1].parts[0].tj_rise_c.? < ladder[0].parts[0].tj_rise_c.?);
+
+    var farther = fan;
+    farther.distance_mm = 50;
+    const farther_h = fanFilmCoefficient(farther);
+    try testing.expect(farther_h < fanFilmCoefficient(fan));
+    var faster = fan;
+    faster.operating_flow_fraction = 0.8;
+    try testing.expect(fanFilmCoefficient(faster) > fanFilmCoefficient(fan));
 }
 
 // spec: placement/thermal_field - one scenario can be solved on its own and matches the ladder's answer for it, and the heatsink asked for alone still bolts its sink to the part the still-air solve names

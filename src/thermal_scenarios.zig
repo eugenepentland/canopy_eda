@@ -51,6 +51,8 @@ pub const ScenarioResult = thermal_field.ScenarioResult;
 pub const PartField = thermal_field.PartField;
 pub const Placement = optimizer.Placement;
 pub const Heatsink = thermal_field.Heatsink;
+pub const Fan = thermal_field.Fan;
+pub const Side = thermal_field.Side;
 pub const HeatsinkMaterial = thermal_field.HeatsinkMaterial;
 pub const FinAxis = thermal_field.FinAxis;
 
@@ -485,7 +487,7 @@ pub const Row = struct {
     parts: []const PartRow = &.{},
     /// Ref-des of every screened part that matched no placed part.
     skipped: []const []const u8 = &.{},
-    heatsink: HeatsinkPlacement = .{},
+    cooling: RowCooling = .{},
 
     /// The part a reader looks at first: the hottest junction, with board
     /// copper standing in for a part that has no junction figure. Null for a
@@ -547,11 +549,11 @@ pub fn solveFields(
     p: optimizer.Placement,
     copper: Copper,
 ) std.mem.Allocator.Error![]ScenarioResult {
-    return thermal_field.solveScenarios(allocator, try inputsFor(allocator, bt, p, copper));
+    return solveFieldsWithHeatsink(allocator, bt, p, copper, null);
 }
 
-/// As `solveFields`, with a physical assembly authored by the saved layout.
-/// Null preserves the historical automatic screening sink.
+/// As `solveFields`, with a physical heatsink authored by the saved layout.
+/// Retained as the single-assembly API for callers that do not model a fan.
 pub fn solveFieldsWithHeatsink(
     allocator: std.mem.Allocator,
     bt: thermal.BoardThermal,
@@ -559,8 +561,22 @@ pub fn solveFieldsWithHeatsink(
     copper: Copper,
     heatsink: ?Heatsink,
 ) std.mem.Allocator.Error![]ScenarioResult {
+    return solveFieldsWithAssembly(allocator, bt, p, copper, heatsink, null);
+}
+
+/// As `solveFields`, with optional physical cooling assemblies. A fan adds one
+/// spatial forced-air scenario; null heatsink preserves the automatic sink.
+pub fn solveFieldsWithAssembly(
+    allocator: std.mem.Allocator,
+    bt: thermal.BoardThermal,
+    p: optimizer.Placement,
+    copper: Copper,
+    heatsink: ?Heatsink,
+    fan: ?Fan,
+) std.mem.Allocator.Error![]ScenarioResult {
     var inputs = try inputsFor(allocator, bt, p, copper);
-    if (heatsink) |sink| inputs.heatsink = sink;
+    if (heatsink) |sink| inputs.cooling.heatsink = sink;
+    if (fan) |assembly| inputs.cooling.fan = assembly;
     return thermal_field.solveScenarios(allocator, inputs);
 }
 
@@ -588,9 +604,31 @@ pub fn paintAt(
     ambient_c: f64,
     copper: Copper,
 ) std.mem.Allocator.Error!Painted {
-    const inputs = try inputsFor(allocator, bt, p, copper);
-    const result = try thermal_field.solveScenario(allocator, inputs, scenario);
-    const ladder = try ladderAt(allocator, &.{result}, ambient_c);
+    return paintAtWithAssembly(allocator, bt, p, .{ .scenario = scenario, .ambient_c = ambient_c, .copper = copper });
+}
+
+/// One uncached thermal view's scenario, ambient, copper and cooling assembly.
+pub const PaintAssemblyOptions = struct {
+    scenario: Scenario,
+    ambient_c: f64,
+    copper: Copper,
+    heatsink: ?Heatsink = null,
+    fan: ?Fan = null,
+};
+
+/// Solve one view with optional physical cooling assemblies, including a fan
+/// on regenerated or sub-scoped placements that do not use the field cache.
+pub fn paintAtWithAssembly(
+    allocator: std.mem.Allocator,
+    bt: thermal.BoardThermal,
+    p: optimizer.Placement,
+    options: PaintAssemblyOptions,
+) std.mem.Allocator.Error!Painted {
+    var inputs = try inputsFor(allocator, bt, p, options.copper);
+    if (options.heatsink) |sink| inputs.cooling.heatsink = sink;
+    if (options.fan) |assembly| inputs.cooling.fan = assembly;
+    const result = try thermal_field.solveScenario(allocator, inputs, options.scenario);
+    const ladder = try ladderAt(allocator, &.{result}, options.ambient_c);
     return .{
         .result = result,
         .row = ladder.rows[0],
@@ -645,9 +683,9 @@ pub fn ladderAt(
     var sink_face: ?thermal_field.Side = null;
     for (results) |result| {
         if (result.scenario != .heatsink) continue;
-        sink_ref = result.heatsink_ref;
-        sink_side = result.heatsink_side;
-        sink_face = result.heatsink_face;
+        sink_ref = result.cooling.heatsink.ref;
+        sink_side = result.cooling.heatsink.side;
+        sink_face = result.cooling.heatsink.face;
         break;
     }
     if (sink_ref.len == 0 and results.len > 0) sink_ref = thermal_field.heatsinkTarget(results[0].parts) orelse "";
@@ -683,10 +721,19 @@ fn rowAt(
         .max_ambient = .{ .c = result.max_ambient.c, .ref = result.max_ambient.ref_des },
         .parts = parts,
         .skipped = result.skipped,
-        .heatsink = .{
-            .ref = result.heatsink_ref,
-            .side = result.heatsink_side orelse .board_backside,
-            .face = result.heatsink_face,
+        .cooling = .{
+            .heatsink = .{
+                .ref = result.cooling.heatsink.ref,
+                .side = result.cooling.heatsink.side orelse .board_backside,
+                .face = result.cooling.heatsink.face,
+            },
+            .fan = .{
+                .model = result.cooling.fan.model,
+                .face = result.cooling.fan.face,
+                .velocity_m_s = result.cooling.fan.velocity_m_s,
+                .operating_flow_m3_s = result.cooling.fan.operating_flow_m3_s,
+                .estimated_pressure_pa = result.cooling.fan.estimated_pressure_pa,
+            },
         },
     };
 }
@@ -732,7 +779,7 @@ pub fn boardVerdict(ladder: Ladder) thermal.Verdict {
     const row = governingRow(ladder) orelse return .over_limit;
     return switch (row.scenario) {
         .natural => .passive_ok,
-        .airflow_1ms, .airflow_2ms => .needs_airflow,
+        .fan, .airflow_1ms, .airflow_2ms => .needs_airflow,
         .heatsink => .needs_heatsink,
     };
 }
@@ -797,6 +844,21 @@ pub const HeatsinkPlacement = struct {
     face: ?thermal_field.Side = null,
 };
 
+/// Auditable operating point carried by the authored fan row.
+pub const FanPlacement = struct {
+    model: []const u8 = "",
+    face: ?thermal_field.Side = null,
+    velocity_m_s: f64 = 0,
+    operating_flow_m3_s: f64 = 0,
+    estimated_pressure_pa: f64 = 0,
+};
+
+/// Physical cooling metadata attached to one reported scenario row.
+pub const RowCooling = struct {
+    heatsink: HeatsinkPlacement = .{},
+    fan: FanPlacement = .{},
+};
+
 /// Spell a cooling scenario for a table, including the sink target and face.
 pub fn scenarioLabel(
     allocator: std.mem.Allocator,
@@ -805,6 +867,7 @@ pub fn scenarioLabel(
 ) std.mem.Allocator.Error![]const u8 {
     return switch (scenario) {
         .natural => "Still air",
+        .fan => "Specified fan",
         .airflow_1ms => "1 m/s airflow",
         .airflow_2ms => "2 m/s airflow",
         .heatsink => if (sink.ref.len > 0)
@@ -824,6 +887,7 @@ pub fn coolingClause(
 ) std.mem.Allocator.Error![]const u8 {
     return switch (scenario) {
         .natural => "in still air",
+        .fan => "with the specified fan",
         .airflow_1ms => "with 1 m/s airflow",
         .airflow_2ms => "with 2 m/s airflow",
         .heatsink => if (sink.ref.len > 0)
@@ -844,6 +908,7 @@ pub fn interventionPhrase(
     const s = scenario orelse return "Over limit even with a heatsink";
     return switch (s) {
         .natural => "Passive cooling OK",
+        .fan => "Needs the specified fan",
         .airflow_1ms => "Needs ~1 m/s airflow",
         .airflow_2ms => "Needs ~2 m/s airflow",
         .heatsink => if (sink.ref.len > 0)

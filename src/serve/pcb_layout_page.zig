@@ -2891,6 +2891,11 @@ const ShownZones = struct {
     fabrication_layers: []const SavedFabricationLayer = &.{},
 };
 
+const SolvedCooling = struct {
+    heatsink: ?SavedHeatsink = null,
+    fan: ?thermal_scenarios.Fan = null,
+};
+
 /// A solved placement plus the request context the PNG and describe endpoints
 /// share — both views must show the *same* board. `placement` references block
 /// memory owned by the caller's `eval`/`module_res`, so those must outlive it.
@@ -2919,8 +2924,8 @@ pub const SolvedRequest = struct {
     /// screenshot / net-open report matches the interactive viewer. Shown
     /// regardless of `?route=1` (a user pour persists through a route preview).
     shown_zones: ShownZones = .{},
-    /// Physical heatsink authored on the named/starred saved layout.
-    heatsink: ?SavedHeatsink = null,
+    /// Physical cooling assemblies resolved against this exact placement.
+    cooling: SolvedCooling = .{},
 };
 
 /// The copper on a solved board, in the thermal projection's terms.
@@ -2939,8 +2944,13 @@ pub fn thermalCopper(solved: SolvedRequest) thermal_scenarios.Copper {
 /// thermal kernel consumes. A sink on the component's own face is a package-
 /// top path; the opposite physical PCB face is the board/exposed-pad path.
 pub fn thermalHeatsink(solved: SolvedRequest, bt: thermal.BoardThermal) ?thermal_scenarios.Heatsink {
-    const resolved = authored_heatsink.resolve(solved.placement, solved.heatsink, solved.block.board.heatsink) orelse return null;
+    const resolved = authored_heatsink.resolve(solved.placement, solved.cooling.heatsink, solved.block.board.thermal.heatsink) orelse return null;
     return authored_heatsink.thermalInput(solved.placement, bt, resolved);
+}
+
+/// Return the board-authored fan already lowered into this solved placement.
+pub fn thermalFan(solved: SolvedRequest) ?thermal_scenarios.Fan {
+    return solved.cooling.fan;
 }
 
 /// Resolve `name` and apply the request's placement-selection rules: a named
@@ -3094,7 +3104,10 @@ pub fn solveForRequest(
             .silk_keepouts = silk_keepouts,
             .fabrication_layers = shownFabricationLayers(sub_doc.layouts, shown_name),
         },
-        .heatsink = authored_heatsink.resolve(placement, shownHeatsink(sub_doc.layouts, shown_name), eff_block.board.heatsink),
+        .cooling = .{
+            .heatsink = authored_heatsink.resolve(placement, shownHeatsink(sub_doc.layouts, shown_name), eff_block.board.thermal.heatsink),
+            .fan = authored_heatsink.lowerFan(placement, eff_block.board.thermal.fan),
+        },
     };
 }
 
@@ -3197,11 +3210,12 @@ fn renderThermalPng(
             .placement = solved.placement,
             .copper = copper,
             .heatsink = thermalHeatsink(solved, screen),
+            .fan = thermalFan(solved),
             .layout = opts.layout,
         });
         break :blk (try thermal_scenarios.paintFrom(alloc, results, solved.placement, scenario, ambient)) orelse
-            try thermal_scenarios.paintAt(alloc, screen, solved.placement, scenario, ambient, copper);
-    } else try thermal_scenarios.paintAt(alloc, screen, solved.placement, scenario, ambient, copper);
+            try thermal_scenarios.paintAtWithAssembly(alloc, screen, solved.placement, .{ .scenario = scenario, .ambient_c = ambient, .copper = copper, .heatsink = thermalHeatsink(solved, screen), .fan = thermalFan(solved) });
+    } else try thermal_scenarios.paintAtWithAssembly(alloc, screen, solved.placement, .{ .scenario = scenario, .ambient_c = ambient, .copper = copper, .heatsink = thermalHeatsink(solved, screen), .fan = thermalFan(solved) });
     return render_thermal_png.render(alloc, solved.placement, painted, .{
         .width = opts.width,
         .title = solved.title,
@@ -3398,7 +3412,7 @@ pub fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngReq
 ///   pins=U13,C5           label these parts' pads with net names ("hubs" = all)
 ///   thermal=1             paint the HEAT FIELD over this board instead of its
 ///                         copper — the picture twin of /api/thermal/:name
-///   scenario=natural|airflow_1ms|airflow_2ms|heatsink
+///   scenario=natural|fan|airflow_1ms|airflow_2ms|heatsink
 ///                         which cooling scenario the heat field is solved for
 ///                         (thermal=1 only; default natural)
 ///   ambient=NN            ambient °C the heat image's absolute temperatures
@@ -6590,7 +6604,7 @@ fn resolveShownView(ctx: *Server, req: ?*httpz.Request, in: ShownInputs) ShownVi
             .base_edge = base_edge,
             .check_drc = in.check_drc,
         });
-    var view = ShownView{ .ro = ro, .routed = routed, .tally = deferred.tally, .violations = deferred.violations, .outline_drawn = outline_drawn, .base_edge = base_edge, .outline = shownOutline(in.layouts, in.shown), .fabrication_layers = fabrication_layers, .heatsink = authored_heatsink.resolve(in.placement.*, shownHeatsink(in.layouts, in.shown), in.block.board.heatsink), .saved = saved, .texts = texts, .dimensions = shownDimensions(in.layouts, in.shown) };
+    var view = ShownView{ .ro = ro, .routed = routed, .tally = deferred.tally, .violations = deferred.violations, .outline_drawn = outline_drawn, .base_edge = base_edge, .outline = shownOutline(in.layouts, in.shown), .fabrication_layers = fabrication_layers, .heatsink = authored_heatsink.resolve(in.placement.*, shownHeatsink(in.layouts, in.shown), in.block.board.thermal.heatsink), .saved = saved, .texts = texts, .dimensions = shownDimensions(in.layouts, in.shown) };
     deferred.reconcile(&view.routed);
     return view;
 }

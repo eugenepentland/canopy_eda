@@ -38,6 +38,27 @@ pub fn lower(placement: optimizer.Placement, spec: ?env.BoardHeatsinkSpec) ?side
     };
 }
 
+/// Lift a board-authored axial fan from board-local coordinates into the
+/// absolute placement frame consumed by thermal fields and renderers.
+pub fn lowerFan(placement: optimizer.Placement, spec: ?env.BoardFanSpec) ?scenarios.Fan {
+    const fan = spec orelse return null;
+    const board = placement.board_rect orelse return null;
+    return .{
+        .model = fan.model,
+        .footprint = .{
+            .x_mm = board.minx + fan.rect.x,
+            .y_mm = board.miny + fan.rect.y,
+            .w_mm = fan.rect.w,
+            .h_mm = fan.rect.h,
+        },
+        .face = if (fan.side == .top) .top else .bottom,
+        .distance_mm = fan.distance_mm,
+        .free_air_flow_m3_s = fan.free_air_flow_m3_s,
+        .max_static_pressure_pa = fan.max_static_pressure_pa,
+        .operating_flow_fraction = fan.operating_flow_fraction,
+    };
+}
+
 /// Apply a saved layout's physical override while keeping an authored target
 /// bound to its stable source identity. Boards without a source declaration
 /// retain the historical sidecar-only behavior.
@@ -141,4 +162,35 @@ test "authored target follows source identity across ref-des renumbering" {
         .target = .{ .scope = "missing", .origin = "U1" },
     });
     try std.testing.expectEqual(@as(?sidecar.SavedHeatsink, null), missing);
+}
+
+test "authored fan footprint is lifted from board-local to placement coordinates" {
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 0,
+        .maxy = 0,
+        .board_rect = .{ .minx = 100, .miny = 50, .w = 81, .h = 25 },
+        .generated = false,
+    };
+    const fan = lowerFan(placement, .{
+        .model = "9A0812G4D011",
+        .rect = .{ .x = 0.5, .y = -27.5, .w = 80, .h = 80 },
+        .side = .top,
+        .distance_mm = 10,
+        .free_air_flow_m3_s = 0.025,
+        .max_static_pressure_pa = 80.4,
+        .operating_flow_fraction = 0.6,
+    }) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("9A0812G4D011", fan.model);
+    try std.testing.expectEqual(@as(f64, 100.5), fan.footprint.?.x_mm);
+    try std.testing.expectEqual(@as(f64, 22.5), fan.footprint.?.y_mm);
+    try std.testing.expectEqual(scenarios.Side.top, fan.face);
 }

@@ -263,6 +263,7 @@ pub const Board = struct {
     placement: thermal_scenarios.Placement,
     copper: thermal_scenarios.Copper = .{},
     heatsink: ?thermal_scenarios.Heatsink = null,
+    fan: ?thermal_scenarios.Fan = null,
     /// Which saved layout this board IS — null for the design's default board.
     /// Carried with the geometry rather than passed alongside it so a caller
     /// cannot cache one layout's field under another's name.
@@ -277,6 +278,7 @@ pub fn boardOf(solved: pcb_layout_page.SolvedRequest, layout: ?[]const u8, bt: t
         .placement = solved.placement,
         .copper = pcb_layout_page.thermalCopper(solved),
         .heatsink = pcb_layout_page.thermalHeatsink(solved, bt),
+        .fan = pcb_layout_page.thermalFan(solved),
         .layout = layout,
     };
 }
@@ -311,7 +313,7 @@ pub fn solveOver(
             if (store.get(alloc, key)) |hit| return hit;
         }
     }
-    const results = try thermal_scenarios.solveFieldsWithHeatsink(alloc, bt, board.placement, board.copper, board.heatsink);
+    const results = try thermal_scenarios.solveFieldsWithAssembly(alloc, bt, board.placement, board.copper, board.heatsink, board.fan);
     if (derivedCacheAllowed()) {
         if (thermal_cache.active()) |store| {
             // Re-read: a design edited WHILE the fields relaxed would otherwise be
@@ -631,6 +633,19 @@ fn writeThermalFixture(dir: std.Io.Dir) !void {
         \\    (pin 2 "GND")
         \\    (power 1.0)))
     });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "src/fan-heater.sexp", .data =
+        \\(import hot-ic)
+        \\
+        \\(design-block "Fan Heater Board"
+        \\  (board (size 40 20)
+        \\    (fan (model "9A0812G4D011") (rect -20 -30 80 80) (side top)
+        \\      (distance-mm 10) (free-air-flow-m3-s 0.025)
+        \\      (max-static-pressure-pa 80.4) (operating-flow-fraction 0.6)))
+        \\  (instance "U1" hot-ic
+        \\    (pin 1 "VIN")
+        \\    (pin 2 "GND")
+        \\    (power 1.0)))
+    });
     try dir.writeFile(std.testing.io, .{ .sub_path = "src/quiet.sexp", .data =
         \\(import cool-ic)
         \\
@@ -889,7 +904,7 @@ fn scenarioRows(alloc: std.mem.Allocator, body: []const u8) ![]std.json.Value {
     return scen.array.items;
 }
 
-// spec: serve/thermal - GET /api/thermal/:name carries the layout-aware cooling ladder as four rungs of absolute degrees at the requested ambient, each naming its hotspot, its ambient ceiling and any part it could not place
+// spec: serve/thermal - GET /api/thermal/:name carries the layout-aware cooling ladder as four baseline rungs of absolute degrees at the requested ambient, each naming its hotspot, its ambient ceiling and any part it could not place
 test "the thermal endpoint carries the cooling-scenario ladder" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -946,6 +961,32 @@ test "the thermal endpoint carries the cooling-scenario ladder" {
     // More air is a cooler board — the whole point of offering the rungs.
     try testing.expect(try num(rows[1].object.get("board_max_c").?) < board_max);
     try testing.expect(try num(rows[2].object.get("board_max_c").?) < try num(rows[1].object.get("board_max_c").?));
+}
+
+// spec: serve/thermal - a board-authored fan adds an auditable fan-only row with its model, face, installed flow, velocity and pressure estimate
+test "the thermal endpoint carries the authored fan operating point" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeThermalFixture(tmp.dir);
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    const got = try serve(alloc, project, "fan-heater", null);
+    try testing.expectEqual(@as(u16, 200), got.status);
+    const rows = try scenarioRows(alloc, got.body);
+    try testing.expectEqual(@as(usize, 5), rows.len);
+    try testing.expectEqualStrings("natural", rows[0].object.get("scenario").?.string);
+    try testing.expectEqualStrings("fan", rows[1].object.get("scenario").?.string);
+    try testing.expect(rows[1].object.get("heatsink").? == .null);
+    const fan = rows[1].object.get("fan").?.object;
+    try testing.expectEqualStrings("9A0812G4D011", fan.get("model").?.string);
+    try testing.expectEqualStrings("top", fan.get("face").?.string);
+    try testing.expect(try num(fan.get("operating_flow_m3_s").?) > 0);
+    try testing.expect(try num(fan.get("velocity_m_s").?) > 0);
+    try testing.expect(try num(fan.get("estimated_pressure_pa").?) > 0);
+    try testing.expect(try num(rows[1].object.get("board_max_c").?) < try num(rows[0].object.get("board_max_c").?));
 }
 
 // spec: serve/thermal - the cooling ladder is read at the caller's ambient, so every temperature on it shifts one for one with ?ambient while each ambient ceiling stays put

@@ -617,6 +617,8 @@ pub const scope_form_docs = blk: {
             "[(material aluminum_6063|aluminum_1050|copper)] [(base-mm N)] [(fin-height-mm N)] " ++
             "[(fin-thickness-mm N)] [(fin-gap-mm N)] [(fin-axis length|width)] " ++
             "[(pad-thickness-mm N)] [(pad-k-w-mk N)])] " ++
+            "[(fan (model \"MPN\") (rect X Y W H) (side top|bottom) (distance-mm N) " ++
+            "(free-air-flow-m3-s N) (max-static-pressure-pa N) (operating-flow-fraction N))] " ++
             "(left|right|top|bottom \"REF\"… | (rot N \"REF\")…)… [(corners \"REF\"…)])",
         .summary = "Physical board outline + edge hardware: (size W H) is the outline in mm " ++
             "(required — without it the form is inert). (corner-radius R) rounds the outline's " ++
@@ -652,6 +654,10 @@ pub const scope_form_docs = blk: {
             "the heatsink scenario, and its target is the stable sub-block/source-origin pair rather than a renumberable " ++
             "ref-des. A saved layout can override its physical assembly; " ++
             "removing or rebuilding the sidecar falls back to this declaration. Each (left|right|top|bottom …) list " ++
+            "(fan …) authors an axial fan normal to one PCB face: its frame projection is board-local, distance is " ++
+            "outlet-to-board standoff, and the catalog free-flow/shutoff-pressure endpoints remain distinct. The required " ++
+            "operating-flow-fraction states the installed-flow assumption instead of silently claiming both maxima at once. " ++
+            "Its optional fan scenario applies distance-expanded forced convection only beneath that projected jet. " ++
             "docks those parts flush INSIDE that board edge (the words name physical edges, " ++
             "not sides of an anchor), slid along the edge toward the pads they connect to; " ++
             "(rot N \"REF\") overrides the default pads-inward rotation. (corners …) pins " ++

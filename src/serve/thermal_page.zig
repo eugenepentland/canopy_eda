@@ -987,6 +987,19 @@ fn writeCoverage(w: *std.Io.Writer, v: View) std.Io.Writer.Error!void {
         }
         try w.writeAll(".</p>");
     }
+    if (v.scenarios.ladder) |ladder| {
+        for (ladder.rows) |row| {
+            if (row.scenario != .fan or row.cooling.fan.model.len == 0) continue;
+            try w.writeAll("<p class=\"tp-hint\"><strong>Fan model:</strong> ");
+            try escape.writeXml(w, row.cooling.fan.model);
+            try w.print(
+                "; {d:.4} m³/s assumed installed flow, {d:.1} m/s area-average velocity at the PCB, " ++
+                    "{d:.1} Pa remaining on the endpoint P–Q approximation, aimed at the {s} face.</p>",
+                .{ row.cooling.fan.operating_flow_m3_s, row.cooling.fan.velocity_m_s, row.cooling.fan.estimated_pressure_pa, if ((row.cooling.fan.face orelse .top) == .top) "top" else "bottom" },
+            );
+            break;
+        }
+    }
     try writeHint(w, "", model_caveat);
     try w.writeAll("</section>");
 }
@@ -999,7 +1012,8 @@ const model_caveat =
     "copper weights, derates each cell by the pour actually covering it, blocks convection off the " ++
     "face a part body sits on, and shortens a part's path into the board by the thermal vias under " ++
     "its own land. Still one sheet in the plane of the board: the two faces are not solved as " ++
-    "separate layers, air does not carry heat between neighbouring parts, and nothing here is " ++
+    "separate layers, air does not carry heat between neighbouring parts, the fan case uses an area-average normal jet " ++
+    "rather than CFD (no hub shadow, swirl, enclosure recirculation or component wake), and nothing here is " ++
     "transient. Read it as a ranking of hot spots and a first cut at the cooling this board needs, " ++
     "not as a thermal qualification.";
 

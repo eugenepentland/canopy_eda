@@ -5,6 +5,7 @@ src/allocating_writer.zig::writeAll | fn writeAll(self: AllocatingWriter, bytes:
 src/allocating_writer.zig::writeByte | fn writeByte(self: AllocatingWriter, byte: u8) std.mem.Allocator.Error!void
 src/asserted_fns.zig::buildMap | fn buildMap(allocator: Allocator, block: *const DesignBlock) Allocator.Error!Map
 src/authored_heatsink.zig::lower | fn lower(placement: optimizer.Placement, spec: ?env.BoardHeatsinkSpec) ?sidecar.SavedHeatsink
+src/authored_heatsink.zig::lowerFan | fn lowerFan(placement: optimizer.Placement, spec: ?env.BoardFanSpec) ?scenarios.Fan
 src/authored_heatsink.zig::resolve | fn resolve( placement: optimizer.Placement, saved: ?sidecar.SavedHeatsink, spec: ?env.BoardHeatsinkSpec, ) ?sidecar.SavedHeatsink
 src/authored_heatsink.zig::thermalInput | fn thermalInput( placement: optimizer.Placement, bt: thermal.BoardThermal, saved: sidecar.SavedHeatsink, ) ?scenarios.Heatsink
 src/bench_args.zig::Common struct_
@@ -523,11 +524,13 @@ src/eval/env.zig::AssertionResult struct_
 src/eval/env.zig::BlockDef struct_
 src/eval/env.zig::BlockOrigin enum_
 src/eval/env.zig::BlockRole enum_
+src/eval/env.zig::BoardFanSpec struct_
 src/eval/env.zig::BoardHeatsinkSpec struct_
 src/eval/env.zig::BoardKeepoutSide enum_
 src/eval/env.zig::BoardKeepoutSpec struct_
 src/eval/env.zig::BoardRole enum_
 src/eval/env.zig::BoardSpec struct_
+src/eval/env.zig::BoardThermalAssemblySpec struct_
 src/eval/env.zig::CalcBlock struct_
 src/eval/env.zig::CalcResult struct_
 src/eval/env.zig::Check union_
@@ -3339,8 +3342,10 @@ src/placement/straighten.zig::passBoard | fn passBoard(board: router.CleanupBoar
 src/placement/thermal_field.zig::AmbientLimit struct_
 src/placement/thermal_field.zig::BoardRect struct_
 src/placement/thermal_field.zig::CellBlock struct_
+src/placement/thermal_field.zig::CoolingAssembly struct_
 src/placement/thermal_field.zig::Coverage struct_
 src/placement/thermal_field.zig::Discretized struct_
+src/placement/thermal_field.zig::Fan struct_
 src/placement/thermal_field.zig::FieldGrid struct_
 src/placement/thermal_field.zig::FinAxis enum_
 src/placement/thermal_field.zig::GridShape struct_
@@ -3355,6 +3360,7 @@ src/placement/thermal_field.zig::Mount struct_
 src/placement/thermal_field.zig::PartField struct_
 src/placement/thermal_field.zig::PartInput struct_
 src/placement/thermal_field.zig::Scenario enum_
+src/placement/thermal_field.zig::ScenarioCooling struct_
 src/placement/thermal_field.zig::ScenarioResult struct_
 src/placement/thermal_field.zig::Sheet struct_
 src/placement/thermal_field.zig::Side enum_
@@ -3365,11 +3371,16 @@ src/placement/thermal_field.zig::conductivity | fn conductivity(self: HeatsinkMa
 src/placement/thermal_field.zig::defaultSheet | fn defaultSheet(spreader_layers: u8) Sheet
 src/placement/thermal_field.zig::default_spreader_layers value
 src/placement/thermal_field.zig::discretize | fn discretize( allocator: std.mem.Allocator, inputs: Inputs, scenario: Scenario, ) std.mem.Allocator.Error!Discretized
+src/placement/thermal_field.zig::enabled | fn enabled(self: Fan) bool
+src/placement/thermal_field.zig::estimatedPressure | fn estimatedPressure(self: Fan) f64
+src/placement/thermal_field.zig::fanFilmCoefficient | fn fanFilmCoefficient(fan: Fan) f64
+src/placement/thermal_field.zig::fanVelocity | fn fanVelocity(fan: Fan) f64
 src/placement/thermal_field.zig::filmCoefficient | fn filmCoefficient(self: Scenario) f64
 src/placement/thermal_field.zig::finCount | fn finCount(geometry: HeatsinkGeometry) usize
 src/placement/thermal_field.zig::gridShape | fn gridShape(board: BoardRect) GridShape
 src/placement/thermal_field.zig::heatsinkTarget | fn heatsinkTarget(parts: []const PartField) ?[]const u8
 src/placement/thermal_field.zig::max_cells_axis value
+src/placement/thermal_field.zig::operatingFlow | fn operatingFlow(self: Fan) f64
 src/placement/thermal_field.zig::sinkToAmbient | fn sinkToAmbient(hs: Heatsink) f64
 src/placement/thermal_field.zig::solveScenario | fn solveScenario( allocator: std.mem.Allocator, inputs: Inputs, scenario: Scenario, ) std.mem.Allocator.Error!ScenarioResult
 src/placement/thermal_field.zig::solveScenarios | fn solveScenarios( allocator: std.mem.Allocator, inputs: Inputs, ) std.mem.Allocator.Error![]ScenarioResult
@@ -4540,6 +4551,7 @@ src/serve/pcb_layout_page.zig::standaloneReleaseAssemblyHtml | fn standaloneRele
 src/serve/pcb_layout_page.zig::subBlockPoseByOriginKey | fn subBlockPoseByOriginKey( alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock, ) ?SubBlockSeeds
 src/serve/pcb_layout_page.zig::subSlug value
 src/serve/pcb_layout_page.zig::thermalCopper | fn thermalCopper(solved: SolvedRequest) thermal_scenarios.Copper
+src/serve/pcb_layout_page.zig::thermalFan | fn thermalFan(solved: SolvedRequest) ?thermal_scenarios.Fan
 src/serve/pcb_layout_page.zig::thermalHeatsink | fn thermalHeatsink(solved: SolvedRequest, bt: thermal.BoardThermal) ?thermal_scenarios.Heatsink
 src/serve/pcb_layout_page.zig::unknownLayoutMsg | fn unknownLayoutMsg( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, want: []const u8, ) []const u8
 src/serve/pcb_layout_page.zig::viasForPoses | fn viasForPoses( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, seed: optimizer.PoseSeed, params: optimizer.Params, ) ?[]const SyncVia
@@ -5249,6 +5261,8 @@ src/testpoint_silkscreen.zig::deinitCollected | fn deinitCollected(alloc: std.me
 src/thermal_scenarios.zig::Answer struct_
 src/thermal_scenarios.zig::Board struct_
 src/thermal_scenarios.zig::Copper value
+src/thermal_scenarios.zig::Fan value
+src/thermal_scenarios.zig::FanPlacement struct_
 src/thermal_scenarios.zig::FinAxis value
 src/thermal_scenarios.zig::Heatsink value
 src/thermal_scenarios.zig::HeatsinkMaterial value
@@ -5257,13 +5271,16 @@ src/thermal_scenarios.zig::Hotspot struct_
 src/thermal_scenarios.zig::Ladder struct_
 src/thermal_scenarios.zig::Limit struct_
 src/thermal_scenarios.zig::MountedTarget struct_
+src/thermal_scenarios.zig::PaintAssemblyOptions struct_
 src/thermal_scenarios.zig::Painted struct_
 src/thermal_scenarios.zig::PartField value
 src/thermal_scenarios.zig::PartRow struct_
 src/thermal_scenarios.zig::Placement value
 src/thermal_scenarios.zig::Row struct_
+src/thermal_scenarios.zig::RowCooling struct_
 src/thermal_scenarios.zig::Scenario value
 src/thermal_scenarios.zig::ScenarioResult value
+src/thermal_scenarios.zig::Side value
 src/thermal_scenarios.zig::boardOf | fn boardOf(p: optimizer.Placement) Board
 src/thermal_scenarios.zig::boardVerdict | fn boardVerdict(ladder: Ladder) thermal.Verdict
 src/thermal_scenarios.zig::coolingClause | fn coolingClause( allocator: std.mem.Allocator, scenario: thermal_field.Scenario, sink: HeatsinkPlacement, ) std.mem.Allocator.Error![]const u8
@@ -5274,6 +5291,7 @@ src/thermal_scenarios.zig::inputsFor | fn inputsFor( allocator: std.mem.Allocato
 src/thermal_scenarios.zig::interventionPhrase | fn interventionPhrase( allocator: std.mem.Allocator, scenario: ?thermal_field.Scenario, sink: HeatsinkPlacement, ) std.mem.Allocator.Error![]const u8
 src/thermal_scenarios.zig::ladderAt | fn ladderAt( allocator: std.mem.Allocator, results: []const thermal_field.ScenarioResult, ambient_c: f64, ) std.mem.Allocator.Error!Ladder
 src/thermal_scenarios.zig::paintAt | fn paintAt( allocator: std.mem.Allocator, bt: thermal.BoardThermal, p: optimizer.Placement, scenario: Scenario, ambient_c: f64, copper: Copper, ) std.mem.Allocator.Error!Painted
+src/thermal_scenarios.zig::paintAtWithAssembly | fn paintAtWithAssembly( allocator: std.mem.Allocator, bt: thermal.BoardThermal, p: optimizer.Placement, options: PaintAssemblyOptions, ) std.mem.Allocator.Error!Painted
 src/thermal_scenarios.zig::paintFrom | fn paintFrom( allocator: std.mem.Allocator, results: []const thermal_field.ScenarioResult, p: optimizer.Placement, scenario: Scenario, ambient_c: f64, ) std.mem.Allocator.Error!?Painted
 src/thermal_scenarios.zig::partInputs | fn partInputs( allocator: std.mem.Allocator, bt: thermal.BoardThermal, p: optimizer.Placement, copper: Copper, ) std.mem.Allocator.Error![]thermal_field.PartInput
 src/thermal_scenarios.zig::ratingsCap | fn ratingsCap(bt: thermal.BoardThermal) thermal_field.AmbientLimit
@@ -5285,6 +5303,7 @@ src/thermal_scenarios.zig::sheetOf | fn sheetOf(rules: optimizer.BoardRules) the
 src/thermal_scenarios.zig::sinkOf | fn sinkOf(ladder: Ladder) HeatsinkPlacement
 src/thermal_scenarios.zig::solveAt | fn solveAt( allocator: std.mem.Allocator, bt: thermal.BoardThermal, p: optimizer.Placement, ambient_c: f64, copper: Copper, ) std.mem.Allocator.Error!Ladder
 src/thermal_scenarios.zig::solveFields | fn solveFields( allocator: std.mem.Allocator, bt: thermal.BoardThermal, p: optimizer.Placement, copper: Copper, ) std.mem.Allocator.Error![]ScenarioResult
+src/thermal_scenarios.zig::solveFieldsWithAssembly | fn solveFieldsWithAssembly( allocator: std.mem.Allocator, bt: thermal.BoardThermal, p: optimizer.Placement, copper: Copper, heatsink: ?Heatsink, fan: ?Fan, ) std.mem.Allocator.Error![]ScenarioResult
 src/thermal_scenarios.zig::solveFieldsWithHeatsink | fn solveFieldsWithHeatsink( allocator: std.mem.Allocator, bt: thermal.BoardThermal, p: optimizer.Placement, copper: Copper, heatsink: ?Heatsink, ) std.mem.Allocator.Error![]ScenarioResult
 src/thermal_scenarios.zig::spreaderLayersOf | fn spreaderLayersOf(rules: optimizer.BoardRules) u8
 src/tool_cli.zig::run | fn run(allocator: std.mem.Allocator, args: []const []const u8) RunError!void

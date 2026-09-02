@@ -4271,7 +4271,7 @@ reserved, or RFU never enter this rule.
 
 ## placement/thermal_field
 
-Public functions: solveScenarios, solveScenario, heatsinkTarget, spreaderLayers, defaultSheet, gridShape, cellsForBox, discretize, sinkToAmbient, finCount
+Public functions: solveScenarios, solveScenario, heatsinkTarget, spreaderLayers, defaultSheet, gridShape, cellsForBox, discretize, sinkToAmbient, finCount, fanVelocity, fanFilmCoefficient
 
 `eval/thermal.zig` answers the paper question — `Tj = Ta + P·θJA`, one part at a
 time, no board and no neighbours. That is the right screen before a package is
@@ -4290,9 +4290,13 @@ it, where the transfer term is how hard it is for that part's heat to reach the
 layers the sheet lumps together — short where a via array stitches the land to
 the planes, long where nothing does.
 
-Four scenarios come back in one call: still air, roughly 1 m/s and 2 m/s of
-forced air, and a small stamped heatsink bolted to the part with the least
-junction margin in still air. Linearity is the load-bearing invariant — the
+Four screening scenarios come back in one call: still air, roughly 1 m/s and
+2 m/s of forced air, and a small stamped heatsink bolted to the part with the
+least junction margin in still air. A board-authored fan adds a fifth row ahead
+of the generic airflow brackets. Its catalog free-flow and shutoff-pressure
+endpoints remain distinct, an explicit installed-flow fraction sets the volume
+flow, and its position, face and standoff produce a distance-expanded local jet
+instead of a global film coefficient. Linearity is the load-bearing invariant — the
 system is solved with ambient as the ZERO reference, so what is returned is a
 RISE field that is independent of the ambient it will be read at, and one solve
 per scenario therefore serves every ambient a caller asks about. It is a
@@ -4303,6 +4307,7 @@ coupling through the air.
 - a single centered source is hottest at the source, decays monotonically along a ray to the edge, and is symmetric about the board centre
 - the rise field is linear in the injected power, so two sources solved together equal the two solved apart added cell by cell
 - more airflow strictly lowers the board's maximum rise, and the heatsink scenario strictly lowers its target part's junction rise
+- an authored fan adds a spatial cooling rung whose selected face, projected position, standoff and installed-flow assumption drive the per-cell film coefficient
 - one scenario can be solved on its own and matches the ladder's answer for it, and the heatsink asked for alone still bolts its sink to the part the still-air solve names
 - a drawn straight-fin heatsink derives its fin count and theta-SA from material and geometry, and applies that sink over the exact authored contact rectangle
 - a part with no pose is reported as skipped instead of placed, a part hanging off the board docks onto the nearest cell, and neither panics
@@ -6299,7 +6304,8 @@ nothing here writes to the project dir.
 - GET /api/thermal/:name screens a design and answers the analysis as facts JSON
 - GET /api/thermal/:name resolves a bare lib/modules module standalone through its parameter defaults
 - GET /api/thermal/:name?ambient=NN screens at the caller's ambient and rejects one that is not a number
-- GET /api/thermal/:name carries the layout-aware cooling ladder as four rungs of absolute degrees at the requested ambient, each naming its hotspot, its ambient ceiling and any part it could not place
+- GET /api/thermal/:name carries the layout-aware cooling ladder as four baseline rungs of absolute degrees at the requested ambient, each naming its hotspot, its ambient ceiling and any part it could not place
+- a board-authored fan adds an auditable fan-only row with its model, face, installed flow, velocity and pressure estimate
 - the cooling ladder is read at the caller's ambient, so every temperature on it shifts one for one with ?ambient while each ambient ceiling stays put
 - a design with nothing to dissipate answers with a null ladder beside a sentence naming what is missing, and keeps every lumped field
 - GET /api/thermal/:name answers an unknown design or module name with a 404 whose body is not JSON

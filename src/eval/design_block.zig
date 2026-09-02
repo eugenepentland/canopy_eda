@@ -2327,6 +2327,7 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
     var outline_approved: []const u8 = "";
     var perimeter_fence: env_mod.PerimeterFenceSpec = .{};
     var heatsink: ?env_mod.BoardHeatsinkSpec = null;
+    var fan: ?env_mod.BoardFanSpec = null;
     var corners: std.ArrayList(env_mod.PlacementItem) = .empty;
     for (form_children[1..]) |child| {
         const c = child.asList() orelse continue;
@@ -2361,6 +2362,10 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
             heatsink = try parseBoardHeatsink(self, child, c[1..]);
             continue;
         }
+        if (std.mem.eql(u8, head, "fan")) {
+            fan = try parseBoardFan(self, child, c[1..]);
+            continue;
+        }
         // Authored interior keepouts are read after this loop: they validate
         // against the outline, which (size W H) may declare further down.
         if (std.mem.eql(u8, head, "keepout")) continue;
@@ -2381,8 +2386,72 @@ fn parseBoard(self: *Evaluator, form_children: []const Node) EvalError!env_mod.B
         .corners = corners.toOwnedSlice(self.allocator) catch &.{},
         .perimeter_fence = perimeter_fence,
         .keepouts = try board_keepout_mod.parseAll(self, form_children[1..], w, h),
-        .heatsink = heatsink,
+        .thermal = .{ .heatsink = heatsink, .fan = fan },
         .present = true,
+    };
+}
+
+/// Parse an authored axial fan aimed normal to one board face:
+///
+///   (fan (model "MPN") (rect X Y W H) (side top|bottom)
+///     (distance-mm N) (free-air-flow-m3-s N)
+///     (max-static-pressure-pa N) (operating-flow-fraction 0..1))
+///
+/// The flow fraction is required: catalog free-air flow and shutoff pressure
+/// are mutually exclusive endpoints, so silently treating either as the
+/// installed operating point would make the thermal answer look more certain
+/// than its input.
+fn parseBoardFan(self: *Evaluator, form: Node, children: []const Node) EvalError!env_mod.BoardFanSpec {
+    var model: ?[]const u8 = null;
+    var x: ?f64 = null;
+    var y: ?f64 = null;
+    var w: ?f64 = null;
+    var h: ?f64 = null;
+    var side: ?env_mod.FabricationSide = null;
+    var distance_mm: ?f64 = null;
+    var flow_m3_s: ?f64 = null;
+    var pressure_pa: ?f64 = null;
+    var flow_fraction: ?f64 = null;
+    for (children) |child| {
+        const c = child.asList() orelse continue;
+        if (c.len == 0) continue;
+        const head = c[0].asAtom() orelse continue;
+        if (std.mem.eql(u8, head, "model") and c.len == 2) {
+            model = c[1].asString() orelse c[1].asAtom();
+        } else if (std.mem.eql(u8, head, "rect") and c.len == 5) {
+            x = c[1].asNumber();
+            y = c[2].asNumber();
+            w = c[3].asNumber();
+            h = c[4].asNumber();
+        } else if (std.mem.eql(u8, head, "side") and c.len == 2) {
+            const value = c[1].asAtom() orelse c[1].asString() orelse "";
+            side = if (std.mem.eql(u8, value, "top")) .top else if (std.mem.eql(u8, value, "bottom")) .bottom else null;
+        } else if (std.mem.eql(u8, head, "distance-mm") and c.len == 2) {
+            distance_mm = c[1].asNumber();
+        } else if (std.mem.eql(u8, head, "free-air-flow-m3-s") and c.len == 2) {
+            flow_m3_s = c[1].asNumber();
+        } else if (std.mem.eql(u8, head, "max-static-pressure-pa") and c.len == 2) {
+            pressure_pa = c[1].asNumber();
+        } else if (std.mem.eql(u8, head, "operating-flow-fraction") and c.len == 2) {
+            flow_fraction = c[1].asNumber();
+        }
+    }
+    const complete = model != null and model.?.len > 0 and x != null and y != null and w != null and h != null and
+        side != null and distance_mm != null and flow_m3_s != null and pressure_pa != null and flow_fraction != null;
+    const valid = complete and w.? > 0 and h.? > 0 and distance_mm.? >= 0 and flow_m3_s.? > 0 and
+        pressure_pa.? > 0 and flow_fraction.? > 0 and flow_fraction.? <= 1;
+    if (!valid) {
+        self.setError(form.span, "malformed (fan …): require model, positive rect/flow/pressure, top|bottom side, nonnegative distance, and operating-flow-fraction in (0,1]");
+        return EvalError.InvalidForm;
+    }
+    return .{
+        .model = model.?,
+        .rect = .{ .x = x.?, .y = y.?, .w = w.?, .h = h.? },
+        .side = side.?,
+        .distance_mm = distance_mm.?,
+        .free_air_flow_m3_s = flow_m3_s.?,
+        .max_static_pressure_pa = pressure_pa.?,
+        .operating_flow_fraction = flow_fraction.?,
     };
 }
 
@@ -5372,6 +5441,9 @@ test "design-block parses a (board ...) form" {
         \\      (material aluminum_6063) (base-mm 2) (fin-height-mm 10)
         \\      (fin-thickness-mm 2) (fin-gap-mm 2) (fin-axis length)
         \\      (pad-thickness-mm 0.5) (pad-k-w-mk 6))
+        \\    (fan (model "9A0812G4D011") (rect 0 -12.5 80 80) (side top)
+        \\      (distance-mm 10) (free-air-flow-m3-s 0.025)
+        \\      (max-static-pressure-pa 80.4) (operating-flow-fraction 0.6))
         \\    (left "usbc" "rj45")
         \\    (right (rot 90 "sma1"))
         \\    (corners "MK1" "MK2" "MK3" "MK4")))
@@ -5400,7 +5472,7 @@ test "design-block parses a (board ...) form" {
     try testing.expect(block.board.perimeter_fence.keepout.blocks.vias);
     try testing.expectEqual(@as(usize, 1), block.board.perimeter_fence.keepout.allow_nets.len);
     try testing.expectEqualStrings("GND", block.board.perimeter_fence.keepout.allow_nets[0]);
-    const sink = block.board.heatsink orelse return error.TestUnexpectedResult;
+    const sink = block.board.thermal.heatsink orelse return error.TestUnexpectedResult;
     try testing.expectApproxEqAbs(@as(f64, 2), sink.rect.x, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 3), sink.rect.y, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 40), sink.rect.w, 1e-9);
@@ -5411,6 +5483,13 @@ test "design-block parses a (board ...) form" {
     try testing.expectEqualStrings("aluminum_6063", sink.material);
     try testing.expectApproxEqAbs(@as(f64, 2), sink.geometry.fin_thickness_mm, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 6), sink.pad.conductivity_w_mk, 1e-9);
+    const fan = block.board.thermal.fan orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("9A0812G4D011", fan.model);
+    try testing.expectEqual(env_mod.FabricationSide.top, fan.side);
+    try testing.expectApproxEqAbs(@as(f64, 10), fan.distance_mm, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.025), fan.free_air_flow_m3_s, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 80.4), fan.max_static_pressure_pa, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.6), fan.operating_flow_fraction, 1e-9);
     try testing.expectEqual(@as(usize, 2), block.board.sides.len);
     try testing.expectEqualStrings("usbc", block.board.sides[0].items[0].ref);
     try testing.expectEqual(@as(f64, 90), block.board.sides[1].items[0].rot.?);

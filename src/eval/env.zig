@@ -1445,6 +1445,27 @@ pub const BoardHeatsinkSpec = struct {
     } = .{},
     pad: struct { thickness_mm: f64 = 0.5, conductivity_w_mk: f64 = 6 } = .{},
 };
+
+/// One axial fan aimed normal to a PCB face. The rectangle is the fan outlet's
+/// board projection in board-local millimetres; `distance_mm` is outlet plane
+/// to that PCB face. Catalog free-air flow and shutoff pressure stay separate,
+/// while `operating_flow_fraction` states the installed-flow assumption used
+/// by the screening model.
+pub const BoardFanSpec = struct {
+    model: []const u8,
+    rect: struct { x: f64, y: f64, w: f64, h: f64 },
+    side: FabricationSide,
+    distance_mm: f64,
+    free_air_flow_m3_s: f64,
+    max_static_pressure_pa: f64,
+    operating_flow_fraction: f64,
+};
+
+/// Optional physical cooling assemblies declared by the board.
+pub const BoardThermalAssemblySpec = struct {
+    heatsink: ?BoardHeatsinkSpec = null,
+    fan: ?BoardFanSpec = null,
+};
 /// The physical board declared by a top-level `(board …)` form: the outline
 /// rectangle plus the parts that live ON it — connectors docked to a named
 /// board edge (`(left|right|top|bottom "ref" …)` lists, same item grammar as
@@ -1481,7 +1502,7 @@ pub const BoardSpec = struct {
     keepouts: []const BoardKeepoutSpec = &.{},
     /// Authored default heatsink. A saved layout may override this assembly;
     /// deleting/rebuilding the sidecar falls back here.
-    heatsink: ?BoardHeatsinkSpec = null,
+    thermal: BoardThermalAssemblySpec = .{},
     role: BoardRole = .subcircuit,
     /// Subcircuit plane policy: false removes non-ground authored planes, or
     /// suppresses the dominant-supply plane in the implicit stackup model.

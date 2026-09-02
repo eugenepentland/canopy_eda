@@ -105,7 +105,8 @@ fn sizeOf(results: []const thermal_scenarios.ScenarioResult) usize {
         total += r.skipped.len * @sizeOf([]const u8);
         for (r.skipped) |s| total += s.len;
         total += r.max_ambient.ref_des.len;
-        total += r.heatsink_ref.len;
+        total += r.cooling.heatsink.ref.len;
+        total += r.cooling.fan.model.len;
     }
     return total;
 }
@@ -137,7 +138,8 @@ fn dupeResults(
         for (src.skipped, skipped) |ss, *ds| ds.* = try alloc.dupe(u8, ss);
         dst.skipped = skipped;
         dst.max_ambient.ref_des = try alloc.dupe(u8, src.max_ambient.ref_des);
-        dst.heatsink_ref = try alloc.dupe(u8, src.heatsink_ref);
+        dst.cooling.heatsink.ref = try alloc.dupe(u8, src.cooling.heatsink.ref);
+        dst.cooling.fan.model = try alloc.dupe(u8, src.cooling.fan.model);
         done += 1;
     }
     return out;
@@ -150,7 +152,8 @@ fn freeResult(alloc: std.mem.Allocator, r: thermal_scenarios.ScenarioResult) voi
     for (r.skipped) |s| alloc.free(s);
     alloc.free(r.skipped);
     alloc.free(r.max_ambient.ref_des);
-    alloc.free(r.heatsink_ref);
+    alloc.free(r.cooling.heatsink.ref);
+    alloc.free(r.cooling.fan.model);
 }
 
 fn freeResults(alloc: std.mem.Allocator, results: []thermal_scenarios.ScenarioResult) void {
@@ -424,7 +427,7 @@ test "thermal cache hands back a copy that outlives the entry" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     const solved = try fakeResults(arena.allocator(), 9, 4);
     solved[0].scenario = .heatsink;
-    solved[0].heatsink_ref = try arena.allocator().dupe(u8, "U1");
+    solved[0].cooling.heatsink.ref = try arena.allocator().dupe(u8, "U1");
     store.put(arena.allocator(), &fx.eval, fx.key(0), solved);
     // The arena that solved it is gone — the entry must not point into it.
     arena.deinit();
@@ -432,7 +435,7 @@ test "thermal cache hands back a copy that outlives the entry" {
     const hit = store.get(testing.allocator, fx.key(0)) orelse return error.ExpectedHit;
     defer freeResults(testing.allocator, hit);
     try testing.expectEqualStrings("U1", hit[0].parts[0].ref_des);
-    try testing.expectEqualStrings("U1", hit[0].heatsink_ref);
+    try testing.expectEqualStrings("U1", hit[0].cooling.heatsink.ref);
 
     // Evicting the entry must not disturb the copy already handed out.
     store.mutex.lock();
@@ -441,7 +444,7 @@ test "thermal cache hands back a copy that outlives the entry" {
     store.freeEntry(testing.allocator, removed.key, removed.value);
     store.mutex.unlock();
     try testing.expectEqualStrings("U1", hit[0].parts[0].ref_des);
-    try testing.expectEqualStrings("U1", hit[0].heatsink_ref);
+    try testing.expectEqualStrings("U1", hit[0].cooling.heatsink.ref);
     try testing.expectEqual(@as(f64, 9), hit[0].grid.rise_c[0]);
 }
 
