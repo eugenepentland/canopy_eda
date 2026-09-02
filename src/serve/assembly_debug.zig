@@ -1468,9 +1468,11 @@ test "assembly viewer ignores PCB editor copper-pour opacity" {
 // spec: Web Server - assembly review derives bare via copper only by clipping it through mask-opening geometry, including the exact authored-width board-edge band
 test "assembly viewer clips vias through mask opening geometry" {
     const board_js = @embedFile("assets/pcb_board.js");
-    try std.testing.expect(std.mem.indexOf(u8, board_js, "r.perimeter_mask_width") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "function paintPerimeterMaskOpening(ctx,L,mw)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "Number(PCB.rules&&PCB.rules.perimeter_mask_width)") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "ctx.clip();physicalBoardPath(ctx)") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "ctx.lineWidth=2*mw*S") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "perimeterMaskSameNet(t.net,pour)") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "function isPerimeterVia(v)") == null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "viaReliefOf") == null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "including via rings, through these polygons") != null);

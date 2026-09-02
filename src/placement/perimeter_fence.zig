@@ -63,7 +63,8 @@ fn sameNetName(a: []const u8, b: []const u8) bool {
         std.ascii.eqlIgnoreCase(shortName(a), shortName(b));
 }
 
-fn routedNetMatches(p: optimizer.Placement, net: i32, name: []const u8) bool {
+/// Whether a routed-copper net index names the requested flattened or leaf net.
+pub fn routedNetMatches(p: optimizer.Placement, net: i32, name: []const u8) bool {
     if (net < 0) return false;
     const i: usize = @intCast(net);
     return i < p.nets.len and sameNetName(p.nets[i].name, name);
@@ -72,7 +73,8 @@ fn routedNetMatches(p: optimizer.Placement, net: i32, name: []const u8) bool {
 /// The matching ground pour on this outer face. A perimeter mask declaration
 /// is not permission to uncover arbitrary copper or bare laminate: its opening
 /// exists only where the fence net is the face's declared ground pour.
-fn faceGroundPour(p: optimizer.Placement, side: optimizer.Side) ?[]const u8 {
+/// Return the matching ground-pour net that permits a perimeter opening.
+pub fn maskPourNetForFace(p: optimizer.Placement, side: optimizer.Side) ?[]const u8 {
     const pour_net = p.rules.pourNetOnSide(side) orelse return null;
     if (!optimizer.isGroundName(shortName(pour_net))) return null;
     if (!sameNetName(pour_net, p.rules.perimeter_fence.net)) return null;
@@ -248,7 +250,8 @@ fn appendBoxInterval(
         try blocked.append(alloc, interval);
 }
 
-fn retainedWeb(p: optimizer.Placement) f64 {
+/// Finished mask dam retained around copper inside the perimeter opening.
+pub fn retainedWeb(p: optimizer.Placement) f64 {
     return @max(pad_clearance_mm, p.rules.design.mask.web);
 }
 
@@ -289,7 +292,7 @@ pub fn maskSegmentsForFaceWithVias(
 ) std.mem.Allocator.Error![]const MaskSegment {
     const width = p.rules.perimeter_fence.mask_width;
     if (!(width > 0) or p.board_rect == null) return &.{};
-    const ground_net = if (side) |face| faceGroundPour(p, face) orelse return &.{} else null;
+    const ground_net = if (side) |face| maskPourNetForFace(p, face) orelse return &.{} else null;
     const poly = try outlinePoints(alloc, p);
     defer if (p.board_poly == null and poly.len > 0) alloc.free(poly);
     if (poly.len < 3) return &.{};

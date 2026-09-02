@@ -853,18 +853,21 @@ fn thermalSquareInsideFill(fill: pour.Fill, cx: f64, cy: f64, half: f64) bool {
 /// RF opening, a clear-polarity copy of that pad's aperture plus one web puts
 /// back only a local pad-shaped mask island; the pad aperture is then reopened,
 /// so the trace exposure remains continuous around it. A declared perimeter
-/// fence adds openings centred on the exact finished edge; CAM clips the
-/// outside half, leaving the authored `mask-width` band inward on both faces.
-/// The stroke exists only on a face carrying a matching GND pour. Pads and
-/// foreign routed copper split it, retaining finished mask over every non-GND
-/// feature and the pour-clearance antipad around it.
+/// fence first opens one continuous band centred on the exact finished edge;
+/// CAM clips the outside half, leaving the authored `mask-width` inward. Before
+/// any other opening is painted, a clear-polarity pass restores pad-shaped mask
+/// islands and exact routed-copper guards. This leaves only the requested
+/// 0.2 mm dam instead of the oversized round scallop produced by splitting a
+/// wide outline stroke. The band exists only on a face carrying a matching GND
+/// pour; later intentional RF relief and pad apertures reopen normally.
 fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optimizer.Side) Error!void {
     const margin = placement.rules.design.mask.margin;
-    const had_relief = try writeMaskRelief(g, placement, copper, side);
     var physical = copper;
     physical.tracks = try physicalTracks(g.arena, copper);
     physical.arcs = try physicalArcs(g.arena, copper);
     physical.rf_paths = &.{};
+    try writePerimeterMaskOpening(g, placement, physical, side);
+    const had_relief = try writeMaskRelief(g, placement, copper, side);
     if (had_relief) try writeMaskPadIslands(g, placement, physical, side);
     for (placement.parts) |p| {
         for (p.pads) |pad| {
@@ -891,14 +894,6 @@ fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optim
         try g.use(.c, merge.width, 0);
         try g.line(merge.x1, merge.y1, merge.x2, merge.y2);
     }
-    const fence = placement.rules.perimeter_fence;
-    if (fence.mask_width > 0) {
-        const segments = try perimeter_fence.maskSegmentsForFaceWithVias(g.arena, placement, physical.tracks, physical.vias, side);
-        if (segments.len > 0) {
-            try g.use(.c, 2 * fence.mask_width, 0);
-            for (segments) |segment| try g.line(segment.a[0], segment.a[1], segment.b[0], segment.b[1]);
-        }
-    }
     // The paddle flashes above can uncover ordinary routed copper on this
     // outer face. Put mask back over every non-ground trace/via after ALL
     // openings so this safety guard has final precedence.
@@ -910,6 +905,62 @@ fn writeMask(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optim
             try protectOppositeEpSignals(g, placement, physical, p, pad, side);
         }
     }
+}
+
+/// Open the whole perimeter band, then subtract only the copper-shaped safety
+/// islands that must stay coated. This runs before RF relief and pad apertures:
+/// clear polarity therefore affects only the perimeter opening, while later
+/// intentional openings retain their normal precedence.
+fn writePerimeterMaskOpening(g: *Gx, placement: optimizer.Placement, copper: Copper, side: optimizer.Side) Error!void {
+    const fence = placement.rules.perimeter_fence;
+    if (!(fence.mask_width > 0)) return;
+    const pour_net = perimeter_fence.maskPourNetForFace(placement, side) orelse return;
+    const poly = try perimeter_fence.outlinePoints(g.arena, placement);
+    if (poly.len < 3) return;
+
+    try g.use(.c, 2 * fence.mask_width, 0);
+    for (poly, 0..) |a, i| {
+        const b = poly[(i + 1) % poly.len];
+        try g.line(a[0], a[1], b[0], b[1]);
+    }
+
+    const design = placement.rules.design;
+    const web = perimeter_fence.retainedWeb(placement);
+    try g.polarity(false);
+
+    // Through lands protect both faces; SMD lands protect only their own face.
+    // The pad aperture is reopened later by the ordinary mask pass.
+    for (placement.parts) |part| {
+        for (part.pads) |pad| {
+            if (isSmd(pad) and part.side != side) continue;
+            const aperture_margin = @max(@as(f64, 0), pad.maskMargin(design.mask.margin));
+            try flashPad(g, part, pad, aperture_margin + web);
+        }
+    }
+
+    const layer: u8 = if (side == .bottom) 1 else 0;
+    for (copper.tracks) |track| {
+        if (track.layer != layer or !(track.width > 0)) continue;
+        if (perimeter_fence.routedNetMatches(placement, track.net, pour_net)) continue;
+        const clearance = @max(web, placement.rules.clearanceForNet(track.net, design.pour.clearance_outer));
+        try g.use(.c, track.width + 2 * clearance, 0);
+        try g.line(track.x1, track.y1, track.x2, track.y2);
+    }
+    for (copper.arcs) |arc| {
+        if (arc.layer != layer or !(arc.width > 0)) continue;
+        if (perimeter_fence.routedNetMatches(placement, arc.net, pour_net)) continue;
+        const clearance = @max(web, placement.rules.clearanceForNet(arc.net, design.pour.clearance_outer));
+        try g.use(.c, arc.width + 2 * clearance, 0);
+        try g.arc(arc.p1, arc.pm, arc.p2);
+    }
+    for (copper.vias) |via| {
+        if (!(via.dia > 0)) continue;
+        if (perimeter_fence.routedNetMatches(placement, via.net, pour_net)) continue;
+        const clearance = @max(web, placement.rules.clearanceForNet(via.net, design.pour.clearance_outer));
+        try g.use(.c, via.dia + 2 * clearance, 0);
+        try g.flash(via.x, via.y);
+    }
+    try g.polarity(true);
 }
 
 /// Put solder mask back locally where a routed RF opening overlaps a pad's
@@ -2693,6 +2744,7 @@ test "perimeter mask band ignores a pad-free component body" {
 }
 
 // spec: placement/perimeter-fence - each face's perimeter opening retains mask over foreign pads, routed traces, vias, and the matching GND pour's clearance around them, without suppressing otherwise-valid fence sites
+// spec: placement/perimeter-fence - fabrication and physical views form that opening as one continuous edge band with copper-shaped clear-polarity protectors, leaving the 0.2 mm pad dam without extra round-ended mask scallops
 test "perimeter mask stays on non-ground copper while fence vias remain independent" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -2741,21 +2793,30 @@ test "perimeter mask stays on non-ground copper while fence vias remain independ
     var top_writer: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&top_writer.writer, arena, placement, .{ .tracks = &tracks, .vias = &vias }, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top" });
     const top = top_writer.written();
-    // The pad aperture ends at x=5.55 (0.5 mm copper radius + 0.05 mm mask
-    // margin); its nearest perimeter-stroke cap ends at x=5.35, leaving the
-    // local 0.2 mm web. The SIG trace carves x=13..15 and the SIG via carves
-    // x=15.9..18.1, so neither foreign feature is uncovered by the GND band.
-    try testing.expect(std.mem.indexOf(u8, top, "X0Y10000000D02*\nX3550000Y10000000D01*") != null);
-    try testing.expect(std.mem.indexOf(u8, top, "X6450000Y10000000D02*\nX13000000Y10000000D01*") != null);
-    try testing.expect(std.mem.indexOf(u8, top, "X15000000Y10000000D02*\nX15900000Y10000000D01*") != null);
-    try testing.expect(std.mem.indexOf(u8, top, "X18100000Y10000000D02*\nX20000000Y10000000D01*") != null);
+    // The outline stays one continuous opening rather than four round-ended
+    // fragments. Clear polarity then restores only the pad aperture plus its
+    // 0.2 mm web, the SIG trace plus pour clearance, and the SIG via guard.
+    try testing.expect(std.mem.indexOf(u8, top, "X0Y10000000D02*\nX20000000Y10000000D01*") != null);
+    const clear_pos = std.mem.indexOf(u8, top, "%LPC*%") orelse return error.ClearPolarityMissing;
+    try testing.expect(std.mem.indexOf(u8, top, "R,1.500000X0.900000*%") != null);
+    try testing.expect(std.mem.indexOfPos(u8, top, clear_pos, "X5000000Y9500000D03*") != null);
+    try testing.expect(std.mem.indexOf(u8, top, "C,0.600000*%") != null);
+    try testing.expect(std.mem.indexOfPos(u8, top, clear_pos, "X14000000Y10000000D02*\nX14000000Y8000000D01*") != null);
+    try testing.expect(std.mem.indexOf(u8, top, "C,0.800000*%") != null);
+    try testing.expect(std.mem.indexOfPos(u8, top, clear_pos, "X17000000Y9500000D03*") != null);
+    const reopen_pos = std.mem.indexOfPos(u8, top, clear_pos, "%LPD*%") orelse return error.DarkPolarityMissing;
+    try testing.expect(reopen_pos > clear_pos);
+    try testing.expect(std.mem.indexOf(u8, top, "R,1.100000X0.500000*%") != null);
 
     var bottom_writer: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&bottom_writer.writer, arena, placement, .{ .tracks = &tracks, .vias = &vias }, &.{}, export_fab.frameFor(placement), .{ .mask = .bottom }, .{ .function = "Soldermask,Bot" });
-    // The top-only pad/track do not affect the bottom. The through via does.
-    try testing.expect(std.mem.indexOf(u8, bottom_writer.written(), "X0Y10000000D02*\nX15900000Y10000000D01*") != null);
-    try testing.expect(std.mem.indexOf(u8, bottom_writer.written(), "X18100000Y10000000D02*\nX20000000Y10000000D01*") != null);
-    try testing.expect(std.mem.indexOf(u8, bottom_writer.written(), "X0Y10000000D02*\nX20000000Y10000000D01*") == null);
+    // The top-only pad/track do not affect the bottom. The through via still
+    // restores its exact circular guard after the same continuous band.
+    const bottom = bottom_writer.written();
+    try testing.expect(std.mem.indexOf(u8, bottom, "X0Y10000000D02*\nX20000000Y10000000D01*") != null);
+    try testing.expect(std.mem.indexOf(u8, bottom, "R,1.500000X0.900000*%") == null);
+    try testing.expect(std.mem.indexOf(u8, bottom, "C,0.600000*%") == null);
+    try testing.expect(std.mem.indexOf(u8, bottom, "C,0.800000*%") != null);
 
     // Fence generation remains a copper/DRC concern, independent of mask gaps.
     const sites = try perimeter_fence.generate(arena, placement);

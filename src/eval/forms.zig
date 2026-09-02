@@ -633,8 +633,9 @@ pub const scope_form_docs = blk: {
             "finished edge, and WIDTH removes solder mask inward from the edge only on a face carrying a matching GND pour (" ++ board_layers.f_mask ++
             " / " ++ board_layers.b_mask ++ "). Component bodies/courtyards do not interrupt the derived edge hardware: " ++
             "pad proximity is the only component-derived reason to suppress a fence via, and its annulus stays at least 0.2 mm " ++
-            "from the pad. Each face's mask opening retains solder mask over foreign pads, tracks, vias, and the GND pour " ++
-            "clearance around them. Ordinary copper and drill DRC legality still applies to every via. The fence net defaults to GND. " ++
+            "from the pad. Each face uses one continuous mask opening with copper-shaped protectors that retain solder mask over " ++
+            "foreign pads, tracks, vias, and the GND pour clearance around them, leaving a 0.2 mm pad dam without oversized edge " ++
+            "scallops. Ordinary copper and drill DRC legality still applies to every via. The fence net defaults to GND. " ++
             "(keepout CLEARANCE …) reserves a visible " ++
             "band beyond the vias' inward copper edge; (blocks …) chooses whether components, " ++
             "tracks, and/or vias are forbidden there (all three by default), while (allow-nets …) " ++

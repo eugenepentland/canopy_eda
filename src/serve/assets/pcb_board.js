@@ -1619,11 +1619,6 @@ function paintGridDots(ctx,k){
 function physicalBoardPath(ctx){var pts=reviewBoardPoints();if(pts.length<3)return false;
  ctx.beginPath();ctx.moveTo(X(pts[0][0]),Y(pts[0][1]));
  for(var i=1;i<pts.length;i++)ctx.lineTo(X(pts[i][0]),Y(pts[i][1]));ctx.closePath();return true;}
-var perimeterMaskGeom=null,perimeterMaskOvs=-1,perimeterMaskOutline=-1,perimeterMaskWidth=-1,perimeterMaskLayer=-1,perimeterMaskRouteRev=-1;
-function perimeterMaskBoxInterval(a,b,q){var lo=0,hi=1;
- function axis(o,d,mn,mx){if(Math.abs(d)<=1e-12)return o>=mn&&o<=mx;
-  var ta=(mn-o)/d,tb=(mx-o)/d;lo=Math.max(lo,Math.min(ta,tb));hi=Math.min(hi,Math.max(ta,tb));return lo<=hi;}
- return axis(a[0],b[0]-a[0],q.x0,q.x1)&&axis(a[1],b[1]-a[1],q.y0,q.y1)?[lo,hi]:null;}
 function perimeterMaskSameNet(a,b){a=String(a||"").toUpperCase();b=String(b||"").toUpperCase();
  if(a===b)return true;var ai=a.lastIndexOf("/"),bi=b.lastIndexOf("/");
  return (ai>=0?a.slice(ai+1):a)===(bi>=0?b.slice(bi+1):b);}
@@ -1631,26 +1626,6 @@ function perimeterMaskPourNet(){if(activeLayer!==0&&activeLayer!==1)return null;
  var st=stackForSignal(activeLayer),net=st&&st.kind==="plane"&&st.plane,rule=(PCB.rules||{}).perimeter_mask_net||"GND";
  if(!net||!perimeterMaskSameNet(net,rule))return null;
  var leaf=String(net).slice(String(net).lastIndexOf("/")+1).toUpperCase();return isGroundNetName(leaf)?net:null;}
-function perimeterMaskSegments(){var mw=Number(PCB.rules&&PCB.rules.perimeter_mask_width)||0;
- if(perimeterMaskGeom&&perimeterMaskOvs===ovsRev&&perimeterMaskOutline===outlineGeomRev&&perimeterMaskWidth===mw&&perimeterMaskLayer===activeLayer&&perimeterMaskRouteRev===keepoutGeomRev)return perimeterMaskGeom;
- var pour=perimeterMaskPourNet();if(!pour)return [];
- var margin=Math.max(0,Number(PCB.rules&&PCB.rules.mask_margin)||0),web=Math.max(.2,Number(PCB.rules&&PCB.rules.mask_web)||0),
-  base=Math.max(web,Number(PCB.rules&&PCB.rules.pour_clearance_outer)||0);
- var pts=reviewBoardPoints(),out=[];if(mw>0&&pts.length>=3)for(var ei=0;ei<pts.length;ei++){var a=pts[ei],b=pts[(ei+1)%pts.length],blocked=[];
-  P.forEach(function(p,pi){(p.pads||[]).forEach(function(pd){if(!(pd.drill>0)&&(p.side==="bottom"?1:0)!==activeLayer)return;
-   var q=wrect(pi,pd),grow=mw+margin+web,iv=perimeterMaskBoxInterval(a,b,{x0:q.x0-grow,y0:q.y0-grow,x1:q.x1+grow,y1:q.y1+grow});if(iv)blocked.push(iv);});});
-  (PCB.tracks||[]).forEach(function(t){if((+t.l||0)!==activeLayer||!(+t.w>0)||perimeterMaskSameNet(t.net,pour))return;
-   var grow=mw+(+t.w)/2+Math.max(base,netClrFor(t.net));trackChords(t).forEach(function(s){
-    var iv=perimeterMaskBoxInterval(a,b,{x0:Math.min(+s.x1,+s.x2)-grow,y0:Math.min(+s.y1,+s.y2)-grow,x1:Math.max(+s.x1,+s.x2)+grow,y1:Math.max(+s.y1,+s.y2)+grow});if(iv)blocked.push(iv);});});
-  (PCB.vias||[]).forEach(function(v){if(!(+(v.d||0)>0)||perimeterMaskSameNet(v.net,pour))return;
-   var grow=mw+(+v.d)/2+Math.max(base,netClrFor(v.net)),iv=perimeterMaskBoxInterval(a,b,{x0:+v.x-grow,y0:+v.y-grow,x1:+v.x+grow,y1:+v.y+grow});if(iv)blocked.push(iv);});
-  blocked.sort(function(u,v){return u[0]-v[0];});var cursor=0;blocked.forEach(function(iv){var lo=Math.max(0,Math.min(1,iv[0])),hi=Math.max(0,Math.min(1,iv[1]));
-   if(lo>cursor+1e-9)out.push([a[0]+(b[0]-a[0])*cursor,a[1]+(b[1]-a[1])*cursor,a[0]+(b[0]-a[0])*lo,a[1]+(b[1]-a[1])*lo]);cursor=Math.max(cursor,hi);});
-  if(cursor<1-1e-9)out.push([a[0]+(b[0]-a[0])*cursor,a[1]+(b[1]-a[1])*cursor,b[0],b[1]]);}
- perimeterMaskGeom=out;perimeterMaskOvs=ovsRev;perimeterMaskOutline=outlineGeomRev;perimeterMaskWidth=mw;perimeterMaskLayer=activeLayer;perimeterMaskRouteRev=keepoutGeomRev;return out;}
-function strokePerimeterMask(ctx){var ss=perimeterMaskSegments();
- ctx.beginPath();for(var i=0;i<ss.length;i++){var s=ss[i];if(!s||s.length<4)continue;
-  ctx.moveTo(X(s[0]),Y(s[1]));ctx.lineTo(X(s[2]),Y(s[3]));}ctx.stroke();}
 // Paint an opposite-face sink before the physical board. The board and thermal
 // field therefore occlude its footprint while any real overhang remains
 // visible around the edge — the depth cue that the retained SVG could not
@@ -1670,13 +1645,8 @@ function paintRearHeatsink(ctx,k){var s=heatsinkRect();
  ctx.fillText("HEATSINK · "+(s.side||"bottom").toUpperCase()+(s.target_ref?" · "+s.target_ref:""),x+5,y+13);
  ctx.restore();}
 function paintPhysicalBoard(ctx,k){if(!PHYSICAL_REVIEW||!physicalBoardPath(ctx))return;
- var ik=1/Math.max(k||1,0.01),r=PCB.rules||{},mw=Number(r.perimeter_mask_width)||0;
+ var ik=1/Math.max(k||1,0.01);
  ctx.save();ctx.fillStyle=PH.mask;ctx.fill();
- // The Gerber mask layer strokes Edge.Cuts at 2*mask-width. Clip that same
- // stroke to the board so the physical review shows exactly WIDTH inward,
- // without painting an amber halo outside the finished edge.
- if(mw>0){ctx.clip();physicalBoardPath(ctx);ctx.strokeStyle=PH.opening;
-  ctx.lineWidth=2*mw*S;ctx.lineJoin="round";strokePerimeterMask(ctx);}
  ctx.restore();ctx.save();physicalBoardPath(ctx);
  ctx.strokeStyle=PH.edge;ctx.lineWidth=Math.max(1.4*ik,0.16*S);ctx.lineJoin="round";ctx.stroke();
  ctx.globalAlpha=0.22;ctx.strokeStyle="#8bc49a";ctx.lineWidth=Math.max(0.7*ik,0.05*S);ctx.stroke();
@@ -2339,6 +2309,23 @@ function clearMaskPadIslands(ctx,L){var grow=maskPadIslandGrow();
  P.forEach(function(p){(p.pads||[]).forEach(function(pd){
   if(!(pd.thru||pd.drill>0||(p.side==="bottom"?1:0)===L))return;
   var shape=worldPadPath(p,pd);ctx.fill(shape);if(grow>0)ctx.stroke(shape);});});ctx.restore();}
+// Match Gerber polarity ordering: expose one continuous edge band, subtract
+// only copper-shaped guards, then let intentional RF/pad openings repaint.
+// This avoids the oversized round scallops made by splitting a wide stroke.
+function paintPerimeterMaskOpening(ctx,L,mw){var pour=perimeterMaskPourNet();if(!pour||!(mw>0))return false;
+ var margin=Math.max(0,Number(PCB.rules&&PCB.rules.mask_margin)||0),web=Math.max(.2,Number(PCB.rules&&PCB.rules.mask_web)||0),
+  base=Math.max(web,Number(PCB.rules&&PCB.rules.pour_clearance_outer)||0);
+ ctx.save();physicalBoardPath(ctx);ctx.clip();physicalBoardPath(ctx);ctx.strokeStyle=PH.substrate;
+ ctx.lineWidth=2*mw*S;ctx.lineJoin="round";ctx.stroke();ctx.restore();
+ ctx.save();ctx.globalCompositeOperation="destination-out";ctx.fillStyle="#000";ctx.strokeStyle="#000";
+ ctx.lineJoin="round";ctx.lineCap="round";ctx.lineWidth=2*(margin+web)*S;
+ P.forEach(function(p){(p.pads||[]).forEach(function(pd){if(!(pd.thru||pd.drill>0||(p.side==="bottom"?1:0)===L))return;
+  var shape=worldPadPath(p,pd);ctx.fill(shape);if(margin+web>0)ctx.stroke(shape);});});
+ (PCB.tracks||[]).forEach(function(t){if((t.l||0)!==L||!(+t.w>0)||perimeterMaskSameNet(t.net,pour))return;
+  var clr=Math.max(base,netClrFor(t.net));ctx.lineWidth=(+t.w+2*clr)*S;ctx.beginPath();trackPath(ctx,t);ctx.stroke();});
+ (PCB.vias||[]).forEach(function(v){if(!(+(v.d||0)>0)||perimeterMaskSameNet(v.net,pour))return;
+  var clr=Math.max(base,netClrFor(v.net));ctx.beginPath();ctx.arc(X(v.x),Y(v.y),(+v.d/2+clr)*S,0,6.2832);ctx.fill();});
+ ctx.restore();return true;}
 function paintMaskRelief(ctx){if(!PHYSICAL_REVIEW||reviewFocusHasNets())return;
  var d=PCB.mask_relief,os=d&&d.openings||[],ss=d&&d.strokes||[],js=d&&d.joints||[],ms=PCB.mask_merges||[],L=activeLayer,
   mw=Number(PCB.rules&&PCB.rules.perimeter_mask_width)||0,any=mw>0,layerHasOutline=false,hasRfRelief=false;
@@ -2358,8 +2345,7 @@ function paintMaskRelief(ctx){if(!PHYSICAL_REVIEW||reviewFocusHasNets())return;
   // through that opening below; in particular a GND pour remains copper-gold
   // instead of being replaced by the old amber opening silhouette.
   mc.strokeStyle=PH.substrate;mc.fillStyle=PH.substrate;
-  if(mw>0){mc.save();physicalBoardPath(mc);mc.clip();
-   mc.strokeStyle=PH.substrate;mc.lineWidth=2*mw*S;mc.lineJoin="round";strokePerimeterMask(mc);mc.restore();}
+  if(mw>0)paintPerimeterMaskOpening(mc,L,mw);
   if(layerHasOutline)os.forEach(function(o){if((o.l||0)!==L)return;if(reliefOutlinePath(mc,o))mc.fill();});
   else{
    ss.forEach(function(s){if((s.l||0)!==L)return;

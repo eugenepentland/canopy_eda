@@ -2287,6 +2287,7 @@ not accumulated as hand-authored copper.
 - pad proximity is the only component-derived reason to suppress a perimeter via site, retaining 0.2 mm from pad copper to the via annulus; ordinary copper and drill DRC legality still applies
 - a face without a declared ground pour matching the fence net has no perimeter mask opening
 - each face's perimeter opening retains mask over foreign pads, routed traces, vias, and the matching GND pour's clearance around them, without suppressing otherwise-valid fence sites
+- fabrication and physical views form that opening as one continuous edge band with copper-shaped clear-polarity protectors, leaving the 0.2 mm pad dam without extra round-ended mask scallops
 - a perimeter keepout begins at the fence via's inward copper edge, carries typed block policy, and admits named nets
 - Gerber opens at most the authored-width solder-mask band around the exact board outline, clipped to matching outer-face GND pour copper
 - completeness-waiver: empty inputs (no effective board outline, incomplete dimensions, or an unresolved net produce an empty site set)

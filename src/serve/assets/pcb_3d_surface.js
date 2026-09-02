@@ -246,17 +246,6 @@
     });
   }
 
-  function maskPadBox(part,pad) {
-    var a=(+part.rot||0)*Math.PI/180,c=Math.cos(a),s=Math.sin(a),bot=(part.side||"top")==="bottom";
-    function world(x,y){if(bot)x=-x;return [(+part.x||0)+x*c-y*s,(+part.y||0)+x*s+y*c];}
-    var points=[];
-    if(pad.poly&&pad.poly.length>=3)points=pad.poly.map(function(v){return world(+v[0],+v[1]);});
-    else {var q=(+pad.rot||0)*Math.PI/180,pc=Math.cos(q),ps=Math.sin(q),hw=(+pad.w||0)/2,hh=(+pad.h||0)/2;
-      [[-hw,-hh],[hw,-hh],[hw,hh],[-hw,hh]].forEach(function(v){points.push(world((+pad.x||0)+v[0]*pc-v[1]*ps,(+pad.y||0)+v[0]*ps+v[1]*pc));});}
-    var x0=1e18,y0=1e18,x1=-1e18,y1=-1e18;points.forEach(function(v){x0=Math.min(x0,v[0]);y0=Math.min(y0,v[1]);x1=Math.max(x1,v[0]);y1=Math.max(y1,v[1]);});
-    return {x0:x0,y0:y0,x1:x1,y1:y1};
-  }
-
   function maskSameNet(a,b) {
     a=String(a||"").toUpperCase();b=String(b||"").toUpperCase();
     if(a===b)return true;var ai=a.lastIndexOf("/"),bi=b.lastIndexOf("/");
@@ -276,33 +265,19 @@
     return net&&maskGroundName(data,net)&&maskSameNet(net,rule)?net:null;
   }
 
-  function maskBoxInterval(a,b,q) {
-    var lo=0,hi=1;
-    function axis(o,d,mn,mx) { if(Math.abs(d)<=1e-12)return o>=mn&&o<=mx;
-      var ta=(mn-o)/d,tb=(mx-o)/d;lo=Math.max(lo,Math.min(ta,tb));hi=Math.min(hi,Math.max(ta,tb));return lo<=hi; }
-    return axis(a[0],b[0]-a[0],q.x0,q.x1)&&axis(a[1],b[1]-a[1],q.y0,q.y1)?[lo,hi]:null;
-  }
-
-  function maskPerimeterSegments(data,pts,width,side) {
-    var pour=maskFacePour(data,side);if(!pour)return [];
-    var out=[],layer=side==="bottom"?1:0,rules=data.rules||{},margin=Math.max(0,+rules.mask_margin||0),
+  function drawPerimeterProtectors(ctx,data,side,pour) {
+    var layer=side==="bottom"?1:0,rules=data.rules||{},margin=Math.max(0,+rules.mask_margin||0),
       islandGrow=window.PCBMaskPadIslandGrow?window.PCBMaskPadIslandGrow():margin,web=Math.max(.2,islandGrow-margin),
       base=Math.max(web,+rules.pour_clearance_outer||0),netclr=data.netclr||{};
     function clearance(net){var key=String(net||""),dot=key.indexOf(".");if(dot>=0)key=key.slice(0,dot);return Math.max(base,+netclr[key]||0);}
-    for(var ei=0;ei<pts.length;ei++) { var a=pts[ei],b=pts[(ei+1)%pts.length],blocked=[];
-      (data.parts||[]).forEach(function(part){(part.pads||[]).forEach(function(pad){if(!(+pad.drill>0)&&(part.side||"top")!==side)return;
-        var q=maskPadBox(part,pad),grow=width+margin+web,iv=maskBoxInterval(a,b,{x0:q.x0-grow,y0:q.y0-grow,x1:q.x1+grow,y1:q.y1+grow});if(iv)blocked.push(iv);});});
-      (data.tracks||[]).forEach(function(t){if((+t.l||0)!==layer||!(+t.w>0)||maskSameNet(t.net,pour))return;
-        var grow=width+(+t.w)/2+clearance(t.net),xs=[+t.x1,+t.x2],ys=[+t.y1,+t.y2];if(isFinite(+t.xm)){xs.push(+t.xm);ys.push(+t.ym);}
-        var iv=maskBoxInterval(a,b,{x0:Math.min.apply(null,xs)-grow,y0:Math.min.apply(null,ys)-grow,x1:Math.max.apply(null,xs)+grow,y1:Math.max.apply(null,ys)+grow});if(iv)blocked.push(iv);});
-      (data.vias||[]).forEach(function(v){if(!(+(v.d||0)>0)||maskSameNet(v.net,pour))return;var grow=width+(+v.d)/2+clearance(v.net),
-        iv=maskBoxInterval(a,b,{x0:+v.x-grow,y0:+v.y-grow,x1:+v.x+grow,y1:+v.y+grow});if(iv)blocked.push(iv);});
-      blocked.sort(function(u,v){return u[0]-v[0];});var cursor=0;
-      blocked.forEach(function(iv){var lo=Math.max(0,Math.min(1,iv[0])),hi=Math.max(0,Math.min(1,iv[1]));
-        if(lo>cursor+1e-9)out.push([a[0]+(b[0]-a[0])*cursor,a[1]+(b[1]-a[1])*cursor,a[0]+(b[0]-a[0])*lo,a[1]+(b[1]-a[1])*lo]);cursor=Math.max(cursor,hi);});
-      if(cursor<1-1e-9)out.push([a[0]+(b[0]-a[0])*cursor,a[1]+(b[1]-a[1])*cursor,b[0],b[1]]);
-    }
-    return out;
+    ctx.lineCap="round";ctx.lineJoin="round";
+    (data.parts||[]).forEach(function(part){withPartTransform(ctx,part,function(){(part.pads||[]).forEach(function(pad){
+      if(!padOnFace(part,pad,side))return;tracePad(ctx,pad);ctx.fill();ctx.lineWidth=2*(margin+web);ctx.stroke();});});});
+    (data.tracks||[]).forEach(function(t){if((+t.l||0)!==layer||!(+t.w>0)||maskSameNet(t.net,pour))return;
+      ctx.lineWidth=+t.w+2*clearance(t.net);ctx.beginPath();var arc=trackArc(t);
+      if(arc)ctx.arc(arc.x,arc.y,arc.r,arc.a0,arc.a1,arc.clockwise);else{ctx.moveTo(+t.x1,+t.y1);ctx.lineTo(+t.x2,+t.y2);}ctx.stroke();});
+    (data.vias||[]).forEach(function(v){if(!(+(v.d||0)>0)||maskSameNet(v.net,pour))return;
+      ctx.beginPath();ctx.arc(+v.x,+v.y,+v.d/2+clearance(v.net),0,Math.PI*2);ctx.fill();});
   }
 
   function maskCanvas(data, pts, b, width, height, scale, side) {
@@ -310,6 +285,10 @@
     var ctx = cv.getContext("2d");
     ctx.setTransform(scale, 0, 0, scale, -b.minx * scale, -b.miny * scale);
     ctx.fillStyle = MASK; boardPath(ctx, pts); ctx.fill();
+    var edge = Math.max(0, +(data.rules && data.rules.perimeter_mask_width) || 0),pour=maskFacePour(data,side);
+    if(edge>0&&pour){ctx.globalCompositeOperation="destination-out";ctx.strokeStyle="#000";ctx.save();boardPath(ctx,pts);ctx.clip();
+      boardPath(ctx,pts);ctx.lineWidth=2*edge;ctx.lineJoin="round";ctx.stroke();ctx.restore();
+      ctx.globalCompositeOperation="source-over";ctx.fillStyle=MASK;ctx.strokeStyle=MASK;drawPerimeterProtectors(ctx,data,side,pour);}
     ctx.globalCompositeOperation = "destination-out"; ctx.fillStyle = "#000"; ctx.strokeStyle = "#000";
     punchRelief(ctx, data, side);
     // Restore only a local pad-shaped web over a wider RF relief, then reopen
@@ -318,16 +297,6 @@
     drawPadIslands(ctx, data, side);
     ctx.globalCompositeOperation = "destination-out"; ctx.fillStyle = "#000"; ctx.strokeStyle = "#000";
     drawPads(ctx, data, side, true); punchMaskMerges(ctx, data, side);
-    var edge = Math.max(0, +(data.rules && data.rules.perimeter_mask_width) || 0);
-    if (edge > 0) {
-      var segments = maskPerimeterSegments(data,pts,edge,side);
-      ctx.beginPath();
-      segments.forEach(function (s) {
-        if (!s || s.length < 4) return;
-        ctx.moveTo(+s[0], +s[1]); ctx.lineTo(+s[2], +s[3]);
-      });
-      ctx.lineWidth = 2 * edge; ctx.lineJoin = "round"; ctx.stroke();
-    }
     return cv;
   }
 
