@@ -131,7 +131,7 @@ pub fn evalForm(
     inst.label = tp.ref_des;
     inst.origin_key = tp.ref_des;
 
-    ids.registerRefDes(self, tp.ref_des);
+    try ids.noteAuthoredRefDes(self, tp.ref_des, form_children[0].span);
     try ctx.instances.append(self.allocator, inst);
     try ctx.pin_nets.append(self.allocator, .{
         .ref_des = tp.ref_des,

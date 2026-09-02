@@ -4429,6 +4429,8 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - malformed executable requirements and electrical declarations produce diagnostics
 - implementation metadata is evaluable but has no runtime value
 - wrapped module roots retain defmodule provenance independently of their design-block title
+- a warning raised inside an imported module is attributed to the module's own file
+- an error raised inside an imported module is attributed to the module's own file
 
 ## eval/suggest
 
@@ -4436,6 +4438,28 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - unbound library name yields an import hint naming the missing import
 - a near-miss name yields a did-you-mean suggestion from env and cache candidates
 - a name with no close candidate reports a plain unknown-name message
+
+## eval/net_suggest
+
+- a one-off net name suggests the established net it is closest to
+- a net name beyond edit distance two or equal to a candidate yields no suggestion
+- a neighbour carrying a different index is a numbered sibling, not a suggestion
+- established nets are those with two or more connections plus every declared port
+- the did-you-mean hint is an appendable suffix that is empty without a candidate
+- an oversized or malformed name is skipped or compared bytewise so the scan never panics and cannot overflow its fixed buffers
+- completeness-waiver: unauthorized access (a pure in-memory ranking over names the caller already holds; it opens nothing and checks no identity)
+- completeness-waiver: i/o failure (no file, socket or process is touched — the candidates come from an already-evaluated design block)
+- completeness-waiver: concurrent access (evaluation and ERC are single-threaded, and every call takes its candidates by value and shares no mutable state)
+
+## eval/validate
+
+- a dead-end net within two edits of a well-connected net suggests that net
+- a dead-end net with no near neighbour keeps its plain message
+- a design block with an empty net list produces no dead-end lint at all
+- an oversized net name is linted with no suggestion and a malformed one is ranked bytewise — the scan never panics and cannot overflow
+- completeness-waiver: unauthorized access (post-build lint over an in-memory design block; it opens nothing and checks no identity)
+- completeness-waiver: i/o failure (the validator reads only the already-materialized block, never the filesystem)
+- completeness-waiver: concurrent access (validation runs inline on the single evaluation thread that built the block)
 
 ## eval/evaluator
 
@@ -5090,6 +5114,7 @@ Public functions: renderSchematic
 
 ## erc
 
+- a floating net within two edits of a well-connected net suggests that net
 - a net pinned by (module-policy (net-class …)) is not reported as an inferred layout class
 - a module-local supply node whose name carries a supply token counts as the IC's power connection
 - EMI coupling intent must bridge its declared domain to ground and cannot also claim supply decoupling
@@ -5203,6 +5228,10 @@ Public functions: analyze
 
 ## eval/design_block
 
+- two instances authored with one ref-des are an error naming both source locations
+- a repeat body that mints one ref-des twice is a duplicate like any other
+- shorthand-generated ref-des never collide with each other or with authored ones
+- each sub-block is its own ref-des namespace so two modules may both name R1
 - module-policy form pins the placement class of named nets on the design block
 - design-rules captures an optional ground-via maximum distance for SMD ground-pad plane stitching
 - design-rules captures an optional finished via-wall plating thickness for power-capacity analysis

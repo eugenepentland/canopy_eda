@@ -68,8 +68,18 @@ pub fn load(
     err_name: []const u8,
     last_error: ?evaluator_mod.EvalDiagnostic,
 ) std.mem.Allocator.Error!Diagnostic {
-    const source = infra_fs.cwd().readFileAlloc(allocator, file_path, max_source_bytes) catch "";
-    return build(allocator, file_path, source, err_name, last_error);
+    // An error raised inside an imported module carries that module's path;
+    // reading THAT file is what makes the span's line and caret line up.
+    const path = diagnosticFile(file_path, last_error);
+    const source = infra_fs.cwd().readFileAlloc(allocator, path, max_source_bytes) catch "";
+    return build(allocator, path, source, err_name, last_error);
+}
+
+/// The file a diagnostic's span points into: the module/component file the
+/// evaluator recorded, else the design source the caller started from.
+fn diagnosticFile(file_path: []const u8, last_error: ?evaluator_mod.EvalDiagnostic) []const u8 {
+    const le = last_error orelse return file_path;
+    return if (le.file.len > 0) le.file else file_path;
 }
 
 /// Extract the source line containing byte `offset`, but only when that

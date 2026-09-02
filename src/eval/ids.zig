@@ -80,6 +80,31 @@ pub fn registerRefDes(self: *Evaluator, ref_des: []const u8) void {
     if (num > gop.value_ptr.*) gop.value_ptr.* = num;
 }
 
+/// Record a ref-des the SOURCE named — `(instance "R1" …)`, `(series "R1" …)`,
+/// `(test-point "TP1" …)`, `(stub … (ref "U7"))` — in the current block scope
+/// and register it against the auto-counters. A second declaration of the same
+/// token in one scope is a hard error naming both places, raised here so the
+/// author sees "duplicate ref-des" instead of the `pin_multi_net` symptom the
+/// later ref-des passes turn it into. `materializeBlock` owns the scope, so a
+/// `(sub-block …)` or module body starts a fresh namespace; a `(repeat …)`
+/// body does not, and two iterations minting one token collide as they should.
+pub fn noteAuthoredRefDes(self: *Evaluator, ref_des: []const u8, span: ast.Span) EvalError!void {
+    registerRefDes(self, ref_des);
+    if (ref_des.len == 0) return;
+    const gop = self.authored_refs.getOrPut(self.allocator, ref_des) catch return EvalError.OutOfMemory;
+    if (!gop.found_existing) {
+        gop.value_ptr.* = .{ .span = span, .file = self.current_file };
+        return;
+    }
+    const first = gop.value_ptr.*;
+    self.setErrorFmt(
+        span,
+        "duplicate ref-des \"{s}\" — already declared at {s}:{d}:{d}; a ref-des must be unique within its block (each (sub-block …) is its own namespace)",
+        .{ ref_des, if (first.file.len > 0) first.file else "<source>", first.span.line, first.span.col },
+    );
+    return EvalError.InvalidForm;
+}
+
 /// Check if a ref_des looks like a standard one (uppercase letter + digits, e.g., "U1", "C23").
 pub fn isStandardRefDes(ref_des: []const u8) bool {
     if (ref_des.len < 2) return false;

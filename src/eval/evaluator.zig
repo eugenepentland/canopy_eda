@@ -48,6 +48,12 @@ pub const EvalDiagnostic = struct {
     /// Human-readable summary. Borrowed; lives as long as the source
     /// buffer or the static string the caller passed in.
     message: []const u8,
+    /// Path of the file `span` points into — the imported module or component
+    /// when the error came from one, so a diagnostic raised inside
+    /// `lib/modules/x.sexp` is not reported against the design that imported
+    /// it. Empty when the evaluator had no file in hand (raw `evalSource`);
+    /// callers fall back to the design source they started from.
+    file: []const u8 = "",
 };
 
 /// One frame of the module call stack — the module being evaluated and
@@ -67,6 +73,10 @@ pub const EvalWarning = struct {
     /// Human-readable summary. Allocated from the evaluator's allocator
     /// and intentionally never freed (project memory convention).
     message: []const u8,
+    /// Path of the file `span` points into — same contract as
+    /// `EvalDiagnostic.file`: the module/component file when the warning was
+    /// raised inside one, empty when unknown.
+    file: []const u8 = "",
 };
 
 pub const EvalError = error{
@@ -210,6 +220,29 @@ pub const Evaluator = struct {
     /// file in a fresh env until the process stack overflows. Inserted on
     /// entry, removed on exit.
     imports_in_progress: std.StringHashMapUnmanaged(void) = .empty,
+    /// Path of the source file whose nodes are being evaluated right now.
+    /// `evalFile` sets it to the design, `resolveImport` to the library file
+    /// it is loading, and `callModule` to the file a module was DEFINED in
+    /// (module bodies evaluate long after their file was read) — each saving
+    /// and restoring the enclosing value. `setError`/`warnFmt` stamp it onto
+    /// every diagnostic so a warning about a retired form inside
+    /// `lib/modules/x.sexp` names that file and line, not the design's.
+    current_file: []const u8 = "",
+    /// Ref-des authored so far in the CURRENT block scope, mapped to where it
+    /// was written. `materializeBlock` swaps in a fresh map per block — each
+    /// `(sub-block …)` / module body is its own namespace — and restores the
+    /// enclosing block's on exit. Second entry for one ref-des is the
+    /// duplicate-ref-des error, raised before auto-assignment renumbers it
+    /// into a confusing downstream symptom.
+    authored_refs: std.StringHashMapUnmanaged(AuthoredRef) = .empty,
+
+    /// Where a ref-des was authored: the span of the form that declared it,
+    /// plus the file that form lives in (a module body's forms are not in the
+    /// design file). Recorded per block scope in `authored_refs`.
+    pub const AuthoredRef = struct {
+        span: ast.Span,
+        file: []const u8,
+    };
 
     pub const PendingId = struct {
         /// Byte offset of the opening paren of the form
@@ -326,6 +359,7 @@ pub const Evaluator = struct {
         self.warnings.deinit(self.allocator);
         self.module_stack.deinit(self.allocator);
         self.imports_in_progress.deinit(self.allocator);
+        self.authored_refs.deinit(self.allocator);
         // Every `loaded_files` key is a dup this evaluator owns (both insertion
         // sites — `builders.loadFile` and the import path — copy the caller's
         // path, because the read-set outlives the call that produced it). The
@@ -351,6 +385,12 @@ pub const Evaluator = struct {
         const nodes = builders.loadDesignFile(self, path) orelse return EvalError.ImportError;
         var env = Env.init(self.allocator, null);
         defer env.deinit();
+        // Diagnostics raised while this file's own forms evaluate belong to it.
+        // (A spliced `<name>.checks.sexp` form is an exception the span-vs-file
+        // pairing cannot express today; it still reports against the design.)
+        const saved_file = self.current_file;
+        self.current_file = path;
+        defer self.current_file = saved_file;
         modules.loadPassivesPrelude(self, &env);
         return self.evalNodes(nodes, &env);
     }
@@ -411,7 +451,11 @@ pub const Evaluator = struct {
     /// `  in module 'x' (called at L:C)` context line appended per
     /// frame, innermost first.
     pub fn setError(self: *Evaluator, span: ast.Span, message: []const u8) void {
-        self.last_error = .{ .span = span, .message = self.withModuleContext(message) };
+        self.last_error = .{
+            .span = span,
+            .message = self.withModuleContext(message),
+            .file = self.current_file,
+        };
     }
 
     /// Append the module-call-stack context lines to `message`. Returns
@@ -445,7 +489,7 @@ pub const Evaluator = struct {
     /// failures silently drop the warning — never the build.
     pub fn warnFmt(self: *Evaluator, span: ast.Span, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
-        self.warnings.append(self.allocator, .{ .span = span, .message = msg }) catch return;
+        self.warnings.append(self.allocator, .{ .span = span, .message = msg, .file = self.current_file }) catch return;
     }
 
     fn evalForm(self: *Evaluator, children: []const Node, env: *Env) EvalError!Value {

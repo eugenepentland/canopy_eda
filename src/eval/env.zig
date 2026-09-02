@@ -78,6 +78,12 @@ pub const BlockDef = struct {
     body: []const ast.Node,
     /// Import scope from the module file
     imports: *Env,
+    /// File the `(defmodule …)` was read from. A module body evaluates long
+    /// after its file was loaded, so `callModule` restores this as the
+    /// evaluator's current file — otherwise every diagnostic raised inside the
+    /// module would be attributed to whichever design happened to call it.
+    /// Empty for definitions evaluated from a buffer with no path.
+    source_file: []const u8 = "",
 };
 
 /// A pin reference in a net.

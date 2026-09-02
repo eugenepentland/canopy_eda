@@ -9,6 +9,7 @@ const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const env_mod = @import("eval/env.zig");
 const na = @import("eval/net_analysis.zig");
+const net_suggest = @import("eval/net_suggest.zig");
 const rails_mod = @import("eval/rails.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
@@ -970,6 +971,7 @@ fn checkFloatingNets(
 ) !void {
     // Build port net set (these connect externally, not dead-ends)
     var port_nets: std.StringHashMapUnmanaged(void) = .empty;
+    defer port_nets.deinit(allocator);
     for (block.ports) |port| {
         try port_nets.put(allocator, port.net, {});
         try port_nets.put(allocator, port.name, {});
@@ -977,6 +979,7 @@ fn checkFloatingNets(
 
     // Also collect optional section ports — their nets are allowed to float
     var optional_nets: std.StringHashMapUnmanaged(void) = .empty;
+    defer optional_nets.deinit(allocator);
     for (block.sections) |sec| {
         try collectOptionalPortNets(allocator, &optional_nets, sec);
     }
@@ -987,6 +990,7 @@ fn checkFloatingNets(
 
     // Also exclude nets that participate in net_ties (sub-block connections)
     var tied_nets: std.StringHashMapUnmanaged(void) = .empty;
+    defer tied_nets.deinit(allocator);
     for (block.net_ties) |nt| {
         const base_a = na.baseNetName(nt.a);
         const base_b = na.baseNetName(nt.b);
@@ -994,8 +998,10 @@ fn checkFloatingNets(
         try tied_nets.put(allocator, base_b, {});
     }
 
-    // Count pins per base net name
+    // Count pins per base net name. Keys are slices into the block's own net
+    // names, so a violation may borrow one after the map is torn down.
     var net_pin_counts: std.StringHashMapUnmanaged(u32) = .empty;
+    defer net_pin_counts.deinit(allocator);
     for (block.nets) |net| {
         const base = na.baseNetName(net.name);
         if (port_nets.contains(base)) continue;
@@ -1005,12 +1011,20 @@ fn checkFloatingNets(
         gop.value_ptr.* += @intCast(net.pins.len);
     }
 
+    // Candidate names for the did-you-mean hint: a one-connection net is very
+    // often a typo of a net that IS wired up, and "Floating net" alone never
+    // says so.
+    const established = try net_suggest.establishedNets(allocator, block);
+    defer allocator.free(established);
+
     var iter = net_pin_counts.iterator();
     while (iter.next()) |entry| {
         if (entry.value_ptr.* == 1) {
             // Skip nets declared as optional ports
             if (optional_nets.contains(entry.key_ptr.*)) continue;
-            const msg = std.fmt.allocPrint(allocator, "Floating net \"{s}\" — only one connection", .{entry.key_ptr.*}) catch continue;
+            const hint = net_suggest.hint(allocator, entry.key_ptr.*, established);
+            defer if (hint.len > 0) allocator.free(hint);
+            const msg = std.fmt.allocPrint(allocator, "Floating net \"{s}\" — only one connection{s}", .{ entry.key_ptr.*, hint }) catch continue;
             try violations.append(allocator, .{
                 .kind = .floating_net,
                 .severity = .warning,
@@ -5098,4 +5112,50 @@ test "orphaned verification inside a sub-block is flagged" {
         if (v.kind != .verification_orphaned) continue;
         try std.testing.expectEqualStrings("U7", v.ref_des);
     }
+}
+
+// spec: erc - a floating net within two edits of a well-connected net suggests that net
+test "floating net finding offers a did-you-mean for a near-miss name" {
+    const allocator = std.testing.allocator;
+    const gnd_pins = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "C1", .pin = "2" },
+    };
+    const typo_pins = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "9" }};
+    const far_pins = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "8" }};
+    const nets = [_]Net{
+        .{ .name = "GND", .pins = &gnd_pins },
+        .{ .name = "GNND", .pins = &typo_pins },
+        .{ .name = "MOSI", .pins = &far_pins },
+    };
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &.{},
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkFloatingNets(allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| allocator.free(v.message);
+        violations.deinit(allocator);
+    }
+    var saw_hint = false;
+    for (violations.items) |v| {
+        if (std.mem.eql(u8, v.net, "GNND")) {
+            try std.testing.expectEqualStrings(
+                "Floating net \"GNND\" — only one connection — did you mean \"GND\"?",
+                v.message,
+            );
+            saw_hint = true;
+        }
+        // A one-connection net with no near neighbour keeps the bare message.
+        if (std.mem.eql(u8, v.net, "MOSI")) {
+            try std.testing.expectEqualStrings("Floating net \"MOSI\" — only one connection", v.message);
+        }
+    }
+    try std.testing.expect(saw_hint);
 }

@@ -8,7 +8,8 @@ const std = @import("std");
 const exit = @import("exit.zig");
 const infra_fs = @import("infra/fs.zig");
 const paths = @import("paths.zig");
-const Evaluator = @import("eval/evaluator.zig").Evaluator;
+const evaluator_mod = @import("eval/evaluator.zig");
+const Evaluator = evaluator_mod.Evaluator;
 const EvalError = @import("eval/evaluator.zig").EvalError;
 const emit = @import("emit.zig");
 const export_kicad = @import("export_kicad.zig");
@@ -45,6 +46,7 @@ const output_dir_flag = "--output-dir";
 const out_of_memory_msg = "Out of memory\n";
 const build_error_fmt = "Build error: {}\n";
 const diag_error_fmt = "{s}:{d}:{d}: error: {s}\n";
+const diag_warning_fmt = "{s}:{d}:{d}: warning: {s}\n";
 const build_failed_assertion_msg = "Build failed: assertion violations\n";
 const cannot_write_fmt = "Cannot write {s}: {}\n";
 const pass_fmt = "PASS: {s}\n";
@@ -170,10 +172,16 @@ pub const CommandError = std.mem.Allocator.Error ||
 /// registered). Prints a diagnostic and exits non-zero if the name isn't a
 /// resolvable module or needs required args it has no defaults for. Lets a
 /// bare module name (e.g. `adp7118-ldo`) build the same as a design name.
+/// The file a stashed diagnostic points into: the imported module/component
+/// the evaluator recorded, else the design source this command started from.
+fn diagFile(diag: evaluator_mod.EvalDiagnostic, fallback: []const u8) []const u8 {
+    return if (diag.file.len > 0) diag.file else fallback;
+}
+
 fn moduleBlock(eval: *Evaluator, name: []const u8) *env_mod.DesignBlock {
     const result = eval_modules.instantiateStandalone(eval, name) catch |err| {
         if (eval.last_error) |diag| {
-            std.debug.print(diag_error_fmt, .{ name, diag.span.line, diag.span.col, diag.message });
+            std.debug.print(diag_error_fmt, .{ diagFile(diag, name), diag.span.line, diag.span.col, diag.message });
         }
         exit.fatal("error: {s} is neither a design nor a buildable module ({s})\n", .{ name, @errorName(err) });
     };
@@ -221,7 +229,7 @@ fn parseCheckArgs(args: []const []const u8) CheckArgs {
 fn evalCheckBlock(eval: *Evaluator, board_path: []const u8, design: []const u8) *env_mod.DesignBlock {
     const result = eval.evalFile(board_path) catch |err| {
         if (eval.last_error) |diag| {
-            std.debug.print(diag_error_fmt, .{ board_path, diag.span.line, diag.span.col, diag.message });
+            std.debug.print(diag_error_fmt, .{ diagFile(diag, board_path), diag.span.line, diag.span.col, diag.message });
         }
         exit.fatal("Evaluate error: {}\n", .{err});
     };
@@ -489,7 +497,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
         // Render the stashed diagnostic (span + message + module call
         // chain) when one exists — the bare error code is the fallback.
         if (eval.last_error) |diag| {
-            std.debug.print(diag_error_fmt, .{ board_path, diag.span.line, diag.span.col, diag.message });
+            std.debug.print(diag_error_fmt, .{ diagFile(diag, board_path), diag.span.line, diag.span.col, diag.message });
         }
         exit.fatal(build_error_fmt, .{err});
     };
@@ -512,10 +520,11 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     _ = id_insert.persistMintedIds(allocator, board_path, &eval);
 
     // Lint warnings (unknown sub-forms / enum words the evaluator skipped).
-    // Spans from module files point into those files but are reported
-    // against the board path — the message names the offending form either way.
+    // A warning raised inside an imported module carries that module's path,
+    // so `file:line:col` points at the form the author has to edit.
     for (eval.warnings.items) |w| {
-        std.debug.print("{s}:{d}:{d}: warning: {s}\n", .{ board_path, w.span.line, w.span.col, w.message });
+        const file = if (w.file.len > 0) w.file else board_path;
+        std.debug.print(diag_warning_fmt, .{ file, w.span.line, w.span.col, w.message });
     }
 
     var has_failure = false;
@@ -635,7 +644,7 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
         // Render the stashed diagnostic (span + message + module call
         // chain) when one exists — the bare error code is the fallback.
         if (eval.last_error) |diag| {
-            std.debug.print(diag_error_fmt, .{ board_path, diag.span.line, diag.span.col, diag.message });
+            std.debug.print(diag_error_fmt, .{ diagFile(diag, board_path), diag.span.line, diag.span.col, diag.message });
         }
         exit.fatal(build_error_fmt, .{err});
     };
@@ -1113,7 +1122,7 @@ fn evalForExport(
     defer allocator.free(source_path);
     const result = eval.evalFile(source_path) catch |err| {
         if (eval.last_error) |diag| {
-            std.debug.print(diag_error_fmt, .{ source_path, diag.span.line, diag.span.col, diag.message });
+            std.debug.print(diag_error_fmt, .{ diagFile(diag, source_path), diag.span.line, diag.span.col, diag.message });
         }
         exit.fatal(build_error_fmt, .{err});
     };

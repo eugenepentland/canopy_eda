@@ -622,6 +622,7 @@ src/eval/env.zig::parseNoteRef | fn parseNoteRef(node: ast.Node) ?NoteRef
 src/eval/env.zig::put | fn put(self: *Env, name: []const u8, value: Value) !void
 src/eval/env.zig::requirementIdForText | fn requirementIdForText(allocator: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error![]const u8
 src/eval/evaluator.zig::AltFunc struct_
+src/eval/evaluator.zig::AuthoredRef struct_
 src/eval/evaluator.zig::BusDef struct_
 src/eval/evaluator.zig::ComponentData struct_
 src/eval/evaluator.zig::DecoupleDefaults struct_
@@ -684,6 +685,7 @@ src/eval/ids.zig::getSymbolPins | fn getSymbolPins(self: *Evaluator, lookup_name
 src/eval/ids.zig::isStandardRefDes | fn isStandardRefDes(ref_des: []const u8) bool
 src/eval/ids.zig::loadPinoutFile | fn loadPinoutFile(self: *Evaluator, path: []const u8) ?LoadedPinout
 src/eval/ids.zig::nextRefDes | fn nextRefDes(self: *Evaluator, prefix: u8) EvalError![]const u8
+src/eval/ids.zig::noteAuthoredRefDes | fn noteAuthoredRefDes(self: *Evaluator, ref_des: []const u8, span: ast.Span) EvalError!void
 src/eval/ids.zig::parseChildIdSidecar | fn parseChildIdSidecar(self: *Evaluator, parent_children: []const Node) ChildIdSidecar
 src/eval/ids.zig::parseId | fn parseId(children: []const Node) ?[]const u8
 src/eval/ids.zig::pinId | fn pinId(self: *Evaluator, node: Node) ?[]const u8
@@ -743,6 +745,9 @@ src/eval/net_envelopes.zig::Declaration struct_
 src/eval/net_envelopes.zig::Result struct_
 src/eval/net_envelopes.zig::build | fn build( allocator: std.mem.Allocator, block: *const DesignBlock, declarations: []const Declaration, ) std.mem.Allocator.Error!Result
 src/eval/net_envelopes.zig::ferriteBridges | fn ferriteBridges( allocator: std.mem.Allocator, instances: []const flat_netlist.FlatInstance, nets: []const flat_netlist.FlatNet, ) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]const u8)
+src/eval/net_suggest.zig::didYouMean | fn didYouMean(name: []const u8, candidates: []const []const u8) ?[]const u8
+src/eval/net_suggest.zig::establishedNets | fn establishedNets( allocator: std.mem.Allocator, block: *const env_mod.DesignBlock, ) std.mem.Allocator.Error![]const []const u8
+src/eval/net_suggest.zig::hint | fn hint( allocator: std.mem.Allocator, name: []const u8, candidates: []const []const u8, ) []const u8
 src/eval/pin_enrichment.zig::enrichPinFunctions | fn enrichPinFunctions( allocator: Allocator, block: *DesignBlock, project_dir: []const u8, ) Allocator.Error!void
 src/eval/power_budget.zig::BranchLoad struct_
 src/eval/power_budget.zig::Rail struct_
@@ -781,6 +786,9 @@ src/eval/special_forms.zig::next | fn next(self: *RepeatIterator) ?i64
 src/eval/special_forms.zig::parseRepeat | fn parseRepeat(self: *Evaluator, args: []const Node, env: *Env) EvalError!RepeatSpec
 src/eval/stackup_presets.zig::resolve | fn resolve(allocator: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!?env.StackupSpec
 src/eval/stackup_presets.zig::writeCatalogJson | fn writeCatalogJson(w: *std.Io.Writer, current: env.StackupSpec) std.Io.Writer.Error!void
+src/eval/suggest.zig::editDistance | fn editDistance(a: []const u8, b: []const u8) usize
+src/eval/suggest.zig::max_edit_distance value
+src/eval/suggest.zig::max_name_len value
 src/eval/suggest.zig::unboundMessage | fn unboundMessage(self: *Evaluator, name: []const u8, env: *const Env) []const u8
 src/eval/test_point.zig::EvalContext struct_
 src/eval/test_point.zig::evalForm | fn evalForm( self: *Evaluator, form_children: []const Node, env: *Env, ctx: EvalContext, ) EvalError!?Instance

@@ -612,6 +612,53 @@ prints `file:line:col: warning: …` to stderr. Eval errors now name the form
 with expected arity, suggest `(import …)` or nearest-name for unbound
 components, and print the module call stack.
 
+**`file` is the file the form actually lives in.** A warning or error raised
+while an imported `lib/modules/*.sexp` or `lib/components/*.sexp` body
+evaluates is reported against *that* file and its own line, not against the
+design that imported it — so a retired form inside a shared module names the
+module you have to edit, and the module call stack still says which call
+reached it:
+
+```text
+lib/modules/adp7118-ldo.sexp:44:5: warning: unknown sub-form (placement …) in (design-block …)
+lib/modules/probe-ldo.sexp:5:17: error: (port …) expects a direction or net after the name
+  in module 'probe-ldo' (called at 4:21)
+```
+
+(Forms spliced in from a sibling `<design>.checks.sexp` are the one exception:
+they still report against the design path.)
+
+### Duplicate ref-des
+
+Two instances **authored** with the same ref-des in one block — including two
+`(repeat …)` iterations that mint the same token — are a build error naming
+both places, raised before ref-des auto-assignment can renumber the second one
+into a confusing `pin_multi_net` further downstream:
+
+```text
+src/board.sexp:8:3: error: duplicate ref-des "R1" — already declared at src/board.sexp:5:3;
+  a ref-des must be unique within its block (each (sub-block …) is its own namespace)
+```
+
+Scope is the **block**, so two instantiations of one module may each name their
+own `R1`; the sub-block pass renumbers them apart. Shorthand-generated parts
+(`(decouple …)`, `(series …)`, `(fanout …)`, `(pullup …)`, `(divider …)`,
+`(led …)`) draw from the auto ref-des counters and never collide. ERC's
+`duplicate_refdes` check stays in place for collisions that only appear after
+the hierarchy is flattened.
+
+### Did-you-mean for net names
+
+A net with exactly one connection (and no declared port) that is within two
+character edits of an *established* net — one with two or more connections, or
+a declared port — carries the near-miss in its finding, so a typo reads as a
+typo instead of as a mysterious dead end:
+
+```text
+WARN: Dead-end net "GNND" — only connected to C1 pin 2 — did you mean "GND"?
+warning   floating_net   [GNND] — Floating net "GNND" — only one connection — did you mean "GND"?
+```
+
 ### Sub-block identity: legacy sidecar vs. hierarchical (opt-in)
 
 Every part needs a stable `id` (→ `uuidFromId` → KiCad footprint) that survives
