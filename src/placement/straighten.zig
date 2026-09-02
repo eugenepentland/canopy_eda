@@ -68,6 +68,7 @@ const optimizer = @import("optimizer.zig");
 const diff_pairs = @import("diff_pairs.zig");
 const geometry = @import("geometry.zig");
 const route_cleanup = @import("route_cleanup.zig");
+const track_polyline = @import("track_polyline.zig");
 const flat_netlist = @import("../flat_netlist.zig");
 
 const eps = 1e-9;
@@ -371,7 +372,7 @@ fn Straightener(comptime Probe: type) type {
                 const width = if (chain.widths.len > 0) chain.widths[0] else segs.items[0].width;
                 const taut = try self.straightenPts(chain.pts, layer);
                 if (taut.len < chain.pts.len) self.changed = true;
-                try emitPolyline(self.arena, &self.out, taut, layer, width, self.ni);
+                try track_polyline.emit(self.arena, &self.out, taut, layer, width, self.ni);
             }
         }
 
@@ -713,28 +714,6 @@ fn Chamferer(comptime Probe: type) type {
             return null;
         }
     };
-}
-
-fn emitPolyline(
-    arena: std.mem.Allocator,
-    out: *std.ArrayList(router.Track),
-    pts: []const [2]f64,
-    layer: u8,
-    width: f64,
-    net: i32,
-) std.mem.Allocator.Error!void {
-    for (1..pts.len) |k| {
-        if (dist(pts[k - 1], pts[k]) < eps) continue;
-        try out.append(arena, .{
-            .x1 = pts[k - 1][0],
-            .y1 = pts[k - 1][1],
-            .x2 = pts[k][0],
-            .y2 = pts[k][1],
-            .layer = layer,
-            .width = width,
-            .net = net,
-        });
-    }
 }
 
 fn maxLayer(net_tracks: []const router.Track, ni: i32) u8 {
@@ -1652,4 +1631,33 @@ test "rf staircase straightens at finish and drops its stale arcs" {
     try testing.expectEqual(@as(usize, 1), r.tracks.len);
     try testing.expectEqual(@as(usize, 0), r.arcs.len);
     try testing.expectEqual(@as(usize, 0), r.sharp_bends.len);
+}
+
+// A simplifier may hand back a chain it has emptied, and `for (1..0)` is
+// illegal behaviour rather than "no iterations" — so the shared emitter's
+// guard is what keeps a dropped chain from panicking a safe build. This copy
+// of the emitter lacked that guard until both were lifted into
+// `track_polyline`.
+// spec: placement/straighten - re-emitting a simplified chain of fewer than two points draws no copper instead of panicking
+test "the shared track emitter drops a chain too short to draw" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var out: std.ArrayList(router.Track) = .empty;
+    try track_polyline.emit(arena, &out, &.{}, 0, 0.127, 3);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+
+    try track_polyline.emit(arena, &out, &.{.{ 1, 1 }}, 0, 0.127, 3);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+
+    // Two coincident points are a chain, but not copper.
+    try track_polyline.emit(arena, &out, &.{ .{ 1, 1 }, .{ 1, 1 } }, 0, 0.127, 3);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+
+    try track_polyline.emit(arena, &out, &.{ .{ 1, 1 }, .{ 2, 1 }, .{ 2, 3 } }, 1, 0.2, 7);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expectEqual(@as(u8, 1), out.items[0].layer);
+    try std.testing.expectEqual(@as(i32, 7), out.items[1].net);
+    try std.testing.expectEqual(@as(f64, 3), out.items[1].y2);
 }

@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const drc = @import("placement/drc.zig");
+const markdown_row = @import("markdown_row.zig");
 const drc_json = @import("serve/drc_json.zig");
 
 /// One register row: the category label as written, the DRC kind it names
@@ -97,22 +98,6 @@ fn headingNamesBoard(line: []const u8, board: []const u8) bool {
     return false;
 }
 
-/// Split a Markdown table row into trimmed cells (no escaped-pipe support:
-/// register rows never need one).
-fn cells(line: []const u8, out: *[16][]const u8) usize {
-    var body = std.mem.trim(u8, line, " \t\r");
-    if (body.len > 0 and body[0] == '|') body = body[1..];
-    if (body.len > 0 and body[body.len - 1] == '|') body = body[0 .. body.len - 1];
-    var n: usize = 0;
-    var it = std.mem.splitScalar(u8, body, '|');
-    while (it.next()) |cell| {
-        if (n == out.len) break;
-        out[n] = std.mem.trim(u8, cell, " \t");
-        n += 1;
-    }
-    return n;
-}
-
 /// Every counted category row the register carries for `board`. Rows are
 /// returned in document order; a category repeated across tables appears
 /// once per row, and `drift` sums them.
@@ -139,8 +124,8 @@ pub fn parseBoard(
             in_table = false;
             continue;
         }
-        var row: [16][]const u8 = undefined;
-        const n = cells(line, &row);
+        var row: [markdown_row.max_cells][]const u8 = undefined;
+        const n = markdown_row.split(line, &row);
         if (!in_table) {
             if (n >= 2 and std.ascii.eqlIgnoreCase(row[1], "count")) {
                 in_table = true;
@@ -292,4 +277,30 @@ test "drift compares registered counts with the run's warning kinds" {
     const empty = try drift(allocator, &.{}, std.enums.EnumArray(drc.Kind, usize).initFill(0));
     defer allocator.free(empty);
     try std.testing.expectEqual(@as(usize, 0), empty.len);
+}
+
+// The two review documents read their own tables back, and their copies of the
+// splitter disagreed here: one accepted a pipe-bearing prose line as a row,
+// and one truncated an over-wide row instead of refusing it — which re-binds
+// every column past the cut to the wrong header. Both now refuse.
+// spec: waiver-register - a table row with no leading pipe or more cells than fit is refused rather than parsed into misaligned columns
+test "the shared row splitter refuses a non-row and an over-wide row" {
+    var row: [markdown_row.max_cells][]const u8 = undefined;
+
+    try std.testing.expectEqual(@as(usize, 3), markdown_row.split("| a | b | c |", &row));
+    try std.testing.expectEqualStrings("a", row[0]);
+    try std.testing.expectEqualStrings("c", row[2]);
+    // A trailing pipe is optional; leading is not.
+    try std.testing.expectEqual(@as(usize, 2), markdown_row.split("  | a | b  ", &row));
+    try std.testing.expectEqual(@as(usize, 0), markdown_row.split("prose | with a pipe", &row));
+    try std.testing.expectEqual(@as(usize, 0), markdown_row.split("", &row));
+
+    // Exactly max_cells is a row; one more is not a row at all.
+    var wide: std.ArrayList(u8) = .empty;
+    defer wide.deinit(std.testing.allocator);
+    for (0..markdown_row.max_cells) |_| try wide.appendSlice(std.testing.allocator, "| x ");
+    try wide.append(std.testing.allocator, '|');
+    try std.testing.expectEqual(@as(usize, markdown_row.max_cells), markdown_row.split(wide.items, &row));
+    try wide.appendSlice(std.testing.allocator, " x |");
+    try std.testing.expectEqual(@as(usize, 0), markdown_row.split(wide.items, &row));
 }

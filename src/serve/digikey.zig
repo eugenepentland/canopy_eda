@@ -12,9 +12,9 @@
 //! Credentials (`DIGIKEY_CLIENT_ID` / `DIGIKEY_CLIENT_SECRET`) are read
 //! server-side by the caller (via `config`) and never travel over CLI.
 const std = @import("std");
-const infra_fs = @import("../infra/fs.zig");
 const json_writer = @import("../json_writer.zig");
 const rate_limiter = @import("rate_limiter.zig");
+const curl_fetch = @import("curl_fetch.zig");
 const numeric = @import("../numeric.zig");
 
 // ── Endpoints / tunables ──────────────────────────────────────────
@@ -184,13 +184,12 @@ fn fetchToken(allocator: std.mem.Allocator, base: []const u8, client_id: []const
     const id_arg = std.fmt.allocPrint(allocator, "client_id={s}", .{client_id}) catch return null;
     const secret_arg = std.fmt.allocPrint(allocator, "client_secret={s}", .{client_secret}) catch return null;
     const body = curl(allocator, &.{
-        "-X",                            "POST",
-        url,                             "-H",
-        form_ct,                         form_field,
-        "grant_type=client_credentials", form_field,
-        id_arg,                          form_field,
-        secret_arg,
-    }, token_timeout_secs, max_response_bytes) orelse return null;
+        "-X",       "POST",
+        "-H",       form_ct,
+        form_field, "grant_type=client_credentials",
+        form_field, id_arg,
+        form_field, secret_arg,
+    }, url, token_timeout_secs, max_response_bytes) orelse return null;
     return parseAccessToken(allocator, body);
 }
 
@@ -224,14 +223,13 @@ fn keywordSearch(
     const body = searchRequestBody(allocator, query, limit) catch return null;
 
     return curl(allocator, &.{
-        "-X",         "POST",
-        url,          "-H",
-        auth,         "-H",
-        client,       "-H",
-        json_accept,  "-H",
-        json_content, "--data-binary",
-        body,
-    }, search_timeout_secs, max_response_bytes);
+        "-X",            "POST",
+        "-H",            auth,
+        "-H",            client,
+        "-H",            json_accept,
+        "-H",            json_content,
+        "--data-binary", body,
+    }, url, search_timeout_secs, max_response_bytes);
 }
 
 /// JSON body for the keyword search. Marketplace listings (third-party
@@ -390,28 +388,23 @@ fn dupeOpt(allocator: std.mem.Allocator, s: ?[]const u8) std.mem.Allocator.Error
 
 // ── curl transport ────────────────────────────────────────────────
 
-/// Run `curl -sS --max-time <t> <extra…>`, returning the response body or null
-/// on a spawn failure or non-zero exit. The body is returned regardless of HTTP
-/// status (no `-f`), so the JSON parsers can distinguish error bodies.
-fn curl(allocator: std.mem.Allocator, extra: []const []const u8, timeout_secs: []const u8, max_bytes: usize) ?[]u8 {
-    rate_limiter.digikey.acquire() catch return null;
-    defer rate_limiter.digikey.release();
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(allocator);
-    argv.appendSlice(allocator, &.{ "curl", "-sS", "--max-time", timeout_secs }) catch return null;
-    argv.appendSlice(allocator, extra) catch return null;
-
-    const res = std.process.run(allocator, infra_fs.currentIo(), .{
-        .argv = argv.items,
-        .stdout_limit = .limited(max_bytes),
-        .stderr_limit = .limited(max_bytes),
-    }) catch return null;
-    allocator.free(res.stderr);
-    if (!res.term.success()) {
-        allocator.free(res.stdout);
-        return null;
-    }
-    return res.stdout;
+/// Run one DigiKey request through the shared curl transport. `url` rides the
+/// transport's `--` end-of-options guard rather than sitting among `extra`,
+/// which is what this copy used to do — a base URL beginning with `-` was a
+/// curl flag.
+fn curl(
+    allocator: std.mem.Allocator,
+    extra: []const []const u8,
+    url: []const u8,
+    timeout_secs: []const u8,
+    max_bytes: usize,
+) ?[]u8 {
+    return curl_fetch.run(allocator, &rate_limiter.digikey, .{
+        .options = extra,
+        .url = url,
+        .timeout_secs = timeout_secs,
+        .max_bytes = max_bytes,
+    });
 }
 
 // ── Datasheet download (fallback source for download_datasheet) ────
@@ -510,7 +503,7 @@ fn hexVal(c: u8) ?u8 {
 fn downloadPdf(allocator: std.mem.Allocator, url: []const u8) ?[]u8 {
     // `--` stops curl option parsing so a `-`-leading vendor URL can't be
     // reparsed as a flag (arg-injection / SSRF hardening).
-    return curl(allocator, &.{ "-L", "-A", browser_ua, "--", url }, download_timeout_secs, max_download_bytes);
+    return curl(allocator, &.{ "-L", "-A", browser_ua }, url, download_timeout_secs, max_download_bytes);
 }
 
 /// PDF magic — distinguishes a real datasheet from an HTML interstitial page.

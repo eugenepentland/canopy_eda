@@ -71,20 +71,19 @@ pub const PInfo = struct {
 /// skipping refs in `excluded` (parts the starred reference doesn't cover —
 /// scoring those would charge the rough seed for reference staleness).
 /// Returns an empty slice if the placement has no anchor hub.
+///
+/// The traversal is `style_score.analyzeStyle`'s, projected down: an `SInfo`
+/// is a `PInfo` plus the gap band and rotation bucket the dense style score
+/// also grades. Sharing it is not a convenience — the two analyses have to
+/// agree about which parts are in scope and which edge each one is on, or the
+/// area score and the style score describe different boards.
 pub fn analyze(alloc: std.mem.Allocator, p: optimizer.Placement, excluded: ?*const std.StringHashMapUnmanaged(void)) std.mem.Allocator.Error![]PInfo {
-    const ai = pcb_describe.anchorIndex(p.parts, p.nets) orelse return &.{};
-    const anchor = p.parts[ai];
-    const a_half = pcb_describe.aabbHalf(anchor);
-    var out: std.ArrayList(PInfo) = .empty;
-    for (p.parts, 0..) |part, i| {
-        if (i == ai) continue;
-        if (excluded) |ex| {
-            if (ex.contains(part.ref_des)) continue;
-        }
-        const side = pcb_describe.sideOf(part.x - anchor.x, part.y - anchor.y, a_half, pcb_describe.aabbHalf(part));
-        try out.append(alloc, .{ .side = side, .class = try style_score.classKey(alloc, p, i) });
-    }
-    return out.toOwnedSlice(alloc);
+    const infos = try style_score.analyzeStyle(alloc, p, excluded);
+    if (infos.len == 0) return &.{};
+    defer alloc.free(infos);
+    const out = try alloc.alloc(PInfo, infos.len);
+    for (infos, out) |info, *slot| slot.* = .{ .side = info.side, .class = info.class };
+    return out;
 }
 
 /// Tally rough + starred parts per interchangeable class per edge, credit

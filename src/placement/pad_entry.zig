@@ -50,6 +50,7 @@ const optimizer = @import("optimizer.zig");
 const pad_grid = @import("pad_grid.zig");
 const pad_shape = @import("pad_shape.zig");
 const route_cleanup = @import("route_cleanup.zig");
+const track_polyline = @import("track_polyline.zig");
 
 /// Copper (mm) a route may keep inside the pad it terminates on.
 ///
@@ -301,7 +302,7 @@ fn trimNet(arena: std.mem.Allocator, job: NetTrim) std.mem.Allocator.Error!?[]co
                 const width = if (chain.widths.len > 0) chain.widths[0] else segs.items[0].width;
                 const pts = try trimChain(arena, chain.pts, job.pads, stub_mm, job.vias);
                 if (pts != null) changed = true;
-                try emitPolyline(arena, &out, pts orelse chain.pts, layer, width, job.net);
+                try track_polyline.emit(arena, &out, pts orelse chain.pts, layer, width, job.net);
             }
         }
         if (layer >= top) break;
@@ -390,29 +391,6 @@ fn maxLayer(net_tracks: []const router.Track, ni: i32) u8 {
 
 fn segLen(t: router.Track) f64 {
     return std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
-}
-
-fn emitPolyline(
-    arena: std.mem.Allocator,
-    out: *std.ArrayList(router.Track),
-    pts: []const [2]f64,
-    layer: u8,
-    width: f64,
-    net: i32,
-) std.mem.Allocator.Error!void {
-    if (pts.len < 2) return; // a dropped chain emits nothing
-    for (1..pts.len) |k| {
-        if (dist(pts[k - 1], pts[k]) < eps) continue;
-        try out.append(arena, .{
-            .x1 = pts[k - 1][0],
-            .y1 = pts[k - 1][1],
-            .x2 = pts[k][0],
-            .y2 = pts[k][1],
-            .layer = layer,
-            .width = width,
-            .net = net,
-        });
-    }
 }
 
 const testing = std.testing;

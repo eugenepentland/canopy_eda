@@ -22,8 +22,8 @@
 //! `downloadDatasheet`'s PDF (an off-site, unauthenticated fetch) to
 //! `storeDatasheet`.
 const std = @import("std");
-const infra_fs = @import("../infra/fs.zig");
 const rate_limiter = @import("rate_limiter.zig");
+const curl_fetch = @import("curl_fetch.zig");
 
 // ── Endpoints / headers ───────────────────────────────────────────
 const host_name = "https://componentsearchengine.com";
@@ -491,30 +491,16 @@ fn httpGet(
     max_bytes: usize,
     timeout_secs: []const u8,
 ) ?[]u8 {
-    rate_limiter.cse.acquire() catch return null;
-    defer rate_limiter.cse.release();
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(allocator);
-    argv.appendSlice(allocator, &.{
-        "curl", "-sS",      "-L", "--max-time",   timeout_secs,
-        "-A",   user_agent, "-H", referer_header,
-    }) catch return null;
-    if (basic_auth) |a| argv.appendSlice(allocator, &.{ "-u", a }) catch return null;
-    // `--` terminates option parsing so a vendor-supplied URL beginning with
-    // `-` can't be reinterpreted as a curl flag (arg-injection / SSRF hardening).
-    argv.appendSlice(allocator, &.{ "--", url }) catch return null;
-
-    const res = std.process.run(allocator, infra_fs.currentIo(), .{
-        .argv = argv.items,
-        .stdout_limit = .limited(max_bytes),
-        .stderr_limit = .limited(max_bytes),
-    }) catch return null;
-    allocator.free(res.stderr);
-    if (!res.term.success()) {
-        allocator.free(res.stdout);
-        return null;
-    }
-    return res.stdout;
+    var options: std.ArrayList([]const u8) = .empty;
+    defer options.deinit(allocator);
+    options.appendSlice(allocator, &.{ "-L", "-A", user_agent, "-H", referer_header }) catch return null;
+    if (basic_auth) |a| options.appendSlice(allocator, &.{ "-u", a }) catch return null;
+    return curl_fetch.run(allocator, &rate_limiter.cse, .{
+        .options = options.items,
+        .url = url,
+        .timeout_secs = timeout_secs,
+        .max_bytes = max_bytes,
+    });
 }
 
 // ── Pure helpers ──────────────────────────────────────────────────
@@ -713,4 +699,35 @@ fn freeHits(a: std.mem.Allocator, hits: []SearchHit) void {
         if (h.datasheet_url) |d| a.free(d);
     }
     a.free(hits);
+}
+
+// A URL is not an option. curl parses a leading `-` as a flag wherever the
+// argument sits, so a vendor-supplied `-o /home/user/.ssh/authorized_keys`
+// spliced in as a "URL" would WRITE that file instead of fetching anything.
+// `--` ends option parsing; the shared transport is what makes it unskippable,
+// and this pins the byte order that makes it work.
+// spec: serve/component_search - every fetched URL follows a -- end-of-options guard so a URL beginning with a dash cannot become a curl option
+test "the curl transport guards a dash-leading URL behind --" {
+    const alloc = std.testing.allocator;
+    const hostile = "-o/tmp/pwned";
+    const argv = try curl_fetch.buildArgv(alloc, .{
+        .options = &.{ "-L", "-A", "agent" },
+        .url = hostile,
+        .timeout_secs = "8",
+        .max_bytes = 16,
+    });
+    defer alloc.free(argv);
+
+    try std.testing.expectEqualStrings(hostile, argv[argv.len - 1]);
+    try std.testing.expectEqualStrings("--", argv[argv.len - 2]);
+    // Nothing before the guard is the URL, so curl can never read it as a flag.
+    for (argv[0 .. argv.len - 2]) |arg| try std.testing.expect(!std.mem.eql(u8, arg, hostile));
+    try std.testing.expectEqualStrings("curl", argv[0]);
+    try std.testing.expectEqualStrings("--max-time", argv[2]);
+    try std.testing.expectEqualStrings("8", argv[3]);
+
+    // A request with no URL adds no guard and no empty trailing argument.
+    const bare = try curl_fetch.buildArgv(alloc, .{ .timeout_secs = "3", .max_bytes = 8 });
+    defer alloc.free(bare);
+    try std.testing.expectEqual(@as(usize, 4), bare.len);
 }

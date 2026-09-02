@@ -84,6 +84,7 @@ const clock = @import("infra/clock.zig");
 const infra_fs = @import("infra/fs.zig");
 const log = @import("infra/log.zig");
 const paths = @import("paths.zig");
+const bench_args = @import("bench_args.zig");
 const json_writer = @import("json_writer.zig");
 const optimizer = @import("placement/optimizer.zig");
 const drc = @import("placement/drc.zig");
@@ -940,37 +941,26 @@ fn writeBaselineReport(w: *std.Io.Writer, report: BaselineReport, baseline_path:
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
-/// The harness's parsed command line.
+/// The harness's parsed command line: the flags every bench harness shares,
+/// plus this one's own.
 const Args = struct {
-    project_dir: []const u8 = ".",
+    cli: bench_args.Common = .{},
     reps: usize = 3,
-    json: bool = false,
-    baseline: ?[]const u8 = null,
-    named: []const []const u8 = &.{},
 };
 
 fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) std.mem.Allocator.Error!Args {
     var out = Args{};
-    var named: std.ArrayList([]const u8) = .empty;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--project-dir")) {
-            i += 1;
-            if (i < args.len) out.project_dir = args[i];
-        } else if (std.mem.eql(u8, args[i], "--reps")) {
-            i += 1;
-            if (i < args.len) out.reps = std.fmt.parseInt(usize, args[i], 10) catch out.reps;
-        } else if (std.mem.eql(u8, args[i], "--json")) {
-            out.json = true;
-        } else if (std.mem.eql(u8, args[i], "--baseline")) {
-            i += 1;
-            if (i < args.len) out.baseline = args[i];
-        } else if (!std.mem.startsWith(u8, args[i], "--")) {
-            try named.append(arena, args[i]);
-        }
-    }
-    out.named = try named.toOwnedSlice(arena);
+    try out.cli.parse(arena, args, &out, takeExtra);
     return out;
+}
+
+/// `--reps <n>` — bench-page's only flag of its own. An unparseable count
+/// keeps the default rather than failing the run.
+fn takeExtra(out: *Args, args: []const []const u8, i: *usize) bool {
+    if (!std.mem.eql(u8, args[i.*], "--reps")) return false;
+    i.* += 1;
+    if (i.* < args.len) out.reps = std.fmt.parseInt(usize, args[i.*], 10) catch out.reps;
+    return true;
 }
 
 /// CLI entry: `netlisp bench-page [--project-dir <dir>] [--reps <n>] [--json]
@@ -981,15 +971,15 @@ pub fn cmdBenchPage(allocator: std.mem.Allocator, args: []const []const u8) Benc
     const arena = arena_state.allocator();
 
     const parsed = try parseArgs(arena, args);
-    const names = if (parsed.named.len > 0)
-        parsed.named
+    const names = if (parsed.cli.named.items.len > 0)
+        parsed.cli.named.items
     else
-        try corpus(arena, parsed.project_dir);
+        try corpus(arena, parsed.cli.project_dir);
 
     var watch = LoadWatch.begin();
     var results: std.ArrayList(BoardResult) = .empty;
     for (names) |n| {
-        var row = try benchOne(allocator, arena, parsed.project_dir, n, parsed.reps);
+        var row = try benchOne(allocator, arena, parsed.cli.project_dir, n, parsed.reps);
         row.load_contended = watch.sample();
         try results.append(arena, row);
     }
@@ -997,12 +987,12 @@ pub fn cmdBenchPage(allocator: std.mem.Allocator, args: []const []const u8) Benc
 
     var buf: [4096]u8 = undefined;
     var fw = std.Io.File.stdout().writer(infra_fs.currentIo(), &buf);
-    if (parsed.json) try writeResultsJson(&fw.interface, results.items, load) else try writeTable(&fw.interface, results.items, parsed.reps, load);
+    if (parsed.cli.json) try writeResultsJson(&fw.interface, results.items, load) else try writeTable(&fw.interface, results.items, parsed.reps, load);
 
     // The durable regression gate: record with `--json > baseline.json`,
     // commit it, and every later gated run compares against it. A missing or
     // corrupt baseline is never a pass.
-    if (parsed.baseline) |path| {
+    if (parsed.cli.baseline) |path| {
         const baseline = loadBaseline(arena, path) catch return error.PageBaselineRegression;
         const report = checkBaseline(arena, results.items, &baseline) catch return error.PageBaselineRegression;
         try writeBaselineReport(&fw.interface, report, path);
@@ -1052,14 +1042,14 @@ test "bench-page CLI parses flags and positionals" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const parsed = try parseArgs(arena, &.{ "--project-dir", "p", "--reps", "5", "--json", "--baseline", "b.json", "barracuda" });
-    try testing.expectEqualStrings("p", parsed.project_dir);
+    try testing.expectEqualStrings("p", parsed.cli.project_dir);
     try testing.expectEqual(@as(usize, 5), parsed.reps);
-    try testing.expect(parsed.json);
-    try testing.expectEqualStrings("b.json", parsed.baseline.?);
-    try testing.expectEqualStrings("barracuda", parsed.named[0]);
+    try testing.expect(parsed.cli.json);
+    try testing.expectEqualStrings("b.json", parsed.cli.baseline.?);
+    try testing.expectEqualStrings("barracuda", parsed.cli.named.items[0]);
     const defaults = try parseArgs(arena, &.{});
     try testing.expectEqual(@as(usize, 3), defaults.reps);
-    try testing.expect(!defaults.json and defaults.baseline == null);
+    try testing.expect(!defaults.cli.json and defaults.cli.baseline == null);
 }
 
 // spec: bench-page - phase medians are the outlier-tolerant middle of the rep samples

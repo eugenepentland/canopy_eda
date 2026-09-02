@@ -25,7 +25,7 @@ const history = @import("history.zig");
 const subprocess = @import("subprocess.zig");
 const page = @import("pcb_layout_page.zig");
 const saved_zone = @import("saved_zone.zig");
-const sidecar_store = @import("../layout_sidecar_store.zig");
+const sidecar_publish = @import("layout_sidecar_publish.zig");
 
 const SavedLayout = page.SavedLayout;
 
@@ -136,40 +136,23 @@ pub fn backfill(
     return report;
 }
 
-/// Persist the merged list with user-save semantics: the previous sidecar is
-/// rolled into `history/` first (so the pass is itself undoable) and the rev is
-/// bumped, which 409s any editor tab still holding the old one instead of
-/// letting it clobber the recovered rows.
+/// Persist the merged list with user-save semantics. The previous sidecar is
+/// rolled into `history/` first, so this pass is itself undoable — the recovery
+/// archive is the only place the rows it replaces still live.
 fn write(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
     layouts: []const SavedLayout,
 ) bool {
-    const path = paths.designSiblingPath(alloc, project_dir, name, page.layouts_ext) catch return false;
-    // The rev read, the snapshot and the write are one transaction: without the
-    // hold a concurrent save can land between the read and the rename, and this
-    // pass then republishes `rev + 1` over it — the lost update the sidecar lock
-    // exists to stop. The three readers below take no lock of their own, so
-    // calling them inside the hold cannot re-enter it.
-    const guard = sidecar_store.lockSidecar(name, null);
-    defer guard.unlock();
-    _ = history.snapshotLayouts(alloc, project_dir, name, path) catch null;
-    const rev = page.readLayoutRev(alloc, project_dir, name, null);
-    const cache = page.readCacheSlot(alloc, project_dir, name);
-    var aw: std.Io.Writer.Allocating = .init(alloc);
-    page.writeLayoutsFileJsonRev(&aw.writer, layouts, cache, rev + 1) catch return false;
-    writeFileAtomic(path, aw.written()) catch return false;
-    return true;
+    return sidecar_publish.publish(alloc, project_dir, name, .{ .snapshot_previous = true }, layouts, mergedRows);
 }
 
-/// Atomic tmp→rename write, so a reader always sees the old or new file whole.
-fn writeFileAtomic(path: []const u8, data: []const u8) !void {
-    var write_buf: [4096]u8 = undefined;
-    var atomic = try infra_fs.cwd().atomicFile(path, .{ .write_buffer = &write_buf });
-    defer atomic.deinit();
-    try atomic.file_writer.interface.writeAll(data);
-    try atomic.finish();
+/// The list is already merged before the hold is taken — this pass reads the
+/// sidecar's rows through `collect`, not through the transaction — so the
+/// publish callback is the identity.
+fn mergedRows(layouts: []const SavedLayout, _: std.mem.Allocator) ?[]const SavedLayout {
+    return layouts;
 }
 
 /// Every board in both archives, newest-first: the `history/` snapshots (which

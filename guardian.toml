@@ -706,13 +706,16 @@ reason = "a declared absolute-maximum rating that is shown to the user must be e
 # The store and page are the only internal holders; a call from any new file now
 # fails the gate instead of quietly adding an unguarded write path.
 
+# `serve/layout_sidecar_publish.zig` is the seam the paragraph above wanted: the
+# history backfill and the KiCad-layout import used to hold one copy each of the
+# lock/rev/snapshot/rename transaction and called the raw writer themselves.
+# Both now publish through it, so the allow list shrank rather than grew.
 [[ban]]
 chain = ["writeLayoutsFileJsonRev"]
 allow = [
   "src/layout_sidecar_store.zig",
   "src/serve/pcb_layout_page.zig",
-  "src/serve/layout_backfill.zig",
-  "src/serve/pcb_layout_import.zig",
+  "src/serve/layout_sidecar_publish.zig",
 ]
 reason = "the raw sidecar serializer applies no rev check, no history snapshot and no outline validation — persist layouts through the guarded save path in src/serve/pcb_layout_page.zig instead"
 

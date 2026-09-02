@@ -4,7 +4,6 @@
 
 const std = @import("std");
 const env_mod = @import("../eval/env.zig");
-const rails_mod = @import("../eval/rails.zig");
 const ctx_mod = @import("context.zig");
 const RenderCtx = ctx_mod.RenderCtx;
 const FlatInst = ctx_mod.FlatInst;
@@ -45,33 +44,10 @@ const passive_chain_base_reach: f64 = 78.0;
 const branched_chain_base_reach: f64 = 83.0;
 const passive_chain_pitch: f64 = 60.0;
 
-fn functionalSignalNet(net: []const u8) bool {
-    if (net.len == 0 or isGroundNet(net)) return false;
-    for (rails_mod.schematic_supply_prefixes) |prefix| {
-        if (std.ascii.startsWithIgnoreCase(net, prefix)) return false;
-    }
-    return true;
-}
-
-fn groupsSharePassiveIsland(ctx: *const RenderCtx, a: PinGroup, b: PinGroup) bool {
-    for (a.conns) |a_conn| {
-        const a_pin = switch (a_conn.endpoint) {
-            .pin => |pin| pin,
-            .net => continue,
-        };
-        const a_anchor = ctx.spoke_anchor_net.get(a_pin.ref_des) orelse continue;
-        if (!functionalSignalNet(baseNetName(a_anchor))) continue;
-        for (b.conns) |b_conn| {
-            const b_pin = switch (b_conn.endpoint) {
-                .pin => |pin| pin,
-                .net => continue,
-            };
-            const b_anchor = ctx.spoke_anchor_net.get(b_pin.ref_des) orelse continue;
-            if (std.mem.eql(u8, baseNetName(a_anchor), baseNetName(b_anchor))) return true;
-        }
-    }
-    return false;
-}
+/// Two groups on one functional signal are one island and take no gap — the
+/// hub view's own rule, called rather than restated so the zoomed-in view can
+/// never gap a board differently from the page it zooms into.
+const groupsSharePassiveIsland = hub_mod.groupsSharePassiveAnchor;
 
 fn gapAfterGroup(ctx: *const RenderCtx, groups: []const PinGroup, index: usize, default_gap: f64) f64 {
     if (default_gap == 0 or index + 1 >= groups.len) return 0;

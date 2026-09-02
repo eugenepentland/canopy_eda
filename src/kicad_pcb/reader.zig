@@ -10,6 +10,7 @@ const ast = @import("../sexpr/ast.zig");
 const parser = @import("../sexpr/parser.zig");
 const board_state = @import("board_state.zig");
 const fmt_const = @import("format.zig");
+const pad_net = @import("pad_net.zig");
 const numeric = @import("../numeric.zig");
 
 const Node = ast.Node;
@@ -156,20 +157,10 @@ fn readPad(
     var net_name: []const u8 = "";
     for (cl[2..]) |sub| {
         if (!sub.isForm("net")) continue;
-        const nl = sub.asList() orelse continue;
-        if (nl.len < 2) continue;
-        // Standard KiCad format: `(net <id> "<name>")` — slot 1 is the
-        // integer net-ID into the top-level table.
-        // Legacy name-only format: `(net "<name>")` — slot 1 is the name
-        // directly, no top-level table. Older Netlisp boards were
-        // written this way; the file-based sync must read both so an
-        // existing board isn't flagged "all pads disconnected" on the
-        // first push. The writer always emits the canonical form.
-        if (nl[1].asNumber()) |id_num| {
-            if (net_table.get(numeric.checkedInt(i64, id_num) orelse continue)) |name| net_name = name;
-        } else if (nl[1].asString()) |name| {
-            net_name = name;
-        }
+        // Both the canonical `(net <id> "<name>")` and the legacy name-only
+        // `(net "<name>")` older Netlisp boards were written with; see
+        // `pad_net`. A malformed one is skipped rather than ending the scan.
+        net_name = pad_net.nameOf(sub, net_table) orelse continue;
         break;
     }
     try pads.append(arena, .{ .number = num, .net = net_name });

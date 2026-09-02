@@ -91,6 +91,7 @@ const fine_accept = @import("fine_accept.zig");
 const fine_window = @import("fine_window.zig");
 const nomination = @import("blocker_nomination.zig");
 const route_timing = @import("route_timing.zig");
+const rank_admit = @import("rank_admit.zig");
 
 // ── Policy: which copper may this tier take, and in what order ───────────────
 
@@ -233,13 +234,9 @@ pub const Nomination = struct { net_i: usize, priority: u32, elements: usize, di
 /// One refused candidate and why, for the decision trace.
 pub const Refused = struct { net_i: usize, why: Refusal };
 
-/// What the tier decided about every net in the victim's way.
-pub const Decision = struct {
-    /// The blockers to rip, cheapest first.
-    picked: []const Nomination,
-    /// Every other candidate, with its reason.
-    refused: []const Refused,
-};
+/// What the tier decided about every net in the victim's way: the blockers to
+/// rip (cheapest first) and every other candidate with its reason.
+pub const Decision = rank_admit.Decision(Nomination, Refused);
 
 /// May this net be taken into `victim`'s cluster, and if not, why not?
 ///
@@ -299,41 +296,18 @@ pub fn select(
     victim: Victim,
     lim: Limits,
 ) std.mem.Allocator.Error!Decision {
-    var ok: std.ArrayList(Nomination) = .empty;
-    defer ok.deinit(alloc);
-    var no: std.ArrayList(Refused) = .empty;
-    errdefer no.deinit(alloc);
-    for (facts) |f| {
-        switch (judge(f, victim)) {
-            .accept => try ok.append(alloc, .{
-                .net_i = f.net_i,
-                .priority = f.priority,
-                .elements = f.elements,
-                .dist = f.dist,
-            }),
-            .refuse => |r| try no.append(alloc, .{ .net_i = f.net_i, .why = r }),
-        }
-    }
-    std.mem.sort(Nomination, ok.items, {}, cheaperFirst);
-    var picked: std.ArrayList(Nomination) = .empty;
-    errdefer picked.deinit(alloc);
-    var spent: usize = 0;
-    // Admit greedily under both bounds, SKIPPING an over-budget candidate rather
-    // than stopping — a long rail must not shut out the two-element stub ranked
-    // behind it, which may be the rest of the corridor.
-    for (ok.items) |n| {
-        if (picked.items.len >= lim.max_blockers) {
-            try no.append(alloc, .{ .net_i = n.net_i, .why = .capped });
-        } else if (spent + n.elements > lim.max_total_elements) {
-            try no.append(alloc, .{ .net_i = n.net_i, .why = .over_budget });
-        } else {
-            spent += n.elements;
-            try picked.append(alloc, n);
-        }
-    }
-    return .{
-        .picked = try picked.toOwnedSlice(alloc),
-        .refused = try no.toOwnedSlice(alloc),
+    return rank_admit.select(alloc, Nomination, Refused, BlockerFacts, Victim, nominate, cheaperFirst, facts, victim, .{
+        .max_items = lim.max_blockers,
+        .max_total_elements = lim.max_total_elements,
+    });
+}
+
+/// `judge`'s verdict as a nomination: the ranking evidence this tier carries is
+/// the candidate's authored priority, element count and corridor distance.
+fn nominate(victim: Victim, f: BlockerFacts) rank_admit.Verdict(Nomination, Refusal) {
+    return switch (judge(f, victim)) {
+        .accept => .{ .accept = .{ .net_i = f.net_i, .priority = f.priority, .elements = f.elements, .dist = f.dist } },
+        .refuse => |r| .{ .refuse = r },
     };
 }
 

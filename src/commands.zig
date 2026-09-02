@@ -15,6 +15,7 @@ const emit = @import("emit.zig");
 const export_kicad = @import("export_kicad.zig");
 const export_kicad_sch = @import("export_kicad_sch.zig");
 const kicad_sch_push = @import("kicad_sch_push.zig");
+const kicad_sch_push_reason = @import("kicad_sch_push_reason.zig");
 const bom = @import("bom.zig");
 const id_insert = @import("id_insert.zig");
 const erc_mod = @import("erc.zig");
@@ -887,23 +888,10 @@ pub fn cmdSyncKicadSch(allocator: std.mem.Allocator, args: []const []const u8) C
     const result = kicad_sch_push.run(allocator, arena_state.allocator(), block, parsed.project_dir, .{
         .dry_run = parsed.dry_run,
         .force = parsed.force,
-    }) catch |err| exit.fatal("Schematic push failed: {s}\n", .{syncSchReason(err)});
+    }) catch |err| exit.fatal("Schematic push failed: {s}\n", .{kicad_sch_push_reason.explain(err)});
 
     printSyncSchPlan(result, parsed.dry_run);
     if (result.plan.refusal) |why| exit.fatal("Refused: {s}\n", .{why});
-}
-
-/// One sentence per failure mode, so the CLI names the rule rather than an
-/// error tag. Shared shape with the HTTP/CLI surfaces' own explanations.
-fn syncSchReason(err: kicad_sch_push.PushError) []const u8 {
-    return switch (err) {
-        error.PcbPathUnset => "this design declares no (kicad-pcb \"<path>\") form, " ++
-            "so there is no KiCad project directory to push the schematic into",
-        error.PcbPathNotInDirectory => "the design's (kicad-pcb \"<path>\") is a bare filename " ++
-            "with no directory, so there is nowhere to write the schematic",
-        error.PushWriteFailed => "writing into the KiCad project directory failed",
-        else => "the schematic export failed its own self-check",
-    };
 }
 
 /// Print the plan as one line per file, then what was (or was not) done.

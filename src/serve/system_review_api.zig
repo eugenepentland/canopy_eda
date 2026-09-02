@@ -13,6 +13,7 @@ const clock = @import("../infra/clock.zig");
 const infra_fs = @import("../infra/fs.zig");
 const json_writer = @import("../json_writer.zig");
 const system_review = @import("../system_review.zig");
+const system_review_markers = @import("../system_review_markers.zig");
 const system_review_assets = @import("../system_review_assets.zig");
 const system_review_md = @import("../system_review_md.zig");
 const system_review_package = @import("../system_review_package.zig");
@@ -371,32 +372,11 @@ fn writableDocumentPath(
     return std.mem.startsWith(u8, document.path, prefix);
 }
 
-fn stripGeneratedMarkerLines(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    var lines = std.mem.splitScalar(u8, source, '\n');
-    var in_fence = false;
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        var marker = false;
-        if (in_fence) {
-            if (std.mem.eql(u8, trimmed, "```")) in_fence = false;
-        } else if (std.mem.startsWith(u8, trimmed, "```")) {
-            in_fence = true;
-        } else {
-            marker = (std.mem.startsWith(u8, trimmed, system_review.generated_region_open) and
-                std.mem.endsWith(u8, trimmed, " -->")) or
-                std.mem.eql(u8, trimmed, system_review.generated_region_close);
-        }
-        if (!marker) try out.writer.print("{s}\n", .{line});
-    }
-    return out.toOwnedSlice();
-}
-
 fn renderSafeDocumentHtml(
     allocator: std.mem.Allocator,
     source: []const u8,
 ) ![]const u8 {
-    const without_markers = try stripGeneratedMarkerLines(allocator, source);
+    const without_markers = try system_review_markers.stripMarkerLines(allocator, source);
     defer allocator.free(without_markers);
     var parsed = try system_review_md.parse(allocator, without_markers, .{});
     defer parsed.deinit();
@@ -745,7 +725,7 @@ fn validateDocumentForSave(
     diagnostic: *system_review.Diagnostic,
 ) !void {
     _ = try system_review.inspectDocumentContent(document, content, diagnostic);
-    const without_markers = try stripGeneratedMarkerLines(allocator, content);
+    const without_markers = try system_review_markers.stripMarkerLines(allocator, content);
     defer allocator.free(without_markers);
     var parsed = try system_review_md.parse(allocator, without_markers, .{});
     defer parsed.deinit();

@@ -2783,6 +2783,7 @@ refused outright: it is invisible at fab resolution and spends two vertices.
 - the chamfer cuts a corner whose arms sit slightly off-axis, and refuses one whose cut would not be a 45 degree diagonal
 - the chamfer cuts the corner next to a pad terminal but keeps a straight run leaving that pad, and refuses an arm shorter than the reserve
 - the chamfer refuses a cut narrower than a trace width rather than spend two vertices on it
+- re-emitting a simplified chain of fewer than two points draws no copper instead of panicking
 - completeness-waiver: empty inputs (a net with no fresh tracks or one straight run returns null — the already-straight test's case)
 - completeness-waiver: large inputs (linear over the net's segment count; corner-cutting is bounded to a few forward sweeps over a short routed chain)
 - completeness-waiver: unauthorized access (a pure geometry pass inside the router; endpoint access control lives in serve/ward_auth)
@@ -6558,6 +6559,7 @@ Public functions: describeComponent, listRequirements, addRequirement, removeReq
 - addRequirement rejection names the accepted check primitives and reference section
 - removeRequirement deletes a requirement by id or exact text
 - formEnd skips parens inside string literals
+- form bounds skip a semicolon comment and refuse an opening byte that is not a paren
 - add list and remove requirement round-trip on disk
 - describeComponent reverse-maps explicit module implementations
 - describeComponent exposes digest-bound datasheet review evidence
@@ -6632,6 +6634,7 @@ Public functions: downloadFootprint, errorMessage, searchComponents, searchError
 - collectHits maps suggestions to search hits
 - containsHit dedups aggregated hits by part name
 - hoistExact moves the exact query match to the front
+- every fetched URL follows a -- end-of-options guard so a URL beginning with a dash cannot become a curl option
 
 ## serve/digikey
 
@@ -8100,6 +8103,7 @@ export never invents them.
 
 - register tables are read only under a heading naming the board and only when the second column is Count
 - drift lists every kind whose registered count differs from the release run's warning count, unrecognised categories included
+- a table row with no leading pipe or more cells than fit is refused rather than parsed into misaligned columns
 - completeness-waiver: empty inputs (an empty register or an empty readiness document yields no entries and no drift)
 - completeness-waiver: large inputs (parsing is a single linear pass over lines and cells with fixed-size cell buffers)
 - completeness-waiver: unauthorized access (the register arrives as an already-read document owned by the system manifest)

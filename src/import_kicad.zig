@@ -44,6 +44,7 @@ const parser_mod = @import("sexpr/parser.zig");
 const tokenizer_mod = @import("sexpr/tokenizer.zig");
 const footprint_conv = @import("convert/footprint.zig");
 const kicad_fmt = @import("kicad_pcb/format.zig");
+const pad_net = @import("kicad_pcb/pad_net.zig");
 const infra_fs = @import("infra/fs.zig");
 const import_fold = @import("import_fold.zig");
 const numeric = @import("numeric.zig");
@@ -288,13 +289,7 @@ fn readPartPad(
     var func: []const u8 = "";
     for (cl[2..]) |sub| {
         if (sub.isForm("net")) {
-            const nl = sub.asList() orelse continue;
-            if (nl.len < 2) continue;
-            if (nl[1].asNumber()) |id_num| {
-                if (net_table.get(numeric.checkedInt(i64, id_num) orelse continue)) |name| net_name = name;
-            } else if (nl[1].asString()) |name| {
-                net_name = name;
-            }
+            if (pad_net.nameOf(sub, net_table)) |name| net_name = name;
         } else if (sub.isForm("pinfunction")) {
             const fl = sub.asList() orelse continue;
             if (fl.len >= 2) func = fl[1].asString() orelse "";

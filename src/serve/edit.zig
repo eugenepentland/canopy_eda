@@ -18,6 +18,7 @@ const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const bom_html = @import("bom_html.zig");
 const pcb_part_json = @import("pcb_part_json.zig");
+const form_child_indent = @import("form_child_indent.zig");
 const history = @import("history.zig");
 const id_insert = @import("../id_insert.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
@@ -2590,7 +2591,7 @@ pub fn addSectionNoteCore(
 
     // Indent heuristic: match the first non-whitespace sibling inside the
     // section body so new notes sit alongside existing forms.
-    const indent = detectSectionIndent(source, sec_start);
+    const indent = form_child_indent.firstChild(source, sec_start);
 
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
@@ -2794,22 +2795,6 @@ fn safeLibName(name: []const u8) bool {
     if (std.mem.indexOf(u8, name, "..") != null) return false;
     if (std.mem.indexOfAny(u8, name, "/\\") != null) return false;
     return true;
-}
-
-/// Return the indentation prefix (leading whitespace) of the first child
-/// form inside a `(section ...)` body, so splice points match the file's
-/// existing indent style. Falls back to two spaces when the section is
-/// empty.
-fn detectSectionIndent(source: []const u8, sec_start: usize) []const u8 {
-    // Skip past `(section "NAME"` opening — find the first newline after it.
-    var i: usize = sec_start;
-    while (i < source.len and source[i] != '\n') : (i += 1) {}
-    if (i >= source.len) return "  ";
-    i += 1;
-    const indent_start = i;
-    while (i < source.len and (source[i] == ' ' or source[i] == '\t')) : (i += 1) {}
-    if (i == indent_start) return "  ";
-    return source[indent_start..i];
 }
 
 const PinTokenLoc = struct { start: usize, end: usize };

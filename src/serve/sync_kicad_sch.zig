@@ -24,6 +24,10 @@ const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const bom = @import("../bom.zig");
 const push = @import("../kicad_sch_push.zig");
+/// One sentence per failure mode, so an agent learns the rule instead of an
+/// error name. Shared with the `sync-kicad-sch` CLI, which reports the same
+/// failures.
+const explain = @import("../kicad_sch_push_reason.zig").explain;
 const mcp_tools = @import("mcp_tools.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const serve_root = @import("../serve.zig");
@@ -259,20 +263,6 @@ pub fn mcpSyncKicadSch(
     // A refusal is reported as a normal result carrying `ok:false`; only a
     // failure to get that far is a tool error.
     return true;
-}
-
-/// One sentence per failure mode, so an agent learns the rule instead of an
-/// error name.
-fn explain(e: PushApiError) []const u8 {
-    return switch (e) {
-        error.PcbPathUnset => "this design declares no (kicad-pcb \"<path>\") form, " ++
-            "so there is no KiCad project directory to push the schematic into",
-        error.PcbPathNotInDirectory => "the design's (kicad-pcb \"<path>\") is a bare filename " ++
-            "with no directory, so there is nowhere to write the schematic",
-        error.FileNotFound, error.NotADesign, error.InvalidName => "no design by that name",
-        error.PushWriteFailed => "writing into the KiCad project directory failed",
-        else => "the schematic export failed",
-    };
 }
 
 fn argStr(args_val: ?std.json.Value, key: []const u8) ?[]const u8 {

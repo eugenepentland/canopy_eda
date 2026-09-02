@@ -20,6 +20,7 @@ const env_mod = @import("../eval/env.zig");
 const check_grammar = @import("../eval/check_grammar.zig");
 const electrical_mod = @import("../eval/electrical.zig");
 const module_metadata = @import("../module_metadata.zig");
+const sexp_form_bounds = @import("../sexp_form_bounds.zig");
 const datasheet_review_json = @import("datasheet_review_json.zig");
 
 const max_component_bytes: usize = 1 * 1024 * 1024;
@@ -684,36 +685,6 @@ fn lastParenIndex(src: []const u8) ?usize {
     return null;
 }
 
-/// Byte index one past the `)` closing the list that begins at `start` (where
-/// `src[start] == '('`). Respects string literals and `\` escapes so parens
-/// inside requirement text don't skew the count. Returns null if unbalanced.
-fn formEnd(src: []const u8, start: usize) ?usize {
-    var depth: i32 = 0;
-    var in_str = false;
-    var i = start;
-    while (i < src.len) : (i += 1) {
-        const c = src[i];
-        if (in_str) {
-            if (c == '\\') {
-                i += 1;
-                continue;
-            }
-            if (c == '"') in_str = false;
-            continue;
-        }
-        switch (c) {
-            '"' => in_str = true,
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if (depth == 0) return i + 1;
-            },
-            else => {},
-        }
-    }
-    return null;
-}
-
 /// Insert `form` as the final child of the component, just before its closing
 /// paren, preserving existing formatting. Returns null if there is no `)`.
 /// Caller owns the result.
@@ -734,7 +705,7 @@ fn spliceRequirement(allocator: std.mem.Allocator, src: []const u8, form: []cons
 /// line) is preserved and reattaches to the prior line. Returns null if the
 /// form is unbalanced. Caller owns the result.
 fn removeFormSrc(allocator: std.mem.Allocator, src: []const u8, start: usize) !?[]u8 {
-    const end = formEnd(src, start) orelse return null;
+    const end = sexp_form_bounds.endIndex(src, start) orelse return null;
     const del_start = std.mem.lastIndexOfScalar(u8, src[0..start], '\n') orelse start;
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -1237,8 +1208,29 @@ test "removeFormSrc deletes a middle requirement and reattaches the close on the
 test "formEnd ignores parens inside string literals" {
     // spec: serve/component_info - formEnd skips parens inside string literals
     const src = "(requirement \"text with ) paren\") trailing";
-    const end = formEnd(src, 0).?;
+    const end = sexp_form_bounds.endIndex(src, 0).?;
     try std.testing.expectEqualStrings("(requirement \"text with ) paren\")", src[0..end]);
+}
+
+// The two copies of this scan disagreed on exactly these two inputs: one
+// counted parens inside a `;` comment (ending the form early, so a splice cut
+// the file mid-form), and the other decremented a `usize` depth on a `)` it
+// reached before any `(` — an underflow panic in a safe build rather than
+// "unbalanced".
+// spec: serve/component_info - form bounds skip a semicolon comment and refuse an opening byte that is not a paren
+test "form bounds ignore a comment's parens and refuse a non-opening start" {
+    const commented = "(requirement \"a\" ; a note with ) in it\n  (ref \"r\"))\ntrailing";
+    const end = sexp_form_bounds.endIndex(commented, 0).?;
+    try std.testing.expectEqualStrings(
+        "(requirement \"a\" ; a note with ) in it\n  (ref \"r\"))",
+        commented[0..end],
+    );
+
+    // A start byte that is not `(` is unbalanced, never a panic.
+    try std.testing.expect(sexp_form_bounds.closeIndex(") stray", 0) == null);
+    try std.testing.expect(sexp_form_bounds.closeIndex("x)", 1) == null);
+    try std.testing.expect(sexp_form_bounds.closeIndex("(a", 0) == null);
+    try std.testing.expect(sexp_form_bounds.closeIndex("", 0) == null);
 }
 
 test "add/list/remove requirement round-trips through the component file on disk" {

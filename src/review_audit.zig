@@ -9,6 +9,7 @@
 const std = @import("std");
 const bom = @import("bom.zig");
 const clock = @import("infra/clock.zig");
+const markdown_row = @import("markdown_row.zig");
 const review = @import("review.zig");
 const component_classification = @import("component_classification.zig");
 const env = @import("eval/env.zig");
@@ -445,21 +446,6 @@ fn reviewerTail(cell_count: usize) usize {
     };
 }
 
-fn splitRow(line: []const u8, out: *[16][]const u8) usize {
-    var body = std.mem.trim(u8, line, " \t\r");
-    if (body.len == 0 or body[0] != '|') return 0;
-    body = body[1..];
-    if (body.len > 0 and body[body.len - 1] == '|') body = body[0 .. body.len - 1];
-    var n: usize = 0;
-    var it = std.mem.splitScalar(u8, body, '|');
-    while (it.next()) |cell| {
-        if (n == out.len) return 0;
-        out[n] = std.mem.trim(u8, cell, " \t");
-        n += 1;
-    }
-    return n;
-}
-
 fn rowKey(allocator: std.mem.Allocator, cells: []const []const u8) std.mem.Allocator.Error![]const u8 {
     return std.mem.join(allocator, "\x1f", cells);
 }
@@ -485,8 +471,8 @@ pub fn mergeDispositions(
     var kept: std.StringHashMapUnmanaged([]const []const u8) = .empty;
     var lines = std.mem.splitScalar(u8, previous, '\n');
     while (lines.next()) |line| {
-        var cells: [16][]const u8 = undefined;
-        const n = splitRow(line, &cells);
+        var cells: [markdown_row.max_cells][]const u8 = undefined;
+        const n = markdown_row.split(line, &cells);
         const k = reviewerTail(n);
         if (k == 0 or tailEmpty(cells[n - k .. n])) continue;
         const key = try rowKey(arena, cells[0 .. n - k]);
@@ -500,8 +486,8 @@ pub fn mergeDispositions(
     while (rendered_lines.next()) |line| {
         if (!first) w.writeAll("\n") catch return error.OutOfMemory;
         first = false;
-        var cells: [16][]const u8 = undefined;
-        const n = splitRow(line, &cells);
+        var cells: [markdown_row.max_cells][]const u8 = undefined;
+        const n = markdown_row.split(line, &cells);
         const k = reviewerTail(n);
         const tail: ?[]const []const u8 = if (k == 0 or !tailEmpty(cells[n - k .. n])) null else kept.get(try rowKey(arena, cells[0 .. n - k]));
         const filled = tail orelse {
