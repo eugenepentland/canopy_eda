@@ -5090,6 +5090,8 @@ Public functions: renderSchematic
 
 ## erc
 
+- a net pinned by (module-policy (net-class …)) is not reported as an inferred layout class
+- a module-local supply node whose name carries a supply token counts as the IC's power connection
 - EMI coupling intent must bridge its declared domain to ground and cannot also claim supply decoupling
 - an explicitly signal-typed rated input is not a supply rail and does not require decoupling
 - explicit decoupling bindings must resolve to the cap's actual rail and return
@@ -5152,6 +5154,7 @@ Public functions: renderSchematic
 
 Public functions: analyze
 
+- a sealed module's declared input-port current is one consumer on the rail it taps when the module annotates no pin there
 - a sibling sub-block's annotated pins load the parent rail its port ties to, so a rail whose consumers are all sealed in modules is no longer empty
 - the sub-block load walk recurses, so a module nested inside a module still credits the board rail its ports chain up to
 - only a sub-block net a port exposes credits the parent; a module's private net stays private however heavily it is annotated
@@ -5200,6 +5203,7 @@ Public functions: analyze
 
 ## eval/design_block
 
+- module-policy form pins the placement class of named nets on the design block
 - design-rules captures an optional ground-via maximum distance for SMD ground-pad plane stitching
 - design-rules captures an optional finished via-wall plating thickness for power-capacity analysis
 

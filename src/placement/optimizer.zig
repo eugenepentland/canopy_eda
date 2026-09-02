@@ -495,6 +495,9 @@ pub const Placement = struct {
     /// The router uses this to distinguish a real ground return from an
     /// optional N/C pad the author deliberately assigned to the GND net.
     pin_roles: []const pin_roles.PartRoles = &.{},
+    /// Author-pinned net classes from `(module-policy (net-class …))`, read by
+    /// module_policy before its name heuristic.
+    net_class_pins: []const env.NetClassPin = &.{},
     /// Per-part `(placement-order …)` rank (index-aligned with `parts`/
     /// `instances`): 0 = unranked, higher = earlier in the declared list. The
     /// router routes higher-priority nets first so they claim the short path.
@@ -6710,6 +6713,7 @@ pub fn solve(
     emitBest(parts, bd.objective, .refine);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, generated);
     pl.pin_roles = prep.roles;
+    pl.net_class_pins = prep.block.net_class_pins;
     pl.rules = try boardRulesWith(arena, block, nets, try prep.rulesFor(arena, block, nets));
     pl.fabrication_layers = block.fabrication_layers;
     pl.diff_pairs = try diff_pairs.resolve(arena, nets, pl.rules.net);
@@ -6915,6 +6919,7 @@ pub fn placeFromPoses(
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
     pl.pin_roles = prep.roles;
+    pl.net_class_pins = prep.block.net_class_pins;
     pl.rules = try boardRulesWith(arena, block, nets, try prep.rulesFor(arena, block, nets));
     pl.fabrication_layers = block.fabrication_layers;
     pl.diff_pairs = try diff_pairs.resolve(arena, nets, pl.rules.net);
@@ -6982,6 +6987,7 @@ pub fn gridPlace(
     const bd = breakdownWith(parts, &prep.idx_of, nets, params, score, lsum);
     var pl = try finalize(arena, parts, built.springs, built.loops, stubs, prep.instances, nets, prep.priority, score, bd, false);
     pl.pin_roles = prep.roles;
+    pl.net_class_pins = prep.block.net_class_pins;
     pl.rules = try boardRulesWith(arena, block, nets, try prep.rulesFor(arena, block, nets));
     pl.fabrication_layers = block.fabrication_layers;
     pl.diff_pairs = try diff_pairs.resolve(arena, nets, pl.rules.net);

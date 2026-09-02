@@ -138,6 +138,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var rough_spec: env_mod.RoughSpec = .{};
     var stackup_spec: env_mod.StackupSpec = .{};
     var pdn_intents: std.ArrayList(env_mod.PdnIntent) = .empty;
+    var net_class_pins: std.ArrayList(env_mod.NetClassPin) = .empty;
     var envelope_decls: std.ArrayList(net_envelopes.Declaration) = .empty;
     var fabrication_layers: std.ArrayList(env_mod.FabricationLayerSpec) = .empty;
     var net_class_specs: std.ArrayList(env_mod.NetClassSpec) = .empty;
@@ -193,6 +194,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .rough_spec = &rough_spec,
         .stackup_spec = &stackup_spec,
         .pdn_intents = &pdn_intents,
+        .net_class_pins = &net_class_pins,
         .envelope_decls = &envelope_decls,
         .fabrication_layers = &fabrication_layers,
         .net_class_specs = &net_class_specs,
@@ -241,6 +243,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .rough = rough_spec,
         .stackup = stackup_spec,
         .pdn_intents = pdn_intents.toOwnedSlice(self.allocator) catch &.{},
+        .net_class_pins = net_class_pins.toOwnedSlice(self.allocator) catch &.{},
         .fabrication_layers = fabrication_layers.toOwnedSlice(self.allocator) catch &.{},
         .net_classes = net_class_specs.toOwnedSlice(self.allocator) catch &.{},
         .design_rules = design_rules_spec,
@@ -323,6 +326,7 @@ const BlockBuildState = struct {
     rough_spec: *env_mod.RoughSpec,
     stackup_spec: *env_mod.StackupSpec,
     pdn_intents: *std.ArrayList(env_mod.PdnIntent),
+    net_class_pins: *std.ArrayList(env_mod.NetClassPin),
     envelope_decls: *std.ArrayList(net_envelopes.Declaration),
     fabrication_layers: *std.ArrayList(env_mod.FabricationLayerSpec),
     net_class_specs: *std.ArrayList(env_mod.NetClassSpec),
@@ -567,6 +571,7 @@ fn evalBlockBodyForm(
         },
         .design_rules => build.design_rules_spec.* = parseDesignRules(self, form_children),
         .pcb_plan => build.pcb_plan_spec.* = try takeFirstPcbPlan(self, form_children, form.span, build.pcb_plan_spec.*),
+        .module_policy => try parseModulePolicy(self, form_children, build.net_class_pins),
         // Section-only forms are ignored at the top level — a
         // design-block body shouldn't carry status/description/pins
         // directly. The exhaustive switch is the contract; the warning
@@ -1260,6 +1265,7 @@ fn evalSection(
             .frequency_plan,
             .design_rules,
             .pcb_plan,
+            .module_policy,
             => self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name}),
         }
     }
@@ -4158,6 +4164,68 @@ test "stackup captures soldermask and copper etch profile" {
     try testing.expectApproxEqAbs(@as(f64, 3.8), mask.er, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.03048), mask.substrate_thickness, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.01524), mask.copper_thickness, 1e-12);
+}
+
+/// `(module-policy (net-class "NET" class)…)`: pin the placement criticality
+/// class of named nets over `module_policy.classifyNetName`'s guess. Each child
+/// must be `(net-class "NET" class)` with a class from the module-policy
+/// vocabulary; anything else is warned and dropped, never silently accepted.
+fn parseModulePolicy(self: *Evaluator, c: []const Node, out: *std.ArrayList(env_mod.NetClassPin)) EvalError!void {
+    for (c[1..]) |child| {
+        const cl = child.asList() orelse {
+            self.warnFmt(child.span, "(module-policy …) accepts only (net-class \"NET\" class) children", .{});
+            continue;
+        };
+        if (cl.len < 3 or !std.mem.eql(u8, cl[0].asAtom() orelse "", "net-class")) {
+            self.warnFmt(child.span, "(module-policy …) accepts only (net-class \"NET\" class) children", .{});
+            continue;
+        }
+        const net = cl[1].asText() orelse {
+            self.warnFmt(cl[1].span, "(module-policy (net-class …)) net must be a name", .{});
+            continue;
+        };
+        const class = cl[2].asAtom() orelse cl[2].asString() orelse {
+            self.warnFmt(cl[2].span, "(module-policy (net-class …)) class must be an atom", .{});
+            continue;
+        };
+        if (!isPlanRouteClass(class)) {
+            self.warnFmt(cl[2].span, "unknown module-policy net class '{s}' — expected one of ground, power, " ++
+                "input_rail, switch_node, clock, rf, feedback, analog, control, signal", .{class});
+            continue;
+        }
+        out.append(self.allocator, .{ .net = net, .class = class }) catch return EvalError.OutOfMemory;
+    }
+}
+
+// spec: eval/design_block - module-policy form pins the placement class of named nets on the design block
+test "design-block captures (module-policy (net-class …)) pins" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (instance "R1" fakeres (pin 1 "V_24V_CLEAN") (pin 2 "GND"))
+        \\  (module-policy (net-class "V_24V_CLEAN" power) (net-class "REF_ADF" clock) (net-class "X" widget) (bogus 1)))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    try eval.component_cache.put(a, "fakeres", .{
+        .name = "fakeres",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    var scope = env_mod.Env.init(a, null);
+    defer scope.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &scope)).design_block;
+    try testing.expectEqual(@as(usize, 2), block.net_class_pins.len);
+    try testing.expectEqualStrings("V_24V_CLEAN", block.net_class_pins[0].net);
+    try testing.expectEqualStrings("power", block.net_class_pins[0].class);
+    try testing.expectEqualStrings("REF_ADF", block.net_class_pins[1].net);
+    try testing.expectEqualStrings("clock", block.net_class_pins[1].class);
+    // The unknown class and the malformed child each warned rather than landing.
+    try testing.expect(eval.warnings.items.len >= 2);
 }
 
 // spec: eval/design_block - net-envelope form publishes an authored voltage envelope on the design block

@@ -161,6 +161,7 @@ pub const ScopeForm = enum {
     frequency_plan,
     design_rules,
     pcb_plan,
+    module_policy,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -209,6 +210,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "stackup", .stackup },
     .{ "pdn", .pdn },
     .{ "net-envelope", .net_envelope },
+    .{ "module-policy", .module_policy },
     .{ "fabrication-layer", .fabrication_layer },
     .{ "net-class", .net_class },
     .{ "pll-loop", .pll_loop },
@@ -688,6 +690,15 @@ pub const scope_form_docs = blk: {
             "the screen uses the rail's declared max-minus-typical load (or maximum load) and labels " ++
             "that assumption. Ferrite-connected nets require separate pdn forms because they are one " ++
             "DC budget but distinct AC domains.",
+    } };
+    t[@backingInt(ScopeForm.module_policy)] = .{ .scope = tl, .doc = .{
+        .syntax = "(module-policy (net-class \"NET\" ground|power|input_rail|switch_node|clock|rf|feedback|analog|control|signal)…)",
+        .summary = "Pin the PCB-layout criticality class of named nets, overriding the name heuristic " ++
+            "the placer, the routing order and the `layout_class_inferred` ERC info use " ++
+            "(`module_policy.classifyNetName`). One (net-class …) child per net; the net is the " ++
+            "FLATTENED name (\"sub-block/NET\" for a module-internal net) or a bare leaf that " ++
+            "matches every module-local net of that name. A pinned net is no longer reported as " ++
+            "inferred. Unknown class atoms and malformed children are warned and dropped.",
     } };
     t[@backingInt(ScopeForm.net_envelope)] = .{ .scope = tl, .doc = .{
         .syntax = "(net-envelope \"NET\" (rated LO HI) [\"why\"])",
