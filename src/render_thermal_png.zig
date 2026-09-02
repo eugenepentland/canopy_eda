@@ -31,6 +31,7 @@ const std = @import("std");
 const board_theme = @import("board_theme.zig");
 const net_name = @import("net_name.zig");
 const optimizer = @import("placement/optimizer.zig");
+const outline = @import("placement/outline.zig");
 const png = @import("png.zig");
 const raster = @import("raster.zig");
 const render_pcb_png = @import("render_pcb_png.zig");
@@ -222,11 +223,14 @@ fn viewBox(p: optimizer.Placement, grid: thermal_field.FieldGrid) [4]f64 {
 fn riseSpan(grid: thermal_field.FieldGrid) [2]f64 {
     var lo: f32 = std.math.floatMax(f32);
     var hi: f32 = -std.math.floatMax(f32);
-    for (grid.rise_c) |v| {
+    var any = false;
+    for (grid.rise_c, 0..) |v, i| {
+        if (grid.active.len != 0 and grid.active[i] == 0) continue;
+        any = true;
         lo = @min(lo, v);
         hi = @max(hi, v);
     }
-    if (grid.rise_c.len == 0) return .{ 0, 0 };
+    if (!any) return .{ 0, 0 };
     return .{ lo, hi };
 }
 
@@ -271,9 +275,20 @@ const Ctx = struct {
         const fy = (y_mm - g.origin_y_mm) / g.cell_mm - 0.5;
         const cx = axisWeights(fx, g.cols);
         const cy = axisWeights(fy, g.rows);
-        const top = lerp(g.at(cx.lo, cy.lo), g.at(cx.hi, cy.lo), cx.t);
-        const bot = lerp(g.at(cx.lo, cy.hi), g.at(cx.hi, cy.hi), cx.t);
-        return top + (bot - top) * cy.t;
+        const points = [_]struct { c: usize, r: usize, weight: f64 }{
+            .{ .c = cx.lo, .r = cy.lo, .weight = (1 - cx.t) * (1 - cy.t) },
+            .{ .c = cx.hi, .r = cy.lo, .weight = cx.t * (1 - cy.t) },
+            .{ .c = cx.lo, .r = cy.hi, .weight = (1 - cx.t) * cy.t },
+            .{ .c = cx.hi, .r = cy.hi, .weight = cx.t * cy.t },
+        };
+        var weighted: f64 = 0;
+        var total: f64 = 0;
+        for (points) |point| {
+            if (!g.isActive(point.c, point.r)) continue;
+            weighted += point.weight * g.at(point.c, point.r);
+            total += point.weight;
+        }
+        return if (total > 0) weighted / total else 0;
     }
 
     /// The heat field, painted in small square blocks over the solved
@@ -292,6 +307,9 @@ const Ctx = struct {
             while (x < x1) : (x += field_block_px) {
                 const wx = self.minx - view_margin_mm + @as(f64, x + field_block_px / 2) / self.scale;
                 const wy = self.miny - view_margin_mm + @as(f64, y - self.yoff + field_block_px / 2) / self.scale;
+                if (self.p.board_poly) |poly| {
+                    if (!outline.contains(poly, wx, wy)) continue;
+                }
                 const col = rampColor(self.norm(self.sample(wx, wy)));
                 self.cv.fillRect(x, y, field_block_px, field_block_px, col, 1.0);
             }
@@ -311,12 +329,13 @@ const Ctx = struct {
         while (r < g.rows) : (r += 1) {
             var c: usize = 0;
             while (c < g.cols) : (c += 1) {
+                if (!g.isActive(c, r)) continue;
                 const here = self.norm(g.at(c, r));
-                if (c + 1 < g.cols and self.crosses(here, self.norm(g.at(c + 1, r)))) {
+                if (c + 1 < g.cols and g.isActive(c + 1, r) and self.crosses(here, self.norm(g.at(c + 1, r)))) {
                     const x = self.xpx(g.origin_x_mm + @as(f64, @floatFromInt(c + 1)) * g.cell_mm);
                     self.cv.line(x, self.cellY(r), x, self.cellY(r + 1), width, bg, 0.6, .butt);
                 }
-                if (r + 1 < g.rows and self.crosses(here, self.norm(g.at(c, r + 1)))) {
+                if (r + 1 < g.rows and g.isActive(c, r + 1) and self.crosses(here, self.norm(g.at(c, r + 1)))) {
                     const y = self.ypx(g.origin_y_mm + @as(f64, @floatFromInt(r + 1)) * g.cell_mm);
                     self.cv.line(self.cellX(c), y, self.cellX(c + 1), y, width, bg, 0.6, .butt);
                 }
@@ -343,6 +362,15 @@ const Ctx = struct {
 
     /// The authored board edge, when the design declared one.
     fn drawBoardOutline(self: *Ctx) void {
+        if (self.p.board_poly) |poly| {
+            if (poly.len < 3) return;
+            var previous = poly[poly.len - 1];
+            for (poly) |p| {
+                self.cv.line(self.xpx(previous[0]), self.ypx(previous[1]), self.xpx(p[0]), self.ypx(p[1]), 1.5, outline_col, 0.9, .butt);
+                previous = p;
+            }
+            return;
+        }
         const r = self.p.board_rect orelse return;
         const x0 = self.xpx(r.minx);
         const y0 = self.ypx(r.miny);
@@ -568,13 +596,6 @@ fn axisWeights(f: f64, count: usize) AxisWeights {
     return .{ .lo = lo, .hi = @min(lo + 1, count - 1), .t = f - @floor(f) };
 }
 
-/// Linear blend of two grid cells (f32 storage) in f64, so a sample never
-/// rounds through the narrower type on its way to a colour.
-fn lerp(a: f32, b: f32, t: f64) f64 {
-    const af: f64 = a;
-    return af + (@as(f64, b) - af) * t;
-}
-
 /// The scenario's ambient ceiling as a caption fragment: the figure and the
 /// part that sets it, or a word saying nothing sets one.
 fn ceilingText(
@@ -672,6 +693,30 @@ test "the heat-zone image encodes as a PNG and changes with the scenario" {
     // Two m/s of air is a colder board, and a picture that did not change would
     // mean the scenario never reached the renderer.
     try testing.expect(!std.mem.eql(u8, still, blown));
+}
+
+// spec: render_thermal_png - an authored non-rectangular outline clips the heat wash and is stroked as its exact polygon instead of the rectangular bounding box
+test "the heat-zone image leaves rounded-off corner area unpainted" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var parts = testParts();
+    var p = testPlacement(&parts);
+    const cut = [_][2]f64{ .{ 5, 0 }, .{ 35, 0 }, .{ 40, 5 }, .{ 40, 35 }, .{ 35, 40 }, .{ 5, 40 }, .{ 0, 35 }, .{ 0, 5 } };
+    p.board_poly = &cut;
+    const view = try testView(arena, p, .natural, 25);
+    var cv = try renderCanvas(arena, p, view, .{ .width = 600 });
+    defer cv.deinit();
+
+    const box = viewBox(p, view.result.grid);
+    const scale = 600.0 / (@max(box[2] - box[0], 1.0) + 2 * view_margin_mm);
+    const px: usize = @intFromFloat((1 - box[0] + view_margin_mm) * scale * ss);
+    const py: usize = @intFromFloat((@as(f64, @floatFromInt(header_h_px)) + (1 - box[1] + view_margin_mm) * scale) * ss);
+    const i = (py * cv.iw + px) * 3;
+    try testing.expectEqual(bg.r, cv.buf[i]);
+    try testing.expectEqual(bg.g, cv.buf[i + 1]);
+    try testing.expectEqual(bg.b, cv.buf[i + 2]);
 }
 
 // spec: render_thermal_png - the field is painted against one absolute 25 °C to 125 °C scale, clamping temperatures outside it so the same colour means the same heat across boards and cooling scenarios

@@ -110,7 +110,7 @@
     for (var p = 0; p < cols * rows; p++) {
       var col = ramp(temperatureNorm(f.ambient_c + g.rise_c[p]));
       img.data[p * 4] = col[0]; img.data[p * 4 + 1] = col[1];
-      img.data[p * 4 + 2] = col[2]; img.data[p * 4 + 3] = 255;
+      img.data[p * 4 + 2] = col[2]; img.data[p * 4 + 3] = (!g.active || g.active[p]) ? 255 : 0;
     }
     c.putImageData(img, 0, 0);
     var out = { cv: cv, hi: hi, iso: [] };
@@ -135,6 +135,8 @@
     function lerp(a, b, va, vb) { var d = vb - va; return d === 0 ? a : a + (b - a) * ((level - va) / d); }
     for (var y = 0; y + 1 < rows; y++) {
       for (var x = 0; x + 1 < cols; x++) {
+        var i0 = y * cols + x, i1 = i0 + 1, i3 = i0 + cols, i2 = i3 + 1;
+        if (g.active && (!g.active[i0] || !g.active[i1] || !g.active[i2] || !g.active[i3])) continue;
         var v0 = at(x, y), v1 = at(x + 1, y), v2 = at(x + 1, y + 1), v3 = at(x, y + 1);
         var code = (v0 > level ? 1 : 0) | (v1 > level ? 2 : 0) | (v2 > level ? 4 : 0) | (v3 > level ? 8 : 0);
         if (code === 0 || code === 15) continue;
@@ -212,10 +214,16 @@
     gy = Math.max(0, Math.min(g.rows - 1, gy));
     var x0 = Math.floor(gx), y0 = Math.floor(gy), x1 = Math.min(x0 + 1, g.cols - 1), y1 = Math.min(y0 + 1, g.rows - 1);
     var fx = gx - x0, fy = gy - y0;
-    function rise(cx, cy) { var v = Number(g.rise_c[cy * g.cols + cx]); return isFinite(v) ? v : 0; }
-    var top = rise(x0, y0) + (rise(x1, y0) - rise(x0, y0)) * fx;
-    var bottom = rise(x0, y1) + (rise(x1, y1) - rise(x0, y1)) * fx;
-    return field.ambient_c + top + (bottom - top) * fy;
+    var samples = [[x0,y0,(1-fx)*(1-fy)], [x1,y0,fx*(1-fy)], [x0,y1,(1-fx)*fy], [x1,y1,fx*fy]];
+    var weighted = 0, total = 0;
+    samples.forEach(function (sample) {
+      var i = sample[1] * g.cols + sample[0];
+      if (g.active && !g.active[i]) return;
+      var v = Number(g.rise_c[i]);
+      if (!isFinite(v)) return;
+      weighted += v * sample[2]; total += sample[2];
+    });
+    return total > 0 ? field.ambient_c + weighted / total : null;
   }
   function probeHide() { if (probe) probe.hidden = true; }
   function probeMove(ev) {
@@ -246,6 +254,14 @@
     var g = field.grid;
     var w = g.cols * g.cell_mm * S, h = g.rows * g.cell_mm * S;
     ctx.save();
+    var boardPts = PCB.board_poly || (PCB.outline && PCB.outline.pts) || null;
+    if (boardPts && boardPts.length >= 3) {
+      ctx.beginPath();
+      ctx.moveTo(X(boardPts[0][0]), Y(boardPts[0][1]));
+      for (var bi = 1; bi < boardPts.length; bi++) ctx.lineTo(X(boardPts[bi][0]), Y(boardPts[bi][1]));
+      ctx.closePath();
+      ctx.clip();
+    }
     ctx.globalAlpha = view.opacity;
     var smooth = ctx.imageSmoothingEnabled;
     ctx.imageSmoothingEnabled = true;

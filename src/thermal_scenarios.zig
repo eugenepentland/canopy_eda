@@ -83,7 +83,7 @@ pub const Board = struct {
 /// endpoint resolve), else the bounding box of the placed parts.
 pub fn boardOf(p: optimizer.Placement) Board {
     if (p.board_rect) |r| return .{
-        .rect = .{ .x_mm = r.minx, .y_mm = r.miny, .w_mm = r.w, .h_mm = r.h },
+        .rect = .{ .x_mm = r.minx, .y_mm = r.miny, .w_mm = r.w, .h_mm = r.h, .outline = p.board_poly orelse &.{} },
         .authored = true,
     };
     return .{
@@ -199,6 +199,15 @@ pub fn coverageOf(
 ) std.mem.Allocator.Error!?thermal_field.Coverage {
     if (!p.rules.declaredStackup()) return null;
     const shape = thermal_field.gridShape(boardOf(p).rect);
+    return coverageForShape(arena, p, copper, shape);
+}
+
+fn coverageForShape(
+    arena: std.mem.Allocator,
+    p: optimizer.Placement,
+    copper: Copper,
+    shape: thermal_field.GridShape,
+) std.mem.Allocator.Error!?thermal_field.Coverage {
     const frac = try arena.alloc(f32, shape.cols * shape.rows);
     @memset(frac, 0);
 
@@ -345,12 +354,15 @@ pub fn inputsFor(
     p: optimizer.Placement,
     copper: Copper,
 ) std.mem.Allocator.Error!thermal_field.Inputs {
+    const board = boardOf(p);
+    const parts = try partInputs(allocator, bt, p, copper);
+    const shape = thermal_field.adaptiveGridShape(board.rect, parts);
     return .{
-        .board = boardOf(p).rect,
+        .board = board.rect,
         .spreader_layers = spreaderLayersOf(p.rules),
         .sheet = sheetOf(p.rules),
-        .coverage = try coverageOf(allocator, p, copper),
-        .parts = try partInputs(allocator, bt, p, copper),
+        .coverage = if (p.rules.declaredStackup()) try coverageForShape(allocator, p, copper, shape) else null,
+        .parts = parts,
         .ratings_cap = ratingsCap(bt),
     };
 }
@@ -971,12 +983,16 @@ fn testRow(ref: []const u8, watts: f64) thermal.PartThermal {
     };
 }
 
-// spec: thermal_scenarios - the board rectangle is the placement's authored outline, and a design without one falls back to the parts bounding box with the substitution reported
+// spec: thermal_scenarios - the board carries the placement's exact authored outline as well as its bounds, and a design without one falls back to the parts bounding box with the substitution reported
 test "the board rectangle prefers the authored outline and reports a fallback" {
     var parts = [_]optimizer.Part{testPart("U1", 10, 10)};
 
-    const authored = boardOf(testPlacement(&parts, true));
+    var placed = testPlacement(&parts, true);
+    const outline = [_][2]f64{ .{ 2, 0 }, .{ 38, 0 }, .{ 40, 2 }, .{ 40, 38 }, .{ 38, 40 }, .{ 2, 40 }, .{ 0, 38 }, .{ 0, 2 } };
+    placed.board_poly = &outline;
+    const authored = boardOf(placed);
     try testing.expect(authored.authored);
+    try testing.expectEqual(outline.len, authored.rect.outline.len);
     try testing.expectEqual(@as(f64, 40), authored.rect.w_mm);
     try testing.expectEqual(@as(f64, 0), authored.rect.x_mm);
 

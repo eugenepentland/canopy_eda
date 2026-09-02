@@ -80,6 +80,8 @@ fn validate(input: Input) error{InvalidModel}!void {
     if (input.model.top_face_h_w_m2k.len != n) return error.InvalidModel;
     if (input.model.bottom_face_h_w_m2k.len != n) return error.InvalidModel;
     if (input.model.heat_source_w_m3.len != n) return error.InvalidModel;
+    if (input.model.active.len != 0 and input.model.active.len != n) return error.InvalidModel;
+    if (activeCellCount(input.model) == 0) return error.InvalidModel;
     if (!(input.model.thickness_m > 0) or !std.math.isFinite(input.model.thickness_m)) return error.InvalidModel;
     if (!std.math.isFinite(input.ambient_c)) return error.InvalidModel;
     for (0..n) |i| {
@@ -101,11 +103,17 @@ fn groupCells(alloc: std.mem.Allocator, model: thermal_field.Discretized) std.me
     const forces = try alloc.alloc(f64, n);
     const boundaries = try alloc.alloc(f64, 2 * n);
     const bodies = try alloc.alloc(Combo, n);
+    @memset(material_by_cell, 0);
+    @memset(force_by_cell, 0);
+    @memset(top_boundary_by_cell, 0);
+    @memset(bottom_boundary_by_cell, 0);
+    @memset(body_by_cell, 0);
     var material_count: usize = 0;
     var force_count: usize = 0;
     var boundary_count: usize = 0;
     var body_count: usize = 0;
     for (0..n) |i| {
+        if (!activeCell(model, i)) continue;
         material_by_cell[i] = internValue(materials, &material_count, model.conductivity_w_mk[i], false);
         force_by_cell[i] = internValue(forces, &force_count, model.heat_source_w_m3[i], true);
         top_boundary_by_cell[i] = internValue(boundaries, &boundary_count, model.top_face_h_w_m2k[i], false);
@@ -124,6 +132,19 @@ fn groupCells(alloc: std.mem.Allocator, model: thermal_field.Discretized) std.me
         .boundaries = boundaries[0..boundary_count],
         .bodies = bodies[0..body_count],
     };
+}
+
+fn activeCell(model: thermal_field.Discretized, i: usize) bool {
+    return model.active.len == 0 or model.active[i] != 0;
+}
+
+fn activeCellCount(model: thermal_field.Discretized) usize {
+    if (model.active.len == 0) return model.shape.cols * model.shape.rows;
+    var count: usize = 0;
+    for (model.active) |active| if (active != 0) {
+        count += 1;
+    };
+    return count;
 }
 
 fn internValue(values: []f64, count: *usize, value: f64, zero_is_none: bool) u32 {
@@ -146,7 +167,7 @@ fn internCombo(values: []Combo, count: *usize, value: Combo) u32 {
 }
 
 fn writeHeader(alloc: std.mem.Allocator, model: thermal_field.Discretized) Error![]const u8 {
-    const elements = model.shape.cols * model.shape.rows;
+    const elements = activeCellCount(model);
     const nodes = (model.shape.cols + 1) * (model.shape.rows + 1) * 2;
     const boundaries = elements * 2;
     return std.fmt.allocPrint(alloc, "{d} {d} {d}\n2\n404 {d}\n808 {d}\n", .{
@@ -186,6 +207,7 @@ fn writeElements(alloc: std.mem.Allocator, model: thermal_field.Discretized, gro
     for (0..model.shape.rows) |row| {
         for (0..model.shape.cols) |col| {
             const i = row * model.shape.cols + col;
+            if (!activeCell(model, i)) continue;
             try w.print("{d} {d} 808 {d} {d} {d} {d} {d} {d} {d} {d}\n", .{
                 id,
                 groups.body_by_cell[i],
@@ -208,10 +230,11 @@ fn writeBoundary(alloc: std.mem.Allocator, model: thermal_field.Discretized, gro
     var out: std.Io.Writer.Allocating = .init(alloc);
     const w = &out.writer;
     var boundary_id: usize = 1;
+    var parent: usize = 1;
     for (0..model.shape.rows) |row| {
         for (0..model.shape.cols) |col| {
             const i = row * model.shape.cols + col;
-            const parent = i + 1;
+            if (!activeCell(model, i)) continue;
             const bottom_bc = groups.bottom_boundary_by_cell[i];
             const top_bc = groups.top_boundary_by_cell[i];
             try w.print("{d} {d} {d} 0 404 {d} {d} {d} {d}\n", .{
@@ -226,6 +249,7 @@ fn writeBoundary(alloc: std.mem.Allocator, model: thermal_field.Discretized, gro
                 nodeId(model.shape, 1, row + 1, col),
             });
             boundary_id += 1;
+            parent += 1;
         }
     }
     return out.toOwnedSlice();
@@ -331,9 +355,10 @@ fn writeManifest(alloc: std.mem.Allocator, input: Input, groups: Groups) Error![
     try w.print("  \"normalizedRules\":{{\"spreaderLayers\":{d},\"outerCopperM\":{d},\"innerPlaneCopperM\":{d},\"laminateM\":{d},\"componentTransferM\":{d},\"bareFaceFilmWm2K\":{d},\"coveredFaceFraction\":0.4}},\n", .{
         input.solver_inputs.spreader_layers, sheet.outer_cu_m, sheet.inner_cu_m, sheet.laminate_m, sheet.transfer_m, scenario.filmCoefficient(),
     });
-    try w.print("  \"mesh\":{{\"format\":\"Elmer native\",\"elementType\":808,\"boundaryType\":404,\"columns\":{d},\"rows\":{d},\"cellMm\":{d},\"modeledWidthMm\":{d},\"modeledHeightMm\":{d},\"elementsThroughThickness\":1,\"materialGroups\":{d},\"heatSourceGroups\":{d},\"faceBoundaryGroups\":{d}}},\n", .{
+    try w.print("  \"mesh\":{{\"format\":\"Elmer native\",\"elementType\":808,\"boundaryType\":404,\"columns\":{d},\"rows\":{d},\"activeElements\":{d},\"cellMm\":{d},\"modeledWidthMm\":{d},\"modeledHeightMm\":{d},\"elementsThroughThickness\":1,\"materialGroups\":{d},\"heatSourceGroups\":{d},\"faceBoundaryGroups\":{d}}},\n", .{
         shape.cols,
         shape.rows,
+        activeCellCount(input.model),
         shape.cell_mm,
         @as(f64, @floatFromInt(shape.cols)) * shape.cell_mm,
         @as(f64, @floatFromInt(shape.rows)) * shape.cell_mm,
@@ -530,6 +555,11 @@ pub fn compare(
     var elmer_max = -std.math.inf(f64);
     for (0..shape.rows) |row| {
         for (0..shape.cols) |col| {
+            const cell_i = row * shape.cols + col;
+            if (!activeCell(input.model, cell_i)) {
+                cell_t[cell_i] = std.math.nan(f64);
+                continue;
+            }
             var sum: f64 = 0;
             for (0..2) |z| {
                 sum += parsed.temperatures_by_node[nodeId(shape, z, row, col) - 1];
@@ -538,7 +568,7 @@ pub fn compare(
                 sum += parsed.temperatures_by_node[nodeId(shape, z, row + 1, col) - 1];
             }
             const value = sum / 8.0;
-            cell_t[row * shape.cols + col] = value;
+            cell_t[cell_i] = value;
             elmer_max = @max(elmer_max, value);
         }
     }
@@ -551,7 +581,10 @@ pub fn compare(
         var r = cells.row_lo;
         while (r <= cells.row_hi) : (r += 1) {
             var c = cells.col_lo;
-            while (c <= cells.col_hi) : (c += 1) part_max = @max(part_max, cell_t[r * shape.cols + c]);
+            while (c <= cells.col_hi) : (c += 1) {
+                const i = r * shape.cols + c;
+                if (activeCell(input.model, i)) part_max = @max(part_max, cell_t[i]);
+            }
         }
         const builtin_board = input.ambient_c + builtin.board_rise_c;
         const builtin_junction = if (builtin.tj_rise_c) |rise| input.ambient_c + rise else null;
@@ -638,6 +671,7 @@ pub fn comparisonMarkdown(alloc: std.mem.Allocator, input: Input, comparison: Co
 
 // spec: export_elmer_thermal - an exported case contains a native hexahedral mesh, the selected natural or forced-air heat equation, normalized thermal-rule manifest, and portable run instructions
 // spec: export_elmer_thermal - component watts are conserved as volumetric heat and each cell's two face losses equal the built-in cell-to-ambient conductance
+// spec: export_elmer_thermal - cells clipped away by a rounded or custom outline are omitted from Elmer bodies and face boundaries
 test "Elmer export emits a native hexahedral mesh and still-air case" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -671,6 +705,16 @@ test "Elmer export emits a native hexahedral mesh and still-air case" {
     try std.testing.expect(std.mem.indexOf(u8, artifact.sif, "External Temperature = 25") != null);
     try std.testing.expect(std.mem.indexOf(u8, artifact.sif, "Heat Source = 1000") != null);
     _ = try std.json.parseFromSliceLeaky(std.json.Value, alloc, artifact.manifest, .{});
+
+    // The bounding lattice may contain cells clipped away by a rounded or
+    // custom outline. They are absent from the FEM bodies and face boundaries,
+    // rather than silently restoring a rectangular slab around the PCB.
+    const clipped_mask = [_]u8{ 1, 0 };
+    var clipped_input = input;
+    clipped_input.model.active = &clipped_mask;
+    const clipped = try build(alloc, clipped_input);
+    try std.testing.expectEqualStrings("12 1 2\n2\n404 2\n808 1\n", clipped.mesh_header);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, clipped.mesh_elements, " 808 "));
 
     var airflow_input = input;
     airflow_input.builtin.scenario = .airflow_1ms;

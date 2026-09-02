@@ -3379,6 +3379,7 @@ src/placement/thermal_field.zig::ScenarioResult struct_
 src/placement/thermal_field.zig::Sheet struct_
 src/placement/thermal_field.zig::Side enum_
 src/placement/thermal_field.zig::ThermalPad struct_
+src/placement/thermal_field.zig::adaptiveGridShape | fn adaptiveGridShape(board: BoardRect, parts: []const PartInput) GridShape
 src/placement/thermal_field.zig::at | fn at(self: FieldGrid, col: usize, row: usize) f32
 src/placement/thermal_field.zig::cellsForBox | fn cellsForBox(shape: GridShape, box: BoardRect) CellBlock
 src/placement/thermal_field.zig::conductivity | fn conductivity(self: HeatsinkMaterial) f64
@@ -3393,6 +3394,7 @@ src/placement/thermal_field.zig::filmCoefficient | fn filmCoefficient(self: Scen
 src/placement/thermal_field.zig::finCount | fn finCount(geometry: HeatsinkGeometry) usize
 src/placement/thermal_field.zig::gridShape | fn gridShape(board: BoardRect) GridShape
 src/placement/thermal_field.zig::heatsinkTarget | fn heatsinkTarget(parts: []const PartField) ?[]const u8
+src/placement/thermal_field.zig::isActive | fn isActive(self: FieldGrid, col: usize, row: usize) bool
 src/placement/thermal_field.zig::max_cells_axis value
 src/placement/thermal_field.zig::operatingFlow | fn operatingFlow(self: Fan) f64
 src/placement/thermal_field.zig::sinkToAmbient | fn sinkToAmbient(hs: Heatsink) f64

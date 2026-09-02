@@ -435,10 +435,10 @@ pub fn thermalFieldApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
     res.body = aw.written();
 }
 
-/// The field object. `rise_c` is row-major over `cols × rows`, each cell holding
-/// its rise ABOVE ambient — the same convention the solver and the heat-zone PNG
-/// use, so a client that wants absolute temperatures adds `ambient_c` and cannot
-/// get a stale ambient baked into the numbers.
+/// The field object. `rise_c` and `active` are row-major over `cols × rows`;
+/// each rise is ABOVE ambient and each active byte says whether that lattice
+/// cell belongs to the exact PCB outline. A client adds `ambient_c` only for an
+/// active cell, so neither stale ambient nor rounded-off substrate is painted.
 fn writeFieldJson(
     w: *std.Io.Writer,
     name: []const u8,
@@ -474,6 +474,11 @@ fn writeFieldJson(
     for (g.rise_c, 0..) |c, i| {
         if (i > 0) try w.writeAll(",");
         try w.print("{d:.2}", .{c});
+    }
+    try w.writeAll("],\"active\":[");
+    for (g.active, 0..) |active, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeByte(if (active != 0) '1' else '0');
     }
     try w.print("]}},\"hotspot\":{{\"x_mm\":{d:.3},\"y_mm\":{d:.3},\"rise_c\":{d:.2},\"c\":{d:.1}}}", .{
         result.hotspot.x_mm,
@@ -1144,6 +1149,7 @@ test "the thermal-field endpoint answers a grid, a hotspot and per-part rows" {
     const rows: usize = @intCast(grid.get("rows").?.integer);
     try testing.expect(cols > 0 and rows > 0);
     try testing.expectEqual(cols * rows, grid.get("rise_c").?.array.items.len);
+    try testing.expectEqual(cols * rows, grid.get("active").?.array.items.len);
     try testing.expect(try num(grid.get("cell_mm").?) > 0);
 
     // Every cell is a RISE, never an absolute temperature: the overlay's colour
