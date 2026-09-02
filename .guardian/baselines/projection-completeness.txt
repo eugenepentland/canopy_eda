@@ -1,2 +1,1 @@
 # guardian-snapshot v3
-projection-completeness|routed-copper-gerber-alias|src/export_matlab_rf.zig|build|tracks,vias

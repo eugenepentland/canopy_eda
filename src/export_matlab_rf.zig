@@ -11,6 +11,7 @@
 const std = @import("std");
 const optimizer = @import("placement/optimizer.zig");
 const router = @import("placement/router.zig");
+const rf_port_report = @import("placement/rf_port_report.zig");
 const impedance = @import("placement/impedance.zig");
 const env = @import("eval/env.zig");
 const export_fab = @import("export_fab.zig");
@@ -86,9 +87,46 @@ const Path = struct {
     axis: Axis,
 };
 
+/// The routed copper this export reads, in the two forms it needs.
+///
+/// `saved` is the persisted bundle `export_gerber.writeLayer` expects for a
+/// full-board export: a swept taper is a compact constant-width editor handle
+/// in `tracks` PLUS the sampled `rf_paths` that are its real geometry, and a
+/// curved run is a chord in `tracks` PLUS the exact `arcs` over it. `physical`
+/// is the same copper after `export_gerber.physicalCopper` has replaced those
+/// handles with the path's own per-sample width chords.
+///
+/// Both are kept because they answer different questions. The straight-section
+/// model this exporter builds — the crop rectangle, the L1 conductor, the port
+/// widths — has to read `physical`, or an editor handle sizes a coupon whose
+/// conductor is not the routed board. The mask layer has to read `saved`,
+/// because `writeLayer` lowers handles itself and a tapering span deliberately
+/// stays tented (`mask_relief.appendRfTraceRuns`), which only the path form can
+/// say. `physicalCopper` returns its input unchanged when the layout holds no
+/// RF path, so a plain routed net pays nothing for this.
+const Bundle = struct {
+    saved: export_gerber.Copper,
+    physical: export_gerber.Copper,
+
+    fn lower(alloc: std.mem.Allocator, saved: export_gerber.Copper) std.mem.Allocator.Error!Bundle {
+        return .{ .saved = saved, .physical = try export_gerber.physicalCopper(alloc, saved) };
+    }
+};
+
 const Region = struct {
     placement: optimizer.Placement,
+    /// The signal net's L1 sections as the model draws them: physical chords,
+    /// so a taper's real width sequence — not its handle — sets the conductor,
+    /// the crop height and both port widths.
     tracks: []const router.Track,
+    /// The signal net's native curves inside the crop, in persisted form. Every
+    /// one is an exact curve over a chord run already in `tracks`; carrying it
+    /// lets the mask open over the real curved envelope.
+    arcs: []const router.Arc,
+    /// The signal net's successful L1 swept paths, in persisted form. Their
+    /// chords are already in `tracks`; the path itself is what tells a mask
+    /// consumer which spans taper and must stay tented.
+    rf_paths: []const rf_port_report.Outcome,
     vias: []const router.Via,
     frame: export_fab.Frame,
     rect: optimizer.BoardRect,
@@ -127,8 +165,9 @@ pub fn errorMessage(err: anyerror) []const u8 {
 /// Build the complete `<project>_matlab_rf_export_v1.zip` artifact.
 pub fn build(alloc: std.mem.Allocator, input: Input) Error!Artifact {
     try validateStackup(input.stackup);
-    const path = try pathFor(alloc, input.placement, input.copper, input.net_name);
-    const region = try regionFor(alloc, input.placement, input.copper, input.stackup, path);
+    const bundle = try Bundle.lower(alloc, input.copper);
+    const path = try pathFor(alloc, input.placement, bundle.physical, input.net_name);
+    const region = try regionFor(alloc, input.placement, bundle, input.stackup, path);
     const package_name = try packageName(alloc, input.project_name);
 
     const l1 = try copperGerber(alloc, region, input.placement.rules.net[path.net_index], .top);
@@ -136,7 +175,17 @@ pub fn build(alloc: std.mem.Allocator, input: Input) Error!Artifact {
     const l3 = try copperGerber(alloc, region, input.placement.rules.net[path.net_index], .l3);
     const l4 = try copperGerber(alloc, region, input.placement.rules.net[path.net_index], .bottom);
 
-    const local_copper = export_gerber.Copper{ .tracks = region.tracks, .vias = region.vias };
+    // The whole routed bundle the crop contains, not the two fields that
+    // happened to be at hand. `writeLayer` drops a track a swept path already
+    // owns, so the chords in `tracks` and the paths beside them describe the
+    // conductor exactly once — and the mask relief opens over the taper's real
+    // swept polygon and the arcs' curved envelope instead of over chords.
+    const local_copper = export_gerber.Copper{
+        .tracks = region.tracks,
+        .arcs = region.arcs,
+        .rf_paths = region.rf_paths,
+        .vias = region.vias,
+    };
     var mask_writer: std.Io.Writer.Allocating = .init(alloc);
     try export_gerber.writeLayer(
         &mask_writer.writer,
@@ -244,6 +293,12 @@ fn pathFor(
 
     const tracks = try signalTracks(alloc, copper.tracks, net_index);
     for (copper.vias) |via| if (via.net == @as(i32, @intCast(net_index))) return error.UnsupportedRouteTopology;
+    // `copper` is the physical view, so the only arcs left on this net are
+    // native curves NOT already described by a swept path. v1 emits straight
+    // G01 sections only (that is what `errorMessage` promises), so modelling
+    // such a curve's chord would ship a coupon whose conductor is not the
+    // routed board. Refuse rather than silently flatten it.
+    for (copper.arcs) |arc| if (arc.net == @as(i32, @intCast(net_index))) return error.UnsupportedRouteGeometry;
 
     const graph = try graphFor(alloc, tracks);
     var endpoints = graph.endpoints;
@@ -407,13 +462,23 @@ fn findOrAddNode(nodes: []Node, count: *usize, p: [2]f64) usize {
     return i;
 }
 
+/// Window `bundle` down to the crop around `path`.
+///
+/// One rule governs every physical form of copper, so the region carries the
+/// whole routed bundle rather than the part the crop happened to be measured
+/// from: what belongs to the signal net travels INTO the region, and anything
+/// else whose real envelope reaches the crop rectangle REFUSES the export as
+/// foreign copper. Ground vias are the one form with their own window (the
+/// fence search band), because they are what the crop is grown to include.
 fn regionFor(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
-    copper: export_gerber.Copper,
+    bundle: Bundle,
     stackup: env.StackupSpec,
     path: Path,
 ) Error!Region {
+    const copper = bundle.physical;
+    const signal_net: i32 = @intCast(path.net_index);
     const ground_plane = planeAt(stackup, 2) orelse return error.MissingReferencePlane;
     const ground_net_index = findNet(placement, ground_plane.net) orelse return error.MissingReferencePlane;
     const rule = placement.rules.net[path.net_index];
@@ -453,11 +518,8 @@ fn regionFor(
         .{ .minx = perp_min, .miny = axis_min, .w = perp_max - perp_min, .h = axis_max - axis_min };
     if (!(rect.w > 0) or !(rect.h > 0)) return error.InvalidGeneratedGeometry;
 
-    // Do not silently throw away a routed coupling feature inside the crop.
-    for (copper.tracks) |track| {
-        if (track.net == @as(i32, @intCast(path.net_index))) continue;
-        if (trackTouchesRect(track, rect)) return error.NearbyForeignCopper;
-    }
+    try refuseForeignCopper(copper, signal_net, rect);
+    const signal = try signalCopper(alloc, bundle.saved, signal_net);
 
     var cropped = placement;
     cropped.parts = &.{};
@@ -495,6 +557,8 @@ fn regionFor(
     return .{
         .placement = cropped,
         .tracks = path.tracks,
+        .arcs = signal.arcs,
+        .rf_paths = signal.rf_paths,
         .vias = vias.items,
         .frame = frame,
         .rect = rect,
@@ -505,6 +569,62 @@ fn regionFor(
             .{ .name = "P2", .point = p1, .width_mm = t1.width, .gap_mm = gap1, .normal = normals[1] },
         },
     };
+}
+
+/// Refuse the export when copper belonging to any other net reaches the crop:
+/// a coupling feature the model silently dropped would make the simulated
+/// coupon disagree with the board. `physical` must be the LOWERED bundle, so a
+/// foreign taper is measured by its real swept width rather than by the
+/// narrower editor handle persisted under it.
+fn refuseForeignCopper(physical: export_gerber.Copper, signal_net: i32, rect: optimizer.BoardRect) BuildError!void {
+    for (physical.tracks) |track| {
+        if (track.net == signal_net) continue;
+        if (trackTouchesRect(track, rect)) return error.NearbyForeignCopper;
+    }
+    // An arc is the exact curve over a chord run that is already in `tracks`,
+    // so its chords were tested above — but the curve bulges off them, and that
+    // bulge is copper the chord test cannot see. Test the arcs themselves.
+    for (physical.arcs) |arc| {
+        if (arc.net == signal_net) continue;
+        if (arcTouchesRect(arc, rect)) return error.NearbyForeignCopper;
+    }
+}
+
+/// The signal net's own curved and swept copper, in the persisted form
+/// `export_gerber.writeLayer` expects. Both kinds are exact geometry over chord
+/// runs the crop already contains, so no second growth pass is needed for them;
+/// what they add is the shape those chords approximate.
+fn signalCopper(
+    alloc: std.mem.Allocator,
+    saved: export_gerber.Copper,
+    signal_net: i32,
+) std.mem.Allocator.Error!struct { arcs: []const router.Arc, rf_paths: []const rf_port_report.Outcome } {
+    var arcs: std.ArrayList(router.Arc) = .empty;
+    for (saved.arcs) |arc| {
+        if (arc.net == signal_net and arc.layer == 0) try arcs.append(alloc, arc);
+    }
+    var rf_paths: std.ArrayList(rf_port_report.Outcome) = .empty;
+    for (saved.rf_paths) |rf| {
+        if (rf.net == signal_net and rf.physical.layer == 0) try rf_paths.append(alloc, rf);
+    }
+    return .{ .arcs = arcs.items, .rf_paths = rf_paths.items };
+}
+
+/// Conservative overlap test for a native curve. The three stored points bound
+/// a circular arc's own bounding box only up to the sagitta bulge, so the box
+/// is grown by the chord's half-length as well as the copper half-width: an arc
+/// can never leave that, and over-reporting here only makes the export refuse
+/// copper it might have been able to ignore.
+fn arcTouchesRect(arc: router.Arc, rect: optimizer.BoardRect) bool {
+    const chord = std.math.hypot(arc.p2[0] - arc.p1[0], arc.p2[1] - arc.p1[1]);
+    const r = arc.width / 2.0 + chord / 2.0;
+    const xs = [_]f64{ arc.p1[0], arc.pm[0], arc.p2[0] };
+    const ys = [_]f64{ arc.p1[1], arc.pm[1], arc.p2[1] };
+    const minx = @min(xs[0], @min(xs[1], xs[2])) - r;
+    const maxx = @max(xs[0], @max(xs[1], xs[2])) + r;
+    const miny = @min(ys[0], @min(ys[1], ys[2])) - r;
+    const maxy = @max(ys[0], @max(ys[1], ys[2])) + r;
+    return maxx >= rect.minx and minx <= rect.minx + rect.w and maxy >= rect.miny and miny <= rect.miny + rect.h;
 }
 
 fn trackTouchesRect(track: router.Track, rect: optimizer.BoardRect) bool {
@@ -1013,63 +1133,79 @@ fn testPlacement(nets: []const optimizer.FlatNet, rules: optimizer.BoardRules) o
     };
 }
 
+/// The four-layer JLCPCB controlled-impedance fixture both build tests export
+/// against, held at file scope so the slices inside it outlive either test's
+/// stack frame.
+const test_stackup_planes = [_]env.StackupPlane{ .{ .index = 2, .net = "GND" }, .{ .index = 3, .net = "GND" } };
+const test_stackup_foils = [_]env.StackupCopper{
+    .{ .index = 1, .thickness = 0.035 },  .{ .index = 2, .thickness = 0.0152 },
+    .{ .index = 3, .thickness = 0.0152 }, .{ .index = 4, .thickness = 0.035 },
+};
+const test_stackup_dielectrics = [_]env.StackupDielectric{
+    .{ .after_layer = 1, .kind = .prepreg, .material = "7628*1", .thickness = 0.2104, .er = 4.4 },
+    .{ .after_layer = 2, .kind = .core, .material = "Core", .thickness = 1.065, .er = 4.6 },
+    .{ .after_layer = 3, .kind = .prepreg, .material = "7628*1", .thickness = 0.2104, .er = 4.4 },
+};
+const test_stackup = env.StackupSpec{
+    .layers = 4,
+    .planes = &test_stackup_planes,
+    .copper = &test_stackup_foils,
+    .dielectrics = &test_stackup_dielectrics,
+    .present = true,
+    .preset = "JLC04161H-7628",
+    .thickness = 1.6,
+};
+const test_z_planes = [_]u8{ 2, 3 };
+const test_z_dielectrics = [_]impedance.Dielectric{
+    .{ .after_layer = 1, .thickness_mm = 0.2104, .er = 4.4 },
+    .{ .after_layer = 2, .thickness_mm = 1.065, .er = 4.6 },
+    .{ .after_layer = 3, .thickness_mm = 0.2104, .er = 4.4 },
+};
+const test_z_foils = [_]impedance.Foil{
+    .{ .index = 1, .thickness_mm = 0.035 },  .{ .index = 2, .thickness_mm = 0.0152 },
+    .{ .index = 3, .thickness_mm = 0.0152 }, .{ .index = 4, .thickness_mm = 0.035 },
+};
+const test_nets = [_]optimizer.FlatNet{ .{ .name = "CAL_THRU", .pins = &.{} }, .{ .name = "GND", .pins = &.{} } };
+const test_net_rules = [_]optimizer.NetRule{
+    .{ .class = .{ .name = "rf-50ohm" }, .width = 0.32, .clearance = 0.127, .rf = .{ .max_freq_hz = 6e9, .electrical = .{ .band_start_hz = 60e6 }, .impedance = .{ .ohms = 50, .layer = 1, .ground_gap_mm = 0.127, .ground_gap_max_mm = 0.25 } } },
+    .{},
+};
+const test_rule_planes = [_]optimizer.PlaneAt{ .{ .index = 2, .net = "GND" }, .{ .index = 3, .net = "GND" } };
+const test_rules = optimizer.BoardRules{
+    .plane_nets = &.{"GND"},
+    .net = &test_net_rules,
+    .copper_layers = 4,
+    .planes = .{ .declared = &test_rule_planes },
+    .physical = .{ .board_thickness = 1.6, .stack = .{ .layers = 4, .planes = &test_z_planes, .dielectrics = &test_z_dielectrics, .foils = &test_z_foils, .board_mm = 1.6 } },
+};
+const test_fence_vias = [_]router.Via{
+    .{ .x = 3, .y = 1.35, .dia = 0.4, .drill = 0.2, .net = 1 },
+    .{ .x = 5, .y = 2.65, .dia = 0.4, .drill = 0.2, .net = 1 },
+    .{ .x = 7, .y = 1.35, .dia = 0.4, .drill = 0.2, .net = 1 },
+};
+
+fn testInput(copper: export_gerber.Copper) Input {
+    return .{
+        .project_name = "rf-switch-eval",
+        .revision = "F",
+        .generator = .{ .generated_utc = "2026-08-14T00:00:00+00:00", .application_version = "test" },
+        .placement = testPlacement(&test_nets, test_rules),
+        .copper = copper,
+        .stackup = test_stackup,
+    };
+}
+
 // spec: MATLAB RF PCB simulation export - CAL_THRU exports as one self-contained ZIP with the specified root directory and required files
 test "build emits the required CAL_THRU MATLAB RF package" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
-    const planes = [_]env.StackupPlane{ .{ .index = 2, .net = "GND" }, .{ .index = 3, .net = "GND" } };
-    const copper_stack = [_]env.StackupCopper{
-        .{ .index = 1, .thickness = 0.035 },  .{ .index = 2, .thickness = 0.0152 },
-        .{ .index = 3, .thickness = 0.0152 }, .{ .index = 4, .thickness = 0.035 },
-    };
-    const dielectrics = [_]env.StackupDielectric{
-        .{ .after_layer = 1, .kind = .prepreg, .material = "7628*1", .thickness = 0.2104, .er = 4.4 },
-        .{ .after_layer = 2, .kind = .core, .material = "Core", .thickness = 1.065, .er = 4.6 },
-        .{ .after_layer = 3, .kind = .prepreg, .material = "7628*1", .thickness = 0.2104, .er = 4.4 },
-    };
-    const stackup = env.StackupSpec{ .layers = 4, .planes = &planes, .copper = &copper_stack, .dielectrics = &dielectrics, .present = true, .preset = "JLC04161H-7628", .thickness = 1.6 };
-    const z_planes = [_]u8{ 2, 3 };
-    const z_dielectrics = [_]impedance.Dielectric{
-        .{ .after_layer = 1, .thickness_mm = 0.2104, .er = 4.4 },
-        .{ .after_layer = 2, .thickness_mm = 1.065, .er = 4.6 },
-        .{ .after_layer = 3, .thickness_mm = 0.2104, .er = 4.4 },
-    };
-    const z_foils = [_]impedance.Foil{
-        .{ .index = 1, .thickness_mm = 0.035 },  .{ .index = 2, .thickness_mm = 0.0152 },
-        .{ .index = 3, .thickness_mm = 0.0152 }, .{ .index = 4, .thickness_mm = 0.035 },
-    };
-    const nets = [_]optimizer.FlatNet{ .{ .name = "CAL_THRU", .pins = &.{} }, .{ .name = "GND", .pins = &.{} } };
-    const net_rules = [_]optimizer.NetRule{
-        .{ .class = .{ .name = "rf-50ohm" }, .width = 0.32, .clearance = 0.127, .rf = .{ .max_freq_hz = 6e9, .electrical = .{ .band_start_hz = 60e6 }, .impedance = .{ .ohms = 50, .layer = 1, .ground_gap_mm = 0.127, .ground_gap_max_mm = 0.25 } } },
-        .{},
-    };
-    const rule_planes = [_]optimizer.PlaneAt{ .{ .index = 2, .net = "GND" }, .{ .index = 3, .net = "GND" } };
-    const rules = optimizer.BoardRules{
-        .plane_nets = &.{"GND"},
-        .net = &net_rules,
-        .copper_layers = 4,
-        .planes = .{ .declared = &rule_planes },
-        .physical = .{ .board_thickness = 1.6, .stack = .{ .layers = 4, .planes = &z_planes, .dielectrics = &z_dielectrics, .foils = &z_foils, .board_mm = 1.6 } },
-    };
     const tracks = [_]router.Track{
         .{ .x1 = 1, .y1 = 2, .x2 = 2, .y2 = 2, .layer = 0, .width = 0.55, .net = 0 },
         .{ .x1 = 2, .y1 = 2, .x2 = 8, .y2 = 2, .layer = 0, .width = 0.32, .net = 0 },
         .{ .x1 = 8, .y1 = 2, .x2 = 9, .y2 = 2, .layer = 0, .width = 0.55, .net = 0 },
     };
-    const vias = [_]router.Via{
-        .{ .x = 3, .y = 1.35, .dia = 0.4, .drill = 0.2, .net = 1 },
-        .{ .x = 5, .y = 2.65, .dia = 0.4, .drill = 0.2, .net = 1 },
-        .{ .x = 7, .y = 1.35, .dia = 0.4, .drill = 0.2, .net = 1 },
-    };
-    const artifact = try build(alloc, .{
-        .project_name = "rf-switch-eval",
-        .revision = "F",
-        .generator = .{ .generated_utc = "2026-08-14T00:00:00+00:00", .application_version = "test" },
-        .placement = testPlacement(&nets, rules),
-        .copper = .{ .tracks = &tracks, .vias = &vias },
-        .stackup = stackup,
-    });
+    const artifact = try build(alloc, testInput(.{ .tracks = &tracks, .vias = &test_fence_vias }));
     try std.testing.expectEqualStrings("rf-switch-eval_matlab_rf_export_v1.zip", artifact.filename);
     try std.testing.expectEqual(@as(usize, 9), artifact.entries.len);
     try std.testing.expect(std.mem.startsWith(u8, artifact.zip, "PK\x03\x04"));
@@ -1093,4 +1229,59 @@ test "build refuses a branched CAL_THRU route" {
         .{ .x1 = 5, .y1 = 2, .x2 = 5, .y2 = 3, .layer = 0, .width = 0.32, .net = 0 },
     };
     try std.testing.expectError(error.UnsupportedRouteTopology, pathFor(alloc, placement, .{ .tracks = &tracks }, default_net));
+}
+
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    var n: usize = 0;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, at, needle)) |i| : (at = i + needle.len) n += 1;
+    return n;
+}
+
+// spec: MATLAB RF PCB simulation export - a swept RF path in the crop is exported as its real width profile and tented taper, never as the compact editor handle
+test "build models the swept CAL_THRU taper rather than its compact handle" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    // What a saved layout holds for a taper: ONE constant-width editor handle
+    // in `tracks`, whose real geometry is the sampled path beside it. The
+    // handle is 0.32 everywhere; the copper it stands for widens to 0.55 over
+    // the middle of the run.
+    const handle = [_]router.Track{.{ .x1 = 1, .y1 = 2, .x2 = 9, .y2 = 2, .layer = 0, .width = 0.32, .net = 0 }};
+    const samples = [_]@import("placement/rf_path_solver.zig").Sample{
+        .{ .at = .{ 1, 2 }, .s_mm = 0, .curvature = 0, .width_mm = 0.32 },
+        .{ .at = .{ 4, 2 }, .s_mm = 3, .curvature = 0, .width_mm = 0.32 },
+        .{ .at = .{ 6, 2 }, .s_mm = 5, .curvature = 0, .width_mm = 0.55 },
+        .{ .at = .{ 9, 2 }, .s_mm = 8, .curvature = 0, .width_mm = 0.55 },
+    };
+    const rf_paths = [_]rf_port_report.Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 0 },
+    }};
+    const artifact = try build(alloc, testInput(.{
+        .tracks = &handle,
+        .rf_paths = &rf_paths,
+        .vias = &test_fence_vias,
+    }));
+
+    // The conductor is the path's three real sections, not the one handle, and
+    // P2 terminates on the 0.55 mm wide end instead of the handle's 0.32 mm.
+    try std.testing.expect(std.mem.indexOf(u8, artifact.manifest, "\"routeSections\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, artifact.manifest, "\"traceWidthMm\":0.550000") != null);
+    const l1 = artifact.entries[1].data;
+    try std.testing.expectEqualStrings(export_gerber.matlab_rf_paths.l1, artifact.entries[1].name[artifact.entries[1].name.len - export_gerber.matlab_rf_paths.l1.len ..]);
+    try std.testing.expect(std.mem.indexOf(u8, l1, "%ADD12C,0.320000*%") != null);
+    try std.testing.expect(std.mem.indexOf(u8, l1, "%ADD16C,0.550000*%") != null);
+
+    // The mask sees the swept path itself, so the tapering span between the two
+    // constant-width runs stays tented: two separate relief regions rather than
+    // the single continuous opening the handle's chords would have produced.
+    const top_mask = artifact.entries[6].data;
+    try std.testing.expectEqualStrings(export_gerber.matlab_rf_paths.top_mask, artifact.entries[6].name[artifact.entries[6].name.len - export_gerber.matlab_rf_paths.top_mask.len ..]);
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(top_mask, "G36*"));
 }
