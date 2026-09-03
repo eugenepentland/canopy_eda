@@ -3165,6 +3165,10 @@ question each caller answers honestly through `Zone.component`.
 - the net-open island chain's bounding-box estimate never exceeds the exact nearest approach, so a skipped pair could not have beaten the frontier
 - an authored ground-via maximum warns on an SMD ground pad until a same-net plane via falls within the budget
 - an optional NC or input-strap land assigned to ground is excluded from the ground-via maximum because its same-package real ground return owns the required plane connection
+- a routed power via carrying more than its plated barrel can take is a fab-blocking error naming how many barrels the transition needs
+- two parallel same-net barrels that the current solve proves share a load each pass on their own share, with no special case
+- an unsolved rail charges every barrel the whole envelope, warning only where the stitched same-net barrels beside it cannot carry it together
+- a board that declares no rail current runs no via-capacity solve and reports no barrel findings
 
 Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper, countKind, defaultSeverity, errorCount
 
@@ -3457,7 +3461,7 @@ Public functions: analyze, classifyNetName, isInductor
 Public functions: capacityForArea, traceCapacityA, requiredTraceWidthMm,
 viaCapacityA, requiredViaDrillMm, routingCurrentA, powerWidthForNet,
 powerViaDrillForNet, routedTrackRequiredWidths, routedTrackRequiredWidthsPrepared,
-adaptiveTargetWidth, exactWidth
+routedViaRequirements, routedViaRequirementsPrepared, adaptiveTargetWidth, exactWidth
 
 Power routing derives conservative pre-route copper geometry from the rail's
 declared load envelope, the actual stack foil, the 10 °C IPC-2221 screening
@@ -3473,8 +3477,12 @@ routing at the local branch current solved by the power-integrity analysis.
 The ordinary class width remains the fallback whenever that solve is
 incomplete, and the PCB DRC panel can widen only failing opted-in segments on
 1 mil increments without moving their centre lines. The router
-does not invent planes on arbitrary layers, and a required single-barrel via
-is enlarged only as far as the derived drill and annular-ring rules require.
+does not invent planes on arbitrary layers, and it routes every barrel at the
+class/board via geometry: a rail's current divides between parallel barrels, so
+the whole-rail single-barrel drill is a reference value rather than a geometry
+routing imposes. Each routed barrel is instead judged after the fact against
+its own solved share, and a transition short of capacity is reported with the
+number of vias it needs.
 
 - a maximum load is the pre-route envelope, with typical used only when no maximum was authored
 - a power pour's effective minimum neck is raised above the board fabrication floor by the rail maximum and actual stack foil

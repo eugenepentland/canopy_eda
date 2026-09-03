@@ -354,6 +354,7 @@ pub const shards: []const []const []const u8 = &.{
         "placement.diff_route.test.",
         "placement.drc_keepout.test.",
         "placement.drc_match.test.",
+        "placement.drc_power_via.test.",
         "placement.impedance_coupled_microstrip.test.",
         "placement.impedance_coupled_stripline.test.",
         "placement.impedance_microstrip.test.",

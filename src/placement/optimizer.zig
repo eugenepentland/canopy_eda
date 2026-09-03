@@ -629,10 +629,15 @@ pub const BoardRules = struct {
         return if (required > 0) required else null;
     }
 
-    /// One-barrel drill required by the same conservative rail envelope. The
-    /// router raises its ordinary via geometry to this value; if that enlarged
-    /// barrel cannot clear the board, routing fails honestly rather than
-    /// emitting an under-capacity transition.
+    /// One-barrel drill required by the same conservative rail envelope — the
+    /// drill a SINGLE via would need to carry the whole rail.
+    ///
+    /// Advisory only. The router deliberately does NOT raise its via geometry
+    /// to this value: parallel barrels legitimately divide a rail's current
+    /// (`power_current.zig` solves that split), and an enlarged barrel that
+    /// cannot clear its neighbours turned an electrical margin into a routing
+    /// failure. Post-route, `drc_power_via.zig` judges each barrel against its
+    /// own solved share and reports how many the transition needs.
     pub fn powerViaDrillForNet(self: BoardRules, name: []const u8) ?f64 {
         const amps = power_capacity.routingCurrentA(self.physical.rails, name) orelse return null;
         return power_capacity.requiredViaDrillMm(amps, self.physical.via_plating_mm);

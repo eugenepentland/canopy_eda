@@ -589,7 +589,9 @@ const power_branch_board_json =
     \\ "board":{"x":-2,"y":-2,"w":20,"h":20},
     \\ "parts":[{"ref":"U1","kind":"ic","hw":1,"hh":1,"x":0,"y":0,"rot":0,"side":"top",
     \\           "pads":[{"num":"1","x":0,"y":0,"w":0.4,"h":0.4,"shape":"rect","net":"V_3V3D"}]}],
-    \\ "tracks":[{"x1":0,"y1":0,"x2":4,"y2":0,"l":0,"w":0.1524,"net":"V_3V3D"}]}
+    \\ "tracks":[{"x1":0,"y1":0,"x2":4,"y2":0,"l":0,"w":0.1524,"net":"V_3V3D"},
+    \\           {"x1":4,"y1":0,"x2":8,"y2":0,"l":1,"w":0.1524,"net":"V_3V3D"}],
+    \\ "vias":[{"x":4,"y":0,"d":0.4,"drill":0.2,"net":"V_3V3D"}]}
 ;
 
 // spec: Web Server - The WASM DRC bridge marshals no rail current, so the client engine never rasters the board's planes for a power-branch width verdict
@@ -625,4 +627,16 @@ test "the bridge builds a rail-less placement, so no plane raster is reachable" 
     const out = runDrcJson(arena, power_branch_board_json);
     try testing.expect(std.mem.indexOf(u8, out, "\"track width\"") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"power width\"") == null);
+
+    // The BARREL verdict is deferred on exactly the same grounds: with no rail
+    // marshalled there is no current to judge this via's plated area against,
+    // so `drc_power_via` has nothing to say here and the server reconcile owns
+    // the answer. Its kinds belong in the client's deferred set for that
+    // reason, not because the client engine is missing a rule.
+    const requirements = try power_integrity.routedViaRequirements(arena, board.placement, board.routed);
+    try testing.expectEqual(@as(usize, 1), board.routed.vias.len);
+    try testing.expectEqual(board.routed.vias.len, requirements.len);
+    try testing.expectEqual(@as(?power_integrity.ViaCurrent, null), requirements[0]);
+    try testing.expect(std.mem.indexOf(u8, out, "\"via current\"") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"via current envelope\"") == null);
 }
