@@ -2501,6 +2501,8 @@ src/placement/near_bind.zig::text | fn text(self: Why) []const u8
 src/placement/net_copper.zig::Copper struct_
 src/placement/net_copper.zig::OneNet struct_
 src/placement/net_copper.zig::collect | fn collect( arena: std.mem.Allocator, copper: Copper, ni: i32, ) std.mem.Allocator.Error!OneNet
+src/placement/net_graph.zig::islandCount | fn islandCount(alloc: std.mem.Allocator, input: Input) std.mem.Allocator.Error!usize
+src/placement/net_graph.zig::joinsFor | fn joinsFor(alloc: std.mem.Allocator, input: Input) std.mem.Allocator.Error![]const Join
 src/placement/net_identity.zig::Identity struct_
 src/placement/net_identity.zig::canonical | fn canonical(self: Identity, net: i32) i32
 src/placement/net_identity.zig::canonicalName | fn canonicalName(self: Identity, nets: []const optimizer.FlatNet, net: i32) []const u8
@@ -2908,17 +2910,26 @@ src/placement/power_capacity.zig::routingCurrentA | fn routingCurrentA(rails: []
 src/placement/power_capacity.zig::temperature_rise_c value
 src/placement/power_capacity.zig::traceCapacityA | fn traceCapacityA(width_mm: f64, foil_mm: f64, outer: bool) f64
 src/placement/power_capacity.zig::viaCapacityA | fn viaCapacityA(drill_mm: f64, plating_mm: f64) f64
+src/placement/power_current.zig::Anchor union_
 src/placement/power_current.zig::Axis struct_
 src/placement/power_current.zig::Barrel struct_
 src/placement/power_current.zig::Contact struct_
 src/placement/power_current.zig::Input struct_
+src/placement/power_current.zig::Join struct_
 src/placement/power_current.zig::Load struct_
 src/placement/power_current.zig::Result struct_
 src/placement/power_current.zig::Segment struct_
 src/placement/power_current.zig::Sheet struct_
+src/placement/power_current.zig::Source struct_
 src/placement/power_current.zig::Status enum_
+src/placement/power_current.zig::Unplaced struct_
+src/placement/power_current.zig::crossParam | fn crossParam(a: Segment, b: Segment) ?f64
+src/placement/power_current.zig::default_max_nodes value
+src/placement/power_current.zig::isSolved | fn isSolved(self: Status) bool
 src/placement/power_current.zig::name | fn name(self: Status) []const u8
+src/placement/power_current.zig::needsGraph | fn needsGraph(input: Input) bool
 src/placement/power_current.zig::solve | fn solve(arena: std.mem.Allocator, input: Input) std.mem.Allocator.Error!Result
+src/placement/power_current.zig::solveWithin | fn solveWithin(arena: std.mem.Allocator, input: Input, max_nodes: usize) std.mem.Allocator.Error!Result
 src/placement/power_integrity.zig::analyze | fn analyze( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, ) std.mem.Allocator.Error!Analysis
 src/placement/power_integrity.zig::analyzeCopper | fn analyzeCopper( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, zones: []const pour.UserZone, base_edge: ?pour.EdgeField, ) std.mem.Allocator.Error!Analysis
 src/placement/power_integrity.zig::name | fn name(self: SurfaceCapacityStatus) []const u8

@@ -3453,6 +3453,18 @@ Public functions: analyze, classifyNetName, isInductor
 ## placement/power-routing
 - a branch whose end lands inside the trunk's copper joins the trunk even when its centreline misses the trunk's by less than the copper half-width
 - a via joins every track whose copper its barrel overlaps, not only tracks ending exactly at its centre
+- an explicit copper-contact junction joins a branch that overlaps the trunk's copper but whose centreline misses it by more than the branch half-width
+- a junction naming a via whose geometry found fewer than two contacts still creates the barrel hub so the layer jump conducts
+- one unplaceable load leaves the rest of the rail solved and reports the dropped current instead of refusing the axis
+- a rail whose every annotated load is unplaceable still refuses the axis rather than reporting a partial solve
+- a load on copper the source cannot reach reports disconnected, not a partial solve, when it is the only load
+- a net whose copper graph exceeds the node budget reports too-large instead of allocating a dense n-squared matrix
+- a net with no annotated current never builds a copper graph at all
+- the node spatial hash returns the same node the linear scan did, so a dense same-layer cluster keeps its historical currents
+- the current solver's connectivity follows the canonical copper-contact policy, so a branch that overlaps the trunk's copper is one node even when the centrelines miss
+- a net whose canonical copper topology is a single island never solves disconnected
+- copper the canonical policy leaves open stays two islands, so a genuinely broken rail is still reported
+- a pour component joins the traces whose copper covers its contact points, not only traces whose centreline passes exactly through them
 
 Public functions: capacityForArea, traceCapacityA, requiredTraceWidthMm,
 viaCapacityA, requiredViaDrillMm, routingCurrentA, powerWidthForNet,

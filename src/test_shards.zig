@@ -495,6 +495,7 @@ pub const shards: []const []const []const u8 = &.{
         "placement.island_accept.test.",
         "placement.land_transit.test.",
         "placement.net_identity.test.",
+        "placement.net_graph.test.",
         "placement.net_open.test.",
         "placement.net_topology.test.",
         "placement.outline.test.",

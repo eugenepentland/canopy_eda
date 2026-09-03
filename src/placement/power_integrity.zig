@@ -30,6 +30,7 @@ const power_budget = @import("../eval/power_budget.zig");
 const net_names = @import("../net_name.zig");
 const numeric = @import("../numeric.zig");
 const power_current = @import("power_current.zig");
+const net_graph = @import("net_graph.zig");
 const pour = @import("pour.zig");
 const implicit_plane = @import("implicit_plane.zig");
 const power_capacity = @import("power_capacity.zig");
@@ -585,24 +586,44 @@ fn solveCurrent(
             .complete = resolved.complete,
         };
     }
-    return power_current.solve(alloc, .{
+    var flow: power_current.Input = .{
         .segments = segments.items,
         .barrels = barrels.items,
         .sheets = sheets,
         .counts = .{ .tracks = routed.tracks.len, .vias = routed.vias.len },
-        .source_contacts = sources,
-        .source_complete = sources.len > 0,
+        .source = .{ .contacts = sources, .complete = sources.len > 0 },
         .loads = loads,
-    });
+    };
+    // The solver's own centreline snapping is tighter than the fabrication
+    // contact policy DRC topology uses, so hand it the canonical junctions —
+    // but only for a net that will actually be solved, since that sweep is
+    // quadratic in the net's copper and ground would pay it for nothing.
+    if (power_current.needsGraph(flow)) flow.joins = try net_graph.joinsFor(alloc, flow);
+    return power_current.solve(alloc, flow);
 }
 
 fn localCurrent(axis: power_current.Axis, route_index: usize, fallback: ?f64, via: bool) ?f64 {
-    if (axis.status != .solved) return fallback;
-    return if (via) axis.via_current_a[route_index] else axis.track_current_a[route_index];
+    if (!axis.status.isSolved()) return fallback;
+    const local = if (via) axis.via_current_a[route_index] else axis.track_current_a[route_index];
+    // A partial solve leaves the dropped loads' feeders at zero amps. Those are
+    // precisely the conductors whose current this solve does NOT know, so they
+    // keep the conservative whole-rail envelope rather than reporting nothing.
+    if (axis.status == .solved_partial and !(local > 0)) return fallback;
+    return local;
+}
+
+/// The current this solve actually KNOWS for one conductor, as opposed to the
+/// current to screen it at (`localCurrent`, which substitutes the envelope).
+/// A partial solve knows nothing about the conductors it left at zero amps.
+fn solvedCurrent(axis: power_current.Axis, route_index: usize, via: bool) ?f64 {
+    if (!axis.status.isSolved()) return null;
+    const local = if (via) axis.via_current_a[route_index] else axis.track_current_a[route_index];
+    if (axis.status == .solved_partial and !(local > 0)) return null;
+    return local;
 }
 
 fn localDrop(axis: power_current.Axis, route_index: usize, via: bool) ?f64 {
-    if (axis.status != .solved) return null;
+    if (!axis.status.isSolved()) return null;
     return if (via) axis.via_drop_v[route_index] else axis.track_drop_v[route_index];
 }
 
@@ -628,8 +649,8 @@ fn analyzeTracks(
             .foil_mm = foil,
             .capacity_a = traceCapacityA(track.width, foil, outer),
             .resistance_ohm = conductorResistance(std.math.hypot(track.x2 - track.x1, track.y2 - track.y1), track.width * foil),
-            .current_typical_a = if (flow.typical.status == .solved) typical else null,
-            .current_maximum_a = if (flow.maximum.status == .solved) maximum else null,
+            .current_typical_a = solvedCurrent(flow.typical, route_index, false),
+            .current_maximum_a = solvedCurrent(flow.maximum, route_index, false),
             .drop_typical_v = localDrop(flow.typical, route_index, false),
             .drop_maximum_v = localDrop(flow.maximum, route_index, false),
             .required_width_typical_mm = if (typical) |a| requiredTraceWidthMm(a, foil, outer) else null,
@@ -663,8 +684,8 @@ fn analyzeVias(
             .barrel_area_mm2 = area,
             .capacity_a = capacity,
             .resistance_ohm = conductorResistance(board_mm, area),
-            .current_typical_a = if (flow.typical.status == .solved) typical else null,
-            .current_maximum_a = if (flow.maximum.status == .solved) maximum else null,
+            .current_typical_a = solvedCurrent(flow.typical, route_index, true),
+            .current_maximum_a = solvedCurrent(flow.maximum, route_index, true),
             .drop_typical_v = localDrop(flow.typical, route_index, true),
             .drop_maximum_v = localDrop(flow.maximum, route_index, true),
             .required_count_typical = countFor(typical, capacity),
