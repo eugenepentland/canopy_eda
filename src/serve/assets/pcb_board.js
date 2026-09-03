@@ -8122,29 +8122,71 @@ function drawReverseTrack(t){var q={x1:t.x2,y1:t.y2,x2:t.x1,y2:t.y1,l:t.l||0,w:t
 function drawTrackFromPoint(t,x,y){
  if(drawSamePointXY(t.x1,t.y1,x,y))return t;
  if(drawSamePointXY(t.x2,t.y2,x,y))return drawReverseTrack(t);return null;}
+// Autorouter centreline fragments need not share an exact endpoint: their
+// round end caps can overlap while retaining a small centreline gap. Saved RF
+// taper migration replaces those capsules with butt-ended swept copper, so it
+// must make that already-conductive overlap explicit or the new path opens the
+// net. Exact joins retain priority; callers still require one unique successor
+// and therefore never guess through a branch.
+function drawTrackFromCopperEnd(t,x,y,reach){var q=drawTrackFromPoint(t,x,y);if(q)return {q:q,gap:0};
+ var a=Math.hypot(t.x1-x,t.y1-y),b=Math.hypot(t.x2-x,t.y2-y),d=Math.min(a,b);
+ if(d>reach+1e-9)return null;return {q:a<=b?t:drawReverseTrack(t),gap:d};}
+window.PCBDrawTrackFromCopperEnd=drawTrackFromCopperEnd;
+function drawEndpointCopperLand(net,l,x,y,w){var exact=drawEndpointLand(net,l,x,y);if(exact)return exact;
+ var key=net||"",r=Math.max(0,+w||0)/2,best=null,bd=1/0;
+ P.forEach(function(p,i){(p.pads||[]).forEach(function(pd){if(pd.thru||!pd.net||pd.net!==key||(p.side==="bottom"?1:0)!==l)return;
+   var pad={i:i,pd:pd,l:l},f=drawPadFrame(pad);if(!f)return;var q=f.local({x:x,y:y}),dx=Math.max(Math.abs(q.x)-f.hw,0),dy=Math.max(Math.abs(q.y)-f.hh,0),d=Math.hypot(dx,dy);
+   if(d<=r+1e-9&&d<bd){bd=d;best=pad;}});});
+ (PCB.vias||[]).forEach(function(v){if((v.net||"")!==key)return;var d=Math.max(0,Math.hypot(v.x-x,v.y-y)-(+v.d||.4)/2);
+  if(d<=r+1e-9&&d<bd){bd=d;best={via:v,pd:{w:+v.d||.4,h:+v.d||.4,shape:"circle",thru:true},l:null};}});
+ return best;}
+function drawLandCentre(pad){return pad&&pad.via?{x:+pad.via.x,y:+pad.via.y}:drawPadFrame(pad).c;}
+function drawSameLand(a,b){return !!a&&!!b&&(a.via?b.via===a.via:!b.via&&a.i===b.i&&a.pd===b.pd);}
+function drawCopperBridge(t,pad,start){var c=drawLandCentre(pad),x=start?t.x1:t.x2,y=start?t.y1:t.y2;
+ if(!c||drawSamePointXY(c.x,c.y,x,y))return null;return {x1:start?c.x:x,y1:start?c.y:y,x2:start?x:c.x,y2:start?y:c.y,
+  l:t.l||0,w:t.w,net:t.net||"",source:t.source,id:trackIdNew()};}
+function drawGapBridge(last,next){if(drawSamePointXY(last.x2,last.y2,next.x1,next.y1))return null;
+ return {x1:last.x2,y1:last.y2,x2:next.x1,y2:next.y1,l:last.l||0,w:last.w,net:last.net||"",source:last.source,id:trackIdNew()};}
 function drawViaAt(net,x,y){return (PCB.vias||[]).some(function(v){return v.net===net&&drawSamePointXY(v.x,v.y,x,y);});}
 function drawRfRetrofitRun(seed,reverse,nominal,pad,start,claimed){var first=reverse?drawReverseTrack(seed):seed,
- run=[first],used={};used[trackIdEnsure(seed)]=1;var total=trackLength(first),endPad=null,
- walk=start.land+start.taper+Math.hypot(+pad.pd.w||0,+pad.pd.h||0);
+ startBridge=drawCopperBridge(first,pad,true),run=startBridge?[startBridge,first]:[first],used={};used[trackIdEnsure(seed)]=1;var total=trackLength(first)+(startBridge?trackLength(startBridge):0),endPad=null,
+ walk=start.land+start.taper+Math.hypot(+pad.pd.w||0,+pad.pd.h||0),keepTail=0;
  for(var guard=0;guard<256;guard++){
-  var last=run[run.length-1],x=last.x2,y=last.y2,finishPad=drawEndpointLand(last.net,last.l||0,x,y);
-  if(finishPad){endPad=finishPad;break;}
-  if(total>=walk-1e-9||drawViaAt(last.net,x,y))break;
-  var next=[];(PCB.tracks||[]).forEach(function(t){var id=trackIdEnsure(t);if(used[id]||claimed[id]||rfOwnsTrack(t))return;
+  var last=run[run.length-1],x=last.x2,y=last.y2,finishPad=drawEndpointCopperLand(last.net,last.l||0,x,y,last.w||nominal);
+  if(finishPad&&!drawSameLand(finishPad,pad)){var finishBridge=drawCopperBridge(last,finishPad,false);if(finishBridge){run.push(finishBridge);total+=trackLength(finishBridge);}endPad=finishPad;break;}
+  var profileDone=total>=walk-1e-9;if(drawViaAt(last.net,x,y))break;
+  var exact=[],overlap=[],outDir=drawTrackEndDirection(last,false),outLen=Math.hypot(outDir.x,outDir.y)||1;
+  // drawTrackEndDirection(..., false) points back into the track from its end;
+  // the gap walk needs the continuation direction leaving that endpoint.
+  outDir.x/=-outLen;outDir.y/=-outLen;(PCB.tracks||[]).forEach(function(t){var id=trackIdEnsure(t);if(used[id]||claimed[id]||rfOwnsTrack(t))return;
    if(t.net!==last.net||(t.l||0)!==(last.l||0)||Math.abs((+t.w||0)-nominal)>1e-7)return;
-   var q=drawTrackFromPoint(t,x,y);if(q&&trackLength(q)>1e-9)next.push({t:t,q:q});});
-  if(next.length!==1)break;var n=next[0];used[trackIdEnsure(n.t)]=1;run.push(n.q);total+=trackLength(n.q);}
- start=drawTaperProfile(first.net,pad,nominal,drawPathPadLaunch(run,pad,true)||drawTrackEndDirection(first,true));if(!start)return null;
+   var hit=drawTrackFromCopperEnd(t,x,y,((+last.w||nominal)+(+t.w||nominal))/2);if(!hit||!(trackLength(hit.q)>1e-9))return;
+   if(hit.gap>1e-9&&(hit.q.x1-x)*outDir.x+(hit.q.y1-y)*outDir.y < -1e-9)return;
+   (hit.gap<=1e-9?exact:overlap).push({t:t,q:hit.q,gap:hit.gap});});
+  overlap.sort(function(a,b){return a.gap-b.gap;});
+  // Several later fragments may fall within one trace-width reach. The nearest
+  // one is the physical continuation when it is distinctly closer; equal
+  // exact or overlapping choices remain an ambiguous branch and stop here.
+  var next=exact.length?exact:(overlap.length>1&&overlap[0].gap+1e-7<overlap[1].gap?[overlap[0]]:overlap);
+  if(next.length!==1){keepTail=trackIdEnsure(last);break;}var n=next[0],bridge=drawGapBridge(last,n.q);
+  // Once the taper is nominal, terminate on the next capsule rather than
+  // owning it: a gap bridge lands at that capsule's centreline endpoint, so
+  // the exact butt end remains electrically joined to the untouched route.
+  if(profileDone){if(bridge){run.push(bridge);total+=trackLength(bridge);}break;}
+  used[trackIdEnsure(n.t)]=1;if(bridge){run.push(bridge);total+=trackLength(bridge);}run.push(n.q);total+=trackLength(n.q);}
+ first=run[0];start=drawTaperProfile(first.net,pad,nominal,drawPathPadLaunch(run,pad,true)||drawTrackEndDirection(first,true));if(!start)return null;
  var last=run[run.length-1],end=endPad?drawTaperProfile(last.net,endPad,nominal,
   drawPathPadLaunch(run,endPad,false)||drawTrackEndDirection(last,false)):null;
  var paths=drawTaperPathSet(run,start,end,nominal);if(!paths.length)return null;
+ if(keepTail)paths.forEach(function(path){path.track_ids=(path.track_ids||[]).filter(function(id){return id!==keepTail;});});
  run.forEach(function(t){claimed[trackIdEnsure(t)]=1;});return paths;}
 function drawRfRetrofitGroups(){var claimed={},groups=[];
- (PCB.tracks||[]).forEach(function(t){var id=trackIdEnsure(t);if(claimed[id]||rfOwnsTrack(t))return;
+ (PCB.tracks||[]).forEach(function(t){var id=trackIdEnsure(t);if(t.source==="autorouter"||claimed[id]||rfOwnsTrack(t))return;
   var c=netClassInfo(t.net||"");if(!c||!(+c.impedance_ohms>0)||(+c.diff_impedance_ohms>0))return;
   var nominal=+c.width||+((PCB.rules||{}).track_width)||baseTrackW();if(!(nominal>0)||Math.abs((+t.w||0)-nominal)>1e-7)return;
-  for(var end=0;end<2&&!claimed[id];end++){var x=end?t.x2:t.x1,y=end?t.y2:t.y1,pad=drawEndpointLand(t.net,t.l||0,x,y);
-   if(!pad)continue;var oriented=end?drawReverseTrack(t):t,profile=drawTaperProfile(t.net,pad,nominal,drawTrackEndDirection(oriented,true));
+  for(var end=0;end<2&&!claimed[id];end++){var x=end?t.x2:t.x1,y=end?t.y2:t.y1,pad=drawEndpointCopperLand(t.net,t.l||0,x,y,t.w);
+   if(!pad)continue;var ox=end?t.x1:t.x2,oy=end?t.y1:t.y2,otherPad=drawEndpointCopperLand(t.net,t.l||0,ox,oy,t.w);
+   if(drawSameLand(pad,otherPad))continue;var oriented=end?drawReverseTrack(t):t,profile=drawTaperProfile(t.net,pad,nominal,drawTrackEndDirection(oriented,true));
    if(!profile)continue;var group=drawRfRetrofitRun(t,!!end,nominal,pad,profile,claimed);if(group)groups.push(group);}});
  return groups;}
 function drawRfRetrofitPlan(){var paths=[];drawRfRetrofitGroups().forEach(function(group){paths=paths.concat(group);});return paths;}
@@ -8207,11 +8249,15 @@ function drawRfRetrofitCached(pending){try{var hit=JSON.parse(localStorage.getIt
 function drawRfRetrofitCacheStore(pending,blocked){try{localStorage.setItem(drawRfRetrofitCacheKey(),JSON.stringify({sig:drawRfRetrofitSignature(pending),blocked:blocked}));}catch(e){}}
 function drawRfPathRegenerable(path){var c=netClassInfo(path&&path.net||"");
  return !!c&&(+c.impedance_ohms>0)&&!(+c.diff_impedance_ohms>0);}
+// Read-only browser-test seam for the explicit replacement plan. The live
+// action uses the same temporary ownership view immediately below.
+window.PCBDrawRfRetrofitReplacePlan=function(){var prior=(PCB.rf_paths||[]).slice();
+ PCB.rf_paths=prior.filter(function(path){return !drawRfPathRegenerable(path);});var groups=drawRfRetrofitGroups();PCB.rf_paths=prior;return groups;};
 // Refresh the compact centreline tracks before deriving their variable-width
 // copper. CPWG ground gap is not a track coordinate: the pour refill consumes
 // the current class's solved gap while these endpoints remain byte-for-byte.
 function drawRfClassWidthPlan(){var tracks=[],nets=Object.create(null),eps=1e-7;
- (PCB.tracks||[]).forEach(function(t){if(!drawRfPathRegenerable({net:t.net}))return;
+ (PCB.tracks||[]).forEach(function(t){if(t.source==="autorouter"||!drawRfPathRegenerable({net:t.net}))return;
   var c=netClassInfo(t.net||""),w=c&&+c.width;if(!(w>0)||Math.abs((+t.w||0)-w)<=eps)return;
   tracks.push({track:t,old:+t.w||0,width:w});nets[t.net||""]=1;});
  return {tracks:tracks,nets:Object.keys(nets).length};}

@@ -7022,6 +7022,8 @@ is what makes the predicate exact rather than approximately right.
 - The PCB editor can explicitly make one named saved layout authoritative in KiCad after a destructive-change preview
 - The PCB editor paints saved geometry, restores exact-state copper fills from persistent browser storage or the fast refill endpoint, then launches whole-board diagnostics and electrical analyses
 - The PCB editor batches attributable saved-layout RF taper migration candidates into at most two whole-board DRC passes, conservatively falls back for unlocated errors, and reuses rejected results while the submitted board state is unchanged
+- Saved-layout RF taper migration follows unambiguous physically overlapping legacy capsules across centreline gaps and bridges the terminal land overlap, so replacing round caps with exact butt-ended swept copper cannot open the routed net
+- RF finish preserves the autorouter's already-shaped variable-width taper segments as physical copper; class-width normalization and saved-handle retrofit apply only to legacy or human-authored compact handles
 - A plain click on the board outline's edge or a corner handle shows its properties instead of being swallowed by the outline-edit drag arming
 - The PCB editor's DXF import assembles a line/arc contour into a closed outline even when the export left sub-µm endpoint seams, mixed winding, or a duplicated contour
 - The PCB editor imports a DXF board outline: the page ships a DXF button (toolstrip + embed action bar) and the importer script, whose client-side parser exposes the loops a picked .dxf found (LWPOLYLINE/POLYLINE loops, LINE/ARC chains, $INSUNITS units, Y-flip to the board frame)

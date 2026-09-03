@@ -14791,7 +14791,7 @@ test "PCB viewer exposes provenance and persistent copper IDs" {
 test "saved controlled-impedance copper receives an idempotent DRC-gated taper retrofit" {
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "function drawRfRetrofitPlan()") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "if(claimed[id]||rfOwnsTrack(t))return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(t.source===\"autorouter\"||claimed[id]||rfOwnsTrack(t))return;") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "!(+c.impedance_ohms>0)||(+c.diff_impedance_ohms>0)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "drawViaAt(last.net,x,y)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function drawRfRetrofitCheck(paths)") != null);
