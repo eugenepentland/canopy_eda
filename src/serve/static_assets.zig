@@ -100,6 +100,8 @@ const pcb_3d_viewer_js = @embedFile("assets/pcb_3d_viewer.js");
 // PNGs first and invokes the STEP renderer only to populate a missing/stale
 // filesystem entry; there is no persistent WebGL scene or render loop.
 const pcb_model_sprites_js = @embedFile("assets/pcb_model_sprites.js");
+const system_cad_js = @embedFile("assets/system_cad.js");
+const system_cad_css = @embedFile("assets/system_cad.css");
 
 // Client-side WASM design-rule check — the same placement/drc.zig engine
 // compiled to wasm32-freestanding (see build.zig's `wasm-drc` step, embedded
@@ -180,6 +182,8 @@ const registry = [_]Asset{
     .{ .name = "pcb_step_worker.js", .body = pcb_step_worker_js, .content_type = .JS },
     .{ .name = "pcb_3d_viewer.js", .body = pcb_3d_viewer_js, .content_type = .JS },
     .{ .name = "pcb_model_sprites.js", .body = pcb_model_sprites_js, .content_type = .JS },
+    .{ .name = "system_cad.js", .body = system_cad_js, .content_type = .JS },
+    .{ .name = "system_cad.css", .body = system_cad_css, .content_type = .CSS },
     .{ .name = "drc.wasm", .body = drc_wasm, .content_type = .WASM },
     .{ .name = "drc_marshal.js", .body = drc_marshal_js, .content_type = .JS },
     .{ .name = "drc_worker.js", .body = drc_worker_js, .content_type = .JS },
@@ -1178,6 +1182,38 @@ test "PCB editor automatically lowers every local controlled-impedance pad taper
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function drawRfTaperAllowed") == null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "function drawReplaceLaid") == null);
+}
+
+// spec: Web Server - Saved-layout RF taper migration follows unambiguous physically overlapping legacy capsules across centreline gaps and bridges the terminal land overlap, so replacing round caps with exact butt-ended swept copper cannot open the routed net
+test "PCB saved-layout RF taper migration preserves overlapping copper continuity" {
+    const markers = [_][]const u8{
+        "function drawTrackFromCopperEnd",
+        "window.PCBDrawTrackFromCopperEnd",
+        "window.PCBDrawRfRetrofitReplacePlan",
+        "function drawEndpointCopperLand",
+        "function drawSameLand",
+        "function drawGapBridge",
+        "hit.gap<=1e-9?exact:overlap",
+        "overlap.sort(function(a,b){return a.gap-b.gap;})",
+        "outDir.x/=-outLen;outDir.y/=-outLen",
+        "(hit.q.x1-x)*outDir.x+(hit.q.y1-y)*outDir.y < -1e-9",
+        "overlap[0].gap+1e-7<overlap[1].gap?[overlap[0]]:overlap",
+        "finishBridge=drawCopperBridge",
+        "if(drawSameLand(pad,otherPad))continue",
+        "if(profileDone){if(bridge)",
+        "path.track_ids=(path.track_ids||[]).filter",
+        "pad=drawEndpointCopperLand(t.net,t.l||0,x,y,t.w)",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
+// spec: Web Server - RF finish preserves the autorouter's already-shaped variable-width taper segments as physical copper; class-width normalization and saved-handle retrofit apply only to legacy or human-authored compact handles
+test "PCB RF finish preserves autorouter-shaped taper copper" {
+    const markers = [_][]const u8{
+        "if(t.source===\"autorouter\"||claimed[id]||rfOwnsTrack(t))return",
+        "if(t.source===\"autorouter\"||!drawRfPathRegenerable({net:t.net}))return",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
 // spec: Web Server - the PCB hand router previews an authored pad neck at its tapered physical width, checks wide/short-pad launches against their exact swept regions, and submits compact handles plus those regions to the synchronous DRC gate

@@ -894,6 +894,9 @@ fn renderPageWithOptions(allocator: std.mem.Allocator, name: []const u8, index: 
     try w.writeAll("<button id=\"cam-review\" type=\"button\" aria-pressed=\"false\" aria-describedby=\"cam-review-status\"");
     try w.writeAll(" title=\"Load and inspect the exact generated Gerber and Excellon files\">CAM Review</button>");
     try w.writeAll("<span id=\"cam-review-status\" class=\"cam-review-status\" role=\"status\" aria-live=\"polite\" data-state=\"semantic\">Fast board</span>");
+    try w.writeAll("<button id=\"measure-tool\" type=\"button\" aria-pressed=\"false\" aria-describedby=\"measure-status\"");
+    try w.writeAll(" title=\"Measure exact Gerber geometry: drag from one copper edge to another\">📏 Measure</button>");
+    try w.writeAll("<span id=\"measure-status\" class=\"measure-status\" role=\"status\" aria-live=\"polite\">Edge-to-edge</span>");
     try w.writeAll("<details id=\"cam-layer-menu\" class=\"layer-menu\" hidden><summary>CAM Layers</summary><div class=\"layer-menu-pop\">");
     try w.writeAll("<label><input type=\"checkbox\" data-cam-layer=\"copper\" checked> Face copper</label>");
     // The iframe fills this from its shared physical layer table. Keeping the
@@ -1345,6 +1348,8 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"load-3d-models\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"cam-review\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"cam-review-status\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"measure-tool\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "id=\"measure-status\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "id=\"cam-layer-menu\" class=\"layer-menu\" hidden") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "class=\"layer-menu\"") != null);
     try std.testing.expectEqual(@as(usize, 7), std.mem.count(u8, html, "data-cam-layer="));
@@ -1386,6 +1391,25 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
     try std.testing.expect(std.mem.indexOf(u8, js, "populateInnerCopperLayers(payload.innerLayers)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "frame.contentWindow.PCBReviewInnerLayers") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "frame.style.transform") == null);
+}
+
+// spec: Web Server - Assembly exposes a read-only Gerber ruler that measures in world millimetres, reports fine mm and mil values, and remains available in frozen release pages
+test "assembly measure tool drives the read-only board ruler" {
+    const shell_js = @embedFile("assets/assembly_debug.js");
+    const board_js = @embedFile("assets/pcb_board.js");
+    const css = @embedFile("assets/assembly_debug.css");
+    const Check = struct { source: []const u8, marker: []const u8 };
+    const checks = [_]Check{
+        .{ .source = shell_js, .marker = "frame.contentWindow.PCBReviewMeasureMode" },
+        .{ .source = shell_js, .marker = "netlisp-pcb-measure-mode" },
+        .{ .source = shell_js, .marker = "netlisp-pcb-measure-state" },
+        .{ .source = shell_js, .marker = "formatMeasurement(payload)" },
+        .{ .source = board_js, .marker = "window.PCBReviewMeasureMode=rulerArm" },
+        .{ .source = board_js, .marker = "type:\"netlisp-pcb-measure-state\"" },
+        .{ .source = board_js, .marker = "var m=mm(ev),p=!RO&&selRef&&partByRef(selRef)" },
+        .{ .source = css, .marker = ".measure-status[data-state=\"active\"]" },
+    };
+    for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.source, check.marker) != null);
 }
 
 // spec: Web Server - The Assembly CAM Review control visibly distinguishes fast, loading, exact, and failed states and applies same-document mode changes directly with a message fallback

@@ -7106,6 +7106,8 @@ is what makes the predicate exact rather than approximately right.
 - The PCB editor can explicitly make one named saved layout authoritative in KiCad after a destructive-change preview
 - The PCB editor paints saved geometry, restores exact-state copper fills from persistent browser storage or the fast refill endpoint, then launches whole-board diagnostics and electrical analyses
 - The PCB editor batches attributable saved-layout RF taper migration candidates into at most two whole-board DRC passes, conservatively falls back for unlocated errors, and reuses rejected results while the submitted board state is unchanged
+- Saved-layout RF taper migration follows unambiguous physically overlapping legacy capsules across centreline gaps and bridges the terminal land overlap, so replacing round caps with exact butt-ended swept copper cannot open the routed net
+- RF finish preserves the autorouter's already-shaped variable-width taper segments as physical copper; class-width normalization and saved-handle retrofit apply only to legacy or human-authored compact handles
 - A plain click on the board outline's edge or a corner handle shows its properties instead of being swallowed by the outline-edit drag arming
 - The PCB editor's DXF import assembles a line/arc contour into a closed outline even when the export left sub-µm endpoint seams, mixed winding, or a duplicated contour
 - The PCB editor imports a DXF board outline: the page ships a DXF button (toolstrip + embed action bar) and the importer script, whose client-side parser exposes the loops a picked .dxf found (LWPOLYLINE/POLYLINE loops, LINE/ARC chains, $INSUNITS units, Y-flip to the board frame)
@@ -7489,7 +7491,7 @@ is what makes the predicate exact rather than approximately right.
 - the board PNG paints the canonical stages in order
 - the board PNG fills inner planes from the same pour engine the fabrication outputs use
 - the board PNG strokes a routed arc as a curve and drops the chords it owns
-- RF-only saved paths paint their sampled physical chords even when no ordinary track handle is present
+- RF-only saved paths paint the same butt-ended swept polygons as Gerber instead of round-capped conservative DRC chords
 - the board PNG paints bottom-side parts under top-side parts
 - A DRC violation carries a stable 4-hex id emitted by the shared JSON writer
 - The whole-rail power-width warning ships its own kind word and the power-solve status that forced it
@@ -7628,6 +7630,7 @@ is what makes the predicate exact rather than approximately right.
 - An opposite-face heatsink is retained in the WebGPU CAM command stream behind the opaque board instead of forcing a Canvas CAM fallback
 - The Assembly CAM Review toggle lazy-loads dependency-cached Gerber/Excellon artwork, can return instantly to the semantic board, and exposes CAM layer controls only while exact files are active
 - The Assembly CAM Review control visibly distinguishes fast, loading, exact, and failed states and applies same-document mode changes directly with a message fallback
+- Assembly exposes a read-only Gerber ruler that measures in world millimetres, reports fine mm and mil values, and remains available in frozen release pages
 - The initial Assembly iframe omits hidden DRC, editable-layout metadata, editor-only scripts, and inline CAM while exposing the lazy generated-files URL
 - The Assembly physical-review embed omits optimizer, DRC, and route-status reporting while retaining the hidden route geometry inputs its read-only painter consumes
 - Assembly layer controls independently toggle face copper, every physical inner copper layer, solder mask, paste, silkscreen, drills, board outline, and component overlays
@@ -7734,6 +7737,8 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 
 ## fabrication-release
 
+- DRC findings require a separate explicit browser acknowledgment while non-DRC evidence failures remain visibly non-waivable
+- every acknowledged fabrication ZIP includes dedicated JSON and Markdown reports containing every raw DRC error and warning
 - a stable release renderer may extend the exact read trace with assembly-only inputs, while any changed byte still blocks packaging
 - revision, source-ID, BOM/centroid, and fallback-geometry identity failures can never be waived
 - consumed-input closure identity is independent of filesystem read order
@@ -7943,6 +7948,7 @@ mutex-guarded, idle-evicted, capped table held in ServerState.
 - the distilled plan fragment parses as a valid s-expression
 - the stuck block serializes each layer's occupancy grid alongside the frontier
 - a second start replaces the design's existing session
+- manual completion serializes successful swept RF paths instead of discarding their fabrication geometry
 - idle sessions are evicted on access
 - the frontier grid cells round-trip through base64
 - completeness-waiver: empty inputs (a design with no parts/nets solves to an empty placement that routes to a done summary with empty board arrays; a hint body with no net/points/layers answers 400 via parseHint; distilling zero accepted hints yields a bare `(pcb-plan)`)

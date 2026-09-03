@@ -198,6 +198,11 @@ command = ["node", "--check", "src/serve/assets/pcb_3d_viewer.js"]
 inputs = ["src/serve/assets/pcb_3d_viewer.js"]
 
 [[external]]
+name = "system-cad-js-syntax"
+command = ["node", "--check", "src/serve/assets/system_cad.js"]
+inputs = ["src/serve/assets/system_cad.js"]
+
+[[external]]
 name = "model-viewer-3d-js-syntax"
 command = ["node", "--check", "src/serve/assets/model_viewer_3d.js"]
 inputs = ["src/serve/assets/model_viewer_3d.js"]

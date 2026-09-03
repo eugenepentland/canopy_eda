@@ -957,6 +957,7 @@ pub fn serve(
     router.get("/schematics/:name", schematic_page.schematicPage, .{});
     registerPcbRoutes(router);
     router.get("/systems/:name", system_review_api.systemPage, .{});
+    router.get("/systems/:name/cad", system_review_api.systemCadPage, .{});
     // The draft package's HTML dossier as a readable page — same composition as
     // the `draft.zip` member, without the download-and-unzip round trip. The
     // composition itself runs on a background thread (`serve/dossier_jobs.zig`),
@@ -968,6 +969,8 @@ pub fn serve(
     // API
     router.get("/api/systems", system_review_api.listSystemsApi, .{});
     router.get("/api/systems/:name", system_review_api.getSystemApi, .{});
+    router.get("/api/systems/:name/cad/mesh", system_review_api.systemCadMeshApi, .{});
+    router.get("/api/systems/:name/cad/export", system_review_api.systemCadExportApi, .{});
     router.get("/api/systems/:name/docs/:doc", system_review_api.getDocumentApi, .{});
     router.put("/api/systems/:name/docs/:doc", system_review_api.putDocumentApi, .{});
     router.post("/api/systems/:name/attest", system_review_api.attestSystemApi, .{});
