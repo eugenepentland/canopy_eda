@@ -265,6 +265,7 @@ test {
     _ = @import("placement/near_bind.zig");
     _ = @import("placement/net_identity.zig");
     _ = @import("placement/net_rewrite_pass.zig");
+    _ = @import("placement/net_graph.zig");
     _ = @import("placement/net_open.zig");
     _ = @import("placement/net_rules.zig");
     _ = @import("placement/net_topology.zig");
