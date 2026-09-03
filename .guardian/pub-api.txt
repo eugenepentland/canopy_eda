@@ -2102,6 +2102,7 @@ src/placement/drc_pour.zig::check | fn check( arena: std.mem.Allocator, placemen
 src/placement/drc_pour.zig::checkAudited | fn checkAudited( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, prepared: drc.PreparedCopper, scope: ?Scope, pads: ?PadShapes, ) std.mem.Allocator.Error!Audited
 src/placement/drc_pour.zig::padShapes | fn padShapes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!PadShapes
 src/placement/drc_power_via.zig::check | fn check( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), placement: optimizer.Placement, routed: router.RouteResult, prepared: ?drc.PreparedCopper, fills: ?pour.FillMemo, ) std.mem.Allocator.Error!void
+src/placement/drc_power_via.zig::report | fn report( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), routed: router.RouteResult, requirements: []const ?power_integrity.ViaCurrent, ) std.mem.Allocator.Error!void
 src/placement/drc_power_width.zig::Duty struct_
 src/placement/drc_power_width.zig::LocalWidth value
 src/placement/drc_power_width.zig::Shortfall struct_
@@ -2953,13 +2954,26 @@ src/placement/power_current.zig::name | fn name(self: Status) []const u8
 src/placement/power_current.zig::needsGraph | fn needsGraph(input: Input) bool
 src/placement/power_current.zig::solve | fn solve(arena: std.mem.Allocator, input: Input) std.mem.Allocator.Error!Result
 src/placement/power_current.zig::solveWithin | fn solveWithin(arena: std.mem.Allocator, input: Input, max_nodes: usize) std.mem.Allocator.Error!Result
+src/placement/power_integrity.zig::Analysis struct_
+src/placement/power_integrity.zig::AxisFlow struct_
+src/placement/power_integrity.zig::Draw struct_
+src/placement/power_integrity.zig::Flow struct_
+src/placement/power_integrity.zig::LoadFlow struct_
 src/placement/power_integrity.zig::LocalWidth struct_
+src/placement/power_integrity.zig::Net struct_
+src/placement/power_integrity.zig::Placed struct_
+src/placement/power_integrity.zig::PowerRequirements struct_
+src/placement/power_integrity.zig::SourceFlow struct_
 src/placement/power_integrity.zig::ViaCurrent struct_
 src/placement/power_integrity.zig::analyze | fn analyze( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, ) std.mem.Allocator.Error!Analysis
 src/placement/power_integrity.zig::analyzeCopper | fn analyzeCopper( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, zones: []const pour.UserZone, base_edge: ?pour.EdgeField, ) std.mem.Allocator.Error!Analysis
 src/placement/power_integrity.zig::name | fn name(self: SurfaceCapacityStatus) []const u8
 src/placement/power_integrity.zig::name | fn name(self: SurfaceKind) []const u8
 src/placement/power_integrity.zig::requiredCount | fn requiredCount(self: ViaCurrent) usize
+src/placement/power_integrity.zig::routedPowerRequirements | fn routedPowerRequirements( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, ) std.mem.Allocator.Error!PowerRequirements
+src/placement/power_integrity.zig::routedPowerRequirementsMemo | fn routedPowerRequirementsMemo( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, memo: ?pour.FillMemo, ) std.mem.Allocator.Error!PowerRequirements
+src/placement/power_integrity.zig::routedPowerRequirementsMemoZones | fn routedPowerRequirementsMemoZones( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, memo: ?pour.FillMemo, zones: []const pour.UserZone, ) std.mem.Allocator.Error!PowerRequirements
+src/placement/power_integrity.zig::routedPowerRequirementsPrepared | fn routedPowerRequirementsPrepared( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, plane_fills: []const pour.NetFills, zones: []const pour.UserZone, zone_fills: []const pour.Fill, ) std.mem.Allocator.Error!PowerRequirements
 src/placement/power_integrity.zig::routedTrackRequiredWidths | fn routedTrackRequiredWidths( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, ) std.mem.Allocator.Error![]const ?LocalWidth
 src/placement/power_integrity.zig::routedTrackRequiredWidthsMemo | fn routedTrackRequiredWidthsMemo( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, memo: ?pour.FillMemo, ) std.mem.Allocator.Error![]const ?LocalWidth
 src/placement/power_integrity.zig::routedTrackRequiredWidthsMemoZones | fn routedTrackRequiredWidthsMemoZones( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, memo: ?pour.FillMemo, zones: []const pour.UserZone, ) std.mem.Allocator.Error![]const ?LocalWidth
@@ -3585,11 +3599,15 @@ src/png.zig::Error value
 src/png.zig::encodeRgb | fn encodeRgb(alloc: std.mem.Allocator, width: u32, height: u32, rgb: []const u8) Error![]u8
 src/poly_scanline.zig::widestInterval | fn widestInterval(poly: []const [2]f64, y: f64) ?[2]f64
 src/poly_scanline.zig::widestMidpoint | fn widestMidpoint(poly: []const [2]f64, y: f64) ?[2]f64
+src/power_flow_cli.zig::Args struct_
+src/power_flow_cli.zig::FlowError value
+src/power_flow_cli.zig::cmdPowerFlow | fn cmdPowerFlow(allocator: std.mem.Allocator, argv: []const []const u8) FlowError!void
 src/power_integrity_json.zig::AcMode enum_
 src/power_integrity_json.zig::Allocators struct_
 src/power_integrity_json.zig::Inputs struct_
 src/power_integrity_json.zig::write | fn write(w: *std.Io.Writer, allocators: Allocators, in: Inputs) std.Io.Writer.Error!void
 src/power_integrity_json.zig::writeAcResponse | fn writeAcResponse(w: *std.Io.Writer, allocators: Allocators, in: Inputs, rev: i64) std.Io.Writer.Error!void
+src/power_integrity_json.zig::writeFlow | fn writeFlow(w: *std.Io.Writer, flow: power_integrity.Flow) std.Io.Writer.Error!void
 src/preflight.zig::Finding struct_
 src/preflight.zig::FindingKind enum_
 src/preflight.zig::FindingStatus enum_

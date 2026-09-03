@@ -819,8 +819,9 @@ fn checkImpl(
     try checkSilkOverPad(arena, &out, placement, pads, &pad_grid, rules.mask.margin);
     var current_routed = routed;
     current_routed.tracks = tracks;
-    const solved_power_widths = if (power.copper) |prepared|
-        try power_integrity.routedTrackRequiredWidthsPrepared(
+    // ONE current solve per rail, read by both power-copper rules below.
+    const solved_power = if (power.copper) |prepared|
+        try power_integrity.routedPowerRequirementsPrepared(
             arena,
             placement,
             current_routed,
@@ -829,8 +830,8 @@ fn checkImpl(
             prepared.zone_fills,
         )
     else
-        try power_integrity.routedTrackRequiredWidthsMemo(arena, placement, current_routed, power.fills);
-    const local_power_widths = solved_power_widths;
+        try power_integrity.routedPowerRequirementsMemo(arena, placement, current_routed, power.fills);
+    const local_power_widths = solved_power.tracks;
     try checkTrackWidth(arena, &out, .{
         .placement = placement,
         .routed = routed,
@@ -839,7 +840,7 @@ fn checkImpl(
         .local_power_widths = local_power_widths,
         .zones = topology_zones,
     });
-    try drc_power_via.check(arena, &out, placement, current_routed, power.copper, power.fills);
+    try drc_power_via.report(arena, &out, current_routed, solved_power.vias);
     // Topology still needs the private chords as physical support (a curved or
     // flared path may touch something its compact handle does not), but finding
     // identity must remain in the persisted track domain.  The topology checker
@@ -3874,9 +3875,9 @@ test "track width accepts a solved narrow power branch but enforces its local re
     };
     const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
     const local = [_]?drc_power_width.LocalWidth{
-        .{ .width_mm = 0.2727 },
-        .{ .width_mm = 0.10 },
-        .{ .width_mm = 0.10 },
+        .{ .width_mm = 0.2727, .envelope = false },
+        .{ .width_mm = 0.10, .envelope = false },
+        .{ .width_mm = 0.10, .envelope = false },
     };
     var violations: std.ArrayList(Violation) = .empty;
     try checkTrackWidth(arena, &violations, .{
@@ -4051,7 +4052,7 @@ test "adaptive power width forgives a bounded pad-entry neck but not the same co
         .{ .x1 = 1, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.55, .net = 0 },
     };
     const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
-    const local = [_]?drc_power_width.LocalWidth{ .{ .width_mm = 0.5 }, .{ .width_mm = 0.5 } };
+    const local = [_]?drc_power_width.LocalWidth{ .{ .width_mm = 0.5, .envelope = false }, .{ .width_mm = 0.5, .envelope = false } };
     for ([_]bool{ true, false }) |landed| {
         var placement = partsOnly(&parts);
         placement.nets = if (landed) &netted else &unnetted;

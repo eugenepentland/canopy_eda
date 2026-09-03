@@ -872,6 +872,38 @@ from the read-only resolve path rather than walking the hierarchy again.
 - completeness-waiver: integer overflow (no arithmetic beyond formatting already-computed net and pad counts)
 - completeness-waiver: panic-free (a design that fails to resolve degrades to a comment line and the next design)
 
+## power-flow
+
+Public functions: cmdPowerFlow, Args, FlowError
+
+Why each power rail's current solve reached the verdict it did. The DRC prints
+`power_width_envelope … incomplete-load-terminals` and stops, which names the
+verdict and hides the evidence: WHICH consumer of the rail failed to resolve,
+and whether it failed because none of its pins are on this net, because its pad
+was not found, or because the copper it sits on never reaches the source.
+`netlisp power-flow [--project-dir <d>] [--layout <name>] [--net <name>]
+[--text] <design>` prints, per rail, the two axis statuses, the declared
+demand, every source terminal with its resolved pad count, every load with its
+contacts / pin completeness / per-axis placement, the unplaced amperes, and
+then each track and barrel whose required capacity exceeds what is there,
+carrying the envelope flag and the reason. It is read-only, writes no file, and
+reads the same two entry points the DRC and the PCB page read, so a rail it
+calls solved is a rail the board's own screens call solved.
+
+- the CLI parses the project dir, the saved layout, the rail filter and the text-output flag with one positional design name
+- the rail filter matches a rail by its exact name or by its hierarchical leaf, and never by a bare substring
+- a board that fails to solve reports UNRESOLVED and fails the command rather than printing an empty report
+- an unresolved load is annotated with which of the three resolution failures it hit
+
+- completeness-waiver: empty inputs (a run naming no design is a usage error; a board with no power rails prints an empty rail list under the board's own track and via counts rather than failing silently)
+- completeness-waiver: large inputs (one arena for the whole run, freed at the end, so the peak is one board's solved placement)
+- completeness-waiver: unauthorized access (a local read-only CLI over the caller's own project directory; no network, no auth surface, and no file is written)
+- completeness-waiver: concurrent access (single-threaded over one board, sharing no state)
+- completeness-waiver: i/o failure (a design that cannot be evaluated or whose layout cannot be restored prints an UNRESOLVED comment and the command fails)
+- completeness-waiver: malformed encoding (the design and its saved layout are parsed by the same seam the PCB page uses, which rejects malformed input long before a rail exists to report)
+- completeness-waiver: integer overflow (no arithmetic beyond formatting already-computed currents, widths and contact counts)
+- completeness-waiver: panic-free (every failing stage degrades to a comment line and a non-zero exit rather than aborting mid-report)
+
 ## rewrite-pins-by-name
 
 Public functions: tool
@@ -3474,6 +3506,10 @@ Public functions: analyze, classifyNetName, isInductor
 - a net whose canonical copper topology is a single island never solves disconnected
 - copper the canonical policy leaves open stays two islands, so a genuinely broken rail is still reported
 - a pour component joins the traces whose copper covers its contact points, not only traces whose centreline passes exactly through them
+- a junction naming a barrel enters it through the barrel's own spoke, so the transition's current flows through the plating instead of around it
+- one shared current solve answers the track-width and via-current rules with exactly the arrays the two per-rule entry points return
+- a net declaring no current is answered no-current without building a copper graph or rastering its sheet contacts
+- the per-net diagnosis names every source terminal's contact count and every load's contacts, pin completeness and per-axis placement
 
 Public functions: capacityForArea, traceCapacityA, requiredTraceWidthMm,
 viaCapacityA, requiredViaDrillMm, routingCurrentA, powerWidthForNet,
@@ -3481,6 +3517,9 @@ powerViaDrillForNet, routedTrackRequiredWidths, routedTrackRequiredWidthsPrepare
 routedViaRequirements, routedViaRequirementsPrepared, adaptiveTargetWidth, exactWidth
 adaptiveTargetWidth, exactWidth, adaptiveFloorWidth, targetFor, netLimits,
 trackLimits, wantsBranchSizing, boardTargets, solveLocalWidths
+routedViaRequirements, routedViaRequirementsPrepared, routedPowerRequirements,
+routedPowerRequirementsMemo, routedPowerRequirementsMemoZones,
+routedPowerRequirementsPrepared, adaptiveTargetWidth, exactWidth
 
 Power routing derives conservative pre-route copper geometry from the rail's
 declared load envelope, the actual stack foil, the 10 °C IPC-2221 screening
@@ -7638,6 +7677,7 @@ is what makes the predicate exact rather than approximately right.
 - Part fields in the PCB blob are escaped for the script element they sit in, so no ref-des, value, MPN, footprint, pad or pad-net name can close the tag
 - Plane net names in the PCB blob's layer table are escaped for the script element, so a plane net cannot close the tag
 - Power-integrity net and terminal names in the PCB blob are escaped for the script element, so neither can close the tag
+- Each power net in the PCB blob carries a "flow" object naming its per-axis status, unplaced current, per-terminal source contacts and per-load resolution
 - The BOM symbol-pin cache reads library pinouts at the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure still contributes its pads
 - The pinout endpoint reads its library file at the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure is served rather than answered 404
 - The revision-free sidecar writers, the render dedup and the regenerate record, re-read under the sidecar lock rather than trusting a value read before it

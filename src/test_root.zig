@@ -61,6 +61,7 @@ test {
     _ = @import("deploy_unit.zig");
     _ = @import("docgen.zig");
     _ = @import("drc_dump.zig");
+    _ = @import("power_flow_cli.zig");
     _ = @import("gerber_dump.zig");
     _ = @import("netlist_dump.zig");
     _ = @import("pins_by_name.zig");

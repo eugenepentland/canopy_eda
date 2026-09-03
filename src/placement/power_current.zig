@@ -604,11 +604,71 @@ fn addTerminal(arena: std.mem.Allocator, graph: *Graph, contacts: []const Contac
 }
 
 fn applyJoins(arena: std.mem.Allocator, graph: *Graph, input: Input, cuts: Cuts) std.mem.Allocator.Error!void {
+    const barrel_ohm = try arena.alloc(f64, input.counts.vias);
+    @memset(barrel_ohm, 0);
+    for (input.barrels) |barrel| {
+        if (barrel.route_index < barrel_ohm.len) barrel_ohm[barrel.route_index] = barrel.resistance_ohm;
+    }
     for (input.joins) |join| {
         const a = try anchorNode(arena, graph, input, cuts, join.a) orelse continue;
         const b = try anchorNode(arena, graph, input, cuts, join.b) orelse continue;
+        if (soleBarrel(join)) |index| {
+            const hub = graph.via_hub[index] orelse continue;
+            try addBarrelJoin(arena, graph, index, barrel_ohm[index], if (a == hub) b else a);
+            continue;
+        }
         try graph.addEdge(arena, .{ .a = a, .b = b, .resistance = terminal_resistance_ohm, .kind = .join });
     }
+}
+
+fn barrelOf(anchor: Anchor) ?usize {
+    return switch (anchor) {
+        .via => |index| index,
+        else => null,
+    };
+}
+
+/// The one barrel a junction names, or null when it names none or two. A
+/// via-to-via junction stays an ordinary tie: two overlapping barrels really
+/// are one piece of plating, and neither is bypassed by saying so.
+fn soleBarrel(join: Join) ?usize {
+    const a = barrelOf(join.a);
+    const b = barrelOf(join.b);
+    if (a != null and b != null) return null;
+    return a orelse b;
+}
+
+/// Attach one piece of copper to a barrel the way the barrel's own land does:
+/// through a half-barrel spoke.
+///
+/// Tying it to the barrel HUB at `terminal_resistance_ohm` instead — which is
+/// what an ordinary junction edge does — puts a 1 µΩ path in parallel with the
+/// plating every other piece of copper on that land already reaches the hub
+/// through. The transition's whole current then flows AROUND the barrel: a
+/// two-layer rail carrying 0.8 A reported 0.7 mA in its via, and every
+/// over-current barrel screen came back clean. `route_index` is set so the
+/// current this spoke does carry is credited to the barrel.
+fn addBarrelJoin(
+    arena: std.mem.Allocator,
+    graph: *Graph,
+    index: usize,
+    barrel_ohm: f64,
+    node: usize,
+) std.mem.Allocator.Error!void {
+    const hub = graph.via_hub[index] orelse return;
+    if (node == hub) return;
+    // A barrel with no modelled plated area (a saved via recording no drill)
+    // has no spoke to enter through and carries no current worth crediting.
+    // It keeps the ordinary tie, which is the only thing holding such a net
+    // together and is exactly what every junction did before.
+    if (!(barrel_ohm > 0) or !std.math.isFinite(barrel_ohm)) {
+        return graph.addEdge(arena, .{ .a = node, .b = hub, .resistance = terminal_resistance_ohm, .kind = .join });
+    }
+    // The barrel's land already attached this node: a second spoke would halve
+    // the barrel's modelled resistance and split its reported current in two.
+    for (graph.via_nodes[index].items) |old| if (old == node) return;
+    try graph.addEdge(arena, .{ .a = node, .b = hub, .resistance = barrel_ohm / 2.0, .kind = .via, .route_index = index });
+    try appendUnique(arena, &graph.via_nodes[index], node);
 }
 
 fn anchorNode(
@@ -1180,6 +1240,47 @@ test "an explicit junction creates a via hub geometry alone would skip" {
     });
     try testing.expectEqual(Status.solved, result.typical.status);
     try testing.expectApproxEqAbs(@as(f64, 1.0), result.typical.track_current_a[1], 1e-9);
+}
+
+// spec: placement/power-routing - a junction naming a barrel enters it through the barrel's own spoke, so the transition's current flows through the plating instead of around it
+test "a junction into a barrel does not short the barrel it names" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Both traces END on the barrel, so the geometric scan already attached
+    // them: the canonical contact policy names the SAME two junctions on top.
+    // Tying those to the barrel hub at the ordinary junction resistance put a
+    // 1 microohm path in parallel with the plating, and the whole rail flowed
+    // around the barrel — 0.7 mA reported in a via carrying 1 A.
+    const segments = [_]Segment{
+        .{ .route_index = 0, .a = .{ 0, 0 }, .b = .{ 1, 0 }, .layer = 0, .resistance_ohm_per_mm = 0.01, .width_mm = 0.2 },
+        .{ .route_index = 1, .a = .{ 1, 0 }, .b = .{ 2, 0 }, .layer = 1, .resistance_ohm_per_mm = 0.01, .width_mm = 0.2 },
+    };
+    const barrels = [_]Barrel{.{ .route_index = 0, .at = .{ 1, 0 }, .resistance_ohm = 0.002, .radius_mm = 0.2 }};
+    const loads = [_]Load{.{ .contacts = &.{.{ .at = .{ 2, 0 }, .layer = 1, .reach_mm = 0.01 }}, .typical_a = 1, .maximum_a = null }};
+    const joins = [_]Join{
+        .{ .a = .{ .track = .{ .index = 0, .at = .{ 1, 0 } } }, .b = .{ .via = 0 } },
+        .{ .a = .{ .track = .{ .index = 1, .at = .{ 1, 0 } } }, .b = .{ .via = 0 } },
+    };
+    const input: Input = .{
+        .segments = &segments,
+        .barrels = &barrels,
+        .counts = .{ .tracks = 2, .vias = 1 },
+        .source = .{ .contacts = &.{.{ .at = .{ 0, 0 }, .layer = 0, .reach_mm = 0.01 }}, .complete = true },
+        .loads = &loads,
+        .joins = &joins,
+    };
+    const joined = try solve(arena, input);
+    try testing.expectEqual(Status.solved, joined.typical.status);
+    try testing.expectApproxEqAbs(@as(f64, 1.0), joined.typical.via_current_a[0], 1e-9);
+
+    // The junctions add nothing the barrel's own land did not already have, so
+    // the answer is the geometry-only one to the last bit.
+    var bare = input;
+    bare.joins = &.{};
+    const alone = try solve(arena, bare);
+    try testing.expectApproxEqAbs(alone.typical.via_current_a[0], joined.typical.via_current_a[0], 1e-12);
+    try testing.expectApproxEqAbs(alone.typical.via_drop_v[0], joined.typical.via_drop_v[0], 1e-12);
 }
 
 // spec: placement/power-routing - one unplaceable load leaves the rest of the rail solved and reports the dropped current instead of refusing the axis

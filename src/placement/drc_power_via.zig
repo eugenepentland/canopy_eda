@@ -99,7 +99,11 @@ pub fn check(
 }
 
 /// The verdict itself, over requirements already in hand.
-fn report(
+///
+/// The reporting DRC calls this directly: it and the track-width rule read one
+/// shared `power_integrity.routedPowerRequirements*` result, so a power net's
+/// current is solved once per pass instead of once per rule.
+pub fn report(
     arena: std.mem.Allocator,
     out: *std.ArrayList(drc.Violation),
     routed: router.RouteResult,
