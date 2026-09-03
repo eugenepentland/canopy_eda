@@ -27,8 +27,6 @@ const max_triangles_per_body: usize = 250_000;
 const max_board_outline_points: usize = 2048;
 const max_board_outline_arcs: usize = 512;
 const max_board_holes: usize = 1024;
-const round_hole_segments: usize = 24;
-const slot_half_segments: usize = 12;
 
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
@@ -830,34 +828,62 @@ fn validateBoardHole(board: Board, outer: []const [2]f64, hole_index: usize) Exp
     return .{ .start = start, .finish = finish };
 }
 
-fn makeBoardHoleRing(allocator: std.mem.Allocator, axis: BoardHoleAxis, radius: f64) std.mem.Allocator.Error![][2]f64 {
+/// Build the clockwise inner wire for a mechanical hole without approximating
+/// any circular boundary with chords. A round drill is one closed CIRCLE edge;
+/// a routed slot is two straight edges joined by exact semicircles.
+fn prepareBoardHoleRing(allocator: std.mem.Allocator, axis: BoardHoleAxis, radius: f64) std.mem.Allocator.Error!PreparedRing {
     const axis_dx = axis.finish[0] - axis.start[0];
     const axis_dy = axis.finish[1] - axis.start[1];
     const axis_length = @sqrt(axis_dx * axis_dx + axis_dy * axis_dy);
-    var ring: [][2]f64 = undefined;
     if (axis_length <= 1e-7) {
-        ring = try allocator.alloc([2]f64, round_hole_segments);
-        for (ring, 0..) |*point, i| {
-            const angle = 2 * std.math.pi * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(round_hole_segments));
-            point.* = .{ axis.start[0] + radius * @cos(angle), axis.start[1] + radius * @sin(angle) };
-        }
-    } else {
-        ring = try allocator.alloc([2]f64, 2 * (slot_half_segments + 1));
-        const axis_angle = std.math.atan2(axis_dy, axis_dx);
-        var at: usize = 0;
-        for (0..slot_half_segments + 1) |i| {
-            const angle = axis_angle - std.math.pi / 2.0 + std.math.pi * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(slot_half_segments));
-            ring[at] = .{ axis.finish[0] + radius * @cos(angle), axis.finish[1] + radius * @sin(angle) };
-            at += 1;
-        }
-        for (0..slot_half_segments + 1) |i| {
-            const angle = axis_angle + std.math.pi / 2.0 + std.math.pi * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(slot_half_segments));
-            ring[at] = .{ axis.start[0] + radius * @cos(angle), axis.start[1] + radius * @sin(angle) };
-            at += 1;
-        }
+        const curves = try allocator.alloc(PreparedCurve, 1);
+        const point = [2]f64{ axis.start[0] + radius, axis.start[1] };
+        curves[0] = .{
+            .start = point,
+            .finish = point,
+            .arc = .{
+                .center = axis.start,
+                .radius = radius,
+                .start_angle = 0,
+                .sweep = -std.math.tau,
+            },
+        };
+        return .{ .curves = curves };
     }
-    if (signedArea2(ring) > 0) reversePoints2(ring);
-    return ring;
+
+    const ux = axis_dx / axis_length;
+    const uy = axis_dy / axis_length;
+    const nx = -uy;
+    const ny = ux;
+    const a = [2]f64{ axis.start[0] + radius * nx, axis.start[1] + radius * ny };
+    const b = [2]f64{ axis.finish[0] + radius * nx, axis.finish[1] + radius * ny };
+    const c = [2]f64{ axis.finish[0] - radius * nx, axis.finish[1] - radius * ny };
+    const d = [2]f64{ axis.start[0] - radius * nx, axis.start[1] - radius * ny };
+    const axis_angle = std.math.atan2(axis_dy, axis_dx);
+    const curves = try allocator.alloc(PreparedCurve, 4);
+    curves[0] = .{ .start = a, .finish = b };
+    curves[1] = .{
+        .start = b,
+        .finish = c,
+        .arc = .{
+            .center = axis.finish,
+            .radius = radius,
+            .start_angle = axis_angle + std.math.pi / 2.0,
+            .sweep = -std.math.pi,
+        },
+    };
+    curves[2] = .{ .start = c, .finish = d };
+    curves[3] = .{
+        .start = d,
+        .finish = a,
+        .arc = .{
+            .center = axis.start,
+            .radius = radius,
+            .start_angle = axis_angle - std.math.pi / 2.0,
+            .sweep = -std.math.pi,
+        },
+    };
+    return .{ .curves = curves };
 }
 
 fn prepareBoard(allocator: std.mem.Allocator, board: Board) (ExportError || std.mem.Allocator.Error)!PreparedBoard {
@@ -887,7 +913,7 @@ fn prepareBoard(allocator: std.mem.Allocator, board: Board) (ExportError || std.
     rings[0] = try prepareOuterRing(allocator, outer, board.arcs, reversed);
     for (board.holes, 0..) |hole, hole_index| {
         const axis = try validateBoardHole(board, outer, hole_index);
-        rings[hole_index + 1] = try prepareLineRing(allocator, try makeBoardHoleRing(allocator, axis, hole.r));
+        rings[hole_index + 1] = try prepareBoardHoleRing(allocator, axis, hole.r);
     }
     return .{ .name = board.name, .rings = rings, .thickness = board.thickness, .color = board.color };
 }
@@ -1657,10 +1683,14 @@ test "PCB recipe exports one analytic manifold solid and ignores legacy artwork 
             .surface = true,
         }},
     });
-    const expected_side_faces = 4 + round_hole_segments + 2 * (slot_half_segments + 1);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "MANIFOLD_SOLID_BREP("));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "ADVANCED_BREP_SHAPE_REPRESENTATION("));
-    try std.testing.expectEqual(expected_side_faces + 2, std.mem.count(u8, output, "ADVANCED_FACE("));
+    // Four outer walls, one true cylindrical drill wall and four routed-slot
+    // walls, plus the two planar caps. No hole perimeter is faceted.
+    try std.testing.expectEqual(@as(usize, 11), std.mem.count(u8, output, "ADVANCED_FACE("));
+    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, output, "=CIRCLE('',"));
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, output, "=CYLINDRICAL_SURFACE('',"));
+    try std.testing.expectEqual(@as(usize, 8), std.mem.count(u8, output, "=PLANE('',"));
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, output, "FACE_BOUND("));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "NEXT_ASSEMBLY_USAGE_OCCURRENCE("));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, output, "FACETED_BREP("));
