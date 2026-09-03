@@ -637,3 +637,8 @@ matters when the person re-recording is the author of the change.
 - **friction:** `prepare-release.sh` discarded an otherwise-green exact candidate after one Canvas zoom sample measured 47.3 ms against the 45 ms limit. The same stripped binary immediately passed at 39.6 ms, but recording it required repeating the whole roughly three-minute wrapper.
 - **idea:** Let the browser performance stage retry one marginal threshold breach with the same stripped candidate, failing only if the retry also breaches; preserve both measurements in the candidate log.
 - **status:** open
+
+## 2026-09-03 · codex · DRC-acknowledged fabrication export
+- **friction:** Two focused `zig build --seed=1 test -Dtest-filter=…` runs overlapped roughly 50–80 unrelated `zig test` processes, exhausted all 8 GiB of swap, and reached load averages above 300. Guardian and the Debug executable compile were killed; the otherwise-passing fabrication-package test later received HTTP 500 instead of its expected stale-token 428 because the release gate's Git subprocess failed closed under the same pressure.
+- **idea:** Put ordinary `zig build test` invocations behind the same machine-wide serialization/pressure gate as `prepare-release.sh`, or add an early load/memory guard that queues before spawning compiler shards. This would prevent unrelated focused runs from invalidating each other's timeout-sensitive tests and eliminate repeated gate attempts.
+- **status:** open

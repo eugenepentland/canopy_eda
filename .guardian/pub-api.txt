@@ -1087,6 +1087,8 @@ src/fab_release.zig::savedBomDigest | fn savedBomDigest( allocator: std.mem.Allo
 src/fab_release.zig::savedLayoutDigest | fn savedLayoutDigest( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) std.mem.Allocator.Error![64]u8
 src/fab_release.zig::tracedInputs | fn tracedInputs( allocator: std.mem.Allocator, trace: *const infra_fs.ReadTrace, project_dir: []const u8, name: []const u8, ) std.mem.Allocator.Error!TracedInputs
 src/fab_release.zig::writeChecksums | fn writeChecksums(writer: *std.Io.Writer, entries: []const zipfile.Entry) std.Io.Writer.Error!void
+src/fab_release.zig::writeDrcHumanReport | fn writeDrcHumanReport( writer: *std.Io.Writer, evidence: Evidence, ) std.Io.Writer.Error!void
+src/fab_release.zig::writeDrcMachineReport | fn writeDrcMachineReport( writer: *std.Io.Writer, evidence: Evidence, ) ReportWriteError!void
 src/fab_release.zig::writeHumanReport | fn writeHumanReport(writer: *std.Io.Writer, evidence: Evidence, lock: Lock, waiver: bool) std.Io.Writer.Error!void
 src/fab_release.zig::writeMachineReport | fn writeMachineReport( writer: *std.Io.Writer, evidence: Evidence, lock: Lock, waiver: bool, ) ReportWriteError!void
 src/fab_release.zig::writeReadinessJson | fn writeReadinessJson( allocator: std.mem.Allocator, writer: *std.Io.Writer, evidence: Evidence, lock: Lock, ) ReadinessJsonError!void

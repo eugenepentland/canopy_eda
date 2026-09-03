@@ -5010,9 +5010,10 @@ fn pcbFabReadinessApiHooked(
 /// GET /api/pcb-gerbers/:name — the complete fab package as one ZIP: Gerber
 /// copper (outer signal layers + stackup-derived inner planes), solder mask,
 /// paste, silkscreen, board profile, Excellon PTH/NPTH drills, the centroid
-/// CSV, a `.gbrjob` job file, and a fabrication-ID manifest — all at the blessed poses with the ★
-/// layout's persisted routed copper, in one shared y-up frame. What a board
-/// house needs to build the board, no KiCad in the loop.
+/// CSV, a `.gbrjob` job file, fabrication-ID manifest, and complete JSON +
+/// Markdown DRC reports — all at the blessed poses with the ★ layout's
+/// persisted routed copper, in one shared y-up frame. What a board house needs
+/// to build and audit the board, no KiCad in the loop.
 ///
 /// Gated by the fab-readiness report (`/api/fab-readiness`): every request must
 /// echo that exact report's `?confirm=<release_token>`. Remaining findings also
@@ -13949,7 +13950,8 @@ fn writeFabReleaseLayout(dir: std.Io.Dir, timestamp: i64) !void {
     var bytes: [512]u8 = undefined;
     const data = try std.fmt.bufPrint(&bytes,
         \\{{"default":"release","layouts":[{{"name":"release","kind":"manual","ts":{d},"default":true,
-        \\ "parts":[{{"ref":"U1","x":20,"y":10,"rot":0}}]}}]}}
+        \\ "parts":[{{"ref":"U1","x":20,"y":10,"rot":0}}],
+        \\ "routes":{{"tracks":[],"vias":[{{"x":20,"y":10,"d":0.2,"drill":0.05,"net":"GND"}}]}}}}]}}
     , .{timestamp});
     try dir.writeFile(std.testing.io, .{ .sub_path = "src/fabok.layouts.json", .data = data });
 }
@@ -14152,6 +14154,8 @@ fn expectFabZipMembers(allocator: std.mem.Allocator, entries: []const StoredZipE
         "fabok-fab-id.txt",
         "fabok-release-report.json",
         "fabok-release-report.md",
+        "fabok-drc-report.json",
+        "fabok-drc-report.md",
         "fabok-design-rules.json",
         "fabok-checksums.sha256",
     }) |member| try std.testing.expect(storedZipEntry(entries, member) != null);
@@ -14168,6 +14172,7 @@ fn expectFabChecksums(allocator: std.mem.Allocator, entries: []const StoredZipEn
     }
 }
 
+// spec: fabrication-release - every acknowledged fabrication ZIP includes dedicated JSON and Markdown reports containing every raw DRC error and warning
 test "fab release requires confirmation and waiver then emits a checksummed revision lock" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -14209,7 +14214,7 @@ test "fab release requires confirmation and waiver then emits a checksummed revi
     try std.testing.expect(std.mem.startsWith(u8, package.body, "PK\x03\x04"));
     const entries = try storedZipEntries(allocator, package.body);
     try expectFabZipMembers(allocator, entries);
-    try std.testing.expectEqual(@as(usize, 22), entries.len);
+    try std.testing.expectEqual(@as(usize, 24), entries.len);
     try std.testing.expect(std.mem.indexOf(u8, storedZipEntry(entries, "fabok-bom.csv").?, "U1") != null);
     try std.testing.expect(std.mem.indexOf(u8, storedZipEntry(entries, "fabok-centroid.csv").?, "U1") != null);
     const assembly_html = storedZipEntry(entries, "fabok-assembly.html").?;
@@ -14229,6 +14234,16 @@ test "fab release requires confirmation and waiver then emits a checksummed revi
     try std.testing.expect(release_report.object.get("waiver").?.bool);
     try std.testing.expectEqualStrings("A", release_report.object.get("revision").?.string);
     try std.testing.expectEqualStrings("FAB-1001", release_report.object.get("part_number").?.string);
+    const drc_report = try std.json.parseFromSliceLeaky(std.json.Value, allocator, storedZipEntry(entries, "fabok-drc-report.json").?, .{});
+    try std.testing.expectEqualStrings("netlisp-drc-report-v1", drc_report.object.get("schema").?.string);
+    try std.testing.expect(drc_report.object.get("acknowledged").?.bool);
+    try std.testing.expect(drc_report.object.get("error_count").?.integer > 0);
+    try std.testing.expectEqual(readiness_json.object.get("raw_drc_count").?.integer, drc_report.object.get("raw_count").?.integer);
+    try std.testing.expectEqual(drc_report.object.get("raw_count").?.integer, drc_report.object.get("error_count").?.integer + drc_report.object.get("warning_count").?.integer);
+    try std.testing.expectEqual(@as(usize, @intCast(drc_report.object.get("raw_count").?.integer)), drc_report.object.get("findings").?.array.items.len);
+    const drc_markdown = storedZipEntry(entries, "fabok-drc-report.md").?;
+    try std.testing.expect(std.mem.indexOf(u8, drc_markdown, "Acknowledgment accepted: yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, drc_markdown, "**err ·") != null or std.mem.indexOf(u8, drc_markdown, "**warn ·") != null);
     const rules = try std.json.parseFromSliceLeaky(std.json.Value, allocator, storedZipEntry(entries, "fabok-design-rules.json").?, .{});
     try std.testing.expectEqualStrings("FAB-1001", rules.object.get("part_number").?.string);
 
@@ -14840,6 +14855,16 @@ test "deferred fabrication ID retains and refreshes its saved anchor" {
     try std.testing.expect(std.mem.indexOf(u8, js, "fabTextResolve(PCB.fab_text,!PCB.analysis_deferred)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "fabTextResolve(j.fab_text||null,true)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "t.text=PCB.fab_text.text;t.fabrication_id=true") != null);
+}
+
+// spec: fabrication-release - DRC findings require a separate explicit browser acknowledgment while non-DRC evidence failures remain visibly non-waivable
+test "fabrication export explicitly acknowledges DRC findings" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "id=\"fab-drc-ack\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "Acknowledge DRC findings and export") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drcAck&&!drcAck.checked") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drc-report.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "non-waivable release-evidence blockers") != null);
 }
 
 test "PCB viewer replaces detected footprint pin-one circles with live collision-aware dots" {

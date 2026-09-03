@@ -7646,6 +7646,8 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 
 ## fabrication-release
 
+- DRC findings require a separate explicit browser acknowledgment while non-DRC evidence failures remain visibly non-waivable
+- every acknowledged fabrication ZIP includes dedicated JSON and Markdown reports containing every raw DRC error and warning
 - a stable release renderer may extend the exact read trace with assembly-only inputs, while any changed byte still blocks packaging
 - revision, source-ID, BOM/centroid, and fallback-geometry identity failures can never be waived
 - consumed-input closure identity is independent of filesystem read order

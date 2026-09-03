@@ -12250,6 +12250,12 @@ function fabRenderReport(rep){
    var layer=d.layer==null?"":(" · layer "+d.layer),gap=d.gap_mm==null?"":(" · gap "+Number(d.gap_mm).toFixed(3)+" / "+Number(d.required_mm).toFixed(3)+" mm");
    h+='<li><code>'+pEsc(d.severity||"")+' · '+pEsc(d.kind||"DRC")+'</code>'+pEsc(where+layer+gap)+(parties.length?' — '+pEsc(parties.join(' ↔ ')):'')+'</li>';});
   h+='</ul></details>';}
+ if(rep.raw_drc_count){
+  h+='<label class="fab-ack"><input type="checkbox" id="fab-drc-ack">'+
+   '<span>I understand this export contains <b>'+Number(rep.raw_drc_count)+'</b> DRC finding(s). '+
+   'All DRC errors and warnings will be included in the ZIP\'s dedicated <code>*-drc-report.json</code> and <code>*-drc-report.md</code> files.</span></label>';}
+ if(!rep.internal_checks_complete)
+  h+='<div class="fab-blocked">DRC findings can be accepted, but export remains disabled until the non-waivable release-evidence blockers above are resolved.</div>';
  if((!rep.errors||!rep.errors.length)&&(!rep.warnings||!rep.warnings.length))
   h+='<div class="fab-sec ok">Board is fab-ready.</div>';
  var s=rep.stats||{};
@@ -12265,12 +12271,13 @@ function fabOpenModal(rep){
  var body=document.getElementById("fab-body"),go=document.getElementById("fab-go"),
   title=document.getElementById("fab-title");
  body.innerHTML=fabRenderReport(rep);
- var hasErr=rep.errors&&rep.errors.length,hasWarn=rep.needs_waiver;
+ var hasErr=rep.errors&&rep.errors.length,hasWarn=rep.needs_waiver,drcAck=document.getElementById("fab-drc-ack");
  var what=fabExportKind==="archive"?"Complete design archive":"Fabrication release";
  title.textContent=hasErr?what+" — problems found":hasWarn?what+" — waiver required":what+" — ready to confirm";
- go.textContent=hasWarn?"Confirm waiver and export":(fabExportKind==="archive"?"Confirm and export archive":"Confirm release and export");
+ go.textContent=drcAck?"Acknowledge DRC findings and export":hasWarn?"Confirm waiver and export":(fabExportKind==="archive"?"Confirm and export archive":"Confirm release and export");
  go.className=hasWarn?"btn fab-danger":"btn";
- go.disabled=!rep.internal_checks_complete||!rep.release_token;
+ function syncFabGo(){go.disabled=!rep.internal_checks_complete||!rep.release_token||(drcAck&&!drcAck.checked);}
+ if(drcAck)drcAck.addEventListener("change",syncFabGo);syncFabGo();
  go.onclick=function(){fabDownload(rep);};
  m.hidden=false;}
 function fabEnsure3D(){

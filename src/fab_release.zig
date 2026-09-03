@@ -861,6 +861,104 @@ pub fn writeMachineReport(
     try writer.print("],\"effective_drc_count\":{d}}}", .{evidence.drc.effective.len});
 }
 
+const DrcCounts = struct { errors: usize = 0, warnings: usize = 0 };
+
+fn drcCounts(findings: []const drc.Violation) DrcCounts {
+    var counts = DrcCounts{};
+    for (findings) |finding| switch (finding.severity) {
+        .err => counts.errors += 1,
+        .warn => counts.warnings += 1,
+    };
+    return counts;
+}
+
+/// Write every raw DRC finding to a dedicated machine-readable package member.
+/// This intentionally duplicates `release-report.json.raw_drc`: fabrication
+/// consumers can find the complete DRC evidence without understanding the
+/// broader release-attestation schema, while the signed release report remains
+/// self-contained.
+pub fn writeDrcMachineReport(
+    writer: *std.Io.Writer,
+    evidence: Evidence,
+) ReportWriteError!void {
+    const counts = drcCounts(evidence.drc.raw);
+    const acknowledged = evidence.drc.raw.len > 0;
+    try writer.writeAll("{\"schema\":\"netlisp-drc-report-v1\",\"part_number\":");
+    try json_writer.writeString(writer, evidence.mark.part_number);
+    try writer.writeAll(",\"revision\":");
+    try json_writer.writeString(writer, evidence.design.revision.id);
+    try writer.writeAll(",\"layout\":");
+    try json_writer.writeString(writer, evidence.design.layout_name);
+    try writer.print(",\"complete\":{s},\"acknowledged\":{s},\"raw_count\":{d},\"error_count\":{d},\"warning_count\":{d},\"effective_count\":{d},\"ignored_count\":{d},\"findings\":[", .{
+        if (evidence.drc.complete) "true" else "false",
+        if (acknowledged) "true" else "false",
+        evidence.drc.raw.len,
+        counts.errors,
+        counts.warnings,
+        evidence.drc.effective.len,
+        evidence.drc.raw.len -| evidence.drc.effective.len,
+    });
+    for (evidence.drc.raw, 0..) |finding, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writeViolationJson(writer, evidence, finding);
+    }
+    try writer.writeAll("]}");
+}
+
+fn writeDrcParty(writer: *std.Io.Writer, evidence: Evidence, finding: drc.Violation) std.Io.Writer.Error!bool {
+    var needs_separator = false;
+    const net_indices = [_]isize{ finding.who.net_a, finding.who.net_b };
+    for (net_indices) |net_index| {
+        if (net_index < 0 or @as(usize, @intCast(net_index)) >= evidence.design.placement.nets.len) continue;
+        if (needs_separator) try writer.writeAll(" ↔ ");
+        try writer.print("net `{s}`", .{evidence.design.placement.nets[@intCast(net_index)].name});
+        needs_separator = true;
+    }
+    const part_indices = [_]isize{ finding.who.part_a, finding.who.part_b };
+    const pads = [_][]const u8{ finding.who.pad_a, finding.who.pad_b };
+    for (part_indices, pads) |part_index, pad| {
+        if (part_index < 0 or @as(usize, @intCast(part_index)) >= evidence.design.placement.parts.len) continue;
+        if (needs_separator) try writer.writeAll(" ↔ ");
+        try writer.print("part `{s}`", .{evidence.design.placement.parts[@intCast(part_index)].ref_des});
+        if (pad.len > 0) try writer.print(" pad `{s}`", .{pad});
+        needs_separator = true;
+    }
+    return needs_separator;
+}
+
+/// Write a human-readable row for every raw DRC error and warning packaged
+/// beside the machine report.
+pub fn writeDrcHumanReport(
+    writer: *std.Io.Writer,
+    evidence: Evidence,
+) std.Io.Writer.Error!void {
+    const counts = drcCounts(evidence.drc.raw);
+    const acknowledged = evidence.drc.raw.len > 0;
+    try writer.print("# DRC report\n\nPart number: `{s}`  \nRevision: `{s}`  \nLayout: `{s}`  \nFull composed DRC completed: {s}  \nAcknowledgment accepted: {s}  \nRaw findings: {d} ({d} errors, {d} warnings)  \nEffective findings after policy: {d}\n\n", .{
+        evidence.mark.part_number,
+        evidence.design.revision.id,
+        evidence.design.layout_name,
+        if (evidence.drc.complete) "yes" else "no",
+        if (acknowledged) "yes" else "no",
+        evidence.drc.raw.len,
+        counts.errors,
+        counts.warnings,
+        evidence.drc.effective.len,
+    });
+    if (evidence.drc.raw.len == 0) {
+        try writer.writeAll("No DRC findings.\n");
+        return;
+    }
+    for (evidence.drc.raw, 0..) |finding, index| {
+        try writer.print("{d}. **{s} · {s}** — ({d:.3}, {d:.3}) mm", .{ index + 1, @tagName(finding.severity), @tagName(finding.kind), finding.x, finding.y });
+        if (finding.layer) |layer| try writer.print("; layer {d}", .{layer.int()});
+        try writer.print("; gap {d:.3} mm / required {d:.3} mm", .{ finding.gap, finding.clearance });
+        try writer.writeAll("; ");
+        if (!try writeDrcParty(writer, evidence, finding)) try writer.writeAll("unattributed");
+        try writer.writeByte('\n');
+    }
+}
+
 /// Write the concise human-readable companion to the machine release audit.
 pub fn writeHumanReport(writer: *std.Io.Writer, evidence: Evidence, lock: Lock, waiver: bool) std.Io.Writer.Error!void {
     try writer.print("# Fabrication release report\n\nPart number: `{s}`  \nRevision: `{s}` ({s})  \nProject commit: `{s}` ({s})  \nTool commit: `{s}`  \nDesign + checks source closure SHA-256: `{s}`  \nEvaluator read-set SHA-256: `{s}`  \nEvaluated dependency closure SHA-256: `{s}`  \nReviewed non-Git inputs SHA-256: `{s}`  \nLayout `{s}` SHA-256: `{s}`  \nCAM SHA-256: `{s}`  \nBOM SHA-256: `{s}`  \nCentroid SHA-256: `{s}`  \nRules/stackup SHA-256: `{s}`  \nRelease token: `{s}`  \nConfirmation: explicit; waiver: {s}\n\n", .{

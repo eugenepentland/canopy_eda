@@ -276,6 +276,12 @@ pub fn compose(
     var rrm: std.Io.Writer.Allocating = .init(arena);
     try fab_release.writeHumanReport(&rrm.writer, parts.evidence, parts.lock, parts.needs_waiver);
     try pkg.add("release-report.md", rrm.written());
+    var drcj: std.Io.Writer.Allocating = .init(arena);
+    try fab_release.writeDrcMachineReport(&drcj.writer, parts.evidence);
+    try pkg.add("drc-report.json", drcj.written());
+    var drcm: std.Io.Writer.Allocating = .init(arena);
+    try fab_release.writeDrcHumanReport(&drcm.writer, parts.evidence);
+    try pkg.add("drc-report.md", drcm.written());
     var rules: std.Io.Writer.Allocating = .init(arena);
     try fab_release.writeRulesJson(&rules.writer, parts.evidence);
     try pkg.add("design-rules.json", rules.written());
