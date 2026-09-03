@@ -9,7 +9,7 @@ const std = @import("std");
 const json_writer = @import("json_writer.zig");
 const thermal_field = @import("placement/thermal_field.zig");
 
-const exporter_version = "1.1.0";
+const exporter_version = "1.2.0";
 /// ASCII VTU written by the generated ResultOutput solver.
 pub const result_filename = "mesh/elmer_result_t0001.vtu";
 
@@ -55,6 +55,7 @@ const Groups = struct {
 const Error = std.mem.Allocator.Error || std.Io.Writer.Error || error{
     InvalidModel,
     InvalidResult,
+    UnsupportedSharedHeatsinkProjection,
 };
 
 /// Build Elmer's native mesh, solver input, and audit metadata in memory.
@@ -318,15 +319,26 @@ fn writeManifest(alloc: std.mem.Allocator, input: Input, groups: Groups) Error![
         const ref_des = appliedHeatsinkRef(input);
         const theta_sa = thermal_field.sinkToAmbientFor(input.solver_inputs, scenario);
         const fin_count = thermal_field.finCount(hs.geometry);
+        const interface = input.builtin.cooling.heatsink.interface;
+        const projection = switch (interface) {
+            .none => "direct_boundary",
+            .board_face => "local_series_approximation",
+            .package_tops => "not_projected",
+        };
         try w.writeAll("  \"heatsink\":{\"attachment\":");
         try json_writer.writeString(w, if (hs.ref_des.len == 0 and hs.contact != null and hs.physical_face != null) "board" else "component");
         try w.writeAll(",\"ref\":");
         if (ref_des.len == 0) try w.writeAll("null") else try json_writer.writeString(w, ref_des);
-        try w.print(",\"contact\":\"{s}\",\"physicalBoardFace\":\"{s}\",\"material\":\"{s}\",\"thetaSaCPerW\":{d},\"geometryMm\":{{\"width\":{d},\"length\":{d},\"base\":{d},\"finHeight\":{d},\"finThickness\":{d},\"finGap\":{d},\"finAxis\":\"{s}\",\"finCount\":{d}}},\"contactRectMm\":", .{
-            @tagName(hs.side),      physicalSinkFace(input, ref_des), @tagName(hs.material),
-            theta_sa,               hs.geometry.width_mm,             hs.geometry.length_mm,
-            hs.geometry.base_mm,    hs.geometry.fin_height_mm,        hs.geometry.fin_thickness_mm,
-            hs.geometry.fin_gap_mm, @tagName(hs.geometry.fin_axis),   fin_count,
+        const contact_kind = input.builtin.cooling.heatsink.side orelse hs.side;
+        try w.print(",\"contact\":\"{s}\",\"physicalBoardFace\":\"{s}\",\"interface\":\"{s}\",\"sharedPlateModel\":\"built_in_shared_node\",\"elmerProjection\":\"{s}\",\"packageContacts\":{d},\"missingThetaJcTop\":{d},\"baseTemperatureC\":", .{
+            @tagName(contact_kind),                          physicalSinkFace(input, ref_des),                    @tagName(interface), projection,
+            input.builtin.cooling.heatsink.package_contacts, input.builtin.cooling.heatsink.missing_theta_jc_top,
+        });
+        if (input.builtin.cooling.heatsink.rise_c) |rise| try w.print("{d}", .{input.ambient_c + rise}) else try w.writeAll("null");
+        try w.print(",\"material\":\"{s}\",\"thetaSaCPerW\":{d},\"geometryMm\":{{\"width\":{d},\"length\":{d},\"base\":{d},\"finHeight\":{d},\"finThickness\":{d},\"finGap\":{d},\"finAxis\":\"{s}\",\"finCount\":{d}}},\"contactRectMm\":", .{
+            @tagName(hs.material),          theta_sa,                  hs.geometry.width_mm,         hs.geometry.length_mm,
+            hs.geometry.base_mm,            hs.geometry.fin_height_mm, hs.geometry.fin_thickness_mm, hs.geometry.fin_gap_mm,
+            @tagName(hs.geometry.fin_axis), fin_count,
         });
         if (hs.contact) |rect| {
             try w.print("[{d},{d},{d},{d}]", .{ rect.x_mm, rect.y_mm, rect.w_mm, rect.h_mm });
@@ -387,7 +399,15 @@ fn writeManifest(alloc: std.mem.Allocator, input: Input, groups: Groups) Error![
             part.mount.thermal_vias, part.mount.via_drill_mm,
         });
     }
-    try w.writeAll("\n  ],\n  \"interpretation\":\"Independent FEM discretization of the same screening coefficients; use the comparison delta to detect numerical/model-projection disagreement, not as material validation.\"\n}\n");
+    const shared_interface = input.builtin.cooling.heatsink.interface;
+    const interpretation = switch (shared_interface) {
+        .none => "Independent FEM discretization of the same screening coefficients; use the comparison delta to detect numerical/model-projection disagreement, not as material validation.",
+        .board_face => "The built-in solve uses one isothermal heatsink node. This board-only Elmer case reduces it to local series face coefficients and is an approximation, not a valid solver comparison.",
+        .package_tops => "The built-in solve includes directional package-to-plate branches and one isothermal heatsink node. Those nodes are not projected into this board-only Elmer case; use the built-in result for this assembly.",
+    };
+    try w.writeAll("\n  ],\n  \"interpretation\":");
+    try json_writer.writeString(w, interpretation);
+    try w.writeAll("\n}\n");
     return out.toOwnedSlice();
 }
 
@@ -412,14 +432,19 @@ fn writeReadme(alloc: std.mem.Allocator, input: Input) Error![]const u8 {
         });
     } else "";
     const assembly = try std.fmt.allocPrint(alloc, "{s}{s}", .{ sink_assembly, fan_assembly });
+    const projection_note = switch (input.builtin.cooling.heatsink.interface) {
+        .none => "",
+        .board_face => "\n> **Shared-plate limitation:** the built-in solver uses one isothermal plate node. This board-only Elmer case reduces that plate to local series face coefficients, so `compare-elmer-thermal` refuses this assembly.\n",
+        .package_tops => "\n> **Shared-plate limitation:** the board-only Elmer mesh has no package or plate nodes, so package-top θJC branches are not projected. Use the built-in thermal result for this assembly; `compare-elmer-thermal` refuses it.\n",
+    };
     return std.fmt.allocPrint(
         alloc,
         "# {s} — Elmer thermal case\n\n" ++
             "Steady-state cooling at **{d} °C ambient** with **{s}**. Run from this directory with:\n\n" ++
             "```sh\nElmerSolver case.sif\n```\n\n" ++
-            "The native mesh is under `mesh/`; results are written to `{s}`. `manifest.json` records the normalized board, stackup, cooling, and component-power rules.\n{s}\n" ++
+            "The native mesh is under `mesh/`; results are written to `{s}`. `manifest.json` records the normalized board, stackup, cooling, and component-power rules.\n{s}{s}\n" ++
             "This case extrudes each built-in thermal-grid cell through one board-thickness element. In-plane conductivity, heat generation, and the two-face film loss are projected from the EDA solver cell-for-cell; board edges are adiabatic. It is therefore a finite-element numerical cross-check of the screening model, not an independently calibrated high-fidelity PCB material model.\n",
-        .{ input.design_name, input.ambient_c, cooling, result_filename, assembly },
+        .{ input.design_name, input.ambient_c, cooling, result_filename, assembly, projection_note },
     );
 }
 
@@ -560,6 +585,8 @@ pub fn compare(
     input: Input,
     parsed: ParsedResult,
 ) Error!Comparison {
+    if (input.builtin.cooling.heatsink.interface != .none)
+        return error.UnsupportedSharedHeatsinkProjection;
     const shape = input.model.shape;
     const expected_nodes = (shape.cols + 1) * (shape.rows + 1) * 2;
     if (parsed.temperatures_by_node.len != expected_nodes) return error.InvalidResult;
@@ -684,6 +711,7 @@ pub fn comparisonMarkdown(alloc: std.mem.Allocator, input: Input, comparison: Co
 // spec: export_elmer_thermal - an exported case contains a native hexahedral mesh, the selected natural or forced-air heat equation, normalized thermal-rule manifest, and portable run instructions
 // spec: export_elmer_thermal - component watts are conserved as volumetric heat and each cell's two face losses equal the built-in cell-to-ambient conductance
 // spec: export_elmer_thermal - cells clipped away by a rounded or custom outline are omitted from Elmer bodies and face boundaries
+// spec: export_elmer_thermal - shared drawn heatsinks disclose whether Elmer approximates or omits their extra thermal network, and the comparison refuses those structurally incomplete projections
 test "Elmer export emits a native hexahedral mesh and still-air case" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -780,9 +808,11 @@ test "Elmer export emits a native hexahedral mesh and still-air case" {
 
     var combined_input = sink_input;
     combined_input.builtin.scenario = .fan_heatsink;
+    combined_input.builtin.cooling.heatsink.interface = .board_face;
     combined_input.solver_inputs.cooling.heatsink.ref_des = "";
     combined_input.solver_inputs.cooling.heatsink.side = .board_backside;
     combined_input.solver_inputs.cooling.heatsink.physical_face = .bottom;
+    combined_input.solver_inputs.cooling.heatsink.contact = .{ .x_mm = 0, .y_mm = 0, .w_mm = 2, .h_mm = 1 };
     combined_input.solver_inputs.cooling.fan = .{
         .model = "9A0812G4D011",
         .footprint = .{ .x_mm = 0, .y_mm = 0, .w_mm = 80, .h_mm = 80 },
@@ -797,7 +827,24 @@ test "Elmer export emits a native hexahedral mesh and still-air case" {
     try std.testing.expect(std.mem.indexOf(u8, combined.manifest, "\"fan\":{") != null);
     try std.testing.expect(std.mem.indexOf(u8, combined.manifest, "\"distanceTarget\":\"heatsink_fin_tips\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, combined.manifest, "\"velocityAtTargetMps\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, combined.manifest, "\"interface\":\"board_face\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, combined.manifest, "\"elmerProjection\":\"local_series_approximation\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, combined.readme, "specified fan and heatsink") != null);
+    try std.testing.expect(std.mem.indexOf(u8, combined.readme, "Shared-plate limitation") != null);
+
+    var package_plate_input = combined_input;
+    package_plate_input.solver_inputs.cooling.heatsink.side = .package_top;
+    package_plate_input.solver_inputs.cooling.heatsink.physical_face = .top;
+    package_plate_input.builtin.cooling.heatsink.interface = .package_tops;
+    package_plate_input.builtin.cooling.heatsink.package_contacts = 1;
+    package_plate_input.builtin.cooling.heatsink.rise_c = 4;
+    const package_plate = try build(alloc, package_plate_input);
+    try std.testing.expect(std.mem.indexOf(u8, package_plate.manifest, "\"interface\":\"package_tops\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, package_plate.manifest, "\"elmerProjection\":\"not_projected\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, package_plate.manifest, "\"packageContacts\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, package_plate.manifest, "\"baseTemperatureC\":29") != null);
+    try std.testing.expect(std.mem.indexOf(u8, package_plate.readme, "package-top θJC branches are not projected") != null);
+    try std.testing.expectError(error.UnsupportedSharedHeatsinkProjection, compare(alloc, package_plate_input, .{ .temperatures_by_node = &.{} }));
 
     var oversized = input;
     oversized.model.shape.cols = thermal_field.max_cells_axis + 1;

@@ -4296,7 +4296,13 @@ term. A powered part injects its watts over the cells its courtyard box covers,
 and its junction sits `P·(θJB + θ_transfer)` above the hottest cell underneath
 it, where the transfer term is how hard it is for that part's heat to reach the
 layers the sheet lumps together — short where a via array stitches the land to
-the planes, long where nothing does.
+the planes, long where nothing does. A drawn heatsink adds one shared
+isothermal plate node. On an unobstructed PCB face its pad couples covered board
+cells to that node and parts across the board use declared θJC(bottom) where
+available; on a populated face each covered powered package needs declared
+θJC(top) to gain a direct junction-to-plate branch. The plate reaches ambient
+through one θSA, so covering more cells or packages never duplicates its rated
+cooling capacity.
 
 Four baseline screening scenarios come back in one call: still air, roughly 1 m/s and
 2 m/s of forced air, and a small stamped heatsink bolted to the part with the
@@ -4325,7 +4331,8 @@ coupling through the air.
 - a fan aimed at a board-mounted heatsink on the same PCB face measures clearance to the fin tips, cools the fins in proportion to jet/contact overlap, leaves the covered PCB without a duplicate bare-face path, and reaches exposed PCB at the additional sink height
 - one scenario can be solved on its own and matches the ladder's answer for it, and the heatsink asked for alone still bolts its sink to the part the still-air solve names
 - a drawn straight-fin heatsink derives its fin count and theta-SA from material and geometry, and applies that sink over the exact authored contact rectangle
-- a PCB-mounted heatsink needs no component target and couples its passive path once across every active board cell beneath its exact contact rectangle
+- a PCB-mounted heatsink needs no component target, couples a bare-face pad to one shared sink node, and reports the directional package-bottom junction path beneath that contact
+- flipping a shared drawn heatsink from an unobstructed PCB backside to a populated face changes it into a package-lid network: every usable lid crosses declared theta-JC-top, missing directional data receives no direct credit, and theta-SA is applied once to the common plate
 - a part with no pose is reported as skipped instead of placed, a part hanging off the board docks onto the nearest cell, and neither panics
 - a board with nothing to dissipate solves to an all-zero field, converged and free of NaN
 - a junction is computed through the declared theta-jb, else through half the theta-ja with the row flagged estimated, and through nothing at all when neither is declared
@@ -4339,7 +4346,7 @@ coupling through the air.
 - a junction sits above the board through theta-jb plus a board-transfer path, which thermal vias under the part shorten and the part's own outer-foil spreading bounds so it never runs away on a small land
 - the grid a board resolves to is answerable without solving it, so a caller can rasterize a coverage map onto exactly the cells the solve will use
 - the packed four-scenario solver uses less per-cell ladder storage than four independent sheet ambient power and rise arrays
-- the exported FEM coefficients conserve component power and reproduce the built-in sheet and two-face still-air conductances cell for cell
+- without a shared drawn plate, the exported FEM coefficients conserve component power and reproduce the built-in sheet and two-face still-air conductances cell for cell
 - the thermal kernel benchmark accepts a board, saved layout and positive repetition count while keeping project resolution outside its timed solve loop
 - completeness-waiver: empty inputs (a board with no parts, and one whose parts dissipate nothing, both solve to a zero field, unit-tested)
 - completeness-waiver: large inputs (the grid is capped at 512 cells per axis and the solve at 10k sweeps, so allocation and wall time are bounded by construction)
@@ -4364,6 +4371,13 @@ edges. The manifest records
 the board, stackup-derived rules, component powers, grid, and coefficient-group
 counts so the handoff remains auditable outside netlisp.
 
+A drawn board-wide heatsink is solved in-process as one shared isothermal plate
+node. The board-only Elmer mesh cannot reproduce that extra node: bare-PCB
+contact is exported only as an explicitly labelled local-series approximation,
+while package-top θJC branches are deliberately not projected. The comparison
+command refuses either shared-plate case rather than publishing mismatched
+results as a numerical cross-check.
+
 `compare-elmer-thermal` exports the case, runs `ElmerSolver`, reconstructs its
 renumbered nodes from VTU point coordinates, and writes JSON plus Markdown with
 built-in and Elmer board/junction temperatures side by side. Both columns use
@@ -4378,6 +4392,7 @@ independent validation of PCB material properties.
 - a comparison reports board maximum and per-part board and junction temperatures in JSON and a side-by-side Markdown table
 - the CLI defaults to 25 C ambient and natural still air, accepts either forced-air rung and a saved layout, and can export without running Elmer
 - the comparison refuses a non-converged built-in field, a failed Elmer process, or a malformed/missing VTU result instead of publishing partial numbers
+- shared drawn heatsinks disclose whether Elmer approximates or omits their extra thermal network, and the comparison refuses those structurally incomplete projections
 - completeness-waiver: empty inputs (a zero-sized or coefficient-less model is rejected, and the CLI refuses a board with no placed powered part)
 - completeness-waiver: large inputs (the upstream thermal grid is capped at 512 cells per axis; mesh and report generation are linear in that bounded grid, and VTU reads are capped at 256 MiB)
 - completeness-waiver: unauthorized access (the CLI reads the same local project files as other exports and writes only the caller-selected output directory; it exposes no network surface)
@@ -5617,7 +5632,7 @@ own column headers are free to use the Greek letter.
 - when a cooling ladder exists the headline verdict and sentence come from the board model, and the package-level screen is kept below it labelled with the JEDEC board that makes it optimistic
 - with a cooling ladder the ambient window's hot end is the governing scenario's ceiling and names the cooling it assumes, adding the still-air ceiling whenever passive operation is not viable
 - the shared JSON body carries the board-coupled verdict as its own additive key, null when there is no ladder, while the package-level verdict key keeps its meaning untouched
-- the shared JSON body carries the scenario ladder as absolute degrees per rung, or a null ladder beside the sentence saying why there is none
+- the shared JSON body carries the scenario ladder as absolute degrees per rung, including its physical heatsink interface, shared-plate temperature and directional package path, or a null ladder beside the sentence saying why there is none
 - completeness-waiver: empty inputs (a board with no rows renders prose and no table, and an unknown figure is a dash or a JSON null, both covered by the bullets above)
 - completeness-waiver: large inputs (one linear pass over the already-computed rows; a bigger board only lengthens the slice it formats)
 - completeness-waiver: unauthorized access (pure formatting over a value the caller already holds; it opens nothing and exposes no surface of its own)
@@ -7009,7 +7024,7 @@ is what makes the predicate exact rather than approximately right.
 - A malformed custom copper-area save names a clickable exact zone that enters its sketch and frames it; a single connected two-endpoint gap exposes an explicit undoable Close profile repair and is safely closed on save for stale sessions, while branches and disconnected geometry are never guessed closed
 - When a copper-area sketch cannot compile as a closed contour but its persisted visible polygon is valid, Update rebuilds a clean closed line sketch from that exact polygon and saves the remaining layout edits; crossing or zero-area visible polygons are still rejected
 - The PCB editor overlays source-declared fabrication backing, edits every region with the outline sketch palette and undo, and persists compiled polygons plus index-aligned native sketches without changing side or material
-- The PCB editor draws one target-free board-contact heatsink rectangle on either PCB face, reopens it for parameter edits, drags it to reposition, resizes it with corner handles, directly edits fin count or gap, material, base/fins and thermal pad, persists the assembly with the named layout, previews its pad/base/fins in 3D, and feeds every covered PCB thermal cell plus the same derived theta-SA to built-in and Elmer thermal solves
+- The PCB editor draws one target-free physical heatsink rectangle on either PCB face, reopens it for parameter edits, drags it to reposition, resizes it with corner handles, directly edits fin count or gap, material, base/fins and thermal pad, persists the assembly with the named layout, previews its pad/base/fins in 3D, and resolves a populated face through covered packages' directional theta-JC-top into one shared plate while an unobstructed face couples the PCB through the pad
 - The PCB editor offers a persistent display-only heatsink visibility toggle in Appearance > Objects, without changing saved geometry or thermal simulations, and entering the heatsink edit tool reveals a hidden heatsink
 - The PCB editor draws a movable circular axial-fan target and outlet footprint, edits its PCB face and outlet-to-target distance with its catalog airflow/pressure and installed-flow assumption, explains that a same-face heatsink makes the target its fin tips, and persists the exact fan assembly with each saved layout for the thermal fan scenario
 - Selecting a board outline exposes editable dimensions, slides horizontal/vertical edges only perpendicular to themselves, and uses Shift to constrain non-axis-aligned edge slides to their dominant axis

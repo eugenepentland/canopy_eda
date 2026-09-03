@@ -57,6 +57,8 @@ fn exportCommandInner(alloc: std.mem.Allocator, argv: []const []const u8) anyerr
     var module_res: ?modules_mod.ResolvedBlock = null;
     defer dropModule(alloc, module_res);
     const prepared = try prepare(alloc, args, &eval, &module_res);
+    if (prepared.input.builtin.cooling.heatsink.interface != .none)
+        exit.fatal("Elmer's board-only mesh cannot compare the shared heatsink plate or package θJC branches; use the built-in thermal result for this assembly\n", .{});
     const output_dir = try outputDir(alloc, args);
     try writeCase(alloc, output_dir, prepared.artifact);
     try printOut("Elmer thermal case: {s}\nRun: cd '{s}' && {s} case.sif\n", .{ output_dir, output_dir, args.solver });

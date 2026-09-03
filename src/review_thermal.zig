@@ -542,6 +542,12 @@ fn writeScenarioRow(w: anytype, row: thermal_scenarios.Row) json_writer.WriteErr
             try w.print("\"{s}\"", .{@tagName(face)})
         else
             try w.writeAll("null");
+        try w.print(",\"interface\":\"{s}\",\"package_contacts\":{d},\"missing_theta_jc_top\":{d},\"temperature_c\":", .{
+            @tagName(row.cooling.heatsink.interface),
+            row.cooling.heatsink.package_contacts,
+            row.cooling.heatsink.missing_theta_jc_top,
+        });
+        try writeFloatOrNull(w, row.cooling.heatsink.temperature_c);
         try w.writeAll("}");
     }
     try w.writeAll(",\"fan\":");
@@ -970,7 +976,7 @@ test "a missing ladder carries the sentence printed in its place" {
     try testing.expect(std.mem.indexOf(u8, scenarioNote(.{}), "layout") != null);
 }
 
-// spec: review_thermal - the shared JSON body carries the scenario ladder as absolute degrees per rung, or a null ladder beside the sentence saying why there is none
+// spec: review_thermal - the shared JSON body carries the scenario ladder as absolute degrees per rung, including its physical heatsink interface, shared-plate temperature and directional package path, or a null ladder beside the sentence saying why there is none
 test "the JSON body carries the scenario ladder or the reason there is none" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -986,6 +992,28 @@ test "the JSON body carries the scenario ladder or the reason there is none" {
     try testing.expectEqualStrings("U5", rows[0].object.get("parts").?.array.items[0].object.get("ref").?.string);
     // A ladder is present, so nothing explains its absence.
     try testing.expect(parsed.object.get("scenarios_unavailable").? == .null);
+
+    var physical_rows = test_rows;
+    var physical_parts = test_part_rows;
+    physical_parts[3].junction_path = .package_top_missing;
+    physical_rows[3].parts = physical_parts[3..4];
+    physical_rows[3].cooling.heatsink = .{
+        .side = .package_top,
+        .face = .top,
+        .interface = .package_tops,
+        .package_contacts = 2,
+        .missing_theta_jc_top = 1,
+        .temperature_c = 42.5,
+    };
+    var physical: std.Io.Writer.Allocating = .init(a);
+    try writeFactsJson(&physical.writer, oneHotPart(.needs_airflow), .{ .ladder = .{ .ambient_c = 25, .rows = &physical_rows } });
+    const physical_json = try std.json.parseFromSliceLeaky(std.json.Value, a, physical.written(), .{});
+    const sink_row = physical_json.object.get("scenarios").?.array.items[3].object;
+    const sink = sink_row.get("heatsink").?.object;
+    try testing.expectEqualStrings("package_tops", sink.get("interface").?.string);
+    try testing.expectEqual(@as(i64, 2), sink.get("package_contacts").?.integer);
+    try testing.expectEqual(@as(f64, 42.5), sink.get("temperature_c").?.float);
+    try testing.expectEqualStrings("package_top_missing", sink_row.get("parts").?.array.items[0].object.get("junction_path").?.string);
 
     var without: std.Io.Writer.Allocating = .init(a);
     try writeFactsJson(&without.writer, oneHotPart(.needs_airflow), .{ .unavailable = "nothing burns here" });

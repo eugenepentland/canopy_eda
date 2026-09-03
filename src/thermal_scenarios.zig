@@ -55,6 +55,7 @@ pub const Fan = thermal_field.Fan;
 pub const Side = thermal_field.Side;
 pub const HeatsinkMaterial = thermal_field.HeatsinkMaterial;
 pub const FinAxis = thermal_field.FinAxis;
+pub const JunctionPath = thermal_field.JunctionPath;
 
 /// The board's copper as this projection needs it: the routed tracks and vias,
 /// and the hand-drawn zones. Exactly `pour.Copper`, because sampling the outer
@@ -740,6 +741,10 @@ fn rowAt(
                 .ref = result.cooling.heatsink.ref,
                 .side = result.cooling.heatsink.side orelse .board_backside,
                 .face = result.cooling.heatsink.face,
+                .interface = result.cooling.heatsink.interface,
+                .package_contacts = result.cooling.heatsink.package_contacts,
+                .missing_theta_jc_top = result.cooling.heatsink.missing_theta_jc_top,
+                .temperature_c = if (result.cooling.heatsink.rise_c) |rise| ambient_c + rise else null,
             },
             .fan = .{
                 .model = result.cooling.fan.model,
@@ -856,6 +861,11 @@ pub const HeatsinkPlacement = struct {
     ref: []const u8 = "",
     side: thermal_field.HeatsinkSide = .board_backside,
     face: ?thermal_field.Side = null,
+    interface: thermal_field.HeatsinkInterface = .none,
+    package_contacts: usize = 0,
+    missing_theta_jc_top: usize = 0,
+    /// Absolute heatsink-base temperature at the selected ambient.
+    temperature_c: ?f64 = null,
 };
 
 /// Auditable operating point carried by the authored fan row.
