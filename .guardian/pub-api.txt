@@ -2512,8 +2512,9 @@ src/placement/near_bind.zig::text | fn text(self: Why) []const u8
 src/placement/net_copper.zig::Copper struct_
 src/placement/net_copper.zig::OneNet struct_
 src/placement/net_copper.zig::collect | fn collect( arena: std.mem.Allocator, copper: Copper, ni: i32, ) std.mem.Allocator.Error!OneNet
-src/placement/net_graph.zig::islandCount | fn islandCount(alloc: std.mem.Allocator, input: Input) std.mem.Allocator.Error!usize
-src/placement/net_graph.zig::joinsFor | fn joinsFor(alloc: std.mem.Allocator, input: Input) std.mem.Allocator.Error![]const Join
+src/placement/net_graph.zig::Land struct_
+src/placement/net_graph.zig::islandCount | fn islandCount(alloc: std.mem.Allocator, input: Input, lands: []const Land) std.mem.Allocator.Error!usize
+src/placement/net_graph.zig::joinsFor | fn joinsFor(alloc: std.mem.Allocator, input: Input, lands: []const Land) std.mem.Allocator.Error![]const Join
 src/placement/net_identity.zig::Identity struct_
 src/placement/net_identity.zig::canonical | fn canonical(self: Identity, net: i32) i32
 src/placement/net_identity.zig::canonicalName | fn canonicalName(self: Identity, nets: []const optimizer.FlatNet, net: i32) []const u8

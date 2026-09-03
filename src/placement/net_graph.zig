@@ -30,16 +30,43 @@ const Contact = power_current.Contact;
 const Join = power_current.Join;
 const Input = power_current.Input;
 
+/// One physical pad land on the rail. DRC topology
+/// (`fab_readiness.buildNetGraph`) makes every such land a conductor in its own
+/// right: two tracks that both end on one pad, or a track and a via that meet
+/// only through a pad, are one island there. The current solve used to see only
+/// the SOURCE and LOAD terminal pads, so that same copper came back as two
+/// islands and every conductor on the rail fell to the whole-rail envelope.
+pub const Land = struct {
+    /// The real world-space outline (`pad_shape.worldShape`), not the
+    /// circumscribed disc `terminalLand` settles for.
+    shape: pad_shape.Shape,
+    /// The land's copper layer; `null` is a plated through-hole land, which
+    /// reaches every layer.
+    layer: ?u8,
+    /// Geometries of ONE component pin share this id. A footprint that draws a
+    /// pin as several lands (an integrated thermal/output land plus its
+    /// opposite-face copper) is one terminal, exactly as `uniteLogicalPads`
+    /// treats it in the DRC graph.
+    logical: usize,
+};
+
 /// Every junction the canonical contact policy finds in one net's solver
 /// input. Feeding these back through `Input.joins` makes the current solve
 /// agree with DRC topology about what is one piece of copper.
-pub fn joinsFor(alloc: std.mem.Allocator, input: Input) std.mem.Allocator.Error![]const Join {
+///
+/// `lands` are the rail's pad outlines — every pad of every part on the rail,
+/// not only the pads a source or load terminal resolved to. They carry no
+/// solver node of their own: a land is a perfect conductor, so the features it
+/// touches are tied to each other directly. Passing an empty slice is the
+/// historical, pad-blind behaviour.
+pub fn joinsFor(alloc: std.mem.Allocator, input: Input, lands: []const Land) std.mem.Allocator.Error![]const Join {
     var out: std.ArrayList(Join) = .empty;
     try appendTrackTrack(alloc, input, &out);
     try appendTrackVia(alloc, input, &out);
     try appendViaVia(alloc, input, &out);
     try appendTerminals(alloc, input, &out);
     try appendSheets(alloc, input, &out);
+    try appendLands(alloc, input, lands, &out);
     return out.items;
 }
 
@@ -47,7 +74,7 @@ pub fn joinsFor(alloc: std.mem.Allocator, input: Input) std.mem.Allocator.Error!
 /// island means every terminal shares metal with every other, which is exactly
 /// the condition under which `power_current.solve` must not answer
 /// `disconnected`.
-pub fn islandCount(alloc: std.mem.Allocator, input: Input) std.mem.Allocator.Error!usize {
+pub fn islandCount(alloc: std.mem.Allocator, input: Input, lands: []const Land) std.mem.Allocator.Error!usize {
     const bases = Bases.of(input);
     const parent = try alloc.alloc(usize, bases.load + input.loads.len);
     for (parent, 0..) |*slot, i| slot.* = i;
@@ -62,7 +89,7 @@ pub fn islandCount(alloc: std.mem.Allocator, input: Input) std.mem.Allocator.Err
     for (input.barrels, 0..) |barrel, i| {
         if (barrel.route_index < route_of_via.len) route_of_via[barrel.route_index] = i;
     }
-    for (try joinsFor(alloc, input)) |join| {
+    for (try joinsFor(alloc, input, lands)) |join| {
         const a = nodeOfAnchor(join.a, route_of_track, route_of_via, bases) orelse continue;
         const b = nodeOfAnchor(join.b, route_of_track, route_of_via, bases) orelse continue;
         unite(parent, a, b);
@@ -334,6 +361,118 @@ fn appendSheetTerminal(
     }
 }
 
+/// Distance from a land's copper to a point, exact once the point is inside
+/// `window` of the land's bounding box (see `pad_shape.pointDist`).
+fn landGap(land: Land, at: [2]f64, window: f64) f64 {
+    return pad_shape.pointDist(
+        land.shape.x0,
+        land.shape.y0,
+        land.shape.x1,
+        land.shape.y1,
+        land.shape.poly,
+        at[0],
+        at[1],
+        window,
+    );
+}
+
+/// Do a land and a copper feature on `layer` share a face? Through-hole lands
+/// reach every layer; an SMD land reaches only its own.
+fn landOnLayer(land: Land, layer: u8) bool {
+    return copper_contact.padOnLayer(land.layer == null, land.layer orelse layer, layer);
+}
+
+/// Two lands are one piece of copper when they are geometries of the same pin
+/// (`logical`) or their outlines physically touch on a shared face — the
+/// `uniteLogicalPads` + `unitePadOverlaps` pair of the DRC graph.
+fn landsTouch(a: Land, b: Land) bool {
+    if (a.logical == b.logical) return true;
+    const shares_face = a.layer == null or b.layer == null or a.layer.? == b.layer.?;
+    if (!shares_face) return false;
+    return pad_shape.shapeGap(a.shape, b.shape, copper_contact.join_slack_mm) <=
+        copper_contact.join_slack_mm;
+}
+
+/// Every piece of this net's solver copper that lands on `land`.
+fn landAnchors(
+    alloc: std.mem.Allocator,
+    input: Input,
+    land: Land,
+    out: *std.ArrayList(power_current.Anchor),
+) std.mem.Allocator.Error!void {
+    for (input.segments) |segment| {
+        if (!landOnLayer(land, segment.layer)) continue;
+        if (!copper_contact.padTrackConnects(land.shape, segment.a, segment.b, segment.width_mm)) continue;
+        const at = closestOn(segment, pad_shape.copperAnchor(land.shape));
+        try out.append(alloc, .{ .track = .{ .index = segment.route_index, .at = at } });
+    }
+    for (input.barrels) |barrel| {
+        const reach = barrel.radius_mm + copper_contact.join_slack_mm;
+        if (landGap(land, barrel.at, reach + 1e-9) > reach) continue;
+        try out.append(alloc, .{ .via = barrel.route_index });
+    }
+    try appendLandTerminal(alloc, out, land, .source, input.source.contacts);
+    for (input.loads, 0..) |load, i| try appendLandTerminal(alloc, out, land, .{ .load = i }, load.contacts);
+    for (input.sheets, 0..) |sheet, si| {
+        if (!landOnLayer(land, sheet.layer)) continue;
+        for (sheet.contacts) |at| {
+            if (landGap(land, at, copper_contact.join_slack_mm + 1e-9) > copper_contact.join_slack_mm) continue;
+            try out.append(alloc, .{ .sheet = si });
+            break;
+        }
+    }
+}
+
+/// One tie per terminal per land: a terminal's own pad is a land, so the pair
+/// meets exactly when the terminal's anchor sits on this land's copper. Two
+/// pins whose lands abut are joined by `landsTouch`, not by reach, so an
+/// adjacent pad can never adopt a neighbour's terminal.
+fn appendLandTerminal(
+    alloc: std.mem.Allocator,
+    out: *std.ArrayList(power_current.Anchor),
+    land: Land,
+    anchor: power_current.Anchor,
+    contacts: []const Contact,
+) std.mem.Allocator.Error!void {
+    for (contacts) |contact| {
+        const shares_face = land.layer == null or contact.layer == null or land.layer.? == contact.layer.?;
+        if (!shares_face) continue;
+        if (landGap(land, contact.at, copper_contact.join_slack_mm + 1e-9) > copper_contact.join_slack_mm) continue;
+        try out.append(alloc, anchor);
+        return;
+    }
+}
+
+/// Junctions mediated by the rail's pad copper. A land is a perfect conductor
+/// with no node of its own, so the features touching one land (or one group of
+/// touching lands) are tied in a star to the first of them: k features on a pad
+/// cost k-1 ties instead of the k²/2 a clique would, and the electrical answer
+/// is the same because every tie is `terminal_resistance_ohm`.
+fn appendLands(
+    alloc: std.mem.Allocator,
+    input: Input,
+    lands: []const Land,
+    out: *std.ArrayList(Join),
+) std.mem.Allocator.Error!void {
+    if (lands.len == 0) return;
+    const parent = try alloc.alloc(usize, lands.len);
+    for (parent, 0..) |*slot, i| slot.* = i;
+    for (lands, 0..) |a, i| {
+        for (lands[i + 1 ..], i + 1..) |b, j| {
+            if (find(parent, i) == find(parent, j)) continue;
+            if (landsTouch(a, b)) unite(parent, i, j);
+        }
+    }
+
+    const groups = try alloc.alloc(std.ArrayList(power_current.Anchor), lands.len);
+    for (groups) |*group| group.* = .empty;
+    for (lands, 0..) |land, i| try landAnchors(alloc, input, land, &groups[find(parent, i)]);
+    for (groups) |group| {
+        if (group.items.len < 2) continue;
+        for (group.items[1..]) |anchor| try out.append(alloc, .{ .a = group.items[0], .b = anchor });
+    }
+}
+
 const testing = std.testing;
 
 /// The audit's barracuda shape: a thin branch T-ing into the interior of a
@@ -368,7 +507,7 @@ test "canonical junctions connect a T branch the solver's own snap misses" {
     try testing.expectEqual(power_current.Status.disconnected, (try power_current.solve(arena, bare)).typical.status);
 
     var joined = bare;
-    joined.joins = try joinsFor(arena, bare);
+    joined.joins = try joinsFor(arena, bare, &.{});
     try testing.expect(joined.joins.len > 0);
     const result = try power_current.solve(arena, joined);
     try testing.expectEqual(power_current.Status.solved, result.typical.status);
@@ -381,10 +520,10 @@ test "a single-island net never solves disconnected" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const bare = tJunction(&.{});
-    try testing.expectEqual(@as(usize, 1), try islandCount(arena, bare));
+    try testing.expectEqual(@as(usize, 1), try islandCount(arena, bare, &.{}));
 
     var joined = bare;
-    joined.joins = try joinsFor(arena, bare);
+    joined.joins = try joinsFor(arena, bare, &.{});
     const result = try power_current.solve(arena, joined);
     try testing.expect(result.typical.status.isSolved());
 }
@@ -410,9 +549,9 @@ test "an open gap stays two islands and stays disconnected" {
             .maximum_a = null,
         }},
     };
-    try testing.expectEqual(@as(usize, 2), try islandCount(arena, input));
+    try testing.expectEqual(@as(usize, 2), try islandCount(arena, input, &.{}));
     var joined = input;
-    joined.joins = try joinsFor(arena, input);
+    joined.joins = try joinsFor(arena, input, &.{});
     try testing.expectEqual(power_current.Status.disconnected, (try power_current.solve(arena, joined)).typical.status);
 }
 
@@ -440,8 +579,95 @@ test "a sheet contact off a trace centreline still joins that trace" {
     };
     try testing.expectEqual(power_current.Status.disconnected, (try power_current.solve(arena, input)).typical.status);
     var joined = input;
-    joined.joins = try joinsFor(arena, input);
+    joined.joins = try joinsFor(arena, input, &.{});
     const result = try power_current.solve(arena, joined);
     try testing.expectEqual(power_current.Status.solved, result.typical.status);
     try testing.expectApproxEqAbs(@as(f64, 1.0), result.typical.track_current_a[0], 1e-8);
+}
+
+/// The audit's barracuda-base shape: two tracks that land on OPPOSITE edges of
+/// one 1.2 mm regulator land, centrelines 1 mm apart so neither trace's copper
+/// reaches the other. DRC topology calls that one island through the pad; the
+/// pad-blind solve saw two.
+const pad_bridge_segments = [_]Segment{
+    .{ .route_index = 0, .a = .{ -1.5, 0.1 }, .b = .{ 0.6, 0.1 }, .layer = 0, .resistance_ohm_per_mm = 0.01, .width_mm = 0.15 },
+    .{ .route_index = 1, .a = .{ 2.7, 1.1 }, .b = .{ 0.6, 1.1 }, .layer = 0, .resistance_ohm_per_mm = 0.01, .width_mm = 0.15 },
+};
+const pad_bridge_source = [_]Contact{.{ .at = .{ -1.5, 0.1 }, .layer = 0, .reach_mm = 0.05 }};
+const pad_bridge_sink = [_]Contact{.{ .at = .{ 2.7, 1.1 }, .layer = 0, .reach_mm = 0.05 }};
+const pad_bridge_loads = [_]power_current.Load{.{ .contacts = &pad_bridge_sink, .typical_a = 1, .maximum_a = null }};
+
+const pad_bridge: Input = .{
+    .segments = &pad_bridge_segments,
+    .barrels = &.{},
+    .counts = .{ .tracks = 2, .vias = 0 },
+    .source = .{ .contacts = &pad_bridge_source, .complete = true },
+    .loads = &pad_bridge_loads,
+};
+
+/// One rectangular top-face land anchored at the origin.
+fn squareLand(x1: f64, y1: f64) [1]Land {
+    return .{.{ .shape = .{ .x0 = 0, .y0 = 0, .x1 = x1, .y1 = y1 }, .layer = 0, .logical = 0 }};
+}
+
+// spec: placement/power-routing - every pad of every part on a rail conducts, so two tracks that meet only on one pad are one island in the current solve exactly as they are in DRC topology
+test "two tracks landing on opposite edges of one pad are one island" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const lands = squareLand(1.2, 1.2);
+
+    // Neither trace's copper touches the other: 1 mm between 0.15 mm
+    // centrelines. Pad-blind, that is two islands and a refused axis.
+    try testing.expectEqual(@as(usize, 2), try islandCount(arena, pad_bridge, &.{}));
+    try testing.expectEqual(power_current.Status.disconnected, (try power_current.solve(arena, pad_bridge)).typical.status);
+
+    try testing.expectEqual(@as(usize, 1), try islandCount(arena, pad_bridge, &lands));
+    var joined = pad_bridge;
+    joined.joins = try joinsFor(arena, pad_bridge, &lands);
+    const result = try power_current.solve(arena, joined);
+    try testing.expectEqual(power_current.Status.solved, result.typical.status);
+    try testing.expectApproxEqAbs(@as(f64, 1.0), result.typical.track_current_a[1], 1e-8);
+}
+
+// spec: placement/power-routing - a pad credits only copper whose full cross-section sits on its land, so a trace that stops short of the pad stays open
+test "a pad does not join copper that stops short of its land" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The same board with the land shrunk to 0.5 mm: the lower trace still
+    // crosses it, the upper one now passes 0.6 mm clear of it.
+    const lands = squareLand(0.5, 0.5);
+    try testing.expectEqual(@as(usize, 2), try islandCount(arena, pad_bridge, &lands));
+    var joined = pad_bridge;
+    joined.joins = try joinsFor(arena, pad_bridge, &lands);
+    try testing.expectEqual(power_current.Status.disconnected, (try power_current.solve(arena, joined)).typical.status);
+}
+
+const pad_jump_segments = [_]Segment{
+    .{ .route_index = 0, .a = .{ -1.5, 0.1 }, .b = .{ 0.6, 0.1 }, .layer = 0, .resistance_ohm_per_mm = 0.01, .width_mm = 0.15 },
+    .{ .route_index = 1, .a = .{ 0.6, 1.0 }, .b = .{ 2.7, 1.0 }, .layer = 1, .resistance_ohm_per_mm = 0.01, .width_mm = 0.15 },
+};
+const pad_jump_barrels = [_]Barrel{.{ .route_index = 0, .at = .{ 0.6, 1.0 }, .resistance_ohm = 0.001, .radius_mm = 0.15 }};
+const pad_jump_sink = [_]Contact{.{ .at = .{ 2.7, 1.0 }, .layer = 1, .reach_mm = 0.05 }};
+const pad_jump_loads = [_]power_current.Load{.{ .contacts = &pad_jump_sink, .typical_a = 1, .maximum_a = null }};
+
+// spec: placement/power-routing - a track and a via that meet only through a pad conduct through it, so a rail's layer jump on a land is not an open
+test "a track and a via that meet only on a pad conduct through it" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const input: Input = .{
+        .segments = &pad_jump_segments,
+        .barrels = &pad_jump_barrels,
+        .counts = .{ .tracks = 2, .vias = 1 },
+        .source = .{ .contacts = &pad_bridge_source, .complete = true },
+        .loads = &pad_jump_loads,
+    };
+    const lands = squareLand(1.2, 1.2);
+    try testing.expectEqual(@as(usize, 2), try islandCount(arena, input, &.{}));
+    try testing.expectEqual(@as(usize, 1), try islandCount(arena, input, &lands));
+    var joined = input;
+    joined.joins = try joinsFor(arena, input, &lands);
+    try testing.expectEqual(power_current.Status.solved, (try power_current.solve(arena, joined)).typical.status);
 }

@@ -31,6 +31,7 @@ const net_names = @import("../net_name.zig");
 const numeric = @import("../numeric.zig");
 const power_current = @import("power_current.zig");
 const net_graph = @import("net_graph.zig");
+const pad_shape = @import("pad_shape.zig");
 const pour = @import("pour.zig");
 const implicit_plane = @import("implicit_plane.zig");
 const power_capacity = @import("power_capacity.zig");
@@ -390,6 +391,35 @@ fn contactForPin(placement: optimizer.Placement, pin: anytype) ?power_current.Co
     };
 }
 
+/// Every pad land of every part on this rail, in `family.pins` order.
+///
+/// These are conductors, not terminals. DRC topology
+/// (`fab_readiness.buildNetGraph`) makes each land a union-find node, so two
+/// tracks that both end on a buck's VOUT land — or a track and a via that meet
+/// only through a decoupling cap's pad — are one island there. The current
+/// solve knew only the pads a SOURCE or LOAD terminal resolved to, so the same
+/// copper split into islands and the rail reported `disconnected` while the DRC
+/// reported no `net_open` at all.
+fn landsFor(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    family: Family,
+) std.mem.Allocator.Error![]const net_graph.Land {
+    var out: std.ArrayList(net_graph.Land) = .empty;
+    for (family.pins, 0..) |pin, logical| {
+        const part = partForRef(placement, pin.ref_des) orelse continue;
+        for (part.pads) |pad| {
+            if (!std.mem.eql(u8, pad.number, pin.pin)) continue;
+            try out.append(alloc, .{
+                .shape = try pad_shape.worldShape(alloc, part.*, pad),
+                .layer = if (pad.thru) null else if (part.side == .top) @as(u8, 0) else 1,
+                .logical = logical,
+            });
+        }
+    }
+    return out.items;
+}
+
 fn descendantOf(ref_des: []const u8, prefix: []const u8) bool {
     return ref_des.len > prefix.len and std.mem.startsWith(u8, ref_des, prefix) and ref_des[prefix.len] == '/';
 }
@@ -440,16 +470,39 @@ fn sourceContacts(
         if (std.mem.startsWith(u8, path, "@external/")) {
             try boundaryContacts(alloc, placement, family, &out);
         } else if (net_names.parent(path)) |prefix| {
-            for (family.pins) |pin| {
-                if (!descendantOf(pin.ref_des, prefix)) continue;
-                const part = partForRef(placement, pin.ref_des) orelse continue;
-                if (part.kind != .hub) continue;
-                if (contactForPin(placement, pin)) |contact| try appendContact(alloc, &out, contact);
-            }
+            try scopedSources(alloc, placement, family, prefix, &out, true);
+            // A rail whose source node carries NO device pin — a boost output
+            // formed by the catch diode, the output caps and the feedback
+            // divider (barracuda's `boost22/V_25V_RAW`) — has no hub pad under
+            // the prefix at all, and the terminal used to resolve to nothing.
+            // The current still physically enters the rail at those rectifier
+            // and reservoir pads, so they are the source contacts, exactly as
+            // `scopedContacts` already falls back for a load.
+            if (out.items.len == before) try scopedSources(alloc, placement, family, prefix, &out, false);
         }
         entry.* = .{ .terminal = path, .contacts = out.items.len - before };
     }
     return .{ .contacts = out.items, .per_terminal = per_terminal };
+}
+
+/// Pads under a source terminal's sub-block prefix that sit on this rail.
+/// `hubs_only` selects the ordinary case (the regulator/converter IC pin that
+/// drives the rail); the relaxed pass is the fallback for a source node built
+/// entirely from discretes.
+fn scopedSources(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    family: Family,
+    prefix: []const u8,
+    out: *std.ArrayList(power_current.Contact),
+    hubs_only: bool,
+) std.mem.Allocator.Error!void {
+    for (family.pins) |pin| {
+        if (!descendantOf(pin.ref_des, prefix)) continue;
+        const part = partForRef(placement, pin.ref_des) orelse continue;
+        if (hubs_only and part.kind != .hub) continue;
+        if (contactForPin(placement, pin)) |contact| try appendContact(alloc, out, contact);
+    }
 }
 
 fn loadContacts(
@@ -747,6 +800,9 @@ const SheetSet = struct {
 const Poured = struct {
     surfaces: []const Surface = &.{},
     sheets: SheetSet = .{},
+    /// The rail's pad lands, built once here because BOTH the sheet contact
+    /// map and the junction list need every pad geometry, not one per pin.
+    lands: []const net_graph.Land = &.{},
 };
 
 fn pourFor(
@@ -756,15 +812,20 @@ fn pourFor(
     family: Family,
     surfaces: []const Surface,
 ) std.mem.Allocator.Error!Poured {
-    return .{ .surfaces = surfaces, .sheets = try sheetsForNet(alloc, placement, routed, family, surfaces) };
+    const lands = try landsFor(alloc, placement, family);
+    return .{
+        .surfaces = surfaces,
+        .sheets = try sheetsForNet(alloc, routed, family, surfaces, lands),
+        .lands = lands,
+    };
 }
 
 fn sheetsForNet(
     alloc: std.mem.Allocator,
-    placement: optimizer.Placement,
     routed: router.RouteResult,
     family: Family,
     surfaces: []const Surface,
+    lands: []const net_graph.Land,
 ) std.mem.Allocator.Error!SheetSet {
     var out: std.ArrayList(power_current.Sheet) = .empty;
     const touch = try alloc.alloc(SheetSet.Touch, surfaces.len);
@@ -789,13 +850,18 @@ fn sheetsForNet(
             try touched_vias.append(alloc, route_index);
             try appendPoint(alloc, &contacts[@intCast(component)], .{ via.x, via.y });
         }
-        for (family.pins) |pin| {
-            const contact = contactForPin(placement, pin) orelse continue;
-            if (contact.layer) |layer| {
+        // EVERY pad geometry, not one contact per pin. A buck's VOUT pin is
+        // drawn as one SMD land plus six plated pad-vias; crediting only the
+        // first geometry hid the fact that those barrels are what carries the
+        // rail into the inner plane, and the current solve then reported the
+        // regulator's own output pad as an island of its own.
+        for (lands) |land| {
+            if (land.layer) |layer| {
                 if (surface.signal_layer == null or surface.signal_layer.? != layer) continue;
             }
-            const component = surface.fill.componentAt(contact.at[0], contact.at[1]);
-            if (component >= 0) try appendPoint(alloc, &contacts[@intCast(component)], contact.at);
+            const at = pad_shape.copperAnchor(land.shape);
+            const component = surface.fill.componentAt(at[0], at[1]);
+            if (component >= 0) try appendPoint(alloc, &contacts[@intCast(component)], at);
         }
         touch[surface_index] = .{ .tracks = touched_tracks.items, .vias = touched_vias.items };
         for (contacts) |component| if (component.items.len > 0) try out.append(alloc, .{
@@ -915,7 +981,7 @@ fn solveCurrent(
     // contact policy DRC topology uses, so hand it the canonical junctions —
     // but only for a net that will actually be solved, since that sweep is
     // quadratic in the net's copper and ground would pay it for nothing.
-    if (power_current.needsGraph(flow)) flow.joins = try net_graph.joinsFor(alloc, flow);
+    if (power_current.needsGraph(flow)) flow.joins = try net_graph.joinsFor(alloc, flow, poured.lands);
     const result = try power_current.solve(alloc, flow);
     for (resolutions, 0..) |*resolution, i| resolution.placed = .{
         .typical = i < result.typical.placed.len and result.typical.placed[i],
@@ -926,7 +992,7 @@ fn solveCurrent(
         .flow = result,
         .sources = sources.per_terminal,
         .loads = resolutions,
-        .islands = if (disconnected) try net_graph.islandCount(alloc, flow) else 0,
+        .islands = if (disconnected) try net_graph.islandCount(alloc, flow, poured.lands) else 0,
     };
 }
 
@@ -1845,6 +1911,131 @@ test "a port-keyed consumer resolves passive pads when the module has no hub pad
     const reg_load = try loadContacts(arena, placement, family, .{ .ref_des = "reg/VIN", .net = "V_5VA", .pins = &.{"VIN"}, .i_typ = 0.2, .i_max = 0.2 });
     try testing.expect(reg_load.complete);
     try testing.expectEqual(@as(usize, 1), reg_load.contacts.len);
+}
+
+// spec: placement/power-routing - the sheet contact map credits every pad geometry, so a pin's plated pad-vias carry the rail into an inner plane even when its outer land does not
+test "an inner plane credits a pin's pad-vias, not only its first geometry" {
+    const geometry = @import("geometry.zig");
+    // A regulator output pin drawn the way real buck footprints are: one outer
+    // land, plus plated pad-vias that carry the rail down to the inner plane.
+    const vout = [_]geometry.Pad{
+        .{ .number = "VOUT", .x = 2, .y = 2, .w = 0.4, .h = 0.4 },
+        .{ .number = "VOUT", .x = 0.5, .y = 0.5, .w = 0.3, .h = 0.3, .thru = true },
+    };
+    const parts = [_]optimizer.Part{
+        .{ .ref_des = "buck/U1", .kind = .hub, .hw = 1.5, .hh = 1.5, .pads = &vout, .fallback = false, .x = 0, .y = 0 },
+    };
+    const pins = [_]flat_netlist.FlatPin{.{ .ref_des = "buck/U1", .pin = "VOUT" }};
+    const nets = [_]optimizer.FlatNet{.{ .name = "V_3V3D", .pins = &pins }};
+    const placement = optimizer.Placement{
+        .parts = @constCast(&parts),
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 3,
+        .maxy = 3,
+        .generated = true,
+    };
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    // One filled inner plane component over [0,1] x [0,1]: it reaches the
+    // pad-vias and never the outer land at (2,2).
+    const labels: [100]i32 = @splat(0);
+    const surfaces = [_]Surface{.{
+        .net = "V_3V3D",
+        .kind = .plane,
+        .physical_layer = 3,
+        .signal_layer = null,
+        .fill = .{
+            .frame = .{ .minx = 0, .miny = 0, .pitch = 0.1, .nx = 10, .ny = 10 },
+            .labels = &labels,
+            .n_comp = 1,
+            .contours = &.{},
+            .holes = &.{},
+            .coarsened = false,
+        },
+    }};
+    const family = try familyFor(arena, placement, .{}, 0);
+    // The one-contact-per-pin spelling looked at the FIRST geometry only, and
+    // that land is not on the plane at all.
+    const first = contactForPin(placement, pins[0]).?;
+    try testing.expectEqual(@as(i32, -1), surfaces[0].fill.componentAt(first.at[0], first.at[1]));
+
+    const routed = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 };
+    const lands = try landsFor(arena, placement, family);
+    try testing.expectEqual(@as(usize, 2), lands.len);
+    const sheets = try sheetsForNet(arena, routed, family, &surfaces, lands);
+    try testing.expectEqual(@as(usize, 1), sheets.sheets.len);
+    try testing.expectEqual(@as(usize, 1), sheets.sheets[0].contacts.len);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), sheets.sheets[0].contacts[0][0], 1e-9);
+}
+
+// spec: placement/power-routing - a source terminal whose sub-block carries no hub pad on the rail resolves the discrete pads the current physically enters through
+test "a source terminal with no hub pad on the rail falls back to its sub-block's discretes" {
+    const geometry = @import("geometry.zig");
+    const one = geometry.Pad{ .number = "1", .x = 0, .y = 0, .w = 0.2, .h = 0.2 };
+    // A boost output node: the catch diode, the reservoir cap and the feedback
+    // divider form the rail. No converter pin sits on it at all.
+    const parts = [_]optimizer.Part{
+        .{ .ref_des = "boost22/D1", .kind = .passive, .hw = 0.1, .hh = 0.1, .pads = &.{one}, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "boost22/C5", .kind = .passive, .hw = 0.1, .hh = 0.1, .pads = &.{one}, .fallback = false, .x = 1, .y = 0 },
+        .{ .ref_des = "amp/U1", .kind = .hub, .hw = 0.1, .hh = 0.1, .pads = &.{one}, .fallback = false, .x = 3, .y = 0 },
+    };
+    const pins = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "boost22/D1", .pin = "1" },
+        .{ .ref_des = "boost22/C5", .pin = "1" },
+        .{ .ref_des = "amp/U1", .pin = "1" },
+    };
+    const nets = [_]optimizer.FlatNet{.{ .name = "V_25V_RAW", .pins = &pins }};
+    const placement = optimizer.Placement{
+        .parts = @constCast(&parts),
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 4,
+        .maxy = 1,
+        .generated = true,
+    };
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const family = try familyFor(arena, placement, .{}, 0);
+    const sources = try sourceContacts(arena, placement, family, &.{"boost22/V_25V_RAW"});
+    try testing.expectEqual(@as(usize, 2), sources.contacts.len);
+    try testing.expectEqual(@as(usize, 2), sources.per_terminal[0].contacts);
+    // The load's own hub pad is NOT a source: the fallback stays inside the
+    // terminal's own sub-block.
+    for (sources.contacts) |contact| try testing.expect(contact.at[0] < 2);
+
+    // A sub-block that does carry a converter pin keeps the hub-only answer:
+    // the discretes beside it are not second voltage sources.
+    const hub_parts = [_]optimizer.Part{
+        .{ .ref_des = "boost22/D1", .kind = .passive, .hw = 0.1, .hh = 0.1, .pads = &.{one}, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "boost22/U7", .kind = .hub, .hw = 0.1, .hh = 0.1, .pads = &.{one}, .fallback = false, .x = 1, .y = 0 },
+    };
+    const hub_pins = [_]flat_netlist.FlatPin{
+        .{ .ref_des = "boost22/D1", .pin = "1" },
+        .{ .ref_des = "boost22/U7", .pin = "1" },
+    };
+    const hub_nets = [_]optimizer.FlatNet{.{ .name = "V_25V_RAW", .pins = &hub_pins }};
+    var hub_placement = placement;
+    hub_placement.parts = @constCast(&hub_parts);
+    hub_placement.nets = &hub_nets;
+    const hub_family = try familyFor(arena, hub_placement, .{}, 0);
+    const hub_sources = try sourceContacts(arena, hub_placement, hub_family, &.{"boost22/V_25V_RAW"});
+    try testing.expectEqual(@as(usize, 1), hub_sources.contacts.len);
+    try testing.expectApproxEqAbs(@as(f64, 1), hub_sources.contacts[0].at[0], 1e-9);
 }
 
 // spec: placement/power-routing - a consumer whose annotated pad sits behind a two-terminal series part on a sibling net enters this net's copper at that part's pad
