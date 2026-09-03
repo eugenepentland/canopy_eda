@@ -22,6 +22,7 @@ const autocommit = @import("autocommit.zig");
 const dossier_jobs = @import("dossier_jobs.zig");
 const fab_release_service = @import("fab_release_service.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
+const system_cad = @import("system_cad.zig");
 const vfs = @import("vfs.zig");
 
 const Server = serve_root.Server;
@@ -1477,7 +1478,7 @@ pub fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
             ".ok{color:#65d38e}.blocked{color:#ffb85c}#message{position:fixed;right:18px;bottom:18px;max-width:520px;background:#172139;border:1px solid #53617d;border-radius:8px;padding:10px;display:none}" ++
             "@media(max-width:1000px){main{grid-template-columns:220px 1fr}.preview{display:none}}" ++
             "</style></head><body><header><div><h1 id=\"title\">System review</h1><p id=\"identity\">Loading manifest…</p></div>" ++
-            "<div class=\"grow\"></div><a class=\"button\" id=\"dossier\" target=\"_blank\" rel=\"noopener\">View dossier</a>" ++
+            "<div class=\"grow\"></div><a class=\"button\" id=\"cad\">3D CAD</a><a class=\"button\" id=\"dossier\" target=\"_blank\" rel=\"noopener\">View dossier</a>" ++
             "<a class=\"button\" id=\"draft\">Download draft</a>" ++
             "<label><input id=\"waive\" type=\"checkbox\"> accept waivers</label><button id=\"release\">Final release</button></header>" ++
             "<main><aside><strong>Documents</strong><div id=\"docs\"></div><div class=\"status\" id=\"readiness\">Computing readiness…</div>" ++
@@ -1509,7 +1510,7 @@ pub fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
             "$('#release').disabled=!state.permissions.release||value.blocked}catch(error){$('#readiness').textContent=error.message;$('#readiness').className='status blocked'}}" ++
             "async function boot(){try{const {value}=await request(endpoint(''));state.manifest=value.manifest;state.permissions=value.permissions;$('#attest').disabled=!value.permissions.write;" ++
             "$('#title').textContent=value.manifest.title;$('#identity').textContent=value.manifest.part_number+' · revision '+value.manifest.revision+' · '+value.permissions.role;" ++
-            "$('#draft').href=endpoint('/draft.zip');$('#dossier').href='/systems/'+encodeURIComponent(SYSTEM)+'/dossier';const host=$('#docs');let first=null;for(const doc of value.manifest.documents){const button=document.createElement('button');" ++
+            "$('#draft').href=endpoint('/draft.zip');$('#cad').href='/systems/'+encodeURIComponent(SYSTEM)+'/cad';$('#dossier').href='/systems/'+encodeURIComponent(SYSTEM)+'/dossier';const host=$('#docs');let first=null;for(const doc of value.manifest.documents){const button=document.createElement('button');" ++
             "button.type='button';button.append(document.createTextNode(doc.title));const tag=document.createElement('span');tag.className='tag';tag.textContent=doc.classification+' · '+(doc.status||'active');button.append(tag);" ++
             "button.onclick=()=>openDoc(doc,button).catch(e=>note(e.message,true));host.append(button);if(!first&&doc.status!=='historical')first=[doc,button]}if(!first&&value.manifest.documents.length)first=[value.manifest.documents[0],host.firstElementChild];" ++
             "if(first)await openDoc(first[0],first[1]);await refreshReady();dossierState()}catch(error){note(error.message,true)}}" ++
@@ -1527,6 +1528,33 @@ pub fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     res.header("content-security-policy", "frame-ancestors 'none'");
     res.header("x-frame-options", "DENY");
     res.body = out.written();
+}
+
+/// GET /systems/:name/cad — import this system's selected PCB layouts into a
+/// native-parametric enclosure workspace.
+pub fn systemCadPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    var diagnostic: system_review.Diagnostic = .{};
+    var loaded = (try loadSystemForRequest(ctx, req, res, &diagnostic)) orelse return;
+    defer loaded.deinit(ctx.allocator);
+    try system_cad.page(res.arena, ctx.project_dir, loaded.parsed.value, res);
+}
+
+/// GET /api/systems/:name/cad/export — emit base/lid solids from the same Zig
+/// enclosure parameters used by the browser workspace.
+pub fn systemCadExportApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    var diagnostic: system_review.Diagnostic = .{};
+    var loaded = (try loadSystemForRequest(ctx, req, res, &diagnostic)) orelse return;
+    defer loaded.deinit(ctx.allocator);
+    try system_cad.exportFile(res.arena, loaded.parsed.value.name, req, res);
+}
+
+/// GET /api/systems/:name/cad/mesh — validate the system identity, then build
+/// display topology with the same native generator used by file export.
+pub fn systemCadMeshApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    var diagnostic: system_review.Diagnostic = .{};
+    var loaded = (try loadSystemForRequest(ctx, req, res, &diagnostic)) orelse return;
+    defer loaded.deinit(ctx.allocator);
+    try system_cad.meshApi(res.arena, req, res);
 }
 
 test "system review API path and asset policy rejects traversal and active content" {
@@ -1898,11 +1926,17 @@ test "the system review page carries the view-dossier action" {
     // A labelled action beside the existing draft download…
     try std.testing.expect(std.mem.indexOf(u8, body, ">View dossier</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, ">Download draft</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, ">3D CAD</a>") != null);
     // …pointing at this system's own page-side dossier path, not the API family.
     try std.testing.expect(std.mem.indexOf(
         u8,
         body,
         "$('#dossier').href='/systems/'+encodeURIComponent(SYSTEM)+'/dossier'",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        body,
+        "$('#cad').href='/systems/'+encodeURIComponent(SYSTEM)+'/cad'",
     ) != null);
 }
 

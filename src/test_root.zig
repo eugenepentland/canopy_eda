@@ -380,9 +380,12 @@ test {
     _ = @import("system_review_md.zig");
     _ = @import("system_review_pdf.zig");
     _ = @import("system_review_package.zig");
+    _ = @import("mechanical/prismatic.zig");
+    _ = @import("mechanical/enclosure.zig");
     _ = @import("board_review_snapshot.zig");
     _ = @import("serve/fab_release_service.zig");
     _ = @import("serve/system_review_api.zig");
+    _ = @import("serve/system_cad.zig");
     _ = @import("review_html.zig");
     _ = @import("review_thermal.zig");
     _ = @import("thermal_scenarios.zig");
