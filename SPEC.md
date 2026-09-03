@@ -3467,11 +3467,13 @@ rail width wherever exact copper clearance permits; pad-sized and constrained
 necks receive automatic tapers, and every remaining electrical shortfall is
 reported together without turning connectivity into a DRC error.
 For a rail carried by an explicitly
-declared plane or copper zone, the fill reserves the full-current neck while
-short pad fanouts may opt into `(power-branch-width MM)` and are judged after
-routing at the local branch current solved by the power-integrity analysis.
-The ordinary class width remains the fallback whenever that solve is
-incomplete, and the PCB DRC panel can widen only failing opted-in segments on
+declared plane or copper zone, the fill reserves the neck its own solved
+current needs, and every segment of every current-rated rail is judged after
+routing at the local branch current solved by the power-integrity analysis;
+`(power-branch-width MM)` is a floor on that verdict, not the switch that
+enables it. A rail whose topology cannot be solved is screened at its whole
+declared current on each segment, carrying the reason it could not be
+localized, and the PCB DRC panel can widen only failing opted-in segments on
 1 mil increments without moving their centre lines. The router
 does not invent planes on arbitrary layers, and a required single-barrel via
 is enlarged only as far as the derived drill and annular-ring rules require.
@@ -3486,9 +3488,12 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - adaptive routing retains the full maximum-current target while a pour-backed rail keeps its short authored fanout width
 - an adaptive rail reports every actionable electrical shortfall in one pass while the fabrication minimum remains a hard error
 - power-width comparison accepts the one-micrometre persistence quantum but rejects a material shortfall
-- a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an incomplete opted-in rail screens every segment at the whole-rail current
+- a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an unsolved rail screens every segment at the whole-rail current and reports why
 - a port-keyed consumer whose module-side net reaches only passive parts resolves those pads as its load contacts
 - a consumer whose annotated pad sits behind a two-terminal series part on a sibling net enters this net's copper at that part's pad
+- a consumer several two-terminal series parts downstream still enters this rail at the first part's pad on it
+- a rail's per-pin bypass stubs are one piece of copper with it, so a consumer whose pins were renamed onto them still resolves and the whole family solves as one graph
+- a solved rail sizes each pour's neck for the current that pour actually carries, and keeps the whole-rail envelope only while the solve is unproven
 - a rail with no annotated load routes for its declared source capacity, so a standalone regulator page sizes copper from its own output rating
 - declared loads outrank source capacity, so a rail routes for what the board draws rather than what its supply could deliver
 - a standalone module that rates its own output port and declares a bare layer count gets an IPC-2221 width for that rail; without the stackup no width is invented
@@ -5345,6 +5350,7 @@ Public functions: analyze
 - only a `(current …)` on a top-level out port creates a rail, and an explicitly signal-kinded output never becomes one
 - a parent board reads a module's rating through its sub-block port, and the highest declared capacity wins a rail whichever way it was declared
 - a sub-block input power port's declared current is reported as a branch load for series sizing and never enters the rail's summed budget
+- a rail an internally sourced board re-exports draws its declared output current as a load at a physical exit terminal, never as a second injection point
 
 ## eval/thermal
 

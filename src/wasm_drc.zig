@@ -616,7 +616,7 @@ test "the bridge builds a rail-less placement, so no plane raster is reachable" 
     // solve produced nothing and no surface was ever poured for it.
     const widths = try power_integrity.routedTrackRequiredWidths(arena, board.placement, board.routed);
     try testing.expectEqual(board.routed.tracks.len, widths.len);
-    for (widths) |w| try testing.expectEqual(@as(?f64, null), w);
+    for (widths) |w| try testing.expectEqual(@as(?power_integrity.LocalWidth, null), w);
 
     // …and the board still checks: this track sits at the class's branch floor,
     // under its 0.3048 mm class width, so the width rule the client DOES run

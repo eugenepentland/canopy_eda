@@ -1932,7 +1932,7 @@ const TrackWidthInput = struct {
     min_width: f64,
     /// Index-aligned IPC-2221 widths from a solved power-copper graph.
     /// Null entries retain the conservative whole-net class rule.
-    local_power_widths: []const ?f64 = &.{},
+    local_power_widths: []const ?power_integrity.LocalWidth = &.{},
     /// Same-net pours consulted by the pad-entry neck exemption: a bounded
     /// neck may legitimately end IN a zone rather than on wide track copper.
     zones: []const TopologyZone = &.{},
@@ -1981,7 +1981,7 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
                 nrules[@intCast(t.net)].pad_neck.power_branch_width
             else
                 0;
-            want = @max(in.min_width, @max(branch_floor, local));
+            want = @max(in.min_width, @max(branch_floor, local.width_mm));
         }
         requirements[track_index] = want;
         const under_width = t.width < want - eps;
@@ -3855,7 +3855,7 @@ test "track width accepts a solved narrow power branch but enforces its local re
         .{ .x1 = 1, .y1 = 0, .x2 = 2, .y2 = -1, .layer = 0, .width = 0.13, .net = 0 },
     };
     const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
-    const local = [_]?f64{ 0.2727, 0.10, 0.10 };
+    const local = [_]?power_integrity.LocalWidth{ .{ .width_mm = 0.2727, .envelope = false }, .{ .width_mm = 0.10, .envelope = false }, .{ .width_mm = 0.10, .envelope = false } };
     var violations: std.ArrayList(Violation) = .empty;
     try checkTrackWidth(arena, &violations, .{
         .placement = placement,
@@ -3990,7 +3990,7 @@ test "adaptive power width forgives a bounded pad-entry neck but not the same co
         .{ .x1 = 1, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.55, .net = 0 },
     };
     const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
-    const local = [_]?f64{ 0.5, 0.5 };
+    const local = [_]?power_integrity.LocalWidth{ .{ .width_mm = 0.5, .envelope = false }, .{ .width_mm = 0.5, .envelope = false } };
     for ([_]bool{ true, false }) |landed| {
         var placement = partsOnly(&parts);
         placement.nets = if (landed) &netted else &unnetted;
