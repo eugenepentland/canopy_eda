@@ -168,9 +168,21 @@
     tellBoardView();
     if (updateUrl) syncUrl();
   }
+  function coolingVisibilityPush() {
+    if (!frame || !frame.contentWindow) return;
+    var useFan = scenario === "fan" || scenario === "fan_heatsink";
+    var useHeatsink = scenario === "heatsink" || scenario === "fan_heatsink";
+    try {
+      var three = frame.contentWindow.PCB3D;
+      if (three && typeof three.setCoolingVisibility === "function") {
+        three.setCoolingVisibility(useFan, useHeatsink);
+      }
+    } catch (e) { /* lazy 3D stack is not ready yet */ }
+  }
   function heatRefresh() {
     if (!frame) return;
     if (veil) { veil.hidden = false; veil.textContent = "Solving…"; }
+    coolingVisibilityPush();
     tell({
       scenario: scenario, ambient: ambient, side: boardSide,
       scaleMinC: scaleMinC, scaleMaxC: scaleMaxC
@@ -187,6 +199,10 @@
       if (fanToggle && typeof d.fan === "boolean") fanToggle.checked = d.fan;
       if (heatsinkToggle && typeof d.heatsink === "boolean") heatsinkToggle.checked = d.heatsink;
       tpSelect(coolingScenario());
+      return;
+    }
+    if (d && d.t === "thermal:3d-ready") {
+      coolingVisibilityPush();
       return;
     }
     if (!d || d.t !== "thermal:state") return;

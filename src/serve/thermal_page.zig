@@ -1573,7 +1573,7 @@ test "saved cooling assemblies render independent simulation toggles" {
     try testing.expect(std.mem.indexOf(u8, natural.body, "id=\"tp-use-heatsink\" type=\"checkbox\" checked") == null);
 }
 
-// spec: serve/thermal-page - thermal 3D fan and heatsink visibility controls also select the matching simulation scenario
+// spec: serve/thermal-page - thermal fan and heatsink controls stay synchronized between the scenario panel and 3D setup, selecting the matching simulation scenario and model visibility
 test "thermal 3D cooling visibility controls drive the simulation scenario" {
     const client = @embedFile("assets/thermal_page.js");
     const overlay = @embedFile("assets/pcb_thermal.js");
@@ -1584,10 +1584,12 @@ test "thermal 3D cooling visibility controls drive the simulation scenario" {
     // and the page selects the already-rendered matching scenario.
     try testing.expect(containsAll(viewer, &.{
         "function notifyThermalCooling(",
+        "function notifyThermalReady(",
         "function syncThermalCooling(",
         "thermal.toggleCooling(kind, visible)",
         "thermal.coolingState()",
         "setCoolingVisibility: function",
+        "thermal:3d-ready",
     }));
     try testing.expect(containsAll(overlay, &.{
         "function coolingState()",
@@ -1597,6 +1599,9 @@ test "thermal 3D cooling visibility controls drive the simulation scenario" {
     }));
     try testing.expect(containsAll(client, &.{
         "d.t === \"thermal:cooling-toggle\"",
+        "d.t === \"thermal:3d-ready\"",
+        "function coolingVisibilityPush()",
+        "three.setCoolingVisibility(useFan, useHeatsink)",
         "tpSelect(coolingScenario())",
     }));
 

@@ -1018,6 +1018,14 @@
     if (thermal && typeof thermal.toggleCooling === "function") thermal.toggleCooling(kind, visible);
   }
 
+  function notifyThermalReady() {
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ t: "thermal:3d-ready" }, "*");
+      }
+    } catch (_) {}
+  }
+
   // A thermal scenario can arrive before the lazy 3D stack has finished
   // building, and a later layout/model refresh rebuilds both assembly groups.
   // Reassert the scenario after either event so authored cooling never flashes
@@ -1093,7 +1101,7 @@
         : (typeof PCB !== "undefined" ? PCB : {});
       if (!THREE || !surface) { setStatus && setStatus("3D assets failed to load", true); return; }
       built = true;
-      try { build(); }
+      try { build(); notifyThermalReady(); }
       catch (e) { console.error(e); setStatus("3D view failed: " + (e && e.message), true); }
     },
     // Re-read PCB.parts and re-pose the scene in place. Called from the 2D board
