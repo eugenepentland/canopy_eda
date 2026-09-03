@@ -642,8 +642,22 @@ fn writeScenarioParts(
         if (row.scenario == v.scenario) "" else " hidden",
     });
     if (!row.converged) try writeHint(w, "", "This scenario hit the solver's iteration ceiling — read its numbers as indicative only.");
+    if (row.cooling.heatsink.interface == .package_tops) {
+        try w.print("<p class=\"tp-hint\">The plate contacts {d} powered package lid{s} through declared θJC(top).", .{
+            row.cooling.heatsink.package_contacts,
+            if (row.cooling.heatsink.package_contacts == 1) "" else "s",
+        });
+        if (row.cooling.heatsink.missing_theta_jc_top > 0) try w.print(
+            " {d} covered powered package{s} lack directional θJC(top) and receive no direct heatsink credit.",
+            .{ row.cooling.heatsink.missing_theta_jc_top, if (row.cooling.heatsink.missing_theta_jc_top == 1) "" else "s" },
+        );
+        if (row.cooling.heatsink.temperature_c) |temperature| try w.print(" Shared plate: {d:.1} °C.", .{temperature});
+        try w.writeAll("</p>");
+    } else if (row.cooling.heatsink.interface == .board_face) {
+        try w.writeAll("<p class=\"tp-hint\">The thermal pad contacts the bare PCB face and conducts into one shared heatsink plate.</p>");
+    }
     try w.writeAll("<div class=\"tp-scroll\"><table class=\"tp-table\"><thead><tr><th>Ref</th><th>Component</th>" ++
-        "<th>P (W)</th><th>θJA (°C/W)</th><th>Board (°C)</th><th>Tj (°C)</th><th>Margin (°C)</th>" ++
+        "<th>P (W)</th><th>θJA (°C/W)</th><th>Path</th><th>Board (°C)</th><th>Tj (°C)</th><th>Margin (°C)</th>" ++
         "<th>Max ambient (°C)</th><th>Cross-probe</th></tr></thead><tbody>");
     const sorted = try alloc.dupe(thermal_scenarios.PartRow, row.parts);
     std.mem.sort(thermal_scenarios.PartRow, sorted, {}, hotterFirst);
@@ -672,7 +686,9 @@ fn writeScenarioPartRow(
         try escape.writeXml(w, cell);
         try w.writeAll("</td>");
     }
-    try w.print("<td>{d:.1}</td><td>", .{part.board_c});
+    try w.writeAll("<td>");
+    try escape.writeXml(w, junctionPathLabel(part.junction_path));
+    try w.print("</td><td>{d:.1}</td><td>", .{part.board_c});
     try writeDeg(w, part.tj_c);
     if (part.jb_estimated and part.tj_c != null) try w.writeAll(" <span class=\"tp-est\">est.</span>");
     try w.writeAll("</td><td>");
@@ -682,6 +698,15 @@ fn writeScenarioPartRow(
     try w.writeAll("</td>");
     try writeCrossProbe(w, v, part.ref);
     try w.writeAll("</tr>");
+}
+
+fn junctionPathLabel(path: thermal_scenarios.JunctionPath) []const u8 {
+    return switch (path) {
+        .board => "Board",
+        .package_top => "θJC top → plate",
+        .package_bottom => "θJC bottom → PCB",
+        .package_top_missing => "Board (θJC top missing)",
+    };
 }
 
 /// The lumped screen's own table, shown when there is no ladder to show one

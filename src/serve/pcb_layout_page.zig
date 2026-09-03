@@ -7822,7 +7822,7 @@ const tip_text = "Silkscreen text (T): click on the board to place a label " ++
     "Gerber.";
 const tip_backing = "Edit fabrication backing regions with the shared shape-sketch palette: lines/arcs, dimensions, constraints, fillet, chamfer, offset and mirror. " ++
     "The authored side, material, thickness, and automatic footprint cutouts remain unchanged. Saved with the layout and emitted in its named Gerber.";
-const tip_heatsink = "Draw or edit a PCB-mounted physical heatsink. Drag its body to move it, drag corner handles to resize it, or click it to edit its face, material, fin count/dimensions, and thermal pad. Every board cell under its base is thermally coupled; no component target is needed. Saved with the layout; the thermal ladder and 3D view use it.";
+const tip_heatsink = "Draw or edit a physical heatsink. Drag its body to move it, drag corner handles to resize it, or click it to edit its face, material, fin count/dimensions, and thermal pad. On a populated face it contacts covered package lids through declared theta-JC-top; on an unobstructed face its pad contacts the PCB. Saved with the layout; the thermal ladder and 3D view use it.";
 const tip_fan = "Place or edit an axial fan. Drag its circular footprint to move it, drag corner handles to resize its outlet, or click it to edit the PCB face, outlet-to-target distance, and airflow specifications. The target is the fin tips when a heatsink shares that face, otherwise the PCB. Saved with the layout and used by the fan thermal scenario.";
 const tip_ruler = "Ruler / dimension (D): drag to measure, or select a footprint first and drag its origin to a straight board edge to create a driving dimension.";
 const tip_move = "Move the selection by an X/Y distance (M): select footprints, tracks, vias, or outline-sketch geometry, then press M (or this button) and type how far to move it; one undo step.";
@@ -15510,7 +15510,7 @@ test "layouts sidecar round-trips a drawn outline" {
     try std.testing.expect(parseSavedOutline(alloc, null) == null);
 }
 
-// spec: Web Server - The PCB editor draws one target-free board-contact heatsink rectangle on either PCB face, reopens it for parameter edits, drags it to reposition, resizes it with corner handles, directly edits fin count or gap, material, base/fins and thermal pad, persists the assembly with the named layout, previews its pad/base/fins in 3D, and feeds every covered PCB thermal cell plus the same derived theta-SA to built-in and Elmer thermal solves
+// spec: Web Server - The PCB editor draws one target-free physical heatsink rectangle on either PCB face, reopens it for parameter edits, drags it to reposition, resizes it with corner handles, directly edits fin count or gap, material, base/fins and thermal pad, persists the assembly with the named layout, previews its pad/base/fins in 3D, and resolves a populated face through covered packages' directional theta-JC-top into one shared plate while an unobstructed face couples the PCB through the pad
 test "layouts sidecar round-trips a physical heatsink assembly" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();

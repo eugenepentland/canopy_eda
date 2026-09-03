@@ -3373,6 +3373,7 @@ src/placement/thermal_field.zig::FinAxis enum_
 src/placement/thermal_field.zig::GridShape struct_
 src/placement/thermal_field.zig::Heatsink struct_
 src/placement/thermal_field.zig::HeatsinkGeometry struct_
+src/placement/thermal_field.zig::HeatsinkInterface enum_
 src/placement/thermal_field.zig::HeatsinkMaterial enum_
 src/placement/thermal_field.zig::HeatsinkSide enum_
 src/placement/thermal_field.zig::Hotspot struct_
@@ -5301,6 +5302,7 @@ src/thermal_scenarios.zig::Heatsink value
 src/thermal_scenarios.zig::HeatsinkMaterial value
 src/thermal_scenarios.zig::HeatsinkPlacement struct_
 src/thermal_scenarios.zig::Hotspot struct_
+src/thermal_scenarios.zig::JunctionPath value
 src/thermal_scenarios.zig::Ladder struct_
 src/thermal_scenarios.zig::Limit struct_
 src/thermal_scenarios.zig::MountedTarget struct_

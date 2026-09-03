@@ -258,6 +258,12 @@ pub const Side = enum { top, bottom };
 /// component, so a top-mounted U15 receives a physically bottom-side sink.
 pub const HeatsinkSide = enum { package_top, board_backside };
 
+/// What the base of a target-free drawn heatsink physically touches. A plate
+/// on a populated face rests on package lids; a plate on an unobstructed face
+/// rests on the PCB through its gap pad. This distinction is deliberately
+/// reported because the two assemblies have different thermal networks.
+pub const HeatsinkInterface = enum { none, board_face, package_tops };
+
 /// Common extrusion materials. Conductivity is the screening value used for
 /// base conduction and plate-fin efficiency; it is not a structural grade
 /// claim.
@@ -364,7 +370,7 @@ pub const Fan = struct {
 
 /// The cooling scenarios, worst-first. `natural` is the board as designed;
 /// the two airflow rungs raise the film coefficient; `heatsink` keeps still air
-/// and bolts a sink to the one part with the least junction margin.
+/// and applies either the authored physical plate or a legacy one-part sink.
 pub const Scenario = enum {
     natural,
     fan,
@@ -374,8 +380,8 @@ pub const Scenario = enum {
     fan_heatsink,
 
     /// Film coefficient per face for this scenario (W/m²K). The heatsink
-    /// scenario is still air everywhere — the sink is an extra path on one
-    /// part's cells, not a change to the board's convection.
+    /// scenario is still air everywhere — the sink adds its own thermal
+    /// network rather than globally changing the board's convection.
     pub fn filmCoefficient(self: Scenario) f64 {
         return switch (self) {
             .natural, .fan, .heatsink, .fan_heatsink => h_natural,
@@ -565,8 +571,8 @@ pub const PartField = struct {
     origin_key: []const u8 = "",
     /// Hottest copper under the part's own cells (°C above ambient).
     board_rise_c: f64,
-    /// Junction rise above ambient: the board under it, plus `P·θJB` (°C). Null
-    /// when the part declares neither a θJB nor a θJA to fall back on.
+    /// Junction rise above ambient through the reported package path. Null when
+    /// the available directional package data cannot define any such path.
     tj_rise_c: ?f64 = null,
     /// True when `tj_rise_c` was computed through the `theta_jb_ja_fraction`
     /// fallback rather than a declared θJB.
@@ -583,7 +589,14 @@ pub const PartField = struct {
 };
 
 /// Package branch used to estimate a part's junction for one scenario.
-pub const JunctionPath = enum { board, package_top, package_bottom };
+pub const JunctionPath = enum {
+    board,
+    package_top,
+    package_bottom,
+    /// The plate physically covers this package, but no directional θJC(top)
+    /// was declared, so the ordinary board path remains the only credited one.
+    package_top_missing,
+};
 
 /// One scenario's whole answer.
 pub const ScenarioResult = struct {
@@ -611,6 +624,12 @@ pub const ScenarioCooling = struct {
         ref: []const u8 = "",
         side: ?HeatsinkSide = null,
         face: ?Side = null,
+        interface: HeatsinkInterface = .none,
+        package_contacts: usize = 0,
+        missing_theta_jc_top: usize = 0,
+        /// Shared heatsink-base rise above ambient (°C). Null for scenarios
+        /// without a physical shared plate.
+        rise_c: ?f64 = null,
     } = .{},
     fan: struct {
         model: []const u8 = "",
@@ -653,7 +672,7 @@ pub fn solveScenarios(
     try configurePackedSolver(allocator, &solver, natural_grid, inputs, .{ .scenarios = natural_lanes });
     const natural_converged = solvePacked(&solver);
     packedLaneToGrid(&solver, 0, natural_grid);
-    out[0] = try summarizeScenario(allocator, natural_grid, inputs, .natural, null, natural_converged);
+    out[0] = try summarizeScenario(allocator, natural_grid, inputs, .{ .scenario = .natural, .converged = natural_converged });
     const target = configuredHeatsinkTarget(inputs, out[0].parts);
 
     const remaining = [simd_scenarios]Scenario{ .airflow_1ms, .airflow_2ms, .heatsink, .airflow_2ms };
@@ -671,11 +690,11 @@ pub fn solveScenarios(
     for (remaining[0..2], 0..) |scenario, lane| {
         const grid = try makeAdaptiveGrid(allocator, inputs);
         packedLaneToGrid(&solver, lane, grid);
-        out[lane + 1 + offset] = try summarizeScenario(allocator, grid, inputs, scenario, null, remaining_converged);
+        out[lane + 1 + offset] = try summarizeScenario(allocator, grid, inputs, .{ .scenario = scenario, .converged = remaining_converged });
     }
     const sink_grid = try makeAdaptiveGrid(allocator, inputs);
     packedLaneToGrid(&solver, 2, sink_grid);
-    out[3 + offset] = try summarizeScenario(allocator, sink_grid, inputs, .heatsink, target, remaining_converged);
+    out[3 + offset] = try summarizeScenario(allocator, sink_grid, inputs, .{ .scenario = .heatsink, .target = target, .sink_rise = solver.sink_rise[2], .converged = remaining_converged });
     if (has_combined) out[4 + offset] = try runScenario(allocator, inputs, .fan_heatsink, target);
     return out;
 }
@@ -748,44 +767,65 @@ fn runScenario(
     const converged = solveWork(&solver);
     for (grid.rise_c, solver.rise) |*out, rise| out.* = @floatCast(rise);
 
-    return summarizeScenario(allocator, grid, inputs, scenario, target, converged);
+    return summarizeScenario(allocator, grid, inputs, .{ .scenario = scenario, .target = target, .sink_rise = solver.sink_rise, .converged = converged });
 }
+
+const SummaryState = struct {
+    scenario: Scenario,
+    target: ?[]const u8 = null,
+    sink_rise: f64 = 0,
+    converged: bool,
+};
 
 fn summarizeScenario(
     allocator: std.mem.Allocator,
     grid: FieldGrid,
     inputs: Inputs,
-    scenario: Scenario,
-    target: ?[]const u8,
-    converged: bool,
+    state: SummaryState,
 ) std.mem.Allocator.Error!ScenarioResult {
+    const interface = heatsinkInterface(inputs, state.scenario);
+    const contacts = packageContactStats(inputs, state.scenario);
     const rows = try partRows(allocator, grid, .{
         .sheet = resolvedSheet(inputs),
         .board = inputs.board,
-    }, inputs.parts, .{ .scenario = scenario, .target = target, .heatsink = inputs.cooling.heatsink });
+    }, inputs.parts, .{ .scenario = state.scenario, .target = state.target, .heatsink = inputs.cooling.heatsink, .sink_rise = state.sink_rise, .interface = interface });
     return .{
-        .scenario = scenario,
+        .scenario = state.scenario,
         .grid = grid,
         .parts = rows.parts,
         .skipped = rows.skipped,
         .hotspot = hotspotOf(grid),
         .max_ambient = maxAmbient(rows.parts, inputs.ratings_cap),
-        .converged = converged,
+        .converged = state.converged,
         .cooling = .{
             .heatsink = .{
-                .ref = if (usesHeatsink(scenario)) target orelse "" else "",
-                .side = if (usesHeatsink(scenario) and (target != null or boardMountedHeatsink(inputs.cooling.heatsink))) inputs.cooling.heatsink.side else null,
-                .face = if (usesHeatsink(scenario) and (target != null or boardMountedHeatsink(inputs.cooling.heatsink))) inputs.cooling.heatsink.physical_face else null,
+                .ref = if (usesHeatsink(state.scenario)) state.target orelse "" else "",
+                .side = reportedHeatsinkSide(inputs, state, interface),
+                .face = if (usesHeatsink(state.scenario) and (state.target != null or boardMountedHeatsink(inputs.cooling.heatsink))) inputs.cooling.heatsink.physical_face else null,
+                .interface = interface,
+                .package_contacts = contacts.contacts,
+                .missing_theta_jc_top = contacts.missing,
+                .rise_c = if (interface != .none) state.sink_rise else null,
             },
             .fan = .{
-                .model = if (usesFan(scenario)) inputs.cooling.fan.model else "",
-                .face = if (usesFan(scenario) and inputs.cooling.fan.enabled()) inputs.cooling.fan.face else null,
-                .velocity_m_s = if (usesFan(scenario)) fanVelocity(inputs.cooling.fan) else 0,
-                .operating_flow_m3_s = if (usesFan(scenario)) inputs.cooling.fan.operatingFlow() else 0,
-                .estimated_pressure_pa = if (usesFan(scenario)) inputs.cooling.fan.estimatedPressure() else 0,
+                .model = if (usesFan(state.scenario)) inputs.cooling.fan.model else "",
+                .face = if (usesFan(state.scenario) and inputs.cooling.fan.enabled()) inputs.cooling.fan.face else null,
+                .velocity_m_s = if (usesFan(state.scenario)) fanVelocity(inputs.cooling.fan) else 0,
+                .operating_flow_m3_s = if (usesFan(state.scenario)) inputs.cooling.fan.operatingFlow() else 0,
+                .estimated_pressure_pa = if (usesFan(state.scenario)) inputs.cooling.fan.estimatedPressure() else 0,
             },
         },
     };
+}
+
+fn reportedHeatsinkSide(inputs: Inputs, state: SummaryState, interface: HeatsinkInterface) ?HeatsinkSide {
+    if (!usesHeatsink(state.scenario)) return null;
+    if (boardMountedHeatsink(inputs.cooling.heatsink)) return switch (interface) {
+        .package_tops => .package_top,
+        .board_face => .board_backside,
+        .none => inputs.cooling.heatsink.side,
+    };
+    return if (state.target != null) inputs.cooling.heatsink.side else null;
 }
 
 // ── Grid construction ─────────────────────────────────────────────────────
@@ -966,9 +1006,9 @@ fn spanCells(spans: [2]Span) usize {
 
 // ── The linear system ─────────────────────────────────────────────────────
 
-/// One scenario's assembled system. Everything is per-cell: `sheet` because the
-/// outer pours are patchy, `to_ambient` because a part body blocks the face it
-/// sits on and the heatsink's extraction lands on one part's cells.
+/// One board-only projection of a scenario, retained for FEM export. Everything
+/// is per-cell: `sheet` because the outer pours are patchy and `to_ambient`
+/// because component bodies and cooling hardware alter each face locally.
 const Work = struct {
     cols: usize,
     rows: usize,
@@ -1007,7 +1047,13 @@ const Solver = struct {
     scale: []f64,
     source: []f32,
     to_ambient: []f32,
+    /// Conductance from each board cell to one isothermal shared heatsink.
+    to_sink: []f32,
     rise: []f64,
+    sink_rise: f64,
+    sink_source: f64,
+    sink_to_ambient: f64,
+    sink_diagonal: f64,
     total_power: f64,
     omega: f64,
 };
@@ -1027,7 +1073,12 @@ const PackedSolver = struct {
     scale: []ScenarioF64,
     source: []ScenarioF32,
     to_ambient: []ScenarioF32,
+    to_sink: []ScenarioF32,
     rise: []ScenarioF64,
+    sink_rise: ScenarioF64,
+    sink_source: ScenarioF64,
+    sink_to_ambient: ScenarioF64,
+    sink_diagonal: ScenarioF64,
     total_power: ScenarioF64,
     omega: f64,
 };
@@ -1155,7 +1206,7 @@ fn fillDiscretizedFaces(
             }
         }
     }
-    if (boardHeatsinkEffect(inputs, grid, scenario)) |effect| {
+    if (boardHeatsinkExportEffect(inputs, grid, scenario)) |effect| {
         const share: f64 = @floatFromInt(spanCells(effect.spans));
         const extra_h = effect.conductance_w_per_k / share / face_area;
         var row = effect.spans[1].lo;
@@ -1224,24 +1275,159 @@ fn heatsinkEffect(
     };
 }
 
-/// One target-free PCB-face sink path. Its thermal interface and total
-/// sink-to-ambient resistance are distributed over the exact clipped contact
-/// footprint, so every covered cell can reject heat through the assembly.
+/// Resolve whether a drawn plate contacts the PCB or package lids. The saved
+/// rectangle has no single-component target, so the physical face and the
+/// powered packages actually intersecting it supply the distinction: any
+/// same-face powered package makes this a package-top plate. This matches a
+/// flat plate resting on components while preserving the historical bare-face
+/// pad model on an unobstructed board backside.
+fn heatsinkInterface(inputs: Inputs, scenario: Scenario) HeatsinkInterface {
+    if (!usesHeatsink(scenario)) return .none;
+    const hs = inputs.cooling.heatsink;
+    if (!boardMountedHeatsink(hs)) return .none;
+    const face = hs.physical_face orelse return .none;
+    const contact = clippedRect(hs.contact orelse return .none, inputs.board) orelse return .none;
+    for (inputs.parts) |part| {
+        if (!(injectedWatts(part) > 0) or part.mount.side != face) continue;
+        const box = part.mount.box orelse continue;
+        if (intersectionArea(contact, box) > 0) return .package_tops;
+    }
+    return .board_face;
+}
+
+/// One target-free PCB-face pad coupling. The pad now reaches a shared sink
+/// node rather than ambient directly; theta-SA belongs to that node exactly
+/// once, no matter how many board cells the base covers.
 fn boardHeatsinkEffect(inputs: Inputs, grid: FieldGrid, scenario: Scenario) ?HeatsinkEffect {
     if (!usesHeatsink(scenario)) return null;
     const hs = inputs.cooling.heatsink;
     if (!boardMountedHeatsink(hs)) return null;
+    if (heatsinkInterface(inputs, scenario) != .board_face) return null;
     const face = hs.physical_face orelse return null;
+    const contact = clippedRect(hs.contact orelse return null, inputs.board) orelse return null;
+    const area_m2 = contact.w_mm * contact.h_mm * square_mm_to_m2;
+    const resistance = padResistance(hs, area_m2);
+    const conductance = resistanceConductance(resistance);
+    if (!(conductance > 0)) return null;
+    return .{
+        .spans = boxSpans(grid, contact),
+        .conductance_w_per_k = conductance,
+        .source_fraction = 1.0,
+        .face = face,
+    };
+}
+
+/// Local boundary-condition reduction used by the board-only Elmer export.
+/// Elmer's current mesh has no separate isothermal plate node, so a bare-face
+/// pad retains the prior series pad+theta-SA coefficient there. Package-top
+/// shared-plate cases deliberately receive no fabricated local coefficient;
+/// their manifest calls out that only the built-in coupled solve is complete.
+fn boardHeatsinkExportEffect(inputs: Inputs, grid: FieldGrid, scenario: Scenario) ?HeatsinkEffect {
+    const pad = boardHeatsinkEffect(inputs, grid, scenario) orelse return null;
+    const hs = inputs.cooling.heatsink;
     const contact = clippedRect(hs.contact orelse return null, inputs.board) orelse return null;
     const area_m2 = contact.w_mm * contact.h_mm * square_mm_to_m2;
     const resistance = padResistance(hs, area_m2) + sinkToAmbientFor(inputs, scenario);
     if (!(resistance > 0) or !std.math.isFinite(resistance)) return null;
+    var effect = pad;
+    effect.conductance_w_per_k = 1.0 / resistance;
+    return effect;
+}
+
+const PackageSinkBranch = struct {
+    spans: [2]Span,
+    board_conductance_w_per_k: f64,
+    case_conductance_w_per_k: f64,
+    equivalent_conductance_w_per_k: f64,
+    board_source_fraction: f64,
+    sink_source_fraction: f64,
+};
+
+/// Eliminate one contacted package's junction node analytically. The remaining
+/// exact two-node equivalent injects part of P into the board, part into the
+/// shared sink, and couples those two nodes through `equivalent_conductance`.
+/// Both directional package data and a board path are required; if either is
+/// absent the direct lid path is not guessed into existence.
+fn packageSinkBranch(part: PartInput, inputs: Inputs, grid: FieldGrid, scenario: Scenario) ?PackageSinkBranch {
+    if (heatsinkInterface(inputs, scenario) != .package_tops) return null;
+    const hs = inputs.cooling.heatsink;
+    return packageSinkBranchFor(part, hs, inputs.board, resolvedSheet(inputs), grid);
+}
+
+fn packageSinkBranchFor(part: PartInput, hs: Heatsink, board: BoardRect, sheet: Sheet, grid: FieldGrid) ?PackageSinkBranch {
+    const face = hs.physical_face orelse return null;
+    if (part.mount.side != face) return null;
+    const part_box = part.mount.box orelse return null;
+    const sink_box = clippedRect(hs.contact orelse return null, board) orelse return null;
+    const contact = intersectionRect(part_box, sink_box) orelse return null;
+    const jc = validNonnegative(part.theta_jc.top) orelse return null;
+    const land = clippedRect(part_box, board) orelse return null;
+    const land_m2 = land.w_mm * land.h_mm * square_mm_to_m2;
+    const rb = (validPositive(junctionToBoard(part)) orelse return null) + transferResistance(part, land_m2, .{
+        .sheet = sheet,
+        .board = board,
+    });
+    const case_area_m2 = contact.w_mm * contact.h_mm * square_mm_to_m2;
+    const rp = jc + padResistance(hs, case_area_m2);
+    if (!(rb > 0) or !std.math.isFinite(rb)) return null;
+    if (rp < 0 or !std.math.isFinite(rp)) return null;
+    const gb = 1.0 / rb;
+    const gp = resistanceConductance(rp);
+    const sum = gb + gp;
+    if (!(sum > 0) or !std.math.isFinite(sum)) return null;
     return .{
-        .spans = boxSpans(grid, contact),
-        .conductance_w_per_k = 1.0 / resistance,
-        .source_fraction = 1.0,
-        .face = face,
+        .spans = boxSpans(grid, land),
+        .board_conductance_w_per_k = gb,
+        .case_conductance_w_per_k = gp,
+        .equivalent_conductance_w_per_k = gb * gp / sum,
+        .board_source_fraction = gb / sum,
+        .sink_source_fraction = gp / sum,
     };
+}
+
+fn intersectionRect(a: BoardRect, b: BoardRect) ?BoardRect {
+    const x0 = @max(a.x_mm, b.x_mm);
+    const y0 = @max(a.y_mm, b.y_mm);
+    const x1 = @min(a.x_mm + a.w_mm, b.x_mm + b.w_mm);
+    const y1 = @min(a.y_mm + a.h_mm, b.y_mm + b.h_mm);
+    if (!(x1 > x0) or !(y1 > y0)) return null;
+    return .{ .x_mm = x0, .y_mm = y0, .w_mm = x1 - x0, .h_mm = y1 - y0 };
+}
+
+fn packageUnderSink(part: PartInput, inputs: Inputs, scenario: Scenario) bool {
+    if (heatsinkInterface(inputs, scenario) != .package_tops) return false;
+    return packagePhysicallyUnderSink(part, inputs.cooling.heatsink);
+}
+
+fn packagePhysicallyUnderSink(part: PartInput, hs: Heatsink) bool {
+    if (part.mount.side != (hs.physical_face orelse return false)) return false;
+    const box = part.mount.box orelse return false;
+    return intersectionRect(box, hs.contact orelse return false) != null;
+}
+
+const PackageContactStats = struct { contacts: usize = 0, missing: usize = 0 };
+
+fn packageContactStats(inputs: Inputs, scenario: Scenario) PackageContactStats {
+    var out = PackageContactStats{};
+    if (heatsinkInterface(inputs, scenario) != .package_tops) return out;
+    const shape = adaptiveGridShape(inputs.board, inputs.parts);
+    const fake = FieldGrid{
+        .cols = shape.cols,
+        .rows = shape.rows,
+        .cell_mm = shape.cell_mm,
+        .origin_x_mm = shape.origin_x_mm,
+        .origin_y_mm = shape.origin_y_mm,
+        .rise_c = &.{},
+    };
+    for (inputs.parts) |part| {
+        if (!(injectedWatts(part) > 0) or !packageUnderSink(part, inputs, scenario)) continue;
+        if (part.theta_jc.top == null) {
+            out.missing += 1;
+            continue;
+        }
+        if (packageSinkBranch(part, inputs, fake, scenario) != null) out.contacts += 1;
+    }
+    return out;
 }
 
 fn validPositive(value: ?f64) ?f64 {
@@ -1380,7 +1566,7 @@ fn buildWork(
     try fillFaces(allocator, &work, grid, inputs, scenario);
     @memset(work.power, 0);
 
-    if (boardHeatsinkEffect(inputs, grid, scenario)) |effect| {
+    if (boardHeatsinkExportEffect(inputs, grid, scenario)) |effect| {
         const sink_share: f64 = @floatFromInt(spanCells(effect.spans));
         sink(&work, effect.spans, effect.conductance_w_per_k / sink_share);
     }
@@ -1415,9 +1601,11 @@ fn buildSolver(
     const scale = try allocator.alloc(f64, n);
     const source = grid.rise_c;
     const to_ambient = try allocator.alloc(f32, n);
+    const to_sink = try allocator.alloc(f32, n);
     const rise = try allocator.alloc(f64, n);
     @memset(stencil, .{});
     @memset(source, 0);
+    @memset(to_sink, 0);
     @memset(rise, 0);
 
     const sheet = resolvedSheet(inputs);
@@ -1432,19 +1620,29 @@ fn buildSolver(
     };
     try fillSolverFaces(allocator, to_ambient, grid, inputs, scenario);
 
-    // A sink changes the diagonal and, for a package-top path, diverts a known
-    // fraction of the source before it reaches the board. Apply conductance
-    // before scale preparation; source is added after the final scale exists.
+    var sink_source: f64 = 0;
+    var sink_to_ambient: f64 = 0;
+    if (boardMountedHeatsink(inputs.cooling.heatsink) and usesHeatsink(scenario))
+        sink_to_ambient = resistanceConductance(sinkToAmbientFor(inputs, scenario));
+
+    // Legacy one-package sinks still reduce to direct ambient conductance.
+    // A drawn plate instead couples board cells to one shared sink node and
+    // injects the package-case share of each contacted part into that node.
     for (inputs.parts) |part| {
         if (part.mount.box == null) continue;
         if (heatsinkEffect(part, inputs, grid, scenario, target)) |effect| {
             const share: f64 = @floatFromInt(spanCells(effect.spans));
             addSolverSink(to_ambient, grid.cols, effect.spans, effect.conductance_w_per_k / share);
         }
+        if (packageSinkBranch(part, inputs, grid, scenario)) |branch| {
+            const share: f64 = @floatFromInt(spanCells(branch.spans));
+            addSolverSink(to_sink, grid.cols, branch.spans, branch.equivalent_conductance_w_per_k / share);
+            sink_source += injectedWatts(part) * branch.sink_source_fraction;
+        }
     }
     if (boardHeatsinkEffect(inputs, grid, scenario)) |effect| {
         const share: f64 = @floatFromInt(spanCells(effect.spans));
-        addSolverSink(to_ambient, grid.cols, effect.spans, effect.conductance_w_per_k / share);
+        addSolverSink(to_sink, grid.cols, effect.spans, effect.conductance_w_per_k / share);
     }
 
     // During these two passes `scale` temporarily holds the sheet conductance.
@@ -1466,7 +1664,7 @@ fn buildSolver(
         var c: usize = 0;
         while (c < grid.cols) : (c += 1) {
             const i = r * grid.cols + c;
-            const diag = @as(f64, to_ambient[i]) +
+            const diag = @as(f64, to_ambient[i]) + @as(f64, to_sink[i]) +
                 (if (c > 0) stencil[i - 1].east else 0) + stencil[i].east +
                 (if (r > 0) stencil[i - grid.cols].south else 0) + stencil[i].south;
             scale[i] = if (diag > 0) omega / diag else 0;
@@ -1476,7 +1674,14 @@ fn buildSolver(
     for (inputs.parts) |part| {
         const box = part.mount.box orelse continue;
         const effect = heatsinkEffect(part, inputs, grid, scenario, target);
-        const watts = injectedWatts(part) * if (effect) |e| e.source_fraction else 1.0;
+        const package_branch = packageSinkBranch(part, inputs, grid, scenario);
+        const source_fraction = if (package_branch) |branch|
+            branch.board_source_fraction
+        else if (effect) |e|
+            e.source_fraction
+        else
+            1.0;
+        const watts = injectedWatts(part) * source_fraction;
         addSolverSource(source, scale, grid, box, watts);
     }
     // Reconstruct the total represented by the quantized source stream. Global
@@ -1487,6 +1692,8 @@ fn buildSolver(
     for (source, scale) |cell_source, cell_scale| {
         if (cell_scale > 0) total_power += @as(f64, cell_source) / cell_scale;
     }
+    const sink_diagonal = sink_to_ambient + sumConductance(to_sink);
+    total_power += sink_source;
     return .{
         .cols = grid.cols,
         .rows = grid.rows,
@@ -1494,7 +1701,12 @@ fn buildSolver(
         .scale = scale,
         .source = source,
         .to_ambient = to_ambient,
+        .to_sink = to_sink,
         .rise = rise,
+        .sink_rise = 0,
+        .sink_source = sink_source,
+        .sink_to_ambient = sink_to_ambient,
+        .sink_diagonal = sink_diagonal,
         .total_power = total_power,
         .omega = omega,
     };
@@ -1541,7 +1753,12 @@ fn buildPackedSolver(
         .scale = scale,
         .source = try allocator.alloc(ScenarioF32, n),
         .to_ambient = try allocator.alloc(ScenarioF32, n),
+        .to_sink = try allocator.alloc(ScenarioF32, n),
         .rise = try allocator.alloc(ScenarioF64, n),
+        .sink_rise = @splat(0),
+        .sink_source = @splat(0),
+        .sink_to_ambient = @splat(0),
+        .sink_diagonal = @splat(0),
         .total_power = @splat(0),
         .omega = relaxationFactor(@max(grid.cols, grid.rows)),
     };
@@ -1575,23 +1792,35 @@ fn configurePackedSolver(
     for (work.to_ambient, grid.active) |*ambient, active| if (active == 0) {
         ambient.* = @splat(0);
     };
+    @memset(work.to_sink, @splat(0));
+    work.sink_rise = @splat(0);
+    work.sink_source = @splat(0);
+    work.sink_to_ambient = @splat(0);
+    work.sink_diagonal = @splat(0);
     if (config.sink_lane) |lane| {
         for (inputs.parts) |part| {
-            const effect = heatsinkEffect(part, inputs, grid, .heatsink, config.target) orelse continue;
-            const share: f64 = @floatFromInt(spanCells(effect.spans));
-            var r = effect.spans[1].lo;
-            while (r <= effect.spans[1].hi) : (r += 1) {
-                var c = effect.spans[0].lo;
-                while (c <= effect.spans[0].hi) : (c += 1) {
-                    const i = r * work.cols + c;
-                    var lanes: [simd_scenarios]f32 = work.to_ambient[i];
-                    lanes[lane] += @floatCast(effect.conductance_w_per_k / share);
-                    work.to_ambient[i] = lanes;
-                }
+            if (heatsinkEffect(part, inputs, grid, .heatsink, config.target)) |effect| {
+                const share: f64 = @floatFromInt(spanCells(effect.spans));
+                addPackedLane(work.to_ambient, work.cols, effect.spans, effect.conductance_w_per_k / share, lane);
+            }
+            if (packageSinkBranch(part, inputs, grid, .heatsink)) |branch| {
+                const share: f64 = @floatFromInt(spanCells(branch.spans));
+                addPackedLane(work.to_sink, work.cols, branch.spans, branch.equivalent_conductance_w_per_k / share, lane);
+                var sink_sources: [simd_scenarios]f64 = work.sink_source;
+                sink_sources[lane] += injectedWatts(part) * branch.sink_source_fraction;
+                work.sink_source = sink_sources;
             }
         }
-        if (boardHeatsinkEffect(inputs, grid, .heatsink)) |effect|
-            addPackedBoardHeatsink(work, grid, inputs, covered, effect, lane);
+        if (boardMountedHeatsink(inputs.cooling.heatsink)) {
+            subtractPackedSinkShield(work, grid, inputs, covered, lane);
+            var sink_ambient: [simd_scenarios]f64 = work.sink_to_ambient;
+            sink_ambient[lane] = resistanceConductance(sinkToAmbientFor(inputs, .heatsink));
+            work.sink_to_ambient = sink_ambient;
+        }
+        if (boardHeatsinkEffect(inputs, grid, .heatsink)) |effect| {
+            const share: f64 = @floatFromInt(spanCells(effect.spans));
+            addPackedLane(work.to_sink, work.cols, effect.spans, effect.conductance_w_per_k / share, lane);
+        }
     }
 
     var r: usize = 0;
@@ -1602,7 +1831,8 @@ fn configurePackedSolver(
             const edge_sum =
                 (if (c > 0) @as(f64, work.stencil[i - 1].east) else 0) + work.stencil[i].east +
                 (if (r > 0) @as(f64, work.stencil[i - work.cols].south) else 0) + work.stencil[i].south;
-            const diag = @as(ScenarioF64, @floatCast(work.to_ambient[i])) + @as(ScenarioF64, @splat(edge_sum));
+            const diag = @as(ScenarioF64, @floatCast(work.to_ambient[i])) +
+                @as(ScenarioF64, @floatCast(work.to_sink[i])) + @as(ScenarioF64, @splat(edge_sum));
             work.scale[i] = if (grid.isActive(c, r)) @as(ScenarioF64, @splat(work.omega)) / diag else @splat(0);
         }
     }
@@ -1613,7 +1843,9 @@ fn configurePackedSolver(
         const box = part.mount.box orelse continue;
         var watts: [simd_scenarios]f64 = @splat(injectedWatts(part));
         if (config.sink_lane) |lane| {
-            if (heatsinkEffect(part, inputs, grid, .heatsink, config.target)) |effect| {
+            if (packageSinkBranch(part, inputs, grid, .heatsink)) |branch| {
+                watts[lane] *= branch.board_source_fraction;
+            } else if (heatsinkEffect(part, inputs, grid, .heatsink, config.target)) |effect| {
                 watts[lane] *= effect.source_fraction;
             }
         }
@@ -1623,30 +1855,46 @@ fn configurePackedSolver(
     for (work.source, work.scale, grid.active) |source, scale, active| {
         if (active != 0) total += @as(ScenarioF64, @floatCast(source)) / scale;
     }
-    work.total_power = total;
+    work.sink_diagonal = work.sink_to_ambient;
+    for (work.to_sink) |coupling| work.sink_diagonal += @as(ScenarioF64, @floatCast(coupling));
+    work.total_power = total + work.sink_source;
 }
 
-fn addPackedBoardHeatsink(
+fn addPackedLane(values: []ScenarioF32, cols: usize, spans: [2]Span, per_cell: f64, lane: usize) void {
+    var r = spans[1].lo;
+    while (r <= spans[1].hi) : (r += 1) {
+        var c = spans[0].lo;
+        while (c <= spans[0].hi) : (c += 1) {
+            const i = r * cols + c;
+            var lanes: [simd_scenarios]f32 = values[i];
+            lanes[lane] += @floatCast(per_cell);
+            values[i] = lanes;
+        }
+    }
+}
+
+fn subtractPackedSinkShield(
     work: *PackedSolver,
     grid: FieldGrid,
     inputs: Inputs,
     covered: []const [2]bool,
-    effect: HeatsinkEffect,
     lane: usize,
 ) void {
+    const hs = inputs.cooling.heatsink;
+    const face_side = hs.physical_face orelse return;
+    const contact = clippedRect(hs.contact orelse return, inputs.board) orelse return;
+    const spans = boxSpans(grid, contact);
     const cell_m = grid.cell_mm * 1.0e-3;
     const cell_area_m2 = cell_m * cell_m;
-    const share: f64 = @floatFromInt(spanCells(effect.spans));
-    const face = @backingInt(effect.face);
-    var r = effect.spans[1].lo;
-    while (r <= effect.spans[1].hi) : (r += 1) {
-        var c = effect.spans[0].lo;
-        while (c <= effect.spans[0].hi) : (c += 1) {
+    const face = @backingInt(face_side);
+    var r = spans[1].lo;
+    while (r <= spans[1].hi) : (r += 1) {
+        var c = spans[0].lo;
+        while (c <= spans[0].hi) : (c += 1) {
             const i = r * work.cols + c;
             var lanes: [simd_scenarios]f32 = work.to_ambient[i];
-            if (boardSinkShieldsCell(inputs, .heatsink, grid, i, effect.face))
+            if (boardSinkShieldsCell(inputs, .heatsink, grid, i, face_side))
                 lanes[lane] -= @floatCast(h_natural * cell_area_m2 * faceFactor(covered[i][face]));
-            lanes[lane] += @floatCast(effect.conductance_w_per_k / share);
             work.to_ambient[i] = lanes;
         }
     }
@@ -1700,6 +1948,21 @@ fn addSolverSink(to_ambient: []f32, cols: usize, spans: [2]Span, per_cell: f64) 
         var c = spans[0].lo;
         while (c <= spans[0].hi) : (c += 1) to_ambient[r * cols + c] += @floatCast(per_cell);
     }
+}
+
+fn resistanceConductance(resistance: f64) f64 {
+    if (!std.math.isFinite(resistance) or resistance < 0) return 0;
+    // A zero-thickness ideal interface is represented by a large but finite
+    // conductance so the iterative system remains well-conditioned and never
+    // admits infinities into its compact f32 coefficient streams.
+    if (resistance == 0) return 1.0e6;
+    return 1.0 / resistance;
+}
+
+fn sumConductance(values: []const f32) f64 {
+    var total: f64 = 0;
+    for (values) |value| total += value;
+    return total;
 }
 
 fn addSolverSource(source: []f32, scale: []const f64, grid: FieldGrid, box: BoardRect, watts: f64) void {
@@ -2051,7 +2314,8 @@ fn sweep(work: *Solver, tolerance: f64) bool {
                 (if (c > 0) @as(f64, work.stencil[i - 1].east) * work.rise[i - 1] else 0) +
                 (if (c + 1 < work.cols) @as(f64, cell.east) * work.rise[i + 1] else 0) +
                 (if (r > 0) @as(f64, work.stencil[i - work.cols].south) * work.rise[i - work.cols] else 0) +
-                (if (r + 1 < work.rows) @as(f64, cell.south) * work.rise[i + work.cols] else 0);
+                (if (r + 1 < work.rows) @as(f64, cell.south) * work.rise[i + work.cols] else 0) +
+                @as(f64, work.to_sink[i]) * work.sink_rise;
             // `delta == scale * residual`, so comparing it with
             // `tolerance * scale` is the same physical stopping test without
             // recovering the diagonal through a division.
@@ -2059,6 +2323,11 @@ fn sweep(work: *Solver, tolerance: f64) bool {
             if (@abs(delta) > tolerance * work.scale[i]) settled = false;
             work.rise[i] += delta;
         }
+    }
+    if (work.sink_diagonal > 0) {
+        var incoming = work.sink_source;
+        for (work.to_sink, work.rise) |g, rise| incoming += @as(f64, g) * rise;
+        work.sink_rise = incoming / work.sink_diagonal;
     }
     return settled;
 }
@@ -2075,10 +2344,16 @@ fn residualSettled(work: *const Solver, tolerance: f64) bool {
                 (if (c > 0) @as(f64, work.stencil[i - 1].east) * work.rise[i - 1] else 0) +
                 (if (c + 1 < work.cols) @as(f64, cell.east) * work.rise[i + 1] else 0) +
                 (if (r > 0) @as(f64, work.stencil[i - work.cols].south) * work.rise[i - work.cols] else 0) +
-                (if (r + 1 < work.rows) @as(f64, cell.south) * work.rise[i + work.cols] else 0);
+                (if (r + 1 < work.rows) @as(f64, cell.south) * work.rise[i + work.cols] else 0) +
+                @as(f64, work.to_sink[i]) * work.sink_rise;
             const delta = @as(f64, work.source[i]) + work.scale[i] * flow - work.omega * work.rise[i];
             if (@abs(delta) > tolerance * work.scale[i]) return false;
         }
+    }
+    if (work.sink_diagonal > 0) {
+        var sink_residual = work.sink_source - work.sink_diagonal * work.sink_rise;
+        for (work.to_sink, work.rise) |g, rise| sink_residual += @as(f64, g) * rise;
+        if (@abs(sink_residual) > tolerance) return false;
     }
     return true;
 }
@@ -2101,11 +2376,14 @@ fn rebalance(work: *Solver) void {
         conductance += g;
         shed += @as(f64, g) * rise;
     }
+    conductance += work.sink_to_ambient;
+    shed += work.sink_to_ambient * work.sink_rise;
     if (conductance <= 0) return;
     const delta = (work.total_power - shed) / conductance;
     for (work.rise, work.scale) |*rise, scale| {
         if (scale > 0) rise.* += delta;
     }
+    if (work.sink_diagonal > 0) work.sink_rise += delta;
 }
 
 /// Relax until the field satisfies its power balance, or until
@@ -2139,12 +2417,17 @@ fn packedSweep(work: *PackedSolver, tolerance: ScenarioF64) bool {
                 (if (c > 0) work.rise[i - 1] * @as(ScenarioF64, @splat(work.stencil[i - 1].east)) else @as(ScenarioF64, @splat(0))) +
                 (if (c + 1 < work.cols) work.rise[i + 1] * @as(ScenarioF64, @splat(cell.east)) else @as(ScenarioF64, @splat(0))) +
                 (if (r > 0) work.rise[i - work.cols] * @as(ScenarioF64, @splat(work.stencil[i - work.cols].south)) else @as(ScenarioF64, @splat(0))) +
-                (if (r + 1 < work.rows) work.rise[i + work.cols] * @as(ScenarioF64, @splat(cell.south)) else @as(ScenarioF64, @splat(0)));
+                (if (r + 1 < work.rows) work.rise[i + work.cols] * @as(ScenarioF64, @splat(cell.south)) else @as(ScenarioF64, @splat(0))) +
+                @as(ScenarioF64, @floatCast(work.to_sink[i])) * work.sink_rise;
             const delta = @as(ScenarioF64, @floatCast(work.source[i])) + work.scale[i] * flow - omega * work.rise[i];
             if (@reduce(.Or, @abs(delta) > tolerance * work.scale[i])) settled = false;
             work.rise[i] += delta;
         }
     }
+    const sink_live = work.sink_diagonal > @as(ScenarioF64, @splat(0));
+    var incoming = work.sink_source;
+    for (work.to_sink, work.rise) |g, rise| incoming += @as(ScenarioF64, @floatCast(g)) * rise;
+    work.sink_rise = @select(f64, sink_live, incoming / work.sink_diagonal, @as(ScenarioF64, @splat(0)));
     return settled;
 }
 
@@ -2160,11 +2443,15 @@ fn packedResidualSettled(work: *const PackedSolver, tolerance: ScenarioF64) bool
                 (if (c > 0) work.rise[i - 1] * @as(ScenarioF64, @splat(work.stencil[i - 1].east)) else @as(ScenarioF64, @splat(0))) +
                 (if (c + 1 < work.cols) work.rise[i + 1] * @as(ScenarioF64, @splat(cell.east)) else @as(ScenarioF64, @splat(0))) +
                 (if (r > 0) work.rise[i - work.cols] * @as(ScenarioF64, @splat(work.stencil[i - work.cols].south)) else @as(ScenarioF64, @splat(0))) +
-                (if (r + 1 < work.rows) work.rise[i + work.cols] * @as(ScenarioF64, @splat(cell.south)) else @as(ScenarioF64, @splat(0)));
+                (if (r + 1 < work.rows) work.rise[i + work.cols] * @as(ScenarioF64, @splat(cell.south)) else @as(ScenarioF64, @splat(0))) +
+                @as(ScenarioF64, @floatCast(work.to_sink[i])) * work.sink_rise;
             const delta = @as(ScenarioF64, @floatCast(work.source[i])) + work.scale[i] * flow - omega * work.rise[i];
             if (@reduce(.Or, @abs(delta) > tolerance * work.scale[i])) return false;
         }
     }
+    var sink_residual = work.sink_source - work.sink_diagonal * work.sink_rise;
+    for (work.to_sink, work.rise) |g, rise| sink_residual += @as(ScenarioF64, @floatCast(g)) * rise;
+    if (@reduce(.Or, @abs(sink_residual) > tolerance)) return false;
     return true;
 }
 
@@ -2176,11 +2463,14 @@ fn packedRebalance(work: *PackedSolver) void {
         conductance += g;
         shed += g * rise;
     }
+    conductance += work.sink_to_ambient;
+    shed += work.sink_to_ambient * work.sink_rise;
     const positive = conductance > @as(ScenarioF64, @splat(0));
     const delta = @select(f64, positive, (work.total_power - shed) / conductance, @as(ScenarioF64, @splat(0)));
     for (work.rise, work.scale) |*rise, scale| {
         if (scale[0] > 0) rise.* += delta;
     }
+    work.sink_rise += @select(f64, work.sink_diagonal > @as(ScenarioF64, @splat(0)), delta, @as(ScenarioF64, @splat(0)));
 }
 
 fn solvePacked(work: *PackedSolver) bool {
@@ -2207,6 +2497,8 @@ const PartScenario = struct {
     scenario: Scenario,
     target: ?[]const u8,
     heatsink: Heatsink,
+    sink_rise: f64 = 0,
+    interface: HeatsinkInterface = .none,
 };
 
 fn partRows(
@@ -2257,6 +2549,28 @@ fn partField(
         .board_rise_c = board_rise,
         .theta_transfer_c_per_w = transferResistance(part, land_m2, transfer),
     };
+    if (context.interface == .package_tops and packagePhysicallyUnderSink(part, context.heatsink)) {
+        if (packageSinkBranchFor(part, context.heatsink, transfer.board, transfer.sheet, grid)) |branch| {
+            const sum = branch.board_conductance_w_per_k + branch.case_conductance_w_per_k;
+            row.jb_estimated = part.theta_jb == null;
+            row.junction_path = .package_top;
+            row.tj_rise_c = (injectedWatts(part) + branch.board_conductance_w_per_k * board_rise +
+                branch.case_conductance_w_per_k * context.sink_rise) / sum;
+            if (part.tj_max) |tj| row.max_ambient_c = tj - row.tj_rise_c.?;
+            return row;
+        }
+        if (part.theta_jc.top == null) row.junction_path = .package_top_missing;
+    }
+    if (context.interface == .board_face and part.mount.side == opposite(context.heatsink.physical_face orelse part.mount.side)) {
+        if (intersectionRect(part.mount.box orelse transfer.board, context.heatsink.contact orelse transfer.board) != null) {
+            const package_r = validNonnegative(part.theta_jc.bottom) orelse junctionToBoard(part) orelse return row;
+            row.jb_estimated = part.theta_jc.bottom == null and part.theta_jb == null;
+            row.junction_path = .package_bottom;
+            row.tj_rise_c = board_rise + injectedWatts(part) * (package_r + row.theta_transfer_c_per_w);
+            if (part.tj_max) |tj| row.max_ambient_c = tj - row.tj_rise_c.?;
+            return row;
+        }
+    }
     if (isTarget(context.scenario, context.target, part.ref_des) and context.heatsink.side == .package_top) {
         const jb = validPositive(junctionToBoard(part)) orelse return row;
         const jc = validNonnegative(part.theta_jc.top) orelse return row;
@@ -2460,6 +2774,12 @@ fn expectSymmetricAbout(grid: FieldGrid, col: usize, row: usize, reach: usize) !
     }
 }
 
+fn extractedPower(work: *const Solver) f64 {
+    var extracted = work.sink_to_ambient * work.sink_rise;
+    for (work.to_ambient, work.rise) |g, rise| extracted += g * rise;
+    return extracted;
+}
+
 // spec: placement/thermal_field - every watt injected leaves through the cells' faces and any heatsink, so the solved field balances the board's power to within a tenth of a percent
 test "the solved field conserves the injected power" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2479,13 +2799,22 @@ test "the solved field conserves the injected power" {
         try testing.expect(solveWork(&work));
 
         const injected = work.total_power;
-        var extracted: f64 = 0;
-        for (work.to_ambient, work.rise) |g, rise| extracted += g * rise;
-        try testing.expectApproxEqRel(injected, extracted, 1e-3);
+        try testing.expectApproxEqRel(injected, extractedPower(&work), 1e-3);
         // Source shares the public f32 output storage until the solve finishes;
         // its represented total stays within that field's precision.
         try testing.expectApproxEqAbs(@as(f64, 1.9), injected, 1e-6);
     }
+
+    var shared_inputs = Inputs{ .board = test_board, .parts = &parts };
+    shared_inputs.cooling.heatsink = .{
+        .physical_face = .top,
+        .contact = test_board,
+        .theta_sa_c_per_w = 4,
+    };
+    var shared = try buildSolver(arena, grid, shared_inputs, .heatsink, null);
+    try testing.expect(solveWork(&shared));
+    try testing.expectApproxEqRel(shared.total_power, extractedPower(&shared), 1e-3);
+    try testing.expectApproxEqAbs(@as(f64, 1.9), shared.total_power, 1e-6);
 }
 
 test "heatsink side selects the package path pad resistance and FEM face" {
@@ -2577,7 +2906,7 @@ test "drawn heatsink geometry drives resistance and exact contact" {
     try testing.expect(model.bottom_face_h_w_m2k[contact_i] > model.top_face_h_w_m2k[contact_i]);
 }
 
-// spec: placement/thermal_field - a PCB-mounted heatsink needs no component target and couples its passive path once across every active board cell beneath its exact contact rectangle
+// spec: placement/thermal_field - a PCB-mounted heatsink needs no component target, couples a bare-face pad to one shared sink node, and reports the directional package-bottom junction path beneath that contact
 test "board-mounted heatsink cools through its footprint without a target" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -2604,13 +2933,76 @@ test "board-mounted heatsink cools through its footprint without a target" {
     try testing.expectEqual(Side.bottom, sunk.cooling.heatsink.face.?);
     try testing.expect(sunk.parts[0].tj_rise_c.? < still.parts[0].tj_rise_c.?);
     try testing.expect(sunk.parts[1].tj_rise_c.? < still.parts[1].tj_rise_c.?);
-    try testing.expectEqual(JunctionPath.board, sunk.parts[0].junction_path);
-    try testing.expectEqual(JunctionPath.board, sunk.parts[1].junction_path);
+    try testing.expectEqual(HeatsinkInterface.board_face, sunk.cooling.heatsink.interface);
+    try testing.expect(sunk.cooling.heatsink.rise_c.? > 0);
+    try testing.expectEqual(JunctionPath.package_bottom, sunk.parts[0].junction_path);
+    try testing.expectEqual(JunctionPath.package_bottom, sunk.parts[1].junction_path);
 
     const model = try discretize(arena, inputs, .heatsink);
     for (model.top_face_h_w_m2k, model.bottom_face_h_w_m2k, model.active) |top_h, bottom_h, active| {
         if (active != 0) try testing.expect(bottom_h > top_h);
     }
+}
+
+// spec: placement/thermal_field - flipping a shared drawn heatsink from an unobstructed PCB backside to a populated face changes it into a package-lid network: every usable lid crosses declared theta-JC-top, missing directional data receives no direct credit, and theta-SA is applied once to the common plate
+test "drawn top plate uses directional case paths and differs from backside PCB contact" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const parts = [_]PartInput{
+        .{
+            .ref_des = "U_CASE",
+            .watts = 2,
+            .theta_jb = 5,
+            .theta_jc = .{ .top = 20, .bottom = 1 },
+            .tj_max = 125,
+            .mount = mountSquare(9, 10, 4),
+        },
+        .{
+            .ref_des = "U_MISSING",
+            .watts = 1,
+            .theta_jb = 6,
+            .theta_jc = .{ .bottom = 2 },
+            .tj_max = 125,
+            .mount = mountSquare(20, 10, 4),
+        },
+    };
+    var inputs = Inputs{
+        .board = .{ .x_mm = 0, .y_mm = 0, .w_mm = 30, .h_mm = 20 },
+        .parts = &parts,
+        .cooling = .{ .heatsink = .{
+            .physical_face = .bottom,
+            .geometry = .{ .width_mm = 30, .length_mm = 20 },
+            .theta_sa_c_per_w = 4,
+            .contact = .{ .x_mm = 0, .y_mm = 0, .w_mm = 30, .h_mm = 20 },
+        } },
+    };
+
+    const backside = try solveScenario(arena, inputs, .heatsink);
+    try testing.expectEqual(HeatsinkInterface.board_face, backside.cooling.heatsink.interface);
+    try testing.expectEqual(HeatsinkSide.board_backside, backside.cooling.heatsink.side.?);
+    try testing.expectEqual(JunctionPath.package_bottom, backside.parts[0].junction_path);
+    try testing.expectEqual(JunctionPath.package_bottom, backside.parts[1].junction_path);
+
+    inputs.cooling.heatsink.physical_face = .top;
+    const top = try solveScenario(arena, inputs, .heatsink);
+    try testing.expectEqual(HeatsinkInterface.package_tops, top.cooling.heatsink.interface);
+    try testing.expectEqual(HeatsinkSide.package_top, top.cooling.heatsink.side.?);
+    try testing.expectEqual(@as(usize, 1), top.cooling.heatsink.package_contacts);
+    try testing.expectEqual(@as(usize, 1), top.cooling.heatsink.missing_theta_jc_top);
+    try testing.expectEqual(JunctionPath.package_top, top.parts[0].junction_path);
+    try testing.expectEqual(JunctionPath.package_top_missing, top.parts[1].junction_path);
+    try testing.expect(top.parts[0].tj_rise_c.? > backside.parts[0].tj_rise_c.?);
+    try testing.expect(@abs(top.hotspot.rise_c - backside.hotspot.rise_c) > 0.1);
+    try testing.expect(top.cooling.heatsink.rise_c.? > 0);
+
+    const ladder = try solveScenarios(arena, inputs);
+    try testing.expectEqual(Scenario.heatsink, ladder[3].scenario);
+    try testing.expectApproxEqAbs(top.hotspot.rise_c, ladder[3].hotspot.rise_c, 1e-3);
+    try testing.expectApproxEqAbs(top.cooling.heatsink.rise_c.?, ladder[3].cooling.heatsink.rise_c.?, 1e-3);
+    try testing.expectEqual(JunctionPath.package_top, ladder[3].parts[0].junction_path);
+    try testing.expectEqual(JunctionPath.package_top_missing, ladder[3].parts[1].junction_path);
 }
 
 // spec: placement/thermal_field - a single centered source is hottest at the source, decays monotonically along a ray to the edge, and is symmetric about the board centre
@@ -3275,7 +3667,7 @@ test "packed scenario storage is smaller than four scalar solver states" {
     try testing.expect(packed_ladder_per_cell < old_ladder_per_cell);
 }
 
-// spec: placement/thermal_field - the exported FEM coefficients conserve component power and reproduce the built-in sheet and two-face still-air conductances cell for cell
+// spec: placement/thermal_field - without a shared drawn plate, the exported FEM coefficients conserve component power and reproduce the built-in sheet and two-face still-air conductances cell for cell
 test "the FEM discretization conserves the built in cell coefficients" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
