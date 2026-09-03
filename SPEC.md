@@ -3506,6 +3506,11 @@ Public functions: analyze, classifyNetName, isInductor
 - a net whose canonical copper topology is a single island never solves disconnected
 - copper the canonical policy leaves open stays two islands, so a genuinely broken rail is still reported
 - a pour component joins the traces whose copper covers its contact points, not only traces whose centreline passes exactly through them
+- every pad of every part on a rail conducts, so two tracks that meet only on one pad are one island in the current solve exactly as they are in DRC topology
+- a pad credits only copper whose full cross-section sits on its land, so a trace that stops short of the pad stays open
+- a track and a via that meet only through a pad conduct through it, so a rail's layer jump on a land is not an open
+- the sheet contact map credits every pad geometry, so a pin's plated pad-vias carry the rail into an inner plane even when its outer land does not
+- a source terminal whose sub-block carries no hub pad on the rail resolves the discrete pads the current physically enters through
 - a junction naming a barrel enters it through the barrel's own spoke, so the transition's current flows through the plating instead of around it
 - one shared current solve answers the track-width and via-current rules with exactly the arrays the two per-rule entry points return
 - a net declaring no current is answered no-current without building a copper graph or rastering its sheet contacts
@@ -5423,6 +5428,7 @@ Public functions: analyze
 - a parent board reads a module's rating through its sub-block port, and the highest declared capacity wins a rail whichever way it was declared
 - a sub-block input power port's declared current is reported as a branch load for series sizing and never enters the rail's summed budget
 - a rail an internally sourced board re-exports draws its declared output current as a load at a physical exit terminal, never as a second injection point
+- a rail whose top-level pass-through pin already declares the current it exports is credited once, at that physical pad, not a second time at its @export terminal
 
 ## eval/thermal
 

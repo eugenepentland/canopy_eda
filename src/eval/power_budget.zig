@@ -208,6 +208,13 @@ fn creditExportedRails(
         const root = na.findRoot(net_parent, base);
         const injects = source_terminals.get(root);
         if (injects == null or injects.?.items.len == 0) continue;
+        // The connector pin the rail leaves through may already declare that
+        // same current: `(pin 7 "V_5V75A" (i-typ 0.145) (i-max 0.180))` on J1
+        // IS this port's export, and it has a physical pad the current solve
+        // can place. Crediting the port as well counted the rail's exit twice
+        // — barracuda's V_5V75A demanded 0.641 A typical where the board draws
+        // 0.496 A — and the phantom half had no pad of its own.
+        if (passThroughLoadOn(tally, root)) continue;
         const path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ export_terminal_prefix, port.name });
         var load = tally.loads.get(root) orelse RailLoad{ .first_name = base };
         const key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ path, root });
@@ -237,6 +244,25 @@ fn creditExportedRails(
         }
         try tally.loads.put(allocator, root, load);
     }
+}
+
+/// Does rail `root` already carry an annotated consumer on a TOP-LEVEL
+/// pass-through part? That row is the board's exit for the rail — a connector,
+/// test-point or mounting pin whose declared current is what leaves — and it
+/// carries a real pad, so `creditExportedRails` must not add a second, padless
+/// copy of the same amperes at an `@export/` terminal.
+///
+/// Top-level only: a row named `mod/J3` is a connector INSIDE a module and says
+/// nothing about where this board's rail leaves.
+fn passThroughLoadOn(tally: *const LoadTally, root: []const u8) bool {
+    var it = tally.groups.valueIterator();
+    while (it.next()) |group| {
+        if (!std.mem.eql(u8, group.root, root)) continue;
+        if (!group.any_typ and !group.any_max) continue;
+        if (std.mem.indexOfScalar(u8, group.ref_des, '/') != null) continue;
+        if (isPassThroughRef(group.ref_des)) return true;
+    }
+    return false;
 }
 
 /// Record `incoming` as `root`'s source unless a stronger one already holds it.
@@ -1587,4 +1613,52 @@ test "a re-exported rail draws its declared output current at a board exit termi
     try testing.expectEqual(@as(?f64, 0.4), exported.i_typ);
     try testing.expectEqual(@as(?f64, 0.5), exported.i_max);
     try testing.expectEqualStrings("V3P3", exported.net);
+}
+
+// spec: eval/power_budget - a rail whose top-level pass-through pin already declares the current it exports is credited once, at that physical pad, not a second time at its @export terminal
+test "an annotated connector pin is the export load, not a second one" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var block = try siblingChainBlock(alloc);
+    const ports = try alloc.alloc(env_mod.Port, block.ports.len + 1);
+    @memcpy(ports[0..block.ports.len], block.ports);
+    ports[block.ports.len] = .{
+        .name = "V3P3_OUT",
+        .net = "V3P3",
+        .direction = "out",
+        .kind = "power",
+        .current_typ = 0.4,
+        .current_max = 0.5,
+    };
+    block.ports = ports;
+
+    // Rated port alone: the exit has no pad of its own, so the synthetic
+    // `@export/` terminal is the only place those amperes leave.
+    const port_only = railNamed(try analyze(alloc, &block), "V3P3").?;
+    try testing.expect(consumerNamed(port_only.consumers, "@export/V3P3_OUT") != null);
+
+    // Now the connector the rail actually leaves through declares the SAME
+    // current on its own pin. That row has a pad; the port's copy does not.
+    const nets = try alloc.dupe(env_mod.Net, block.nets);
+    for (nets) |*net| {
+        if (!std.mem.eql(u8, net.name, "V3P3")) continue;
+        net.pins = try alloc.dupe(env_mod.PinRef, &.{
+            .{ .ref_des = "TP1", .pin = "1" },
+            .{ .ref_des = "J1", .pin = "7", .i_typ = 0.4, .i_max = 0.5 },
+        });
+    }
+    block.nets = nets;
+    block.instances = try alloc.dupe(env_mod.Instance, &.{ namedPart("TP1", "testpoint"), namedPart("J1", "header") });
+    const with_pin = railNamed(try analyze(alloc, &block), "V3P3").?;
+
+    try testing.expect(consumerNamed(with_pin.consumers, "@export/V3P3_OUT") == null);
+    const connector = consumerNamed(with_pin.consumers, "J1").?;
+    try testing.expectEqual(@as(?f64, 0.4), connector.i_typ);
+    try testing.expectEqual(@as(?f64, 0.5), connector.i_max);
+    // One export, counted once: the rail's total is the port-only total, not
+    // that total plus the connector pin.
+    try testing.expectApproxEqAbs(port_only.load_typ_a, with_pin.load_typ_a, 1e-12);
+    try testing.expectApproxEqAbs(port_only.load_max_a, with_pin.load_max_a, 1e-12);
 }
