@@ -102,7 +102,8 @@ button { color: inherit; }
   cursor:pointer;
 }
 .tp-face button:first-of-type { border-radius:6px 0 0 6px; }
-.tp-face button:last-child { margin-left:-5px;border-radius:0 6px 6px 0; }
+.tp-face button + button { margin-left:-5px; }
+.tp-face button:last-child { border-radius:0 6px 6px 0; }
 .tp-face button.on { position:relative;border-color:var(--accent);background:#223049;color:var(--text); }
 .tp-legend { display: flex; align-items: center; gap: 7px; }
 /* The stops render_thermal_png.zig paints and pcb_thermal.js rebuilds — one
@@ -178,11 +179,11 @@ button { color: inherit; }
 }
 .tp-seg-btn:hover { color: var(--text); }
 .tp-seg-btn.on { background: #223049; border-color: var(--accent); color: var(--text); }
-.tp-amb { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.tp-amb { display: flex; align-items: center; gap: 5px; color: var(--muted); white-space: nowrap; }
 .tp-amb input {
-  width: 84px;
-  min-height: 32px;
-  padding: 3px 7px;
+  width: 68px;
+  min-height: 28px;
+  padding: 2px 5px;
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -206,7 +207,6 @@ button { color: inherit; }
 /* Said out loud, never silently: the page fell back to the default board. */
 .tp-miss { width: 100%; color: var(--warn); font-size: 12.5px; overflow-wrap: anywhere; }
 .tp-tools { display: flex; gap: 8px; margin-left: auto; }
-.tp-amb { margin-right: auto; }
 .tp-tool {
   display: inline-flex;
   align-items: center;
@@ -309,8 +309,8 @@ button { color: inherit; }
   .tp-controls { flex-direction:column;align-items:stretch;gap:10px; }
   .tp-seg { flex-direction:column; }
   .tp-seg-btn { min-height:44px; }
-  .tp-amb { justify-content:space-between; }
-  .tp-amb input { flex:1;min-height:44px;font-size:16px; }
+  .tp-controls > .tp-amb { justify-content:space-between; }
+  .tp-controls > .tp-amb input { flex:1;min-height:44px;font-size:16px; }
   .tp-tools { margin-left:0; }
   .tp-tool { flex:1;justify-content:center;min-height:44px; }
   .tp-table th, .tp-table td { padding:9px 8px; }

@@ -948,6 +948,7 @@ pub fn renderLayoutPage(
         .read_only = embed and !edit_embed,
         .embed = embed,
         .model_sprites = model_sprites,
+        .model_data = thermal_overlay,
         .thermal_overlay = thermal_overlay,
         .assembly_review = physical_review and !thermal_overlay,
         .analysis_deferred = defer_analysis,
@@ -1051,9 +1052,10 @@ pub fn renderLayoutPage(
     }
     if (showEmbedLegend(embed, edit_embed, physical_review)) try writeLegend(w, placement, false);
     try writeStage(w, view, embed);
-    // WebGL 3D-view stage — hidden until the "3D View" tab is opened, then the
-    // body gets `.mode-3d` (CSS swaps the SVG out for this). Built lazily.
-    if (!embed) try w.writeAll(pcb_3d_stage_html);
+    // WebGL 3D-view stage — hidden until the "3D View" tab (or the thermal
+    // parent's "3D setup" button) opens it, then `.mode-3d` swaps out the SVG.
+    // Ordinary embeds remain lean; the thermal embed alone exposes this stage.
+    if (!embed or thermal_overlay) try w.writeAll(pcb_3d_stage_html);
     if (!embed) try w.writeAll(courtyard_modal ++ cooling_modals ++ fp_card_modal ++ fab_modal);
     try w.writeAll("</main>");
     try writeRightDock(w, ctx.allocator, embed, edit_embed, .{ .panel = .{ .name = name, .sub = sub }, .layouts = layouts, .auto = auto_score, .placement = placement });
@@ -1077,6 +1079,7 @@ pub fn renderLayoutPage(
         .model_sprites = model_sprites,
         .thermal_overlay = thermal_overlay,
         .embed = embed,
+        .embedded_3d = thermal_overlay,
     });
     try w.writeAll("</body></html>");
 
@@ -1107,6 +1110,7 @@ const PageScripts = struct {
     model_sprites: bool,
     thermal_overlay: bool,
     embed: bool,
+    embedded_3d: bool = false,
 };
 
 /// Emit only the clients the selected surface can execute. Assembly is
@@ -1129,7 +1133,7 @@ fn writePageScripts(w: *std.Io.Writer, mode: PageScripts) std.Io.Writer.Error!vo
         "<script src=\"/static/pcb_stuck.js\"></script>");
     if (mode.model_sprites) try w.writeAll("<script src=\"/static/pcb_model_sprites.js\"></script>");
     if (mode.thermal_overlay) try w.writeAll("<script src=\"/static/pcb_thermal.js\"></script>");
-    if (!mode.embed) try w.writeAll(pcb_3d_toggle_js);
+    if (!mode.embed or mode.embedded_3d) try w.writeAll(pcb_3d_toggle_js);
 }
 
 /// Resolve `name` to a renderable design block. Preference: a design source
@@ -8983,6 +8987,9 @@ const PcbDataOpts = struct {
     /// Resolve STEP metadata for an assembly/debug embed and let the browser
     /// progressively rasterize it; ordinary embeds deliberately leave it off.
     model_sprites: bool = false,
+    /// Resolve STEP metadata for an embedded 3D scene without enabling the 2D
+    /// model-sprite client. Used by Thermal's on-demand physical setup view.
+    model_data: bool = false,
     /// Thermal's exclusive overlay needs board/part geometry, not editor-only
     /// layout history, stamping seeds, source metadata, or fabrication text.
     thermal_overlay: bool = false,
@@ -9468,10 +9475,11 @@ fn writePcbData(
     try writePayloadAnalysis(w, alloc, p, routed, opts);
 
     // Per-footprint STEP-model references (URL + KiCad offset/rotation) for the
-    // 3D-view tab or assembly's persistent sprite cache. Ordinary embedded previews
-    // have neither and skip the filesystem-scanning model resolution entirely.
+    // 3D-view tab, thermal setup, or assembly's persistent sprite cache.
+    // Ordinary embedded previews have none and skip filesystem model lookup.
     try w.writeAll(",\"models\":");
-    if (opts.embed and !opts.model_sprites) try w.writeAll("{}") else try writeModelsJson(w, alloc, project_dir, p.instances);
+    const skip_models = opts.embed and !(opts.model_sprites or opts.model_data);
+    if (skip_models) try w.writeAll("{}") else try writeModelsJson(w, alloc, project_dir, p.instances);
     try writeCamFields(w, name, opts);
     try w.writeAll("};</script>");
 }
@@ -10290,6 +10298,9 @@ const embed_css =
     \\body.embed .pcb-canvas-host{border-radius:6px}
     \\body.embed:not(.embed-edit) .part{cursor:default}
     \\body.embed-edit .part{cursor:grab}
+    \\body.embed.mode-3d .pcb-layout{height:100vh;min-height:0}
+    \\body.embed.mode-3d .pcb-main{height:100%}
+    \\body.embed.mode-3d .pcb-3d-stage{min-height:0}
 ;
 
 /// The (hidden) WebGL stage for the 3D-view tab: a canvas, a status overlay,
@@ -10312,6 +10323,7 @@ const pcb_3d_stage_html =
     \\<label><input type="checkbox" id="pcb3d-t-surface" checked>Surfaces</label>
     \\<label><input type="checkbox" id="pcb3d-t-board" checked>Board</label>
     \\<label title="Uncheck to hide and exclude the heatsink from STEP export"><input type="checkbox" id="pcb3d-t-heatsink" checked>Heatsink</label>
+    \\<label><input type="checkbox" id="pcb3d-t-fan" checked>Fan</label>
     \\<label><input type="checkbox" id="pcb3d-t-axes" checked>Axes</label>
     \\</div></div>
 ;
@@ -10324,7 +10336,6 @@ const pcb_3d_stage_html =
 const pcb_3d_toggle_js =
     \\<script>(function(){
     \\var tab3d=document.getElementById("pcb-tab-3d"),tab2d=document.getElementById("pcb-tab-2d");
-    \\if(!tab3d||!tab2d)return;
     \\var loaded=false,loading=null;
     \\function loadScript(src){return new Promise(function(res,rej){
     \\ var s=document.createElement("script");s.src=src;s.onload=res;
@@ -10338,11 +10349,12 @@ const pcb_3d_toggle_js =
     \\ loading=seq.then(function(){loaded=true;});
     \\ return loading;}
     \\function setViewQuery(mode){try{var u=new URL(location.href);
+    \\ if(document.body.classList.contains("embed"))return;
     \\ if(mode)u.searchParams.set("view",mode);else u.searchParams.delete("view");
     \\ history.replaceState(null,"",u.pathname+(u.searchParams.toString()?"?"+u.searchParams.toString():"")+u.hash);}catch(e){}}
     \\function show3d(){
     \\ document.body.classList.add("mode-3d");
-    \\ tab3d.classList.add("active");tab2d.classList.remove("active");
+    \\ if(tab3d)tab3d.classList.add("active");if(tab2d)tab2d.classList.remove("active");
     \\ setViewQuery("3d");
     \\ ensure().then(function(){
     \\  if(window.PCB3D){window.PCB3D.init();
@@ -10352,9 +10364,13 @@ const pcb_3d_toggle_js =
     \\  if(st){st.textContent="3D assets failed to load";st.className="err";}});}
     \\function show2d(){
     \\ document.body.classList.remove("mode-3d");
-    \\ tab2d.classList.add("active");tab3d.classList.remove("active");setViewQuery("");}
-    \\tab3d.addEventListener("click",function(e){e.preventDefault();show3d();});
-    \\tab2d.addEventListener("click",function(e){
+    \\ if(tab2d)tab2d.classList.add("active");if(tab3d)tab3d.classList.remove("active");setViewQuery("");}
+    \\window.PCB3DView={show3d:show3d,show2d:show2d};
+    \\window.addEventListener("message",function(ev){var d=ev.data;
+    \\ if(ev.origin!==window.location.origin||!d||d.type!=="netlisp-pcb-view")return;
+    \\ if(d.view==="3d")show3d();else show2d();});
+    \\if(tab3d)tab3d.addEventListener("click",function(e){e.preventDefault();show3d();});
+    \\if(tab2d)tab2d.addEventListener("click",function(e){
     \\ if(document.body.classList.contains("mode-3d")){e.preventDefault();show2d();}});
     \\try{if(new URLSearchParams(location.search).get("view")==="3d")show3d();}catch(e){}
     \\})();</script>
@@ -13652,6 +13668,7 @@ test "PCB header links board designs to assembly and keeps modules scoped" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-export-artwork\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-t-surface\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-t-heatsink\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-t-fan\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, @embedFile("assets/pcb_board.js"), "function hsModalOpen(rect)") != null);
     try std.testing.expect(std.mem.indexOf(u8, cooling_modals, "id=\"hs-fin-count\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, cooling_modals, "id=\"hs-shape\"") != null);
@@ -13669,8 +13686,12 @@ test "PCB header links board designs to assembly and keeps modules scoped" {
     try std.testing.expect(std.mem.indexOf(u8, board_js, "function fanDragMove(m)") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "fanModalOpen(PCB.fan)") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "fan:savedFan") != null);
-    try std.testing.expect(std.mem.indexOf(u8, @embedFile("assets/pcb_3d_viewer.js"), "function rebuildHeatsink()") != null);
-    try std.testing.expect(std.mem.indexOf(u8, @embedFile("assets/pcb_3d_viewer.js"), "s.shape === \"stepped\"") != null);
+    const viewer_js = @embedFile("assets/pcb_3d_viewer.js");
+    try std.testing.expect(std.mem.indexOf(u8, viewer_js, "function rebuildHeatsink()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, viewer_js, "s.shape === \"stepped\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, viewer_js, "function rebuildFan()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, viewer_js, "f.distance_mm") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_3d_toggle_js, "netlisp-pcb-view") != null);
     const surface_asset = std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_3d_surface.js") orelse return error.TestUnexpectedResult;
     const step_export_asset = std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_step_export.js") orelse return error.TestUnexpectedResult;
     const viewer_asset = std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_3d_viewer.js") orelse return error.TestUnexpectedResult;

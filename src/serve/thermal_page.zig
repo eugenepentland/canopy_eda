@@ -446,7 +446,9 @@ fn writeHint(w: *std.Io.Writer, lead: []const u8, text: []const u8) std.Io.Write
 }
 
 /// The controls row: the cooling-scenario segmented picker (only where there IS
-/// a ladder to pick from), the ambient spinner, and the two read-only exports.
+/// a ladder to pick from), and the two read-only exports. The ambient spinner
+/// lives beside the temperature scale when there is a board field; only the
+/// no-field fallback keeps it here, because that page has no board toolbar.
 /// Deliberately OUTSIDE the swapped regions — replacing the number the reader is
 /// typing into would fight them for the caret.
 fn writeControls(w: *std.Io.Writer, alloc: std.mem.Allocator, v: View) RenderError!void {
@@ -467,12 +469,7 @@ fn writeControls(w: *std.Io.Writer, alloc: std.mem.Allocator, v: View) RenderErr
         }
         try w.writeAll("</div>");
     }
-    try w.print(
-        "<label class=\"tp-amb\">Ambient <input id=\"tp-ambient\" type=\"number\" inputmode=\"numeric\" " ++
-            "value=\"{d}\" min=\"{d}\" max=\"{d}\" step=\"1\"> °C</label>",
-        .{ v.ambient_c, ambient_min_c, ambient_max_c },
-    );
-    try w.writeAll("<span class=\"tp-status\" id=\"tp-status\" role=\"status\" hidden></span>");
+    if (v.scenarios.ladder == null) try writeAmbientControl(w, v);
     try w.writeAll("<span class=\"tp-tools\"><a class=\"tp-tool\" href=\"/api/schematic-pdf/");
     try writeUrlEncoded(w, v.name);
     try w.writeAll("\" download title=\"Download the design-review document\">⤓ PDF</a>");
@@ -482,6 +479,15 @@ fn writeControls(w: *std.Io.Writer, alloc: std.mem.Allocator, v: View) RenderErr
     try writeLayoutParam(w, v, false);
     try w.writeAll("\" title=\"The same screening as read-only facts JSON\">{ } JSON</a></span>");
     try w.writeAll("</section>");
+}
+
+fn writeAmbientControl(w: *std.Io.Writer, v: View) std.Io.Writer.Error!void {
+    try w.print(
+        "<label class=\"tp-amb\">Ambient <input id=\"tp-ambient\" type=\"number\" inputmode=\"numeric\" " ++
+            "value=\"{d}\" min=\"{d}\" max=\"{d}\" step=\"1\" aria-label=\"Ambient temperature\"> °C</label>",
+        .{ v.ambient_c, ambient_min_c, ambient_max_c },
+    );
+    try w.writeAll("<span class=\"tp-status\" id=\"tp-status\" role=\"status\" hidden></span>");
 }
 
 /// The board picker: which saved layout this page is screening.
@@ -540,7 +546,7 @@ fn writeBoardPane(w: *std.Io.Writer, v: View) std.Io.Writer.Error!void {
         try w.writeAll("</p></div></section>");
         return;
     }
-    try writeBoardLegend(w);
+    try writeBoardLegend(w, v);
     try w.writeAll("<div class=\"tp-board-stage\" id=\"tp-board-stage\">");
     try w.writeAll("<iframe id=\"tp-frame\" title=\"Heat field over the board\" src=\"/pcb-layout/");
     try writeUrlEncoded(w, v.name);
@@ -556,23 +562,25 @@ fn writeBoardPane(w: *std.Io.Writer, v: View) std.Io.Writer.Error!void {
     try w.writeAll("</div></section>");
 }
 
-/// The board controls strip: the colour ramp, its editable absolute endpoints,
-/// the hotspot readout, and the two switches that only change what is DRAWN
-/// (range, label chips, wash opacity) and so never cost a solve.
+/// The board controls strip: 2D faces plus the physical 3D test setup, the
+/// colour ramp and ambient, the hotspot readout, and the two switches that only
+/// change what is DRAWN (range, label chips, wash opacity).
 ///
 /// The scale starts at 25–125 °C. Its client keeps a valid manual range in the
 /// URL and sends it to the overlay, which recolours its cached field in place.
-fn writeBoardLegend(w: *std.Io.Writer) std.Io.Writer.Error!void {
+fn writeBoardLegend(w: *std.Io.Writer, v: View) std.Io.Writer.Error!void {
     try w.writeAll("<div class=\"tp-board-controls\">");
-    try w.writeAll("<div class=\"tp-face\" role=\"group\" aria-label=\"Board face\">");
-    try w.writeAll("<span>View</span><button type=\"button\" id=\"tp-face-top\" data-board-side=\"top\" class=\"on\" aria-pressed=\"true\">Top</button>");
-    try w.writeAll("<button type=\"button\" id=\"tp-face-bottom\" data-board-side=\"bottom\" aria-pressed=\"false\">Bottom</button></div>");
+    try w.writeAll("<div class=\"tp-face\" role=\"group\" aria-label=\"Board view\">");
+    try w.writeAll("<span>View</span><button type=\"button\" id=\"tp-face-top\" data-board-side=\"top\" data-board-view=\"top\" class=\"on\" aria-pressed=\"true\">Top</button>");
+    try w.writeAll("<button type=\"button\" id=\"tp-face-bottom\" data-board-side=\"bottom\" data-board-view=\"bottom\" aria-pressed=\"false\">Bottom</button>");
+    try w.writeAll("<button type=\"button\" id=\"tp-view-3d\" data-board-view=\"3d\" aria-pressed=\"false\" title=\"Orbit the physical board, components, heatsink, and cooling fan\">3D setup</button></div>");
     try w.writeAll("<div class=\"tp-legend\" aria-label=\"Temperature scale\">");
     try w.writeAll("<label class=\"tp-scale-bound\"><input type=\"number\" id=\"tp-scale-min\" " ++
         "step=\"1\" value=\"25\" aria-label=\"Scale minimum temperature\" aria-invalid=\"false\"> °C</label>");
     try w.writeAll("<span class=\"tp-ramp\"></span>");
     try w.writeAll("<label class=\"tp-scale-bound\"><input type=\"number\" id=\"tp-scale-max\" " ++
         "step=\"1\" value=\"125\" aria-label=\"Scale maximum temperature\" aria-invalid=\"false\"> °C</label></div>");
+    try writeAmbientControl(w, v);
     try w.writeAll("<span class=\"tp-hotspot\" id=\"tp-hotspot\"></span>");
     try w.writeAll("<label class=\"tp-switch\"><input type=\"checkbox\" id=\"tp-labels\"> All labels</label>");
     try w.writeAll("<label class=\"tp-switch\">Wash <input type=\"range\" id=\"tp-opacity\" " ++
@@ -1660,6 +1668,9 @@ test "the board offers a persistent manual temperature scale" {
     try testing.expect(containsAll(html, &.{
         "id=\"tp-scale-min\"",
         "id=\"tp-scale-max\"",
+        "id=\"tp-ambient\"",
+        "id=\"tp-view-3d\"",
+        "3D setup",
         "value=\"25\"",
         "value=\"125\"",
         "Scale minimum temperature",
@@ -1669,6 +1680,13 @@ test "the board offers a persistent manual temperature scale" {
         "id=\"tp-labels\"",
         "id=\"tp-opacity\"",
     }));
+    // Ambient now belongs to the board toolbar, immediately after the colour
+    // scale rather than in the scenario/export panel on the left.
+    const board_controls = std.mem.indexOf(u8, html, "class=\"tp-board-controls\"") orelse return error.NoBoardControls;
+    const scale_max = std.mem.indexOfPos(u8, html, board_controls, "id=\"tp-scale-max\"") orelse return error.NoScale;
+    const ambient_control = std.mem.indexOfPos(u8, html, board_controls, "id=\"tp-ambient\"") orelse return error.NoAmbient;
+    const hotspot = std.mem.indexOfPos(u8, html, board_controls, "id=\"tp-hotspot\"") orelse return error.NoHotspot;
+    try testing.expect(scale_max < ambient_control and ambient_control < hotspot);
     // The iframe maps absolute copper temperatures onto the chosen endpoints
     // and rebuilds its existing raster when they change.
     const overlay = @embedFile("assets/pcb_thermal.js");
@@ -1696,6 +1714,9 @@ test "the board offers a persistent manual temperature scale" {
         "searchParams.get(\"scale_max\")",
         "searchParams.set(\"scale_min\"",
         "searchParams.set(\"scale_max\"",
+        "function setupViewSet(",
+        "type: \"netlisp-pcb-view\"",
+        "searchParams.set(\"view\", \"3d\")",
     }));
 
     // Both halves of the postMessage contract, so a rename on either side of

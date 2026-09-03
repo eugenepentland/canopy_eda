@@ -26,7 +26,7 @@
   // resolved at init() time when it's guaranteed defined.
   var DATA = {};
   var renderer, scene, camera, controls;
-  var boardGroup, partsGroup, heatsinkGroup, axes;
+  var boardGroup, partsGroup, heatsinkGroup, fanGroup, axes;
   // One pose Group per PCB.parts entry, in the same index order — so a Load /
   // drag / reset / side flip that mutated PCB.parts can be re-applied by
   // walking both arrays. Each pose group owns a nested `mount` group whose
@@ -44,7 +44,7 @@
 
   var DEFAULT_BOARD_T = 1.6;
   var boardCapMat, boardEdgeMat;
-  var layerVisible = { models: true, surfaces: true, heatsink: true };
+  var layerVisible = { models: true, surfaces: true, heatsink: true, fan: true };
 
   function deg2rad(d) { return d * Math.PI / 180; }
   function boardThickness() {
@@ -611,7 +611,7 @@
     return 0xc4cbd0;
   }
 
-  function addHeatsinkBox(group, material, sx, sy, sz, x, y, z) {
+  function addAssemblyBox(group, material, sx, sy, sz, x, y, z) {
     if (!(sx > 0) || !(sy > 0) || !(sz > 0)) return;
     var mesh = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), material);
     mesh.position.set(x, y, z);
@@ -641,9 +641,9 @@
       color: 0x6aa9d8, transparent: true, opacity: 0.62, metalness: 0.05, roughness: 0.8
     }) : null;
 
-    if (pad) addHeatsinkBox(heatsinkGroup, pad, +s.w, +s.h, padT, cx, cy,
+    if (pad) addAssemblyBox(heatsinkGroup, pad, +s.w, +s.h, padT, cx, cy,
       faceZ + sign * padT / 2);
-    addHeatsinkBox(heatsinkGroup, metal, +s.w, +s.h, baseT, cx, cy,
+    addAssemblyBox(heatsinkGroup, metal, +s.w, +s.h, baseT, cx, cy,
       faceZ + sign * (padT + baseT / 2));
 
     var extraH = finH;
@@ -651,7 +651,7 @@
       var lowerW = Math.max(0, +s.lower_width_mm || 0);
       var lowerL = Math.max(0, +s.lower_length_mm || 0);
       var lowerH = Math.max(0, +s.lower_height_mm || 0);
-      addHeatsinkBox(heatsinkGroup, metal, lowerW, lowerL, lowerH, cx, cy,
+      addAssemblyBox(heatsinkGroup, metal, lowerW, lowerL, lowerH, cx, cy,
         faceZ + sign * (padT + baseT + lowerH / 2));
       extraH = lowerH;
     } else if (finH > 0 && finT > 0) {
@@ -664,13 +664,69 @@
       var finZ = faceZ + sign * (padT + baseT + finH / 2);
       for (var i = 0; i < count; i++) {
         var offset = first + i * pitch;
-        addHeatsinkBox(heatsinkGroup, metal,
+        addAssemblyBox(heatsinkGroup, metal,
           lengthAxis ? finT : along, lengthAxis ? along : finT, finH,
           cx + (lengthAxis ? offset : 0), cy + (lengthAxis ? 0 : offset), finZ);
       }
     }
     heatsinkGroup.visible = layerVisible.heatsink;
     span = Math.max(span, 2 * (padT + baseT + extraH), 8);
+  }
+
+  // Show the authored axial fan at its physical outlet-to-target distance. The
+  // catalog data does not prescribe a casing depth or blade profile, so those
+  // are deliberately simple proportional preview geometry; its outlet size,
+  // position, board face and separation from the PCB/heatsink are exact.
+  function rebuildFan() {
+    disposeGroup(fanGroup);
+    var f = DATA.fan;
+    if (!f || !(f.w > 0) || !(f.h > 0)) return;
+
+    var sign = f.side === "bottom" ? -1 : 1;
+    var faceZ = sign < 0 ? -boardThickness() : 0;
+    var targetZ = faceZ;
+    var sink = DATA.heatsink;
+    if (sink && sink.side === f.side) {
+      var sinkHeight = sink.shape === "stepped" ?
+        Math.max(0, +sink.lower_height_mm || 0) : Math.max(0, +sink.fin_height_mm || 0);
+      targetZ += sign * (Math.max(0, +sink.pad_thickness_mm || 0) +
+        Math.max(0, +sink.base_mm || 0) + sinkHeight);
+    }
+    var distance = Math.max(0, +f.distance_mm || 0);
+    var depth = Math.max(3, Math.min(8, Math.min(+f.w, +f.h) * 0.1));
+    var z = targetZ + sign * (distance + depth / 2);
+    var cx = +f.x + +f.w / 2, cy = -(+f.y + +f.h / 2);
+    var rail = Math.max(2, Math.min(+f.w, +f.h) * 0.09);
+    var radius = Math.max(1, Math.min(+f.w, +f.h) / 2 - rail * 1.15);
+    var hubR = Math.max(1, radius * 0.2);
+    var casing = new THREE.MeshStandardMaterial({ color: 0x303844, metalness: 0.12, roughness: 0.72 });
+    var blade = new THREE.MeshStandardMaterial({ color: 0x586574, metalness: 0.08, roughness: 0.58 });
+
+    addAssemblyBox(fanGroup, casing, +f.w, rail, depth, cx, cy - (+f.h - rail) / 2, z);
+    addAssemblyBox(fanGroup, casing, +f.w, rail, depth, cx, cy + (+f.h - rail) / 2, z);
+    addAssemblyBox(fanGroup, casing, rail, Math.max(0.1, +f.h - 2 * rail), depth,
+      cx - (+f.w - rail) / 2, cy, z);
+    addAssemblyBox(fanGroup, casing, rail, Math.max(0.1, +f.h - 2 * rail), depth,
+      cx + (+f.w - rail) / 2, cy, z);
+
+    var ring = new THREE.Mesh(new THREE.TorusGeometry(radius, Math.max(0.7, rail * 0.24), 8, 48), casing);
+    ring.position.set(cx, cy, z); fanGroup.add(ring);
+    var hub = new THREE.Mesh(new THREE.CylinderGeometry(hubR, hubR, depth * 0.48, 32), casing);
+    hub.rotation.x = Math.PI / 2; hub.position.set(cx, cy, z); fanGroup.add(hub);
+    var bladeLen = Math.max(0.5, (radius - hubR) * 0.72);
+    for (var i = 0; i < 7; i++) {
+      var angle = i * Math.PI * 2 / 7;
+      var vane = new THREE.Mesh(new THREE.BoxGeometry(bladeLen, Math.max(1, radius * 0.18), depth * 0.2), blade);
+      var radial = hubR + bladeLen * 0.48;
+      vane.position.set(cx + Math.cos(angle) * radial, cy + Math.sin(angle) * radial, z);
+      vane.rotation.z = angle + 0.42;
+      fanGroup.add(vane);
+    }
+    fanGroup.visible = layerVisible.fan;
+    span = Math.max(span,
+      2 * Math.abs(cx - center.x) + +f.w,
+      2 * Math.abs(cy - center.y) + +f.h,
+      2 * Math.abs(z - center.z) + depth, 8);
   }
 
   // This face mesh is the board's only visible cap and carries the one
@@ -752,7 +808,7 @@
     try {
       return JSON.stringify([
         DATA.parts, DATA.tracks, DATA.vias, DATA.pours, DATA.zone_fills, DATA.rf_paths,
-        DATA.mask_relief, DATA.mask_merges, DATA.texts, DATA.fab_text, DATA.heatsink
+        DATA.mask_relief, DATA.mask_merges, DATA.texts, DATA.fab_text, DATA.heatsink, DATA.fan
       ]);
     } catch (_) { return "artwork"; }
   }
@@ -807,6 +863,7 @@
     }
     rebuildBoard();
     rebuildHeatsink();
+    rebuildFan();
     lastSig = sceneSig();
     requestRender();
   }
@@ -905,7 +962,8 @@
     boardGroup = new THREE.Group();
     partsGroup = new THREE.Group();
     heatsinkGroup = new THREE.Group();
-    scene.add(boardGroup); scene.add(partsGroup); scene.add(heatsinkGroup);
+    fanGroup = new THREE.Group();
+    scene.add(boardGroup); scene.add(partsGroup); scene.add(heatsinkGroup); scene.add(fanGroup);
 
     // One group per part, in PCB.parts order. Only STEP bodies need individual
     // 3D objects now; pads are painted into the board's two face textures.
@@ -963,6 +1021,7 @@
     });
     chk("pcb3d-t-board", function (v) { boardGroup.visible = v; requestRender(); });
     chk("pcb3d-t-heatsink", function (v) { layerVisible.heatsink = v; heatsinkGroup.visible = v; requestRender(); });
+    chk("pcb3d-t-fan", function (v) { layerVisible.fan = v; fanGroup.visible = v; requestRender(); });
     chk("pcb3d-t-axes", function (v) { axes.visible = v; requestRender(); });
   }
 

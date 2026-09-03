@@ -53,9 +53,11 @@
   var scaleMinC = SCALE_DEFAULT_MIN_C;
   var scaleMaxC = SCALE_DEFAULT_MAX_C;
   var boardSide = "top";
+  var view3d = false;
   try {
     var openingUrl = new URL(window.location.href);
     boardSide = openingUrl.searchParams.get("board_side") === "bottom" ? "bottom" : "top";
+    view3d = openingUrl.searchParams.get("view") === "3d";
     var openingMinC = parseFloat(openingUrl.searchParams.get("scale_min"));
     var openingMaxC = parseFloat(openingUrl.searchParams.get("scale_max"));
     if (isFinite(openingMinC) && isFinite(openingMaxC) && openingMaxC > openingMinC) {
@@ -76,6 +78,7 @@
   var jsonLink = document.getElementById("tp-json");
   var layoutSel = document.getElementById("tp-layout");
   var faceButtons = page.querySelectorAll("[data-board-side]");
+  var viewButtons = page.querySelectorAll("[data-board-view]");
 
   function enc(s) { return encodeURIComponent(s); }
   function layoutParam() { return LAYOUT ? "&layout=" + enc(LAYOUT) : ""; }
@@ -131,16 +134,36 @@
       }, window.location.origin);
     } catch (e) { /* frame not ready yet */ }
   }
+  function tellBoardView() {
+    if (!frame || !frame.contentWindow) return;
+    try {
+      frame.contentWindow.postMessage({
+        type: "netlisp-pcb-view", view: view3d ? "3d" : "2d"
+      }, window.location.origin);
+    } catch (e) { /* frame not ready yet */ }
+  }
+  function viewButtonsSync() {
+    var selected = view3d ? "3d" : boardSide;
+    for (var i = 0; i < viewButtons.length; i++) {
+      var on = viewButtons[i].getAttribute("data-board-view") === selected;
+      viewButtons[i].classList.toggle("on", on);
+      viewButtons[i].setAttribute("aria-pressed", on ? "true" : "false");
+    }
+  }
   function boardSideSet(next, updateUrl) {
     boardSide = next === "bottom" ? "bottom" : "top";
+    view3d = false;
     page.setAttribute("data-board-side", boardSide);
-    for (var i = 0; i < faceButtons.length; i++) {
-      var on = faceButtons[i].getAttribute("data-board-side") === boardSide;
-      faceButtons[i].classList.toggle("on", on);
-      faceButtons[i].setAttribute("aria-pressed", on ? "true" : "false");
-    }
+    viewButtonsSync();
+    tellBoardView();
     orientBoard();
     tell({ side: boardSide });
+    if (updateUrl) syncUrl();
+  }
+  function setupViewSet(updateUrl) {
+    view3d = true;
+    viewButtonsSync();
+    tellBoardView();
     if (updateUrl) syncUrl();
   }
   function heatRefresh() {
@@ -176,6 +199,7 @@
   // needs the display-only range, and this also covers a browser Back reload.
   if (frame) frame.addEventListener("load", function () {
     orientBoard();
+    tellBoardView();
     tell({
       scenario: scenario, ambient: ambient, side: boardSide,
       scaleMinC: scaleMinC, scaleMaxC: scaleMaxC
@@ -184,7 +208,9 @@
   for (var f = 0; f < faceButtons.length; f++) {
     faceButtons[f].addEventListener("click", function () { boardSideSet(this.getAttribute("data-board-side"), true); });
   }
-  boardSideSet(boardSide, false);
+  var setupButton = document.getElementById("tp-view-3d");
+  if (setupButton) setupButton.addEventListener("click", function () { setupViewSet(true); });
+  if (view3d) setupViewSet(false); else boardSideSet(boardSide, false);
   if (labelsBox) labelsBox.addEventListener("change", function () { tell({ labels: labelsBox.checked }); });
   if (opacityBox) {
     opacityBox.addEventListener("input", function () { tell({ opacity: parseInt(opacityBox.value, 10) / 100 }); });
@@ -280,6 +306,8 @@
       u.searchParams.set("scenario", scenario);
       if (boardSide === "bottom") u.searchParams.set("board_side", "bottom");
       else u.searchParams.delete("board_side");
+      if (view3d) u.searchParams.set("view", "3d");
+      else u.searchParams.delete("view");
       if (scaleMinC === SCALE_DEFAULT_MIN_C && scaleMaxC === SCALE_DEFAULT_MAX_C) {
         u.searchParams.delete("scale_min");
         u.searchParams.delete("scale_max");
