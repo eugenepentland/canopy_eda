@@ -7541,6 +7541,7 @@ is what makes the predicate exact rather than approximately right.
 - An opposite-face heatsink is retained in the WebGPU CAM command stream behind the opaque board instead of forcing a Canvas CAM fallback
 - The Assembly CAM Review toggle lazy-loads dependency-cached Gerber/Excellon artwork, can return instantly to the semantic board, and exposes CAM layer controls only while exact files are active
 - The Assembly CAM Review control visibly distinguishes fast, loading, exact, and failed states and applies same-document mode changes directly with a message fallback
+- Assembly exposes a read-only Gerber ruler that measures in world millimetres, reports fine mm and mil values, and remains available in frozen release pages
 - The initial Assembly iframe omits hidden DRC, editable-layout metadata, editor-only scripts, and inline CAM while exposing the lazy generated-files URL
 - The Assembly physical-review embed omits optimizer, DRC, and route-status reporting while retaining the hidden route geometry inputs its read-only painter consumes
 - Assembly layer controls independently toggle face copper, every physical inner copper layer, solder mask, paste, silkscreen, drills, board outline, and component overlays

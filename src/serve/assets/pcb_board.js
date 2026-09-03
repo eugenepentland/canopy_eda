@@ -5493,6 +5493,7 @@ window.addEventListener("message",function(ev){var msg=ev.data;
  if(msg.type==="netlisp-pcb-parts-request"){reviewPostParts(ev.source,STANDALONE?"*":ev.origin);return;}
  if(msg.type==="netlisp-pcb-orientation"){if(RO)reviewOrient(msg.side,msg.rotation);return;}
  if(msg.type==="netlisp-pcb-cam-mode"){if(RO)camReviewSet(!!msg.enabled);return;}
+ if(msg.type==="netlisp-pcb-measure-mode"){if(RO&&window.PCBReviewMeasureMode)window.PCBReviewMeasureMode(!!msg.enabled);return;}
  if(msg.type==="netlisp-pcb-cam-visibility"){reviewCamVisibility(msg.layers);return;}
  if(msg.type!=="netlisp-pcb-focus")return;
  if(msg.design!=null&&String(msg.design)!==String(PCB.name))return;
@@ -11791,6 +11792,10 @@ function apPresetApply(n){
  // overlay, so pointermove keeps measuring after the press.
  var rulerMode=false,rulerDraw=null,rgRuler=null;
  var rulerBtn=document.getElementById("pcb-ruler-btn");
+ function rulerReviewPost(a,b){if(!PHYSICAL_REVIEW||window.parent===window)return;
+  var msg={type:"netlisp-pcb-measure-state",design:PCB.name,enabled:rulerMode};
+  if(a&&b){msg.dxMm=b.x-a.x;msg.dyMm=b.y-a.y;msg.distanceMm=Math.hypot(msg.dxMm,msg.dyMm);}
+  try{window.parent.postMessage(msg,MESSAGE_TARGET_ORIGIN);}catch(e){}}
  function rulerArm(on){rulerMode=on;PCB.rulerOn=on;svg.classList.toggle("ruler-mode",on);
   if(on&&heatsinkMode)heatsinkArm(false);
   if(on&&fanMode)fanArm(false);
@@ -11801,24 +11806,29 @@ function apPresetApply(n){
   else{var m2=document.getElementById("pcb-savemsg"),rp=selRef&&partByRef(selRef);if(m2){m2.style.color="#e3b341";m2.textContent=rp?
     ("dimension: drag from "+refLabel(rp.ref)+" origin to a horizontal or vertical board edge"):
     "measure: drag to measure (Esc exits)";}}
-  toolSync();}
+  toolSync();rulerReviewPost();}
  // Remove the drawn ruler overlay only — the live {a,b} drag state stays so
  // the pointermove handler can keep redrawing. rulerArm(false) is where the
  // whole gesture is retired.
  function rulerClear(){if(rgRuler&&rgRuler.parentNode)rgRuler.parentNode.removeChild(rgRuler);rgRuler=null;}
+ function rulerLen(mm){return PHYSICAL_REVIEW?mm.toFixed(3)+" mm ("+(mm/0.0254).toFixed(1)+" mil)":fmtLen2(mm);}
  function rulerDrawNow(a,b,state){rulerClear();rgRuler=el("g",{});gU.appendChild(rgRuler);
   var dx=b.x-a.x,dy=b.y-a.y,dist=Math.hypot(dx,dy);
   rgRuler.appendChild(el("line",{"class":"pcb-ruler-line",x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1)}));
+  rgRuler.appendChild(el("circle",{"class":"pcb-ruler-point",cx:X(a.x).toFixed(1),cy:Y(a.y).toFixed(1),r:3}));
+  rgRuler.appendChild(el("circle",{"class":"pcb-ruler-point",cx:X(b.x).toFixed(1),cy:Y(b.y).toFixed(1),r:3}));
   // dx / dy guide legs
   rgRuler.appendChild(el("line",{"class":"pcb-ruler-line",x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(a.y).toFixed(1),opacity:0.5}));
   rgRuler.appendChild(el("line",{"class":"pcb-ruler-line",x1:X(b.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),opacity:0.5}));
   var lt=el("text",{"class":"pcb-ruler-lbl",x:(X(b.x)+8).toFixed(1),y:(Y(b.y)-6).toFixed(1)});
-  lt.textContent=state&&state.ref?((state.axis==="x"?"X":"Y")+" = "+fmtLen2(Math.abs(state.axis==="x"?dx:dy))+(state.target?" · release to set":" · snap to edge")):
-   ("d="+fmtLen2(dist)+"  dx="+fmtLen2(Math.abs(dx))+"  dy="+fmtLen2(Math.abs(dy)));
+  lt.textContent=state&&state.ref?((state.axis==="x"?"X":"Y")+" = "+rulerLen(Math.abs(state.axis==="x"?dx:dy))+(state.target?" · release to set":" · snap to edge")):
+   ("d="+rulerLen(dist)+"  dx="+rulerLen(Math.abs(dx))+"  dy="+rulerLen(Math.abs(dy)));
   rgRuler.appendChild(lt);
   // Mirror the measurement into the status bar's delta segment.
-  stSet("st-dxdy","d "+fmtLen2(dist)+"  dx "+fmtLen2(Math.abs(dx))+"  dy "+fmtLen2(Math.abs(dy)));}
+  stSet("st-dxdy","d "+fmtLen2(dist)+"  dx "+fmtLen2(Math.abs(dx))+"  dy "+fmtLen2(Math.abs(dy)));
+  rulerReviewPost(a,b);}
  PCB.rulerOff=function(){if(rulerMode)rulerArm(false);};
+ window.PCBReviewMeasureMode=rulerArm;
  if(rulerBtn)rulerBtn.addEventListener("click",function(){rulerArm(!rulerMode);});
  function dimensionEdgeAt(m,axis){var hit=edgeAt(m);if(!hit)return null;var o=outlineEditable(),pts=outlinePtsOf(o),a,b,c=null;
   if(OS&&o&&o.sketch&&hit.id){c=OS.curve(o.sketch,hit.id);if(!c||c.kind!=="line")return null;a=OS.point(o.sketch,c.a);b=OS.point(o.sketch,c.b);}
@@ -11945,6 +11955,8 @@ function apPresetApply(n){
  PCB.moveDlgOpen=function(){return !!moveDlg;};
  PCB.moveDlgClose=function(){closeMoveDialog();};
  document.addEventListener("keydown",function(ev){if(kbTyping(ev.target))return;
+  if((ev.key==="d"||ev.key==="D")&&!ev.ctrlKey&&!ev.metaKey&&RO&&PHYSICAL_REVIEW){ev.preventDefault();
+   try{window.parent.postMessage({type:"netlisp-pcb-measure-toggle",design:PCB.name},MESSAGE_TARGET_ORIGIN);}catch(e){}return;}
   if((ev.key==="d"||ev.key==="D")&&!ev.ctrlKey&&!ev.metaKey&&!RO){ev.preventDefault();rulerArm(!rulerMode);return;}
   if((ev.key==="m"||ev.key==="M")&&!ev.ctrlKey&&!ev.metaKey&&!RO){ev.preventDefault();moveDialog();return;}
   if(ev.key==="Escape"&&rulerMode){rulerArm(false);}});
@@ -11952,7 +11964,7 @@ function apPresetApply(n){
  // phase, and swallows the gesture only while in ruler mode.
  svg.addEventListener("pointerdown",function(ev){if(!rulerMode||ev.button!==0)return;
   ev.stopPropagation();ev.preventDefault();try{svg.setPointerCapture(ev.pointerId);}catch(e){}
-  var m=mm(ev),p=selRef&&partByRef(selRef),a=p?{x:p.x,y:p.y}:m;rulerDraw={a:a,b:a,ref:p&&p.ref||null,axis:null,target:null,cursor:m};rulerDrawNow(a,a,rulerDraw);},true);
+  var m=mm(ev),p=!RO&&selRef&&partByRef(selRef),a=p?{x:p.x,y:p.y}:m;rulerDraw={a:a,b:a,ref:p&&p.ref||null,axis:null,target:null,cursor:m};rulerDrawNow(a,a,rulerDraw);},true);
  svg.addEventListener("pointermove",function(ev){if(!rulerMode||!rulerDraw)return;
   ev.stopPropagation();var m=mm(ev);rulerDraw.cursor=m;
   if(rulerDraw.ref){var dx=m.x-rulerDraw.a.x,dy=m.y-rulerDraw.a.y,axis=Math.abs(dx)>=Math.abs(dy)?"x":"y",target=dimensionEdgeAt(m,axis);rulerDraw.axis=axis;rulerDraw.target=target;

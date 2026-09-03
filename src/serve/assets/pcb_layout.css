@@ -347,6 +347,7 @@ a.lay-name:hover{color:#58a6ff;text-decoration:underline}
 .pcb-layers-pop .ap-lrow,.pcb-layers-pop .ap-row,.pcb-layers-pop .ap-h,
 .pcb-layers-pop .ap-slider,.pcb-layers-pop .ap-presets{padding-left:10px;padding-right:10px}
 .pcb-ruler-line{stroke:#e3b341;stroke-width:1.4;stroke-dasharray:4 3;pointer-events:none}
+.pcb-ruler-point{fill:#001023;stroke:#ffd33d;stroke-width:1.6;pointer-events:none}
 .pcb-ruler-lbl{fill:#e3b341;font-size:12px;font-weight:600;paint-order:stroke;stroke:var(--pcb-bg,#001023);stroke-width:3;pointer-events:none}
 svg.ruler-mode{cursor:crosshair}
 .pcb-panel{background:#1e1f23;border:1px solid #2c2d31;border-radius:8px;padding:8px 12px}
