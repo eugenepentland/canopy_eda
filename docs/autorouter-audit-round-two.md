@@ -246,10 +246,15 @@ both routing and post-route inspection. An unpoured rail reserves the
 worst-layer full-current width; an explicit power plane or zone reserves that
 width as its minimum neck while short component fanouts remain at their
 authored geometry and are checked at solved local branch current. Power vias
-are enlarged to a fabrication-valid single barrel when the authored drill is
-insufficient. The resulting copper is still screened after routing for local
-capacity and IR drop; this is conservative board-level screening rather than a
-3D thermal or IPC-2152 field solve.
+route at the class/board via geometry and are judged after the fact: the
+current solve divides a rail between parallel barrels, and the `via_current`
+DRC rule reports each barrel that carries more than its plated area can take,
+with the number of vias the transition needs. (Until 2026-09 the router instead
+enlarged EVERY barrel on a rail to the single-barrel drill for the whole rail
+current — wrong wherever barrels share, and a routing failure wherever the fat
+barrel could not clear.) The resulting copper is still screened after routing
+for local capacity and IR drop; this is conservative board-level screening
+rather than a 3D thermal or IPC-2152 field solve.
 
 ---
 

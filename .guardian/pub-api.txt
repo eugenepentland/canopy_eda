@@ -2101,6 +2101,7 @@ src/placement/drc_pour.zig::Scope struct_
 src/placement/drc_pour.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, prepared: drc.PreparedCopper, ) std.mem.Allocator.Error![]const drc.Violation
 src/placement/drc_pour.zig::checkAudited | fn checkAudited( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, prepared: drc.PreparedCopper, scope: ?Scope, pads: ?PadShapes, ) std.mem.Allocator.Error!Audited
 src/placement/drc_pour.zig::padShapes | fn padShapes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!PadShapes
+src/placement/drc_power_via.zig::check | fn check( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), placement: optimizer.Placement, routed: router.RouteResult, prepared: ?drc.PreparedCopper, fills: ?pour.FillMemo, ) std.mem.Allocator.Error!void
 src/placement/drc_power_width.zig::Duty struct_
 src/placement/drc_power_width.zig::LocalWidth value
 src/placement/drc_power_width.zig::Shortfall struct_
@@ -2942,14 +2943,19 @@ src/placement/power_current.zig::needsGraph | fn needsGraph(input: Input) bool
 src/placement/power_current.zig::solve | fn solve(arena: std.mem.Allocator, input: Input) std.mem.Allocator.Error!Result
 src/placement/power_current.zig::solveWithin | fn solveWithin(arena: std.mem.Allocator, input: Input, max_nodes: usize) std.mem.Allocator.Error!Result
 src/placement/power_integrity.zig::LocalWidth struct_
+src/placement/power_integrity.zig::ViaCurrent struct_
 src/placement/power_integrity.zig::analyze | fn analyze( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, ) std.mem.Allocator.Error!Analysis
 src/placement/power_integrity.zig::analyzeCopper | fn analyzeCopper( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, zones: []const pour.UserZone, base_edge: ?pour.EdgeField, ) std.mem.Allocator.Error!Analysis
 src/placement/power_integrity.zig::name | fn name(self: SurfaceCapacityStatus) []const u8
 src/placement/power_integrity.zig::name | fn name(self: SurfaceKind) []const u8
+src/placement/power_integrity.zig::requiredCount | fn requiredCount(self: ViaCurrent) usize
 src/placement/power_integrity.zig::routedTrackRequiredWidths | fn routedTrackRequiredWidths( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, ) std.mem.Allocator.Error![]const ?LocalWidth
 src/placement/power_integrity.zig::routedTrackRequiredWidthsMemo | fn routedTrackRequiredWidthsMemo( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, memo: ?pour.FillMemo, ) std.mem.Allocator.Error![]const ?LocalWidth
 src/placement/power_integrity.zig::routedTrackRequiredWidthsMemoZones | fn routedTrackRequiredWidthsMemoZones( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, memo: ?pour.FillMemo, zones: []const pour.UserZone, ) std.mem.Allocator.Error![]const ?LocalWidth
 src/placement/power_integrity.zig::routedTrackRequiredWidthsPrepared | fn routedTrackRequiredWidthsPrepared( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, plane_fills: []const pour.NetFills, zones: []const pour.UserZone, zone_fills: []const pour.Fill, ) std.mem.Allocator.Error![]const ?LocalWidth
+src/placement/power_integrity.zig::routedViaRequirements | fn routedViaRequirements( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, ) std.mem.Allocator.Error![]const ?ViaCurrent
+src/placement/power_integrity.zig::routedViaRequirementsMemo | fn routedViaRequirementsMemo( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, memo: ?pour.FillMemo, ) std.mem.Allocator.Error![]const ?ViaCurrent
+src/placement/power_integrity.zig::routedViaRequirementsPrepared | fn routedViaRequirementsPrepared( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, plane_fills: []const pour.NetFills, zones: []const pour.UserZone, zone_fills: []const pour.Fill, ) std.mem.Allocator.Error![]const ?ViaCurrent
 src/placement/power_integrity.zig::temperature_rise_c value
 src/placement/power_integrity.zig::via_plating_mm value
 src/placement/power_route_width.zig::adaptiveTargetWidth | fn adaptiveTargetWidth( zones: []const route_policy.ExistingZone, placement: optimizer.Placement, net_i: usize, authored: f64, ) ?f64

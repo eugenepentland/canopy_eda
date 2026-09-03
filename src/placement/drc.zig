@@ -18,6 +18,7 @@ const drc_perimeter_keepout = @import("drc_perimeter_keepout.zig");
 const drc_power_width = @import("drc_power_width.zig");
 const drc_board_keepout = @import("drc_board_keepout.zig");
 const drc_match = @import("drc_match.zig");
+const drc_power_via = @import("drc_power_via.zig");
 const geometry = @import("geometry.zig");
 const keepout = @import("keepout.zig");
 const land_transit = @import("land_transit.zig");
@@ -81,6 +82,16 @@ pub const Kind = enum {
     /// so it is a warning: fix the model or widen the copper, but do not block
     /// fabrication on an unproven number. See `drc_power_width.zig`.
     power_width_envelope,
+    /// A routed via barrel carries more SOLVED current than its plated area
+    /// can take. `gap` is the current, `clearance` the barrel's capacity, so
+    /// `ceil(gap/clearance)` is how many barrels the transition needs. A fab
+    /// error like any other undersized power copper (see `drc_power_via.zig`).
+    via_current,
+    /// The same shortfall measured against the WHOLE-RAIL envelope because the
+    /// net's current solve did not resolve, and not covered by the same-net
+    /// barrels stitched beside it. An upper bound rather than a measurement,
+    /// so a warning — the `power_width_envelope` of the barrel rules.
+    via_current_envelope,
     /// A final plane/pour component cannot be represented as one unambiguous
     /// solid: an outer or hole is degenerate/self-intersecting, a hole crosses
     /// or escapes its outer, or sibling holes touch/overlap.
@@ -213,6 +224,11 @@ pub fn defaultSeverity(k: Kind) Severity {
         // A legal board can still have a long ground return. The authored
         // distance is an SI budget, so report it without blocking fabrication.
         .ground_via_distance, .reference_plane_gap, .reference_transition, .loop_area => .warn,
+        // A whole-rail current charged to one barrel because the solve could
+        // not divide the rail is a conservative upper bound, not a
+        // measurement, so it must never block a fab. The MEASURED spelling
+        // (`via_current`) stays an error.
+        .via_current_envelope => .warn,
         // The board can still fabricate, but the authored bypass relationship
         // is electrically ineffective at high frequency until its local
         // surface leg reaches the intended IC land.
@@ -823,6 +839,7 @@ fn checkImpl(
         .local_power_widths = local_power_widths,
         .zones = topology_zones,
     });
+    try drc_power_via.check(arena, &out, placement, current_routed, power.copper, power.fills);
     // Topology still needs the private chords as physical support (a curved or
     // flared path may touch something its compact handle does not), but finding
     // identity must remain in the persisted track domain.  The topology checker
@@ -5223,6 +5240,10 @@ fn firstUncoveredWarningKind(seen: KindSet) ?Kind {
         // exact fill/surface graphs are intentionally too expensive for the
         // router/WASM hot path. Their owning modules prove the emitted default
         // severity alongside their dedicated geometry fixtures.
+        // `via_current_envelope` joins them for the same reason from the other
+        // end: it needs a board with DECLARED rail current, which no fixture
+        // here has, and `drc_power_via.zig` proves its severity on one.
+        if (k == .via_current_envelope) continue;
         if (k == .bypass_open or k == .reference_plane_gap or
             k == .reference_transition or k == .loop_area) continue;
         if (defaultSeverity(k) == .warn and !seen[i]) return k;

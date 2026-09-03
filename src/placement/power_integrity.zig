@@ -1815,3 +1815,177 @@ test "a plane's required neck follows its own solved current" {
     );
     try testing.expect(unproven[0].required_neck_maximum_mm.? > solved[0].required_neck_maximum_mm.?);
 }
+
+// ── Per-via current requirements ────────────────────────────────────────────
+//
+// The barrel twin of `routedTrackRequiredWidths*` above, kept as one
+// self-contained block: same three seams (bare / memoised / prepared fills),
+// same demand gating, same "maximum axis when a maximum is declared" rule, and
+// the same conservative whole-rail fallback when the solve does not resolve.
+//
+// It exists because a via had no capacity rule at all. The pre-route geometry
+// used to compensate by fattening EVERY barrel on a rail to the drill one
+// barrel would need for the whole rail current, which is both wrong (the solver
+// splits current between parallel barrels) and expensive (a fat barrel that
+// cannot clear its neighbours fails the route). Post-route the answer is
+// local: this reports what each barrel actually carries, and `drc_power_via`
+// turns that into "add N vias here".
+
+/// What one routed via barrel is asked to carry, and what it can carry.
+/// Produced index-aligned with `routed.vias`; null for a barrel on a net with
+/// no declared current demand, which is the only case with no answer at all.
+pub const ViaCurrent = struct {
+    /// Current charged to this barrel, in amperes.
+    current_a: f64,
+    /// This barrel's IPC-2221 plated-area capacity at the screen's
+    /// temperature rise, in amperes.
+    capacity_a: f64,
+    /// True when `current_a` is the WHOLE-RAIL envelope rather than this
+    /// barrel's solved share, because the net's current solve did not resolve.
+    /// It is an upper bound on any one barrel, so a reader must credit the
+    /// parallel barrels beside it before calling the transition undersized.
+    envelope: bool,
+    /// Why the solve produced what it did (`power_current.Status.name`).
+    reason: []const u8,
+
+    /// How many barrels of this geometry the charged current needs — the
+    /// number a repair message counts down from. At least one whenever the
+    /// geometry is judgeable at all.
+    pub fn requiredCount(self: ViaCurrent) usize {
+        return countFor(self.current_a, self.capacity_a) orelse 1;
+    }
+};
+
+/// Continuous-current capacity of one routed barrel, from the board's own
+/// plating rule and the barrel's drill (or its land minus two plating walls
+/// when a saved via records no drill).
+fn viaBarrelCapacityA(placement: optimizer.Placement, via: router.Via) f64 {
+    const plating_mm = placement.rules.physical.via_plating_mm;
+    const drill = if (via.drill > 0) via.drill else @max(0, via.dia - 2.0 * plating_mm);
+    return capacityForArea(std.math.pi * drill * plating_mm, false, temperature_rise_c);
+}
+
+/// Solved local current and barrel capacity for every routed via, index-aligned
+/// with `routed.vias`. The barrel spelling of `routedTrackRequiredWidths`.
+pub fn routedViaRequirements(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+) std.mem.Allocator.Error![]const ?ViaCurrent {
+    return routedViaRequirementsMemo(alloc, placement, routed, null);
+}
+
+/// `routedViaRequirements` with a per-fill memo, on exactly the terms
+/// `routedTrackRequiredWidthsMemo` states: the only surfaces it can ever want
+/// are ordinary declared plane/pour fills of this board, so they are keyed and
+/// reused like any other, and a null memo is the unmemoised spelling. The
+/// pour is gated by the SAME predicate as the track twin, so adding this rule
+/// cannot make any caller raster a board it was not already rastering.
+pub fn routedViaRequirementsMemo(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    memo: ?pour.FillMemo,
+) std.mem.Allocator.Error![]const ?ViaCurrent {
+    var needs_surfaces = false;
+    if (routed.vias.len > 0) for (placement.nets, 0..) |net, net_index| {
+        const demand = demandFor(placement.rules.physical.rails, net.name);
+        const has_demand = demand.typical_a != null or demand.maximum_a != null;
+        const branch_opted = net_index < placement.rules.net.len and
+            placement.rules.net[net_index].pad_neck.power_branch_width > 0;
+        if (has_demand and branch_opted and router.netHasPlane(placement, net.name)) {
+            needs_surfaces = true;
+            break;
+        }
+    };
+    const surfaces = if (needs_surfaces)
+        try buildSurfaces(alloc, placement, routed, &.{}, null, memo)
+    else
+        &.{};
+    return routedViaRequirementsFromSurfaces(alloc, placement, routed, surfaces);
+}
+
+/// The reporting DRC spelling: consume the exact carrying-layer and user-zone
+/// fills the seam already poured, so a plane-backed rail's barrels are judged
+/// against a solved sheet instead of falling back to the whole-rail envelope.
+pub fn routedViaRequirementsPrepared(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    plane_fills: []const pour.NetFills,
+    zones: []const pour.UserZone,
+    zone_fills: []const pour.Fill,
+) std.mem.Allocator.Error![]const ?ViaCurrent {
+    var surfaces: std.ArrayList(Surface) = .empty;
+    for (plane_fills) |net_fills| {
+        for (net_fills.layers, net_fills.fills) |layer, fill| try surfaces.append(alloc, .{
+            .net = net_fills.net_name,
+            .kind = if (layer.track_layer == null) .plane else .pour,
+            .physical_layer = if (layer.stack > 0) layer.stack else if (layer.track_layer) |signal|
+                placement.rules.signalStackIndex(signal)
+            else
+                0,
+            .signal_layer = layer.track_layer,
+            .fill = fill,
+        });
+    }
+    const zone_count = @min(zones.len, zone_fills.len);
+    for (zones[0..zone_count], zone_fills[0..zone_count]) |zone, fill| try surfaces.append(alloc, .{
+        .net = zone.net,
+        .kind = .zone,
+        .physical_layer = placement.rules.signalStackIndex(zone.layer),
+        .signal_layer = zone.layer,
+        .fill = fill,
+    });
+    return routedViaRequirementsFromSurfaces(alloc, placement, routed, surfaces.items);
+}
+
+fn routedViaRequirementsFromSurfaces(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    surfaces: []const Surface,
+) std.mem.Allocator.Error![]const ?ViaCurrent {
+    const out = try alloc.alloc(?ViaCurrent, routed.vias.len);
+    @memset(out, null);
+    if (routed.vias.len == 0) return out;
+    const identity = try net_identity.Identity.init(alloc, placement);
+    for (placement.nets, 0..) |net, net_index| {
+        // A per-pin bypass stub is judged as its rail's own copper.
+        if (!identity.isRoot(net_index)) continue;
+        const demand = demandFor(placement.rules.physical.rails, net.name);
+        // The declared whole-rail envelope, on the axis the verdict is taken
+        // on: never substitute the smaller typical axis for a declared maximum.
+        const envelope = (if (demand.maximum_a != null) demand.maximum_a else demand.typical_a) orelse continue;
+        const family = try familyFor(alloc, placement, identity, net_index);
+        var owns_via = false;
+        for (routed.vias) |via| {
+            if (!family.has(via.net)) continue;
+            owns_via = true;
+            break;
+        }
+        // A rail with no barrels pays for no solve. The track rule solved this
+        // same net a moment ago; the cost of asking twice is only worth paying
+        // where there is actually a barrel to judge.
+        if (!owns_via) continue;
+        const poured = try pourFor(alloc, placement, routed, family, surfaces);
+        const flow = try solveCurrent(alloc, placement, routed, family, demand, poured);
+        const axis = if (demand.maximum_a != null) flow.maximum else flow.typical;
+        // Same rule as the track twin: a partial solve cannot say what an
+        // unplaced load's current does at this barrel, so it is screened at
+        // the envelope with its status as the reason.
+        const solved = axis.status == .solved;
+        for (routed.vias, 0..) |via, route_index| {
+            if (!family.has(via.net)) continue;
+            const amps = if (solved) axis.via_current_a[route_index] else envelope;
+            if (!std.math.isFinite(amps) or amps < 0) continue;
+            out[route_index] = .{
+                .current_a = amps,
+                .capacity_a = viaBarrelCapacityA(placement, via),
+                .envelope = !solved,
+                .reason = axis.status.name(),
+            };
+        }
+    }
+    return out;
+}

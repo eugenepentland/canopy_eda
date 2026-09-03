@@ -228,6 +228,7 @@ test {
     _ = @import("placement/drc_board_keepout.zig");
     _ = @import("placement/drc_perimeter_keepout.zig");
     _ = @import("placement/drc_power_width.zig");
+    _ = @import("placement/drc_power_via.zig");
     _ = @import("placement/drc_pour.zig");
     _ = @import("placement/drc_scope.zig");
     _ = @import("placement/edge_rotation.zig");
