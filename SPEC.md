@@ -872,6 +872,38 @@ from the read-only resolve path rather than walking the hierarchy again.
 - completeness-waiver: integer overflow (no arithmetic beyond formatting already-computed net and pad counts)
 - completeness-waiver: panic-free (a design that fails to resolve degrades to a comment line and the next design)
 
+## power-flow
+
+Public functions: cmdPowerFlow, Args, FlowError
+
+Why each power rail's current solve reached the verdict it did. The DRC prints
+`power_width_envelope … incomplete-load-terminals` and stops, which names the
+verdict and hides the evidence: WHICH consumer of the rail failed to resolve,
+and whether it failed because none of its pins are on this net, because its pad
+was not found, or because the copper it sits on never reaches the source.
+`netlisp power-flow [--project-dir <d>] [--layout <name>] [--net <name>]
+[--text] <design>` prints, per rail, the two axis statuses, the declared
+demand, every source terminal with its resolved pad count, every load with its
+contacts / pin completeness / per-axis placement, the unplaced amperes, and
+then each track and barrel whose required capacity exceeds what is there,
+carrying the envelope flag and the reason. It is read-only, writes no file, and
+reads the same two entry points the DRC and the PCB page read, so a rail it
+calls solved is a rail the board's own screens call solved.
+
+- the CLI parses the project dir, the saved layout, the rail filter and the text-output flag with one positional design name
+- the rail filter matches a rail by its exact name or by its hierarchical leaf, and never by a bare substring
+- a board that fails to solve reports UNRESOLVED and fails the command rather than printing an empty report
+- an unresolved load is annotated with which of the three resolution failures it hit
+
+- completeness-waiver: empty inputs (a run naming no design is a usage error; a board with no power rails prints an empty rail list under the board's own track and via counts rather than failing silently)
+- completeness-waiver: large inputs (one arena for the whole run, freed at the end, so the peak is one board's solved placement)
+- completeness-waiver: unauthorized access (a local read-only CLI over the caller's own project directory; no network, no auth surface, and no file is written)
+- completeness-waiver: concurrent access (single-threaded over one board, sharing no state)
+- completeness-waiver: i/o failure (a design that cannot be evaluated or whose layout cannot be restored prints an UNRESOLVED comment and the command fails)
+- completeness-waiver: malformed encoding (the design and its saved layout are parsed by the same seam the PCB page uses, which rejects malformed input long before a rail exists to report)
+- completeness-waiver: integer overflow (no arithmetic beyond formatting already-computed currents, widths and contact counts)
+- completeness-waiver: panic-free (every failing stage degrades to a comment line and a non-zero exit rather than aborting mid-report)
+
 ## rewrite-pins-by-name
 
 Public functions: tool
@@ -3165,6 +3197,10 @@ question each caller answers honestly through `Zone.component`.
 - the net-open island chain's bounding-box estimate never exceeds the exact nearest approach, so a skipped pair could not have beaten the frontier
 - an authored ground-via maximum warns on an SMD ground pad until a same-net plane via falls within the budget
 - an optional NC or input-strap land assigned to ground is excluded from the ground-via maximum because its same-package real ground return owns the required plane connection
+- a routed power via carrying more than its plated barrel can take is a fab-blocking error naming how many barrels the transition needs
+- two parallel same-net barrels that the current solve proves share a load each pass on their own share, with no special case
+- an unsolved rail charges every barrel the whole envelope, warning only where the stitched same-net barrels beside it cannot carry it together
+- a board that declares no rail current runs no via-capacity solve and reports no barrel findings
 
 Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper, countKind, defaultSeverity, errorCount
 
@@ -3234,7 +3270,12 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - silk-over-pad checks authored footprint silk rather than inventing reference-designator artwork
 - flags a plated through-hole pad whose annular ring is under the minimum; NPTH pads exempt
 - flags a track narrower than its net-class width, else the board minimum, as an error
-- a solved local-current requirement replaces the whole-net class width for that power track, but never permits copper below its own IPC-2221 requirement
+- a solved local-current requirement replaces the whole-net class width for that power track, but never permits copper below its own IPC-2221 requirement or the authored branch floor
+- a solved local-current width replaces the net-class width for that track, floored by fabrication and the authored power-branch-width
+- a whole-rail envelope width, used when the per-branch current solve fails, is reported as an explained warning rather than as the solved error
+- an unsolvable rail is judged against the whole-rail envelope as a warning naming the solver status, not as a fabrication error
+- a net with no solved entry and no rail demand imposes no current-capacity requirement at all
+- each power-width shortfall becomes one finding of its own kind and severity, with the envelope reason attached
 - a short neck forced by a same-net land narrower than the solved power width is exempt when its far end reaches solved-width copper, while an overlong neck is not
 - a mid-run pinch between two solved-width runs and a neck narrower than its forcing land both keep the power-width finding
 - a bounded pad-entry neck may terminate in a same-net poured zone instead of solved-width track copper
@@ -3453,28 +3494,64 @@ Public functions: analyze, classifyNetName, isInductor
 ## placement/power-routing
 - a branch whose end lands inside the trunk's copper joins the trunk even when its centreline misses the trunk's by less than the copper half-width
 - a via joins every track whose copper its barrel overlaps, not only tracks ending exactly at its centre
+- an explicit copper-contact junction joins a branch that overlaps the trunk's copper but whose centreline misses it by more than the branch half-width
+- a junction naming a via whose geometry found fewer than two contacts still creates the barrel hub so the layer jump conducts
+- one unplaceable load leaves the rest of the rail solved and reports the dropped current instead of refusing the axis
+- a rail whose every annotated load is unplaceable still refuses the axis rather than reporting a partial solve
+- a load on copper the source cannot reach reports disconnected, not a partial solve, when it is the only load
+- a net whose copper graph exceeds the node budget reports too-large instead of allocating a dense n-squared matrix
+- a net with no annotated current never builds a copper graph at all
+- the node spatial hash returns the same node the linear scan did, so a dense same-layer cluster keeps its historical currents
+- the current solver's connectivity follows the canonical copper-contact policy, so a branch that overlaps the trunk's copper is one node even when the centrelines miss
+- a net whose canonical copper topology is a single island never solves disconnected
+- copper the canonical policy leaves open stays two islands, so a genuinely broken rail is still reported
+- a pour component joins the traces whose copper covers its contact points, not only traces whose centreline passes exactly through them
+- every pad of every part on a rail conducts, so two tracks that meet only on one pad are one island in the current solve exactly as they are in DRC topology
+- a pad credits only copper whose full cross-section sits on its land, so a trace that stops short of the pad stays open
+- a track and a via that meet only through a pad conduct through it, so a rail's layer jump on a land is not an open
+- the sheet contact map credits every pad geometry, so a pin's plated pad-vias carry the rail into an inner plane even when its outer land does not
+- a source terminal whose sub-block carries no hub pad on the rail resolves the discrete pads the current physically enters through
+- a junction naming a barrel enters it through the barrel's own spoke, so the transition's current flows through the plating instead of around it
+- one shared current solve answers the track-width and via-current rules with exactly the arrays the two per-rule entry points return
+- a net declaring no current is answered no-current without building a copper graph or rastering its sheet contacts
+- the per-net diagnosis names every source terminal's contact count and every load's contacts, pin completeness and per-axis placement
 
 Public functions: capacityForArea, traceCapacityA, requiredTraceWidthMm,
 viaCapacityA, requiredViaDrillMm, routingCurrentA, powerWidthForNet,
 powerViaDrillForNet, routedTrackRequiredWidths, routedTrackRequiredWidthsPrepared,
-adaptiveTargetWidth, exactWidth
+routedViaRequirements, routedViaRequirementsPrepared, adaptiveTargetWidth, exactWidth
+adaptiveTargetWidth, exactWidth, adaptiveFloorWidth, targetFor, netLimits,
+trackLimits, wantsBranchSizing, boardTargets, solveLocalWidths
+routedViaRequirements, routedViaRequirementsPrepared, routedPowerRequirements,
+routedPowerRequirementsMemo, routedPowerRequirementsMemoZones,
+routedPowerRequirementsPrepared, adaptiveTargetWidth, exactWidth
 
 Power routing derives conservative pre-route copper geometry from the rail's
 declared load envelope, the actual stack foil, the 10 °C IPC-2221 screening
 target, and the board's via-plating rule. Shared traces without plane or pour
 support first route a fabrication-legal centreline, then grow toward the full
-rail width wherever exact copper clearance permits; pad-sized and constrained
-necks receive automatic tapers, and every remaining electrical shortfall is
-reported together without turning connectivity into a DRC error.
+rail width wherever exact copper clearance permits. A class that opts in with
+`(power-branch-width MM)` instead grows each SEGMENT toward the width its own
+solved branch current needs, so a test-point stub is not built at trunk width;
+the whole-rail width is retained wherever that solve cannot judge a branch, and
+on every class that never opted in. Pad-sized and constrained necks receive
+automatic tapers, and every remaining electrical shortfall is reported together
+without turning connectivity into a DRC error.
 For a rail carried by an explicitly
-declared plane or copper zone, the fill reserves the full-current neck while
-short pad fanouts may opt into `(power-branch-width MM)` and are judged after
-routing at the local branch current solved by the power-integrity analysis.
-The ordinary class width remains the fallback whenever that solve is
-incomplete, and the PCB DRC panel can widen only failing opted-in segments on
+declared plane or copper zone, the fill reserves the neck its own solved
+current needs, and every segment of every current-rated rail is judged after
+routing at the local branch current solved by the power-integrity analysis;
+`(power-branch-width MM)` is a floor on that verdict, not the switch that
+enables it. A rail whose topology cannot be solved is screened at its whole
+declared current on each segment, carrying the reason it could not be
+localized, and the PCB DRC panel can widen only failing opted-in segments on
 1 mil increments without moving their centre lines. The router
-does not invent planes on arbitrary layers, and a required single-barrel via
-is enlarged only as far as the derived drill and annular-ring rules require.
+does not invent planes on arbitrary layers, and it routes every barrel at the
+class/board via geometry: a rail's current divides between parallel barrels, so
+the whole-rail single-barrel drill is a reference value rather than a geometry
+routing imposes. Each routed barrel is instead judged after the fact against
+its own solved share, and a transition short of capacity is reported with the
+number of vias it needs.
 
 - a maximum load is the pre-route envelope, with typical used only when no maximum was authored
 - a power pour's effective minimum neck is raised above the board fabrication floor by the rail maximum and actual stack foil
@@ -3486,9 +3563,12 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - adaptive routing retains the full maximum-current target while a pour-backed rail keeps its short authored fanout width
 - an adaptive rail reports every actionable electrical shortfall in one pass while the fabrication minimum remains a hard error
 - power-width comparison accepts the one-micrometre persistence quantum but rejects a material shortfall
-- a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an incomplete opted-in rail screens every segment at the whole-rail current
+- a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an unsolved rail screens every segment at the whole-rail current and reports why
 - a port-keyed consumer whose module-side net reaches only passive parts resolves those pads as its load contacts
 - a consumer whose annotated pad sits behind a two-terminal series part on a sibling net enters this net's copper at that part's pad
+- a consumer several two-terminal series parts downstream still enters this rail at the first part's pad on it
+- a rail's per-pin bypass stubs are one piece of copper with it, so a consumer whose pins were renamed onto them still resolves and the whole family solves as one graph
+- a solved rail sizes each pour's neck for the current that pour actually carries, and keeps the whole-rail envelope only while the solve is unproven
 - a rail with no annotated load routes for its declared source capacity, so a standalone regulator page sizes copper from its own output rating
 - declared loads outrank source capacity, so a rail routes for what the board draws rather than what its supply could deliver
 - a standalone module that rates its own output port and declares a bare layer count gets an IPC-2221 width for that rail; without the stackup no width is invented
@@ -3498,6 +3578,8 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - the PCB DRC panel offers an undoable repair for every authoritative adaptive power-width finding that loads the exact geometry gate on demand, recuts only failing runs without moving their centre lines, removes generated stitching posts crossed by the wider copper, commits independently clean repairs when another run is constrained, and never expands one finding into more taper-slice findings
 - Two adaptive slices meeting at a bend or at a plain two-way splice with existing copper are emitted at one width, with the 45-degree transition moved onto the adjoining straight, while pad lands, via corners and T-junctions keep their free trunk/branch step
 - two adaptive power tracks that meet at a bend take the narrower of their two widths at that joint, including where one side is copper this pass left alone, and the wider side tapers back to its electrical target along its own straight
+- a routed power segment on a class that opted into branch sizing is widened for the current its own branch carries, not for the whole rail, while an unsolved branch, an uncovered segment, and every class that never opted in keep the whole-rail target
+- a trunk and a branch sized for their own solved currents still meet at one width, the wider side tapering back to its own target rather than stepping at the joint
 - a three-track junction, a same-net barrel, or a pad land at the meeting point leaves every leg its own width, so only a bare two-track joint is equalized
 - completeness-waiver: concurrent access (capacity functions are pure and routing reads one immutable placement snapshot while mutating only its caller-owned route)
 - completeness-waiver: empty inputs (a missing or empty stack and a rail without an unambiguous declared load produce no derived geometry)
@@ -5345,6 +5427,8 @@ Public functions: analyze
 - only a `(current …)` on a top-level out port creates a rail, and an explicitly signal-kinded output never becomes one
 - a parent board reads a module's rating through its sub-block port, and the highest declared capacity wins a rail whichever way it was declared
 - a sub-block input power port's declared current is reported as a branch load for series sizing and never enters the rail's summed budget
+- a rail an internally sourced board re-exports draws its declared output current as a load at a physical exit terminal, never as a second injection point
+- a rail whose top-level pass-through pin already declares the current it exports is credited once, at that physical pad, not a second time at its @export terminal
 
 ## eval/thermal
 
@@ -7050,6 +7134,8 @@ is what makes the predicate exact rather than approximately right.
 - tangent trace bends and outline fillets remain native editable arcs in the PCB editor
 - While hand-routing, the PCB editor can toggle the preview and committed path between 45-degree octilinear and 90-degree Manhattan bends
 - The PCB hand router defers adaptive electrical-width verdicts its zone-blind WASM tier cannot prove, while retaining branch-floor and fabrication-minimum errors locally
+- The PCB editor defers every server-solved power finding — the solved width, its whole-rail envelope variant, and the via-count rule — to the authoritative server DRC
+- The PCB editor widens adaptive power copper to each track's own solved branch current, falling back to the whole-rail envelope only when that screen is absent, stale, or unsolved
 - The PCB editor places repeated standalone vias on a chosen net without creating trace segments, using grid/copper snapping, net-class geometry, the live DRC gate, and one undo step per via
 - Escape cancels an active manual route even when its final route-wide DRC check rejects finishing it, restoring the route-start copper and exiting Draw instead of retrying the blocked finish
 - A hand-routed RF launch keeps its generated portal collar inside the source pad, retries a DRC-blocked wide-land taper with progressively shorter flares, and finishes with the independently DRC-confirmed uniform trace when no automatic taper fits
@@ -7408,6 +7494,7 @@ is what makes the predicate exact rather than approximately right.
 - RF-only saved paths paint the same butt-ended swept polygons as Gerber instead of round-capped conservative DRC chords
 - the board PNG paints bottom-side parts under top-side parts
 - A DRC violation carries a stable 4-hex id emitted by the shared JSON writer
+- The whole-rail power-width warning ships its own kind word and the power-solve status that forced it
 - The shared DRC JSON writer emits each violation's named parties and omits the sides the checker could not name
 - The WASM DRC bridge parses board-state JSON to the same violations as a direct drc.check run
 - Both client DRC bridges read the blob's design-rule object through one shared reader, so the stateless check and the session probe resolve identical board rules
@@ -7599,6 +7686,7 @@ is what makes the predicate exact rather than approximately right.
 - Part fields in the PCB blob are escaped for the script element they sit in, so no ref-des, value, MPN, footprint, pad or pad-net name can close the tag
 - Plane net names in the PCB blob's layer table are escaped for the script element, so a plane net cannot close the tag
 - Power-integrity net and terminal names in the PCB blob are escaped for the script element, so neither can close the tag
+- Each power net in the PCB blob carries a "flow" object naming its per-axis status, unplaced current, per-terminal source contacts and per-load resolution
 - The BOM symbol-pin cache reads library pinouts at the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure still contributes its pads
 - The pinout endpoint reads its library file at the class-owned lib_limits cap, so a pinout past the retired 256 KiB figure is served rather than answered 404
 - The revision-free sidecar writers, the render dedup and the regenerate record, re-read under the sidecar lock rather than trusting a value read before it

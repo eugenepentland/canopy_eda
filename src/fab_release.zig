@@ -302,8 +302,9 @@ fn hashViolation(hash: *Sha256, violation: drc.Violation) void {
     std.mem.writeInt(i32, parties[16..20], violation.who.track_a, .little);
     hash.update(&parties);
     hash.update(&.{if (violation.layer) |layer| layer.int() else 0xff});
-    hash.update(&.{@intFromBool(violation.who.bridge != null)});
-    if (violation.who.bridge) |bridge| for (bridge) |coordinate| hashFloat(hash, coordinate);
+    hash.update(&.{@intFromBool(violation.who.bridgePoints() != null)});
+    if (violation.who.bridgePoints()) |bridge| for (bridge) |coordinate| hashFloat(hash, coordinate);
+    hash.update(violation.who.noteText());
 }
 
 fn hashEvaluatedBom(hash: *Sha256, placement: optimizer.Placement) void {
@@ -757,7 +758,7 @@ fn writeViolationJson(writer: *std.Io.Writer, evidence: Evidence, violation: drc
         try writer.print(",\"layer\":{d}", .{layer.int()})
     else
         try writer.writeAll(",\"layer\":null");
-    if (violation.who.bridge) |bridge| {
+    if (violation.who.bridgePoints()) |bridge| {
         try writer.writeAll(",\"bridge\":[");
         for (bridge, 0..) |coordinate, index| {
             if (index > 0) try writer.writeByte(',');
@@ -1158,7 +1159,7 @@ test "release token binds finding counts stats and DRC bridge evidence" {
     const finding_one = [_]fab_readiness.Item{.{ .id = "drc", .message = "same summary", .count = 1 }};
     const finding_two = [_]fab_readiness.Item{.{ .id = "drc", .message = "same summary", .count = 2 }};
     const base_violation = drc.Violation{ .x = 1, .y = 2, .gap = 0, .clearance = 0.1, .kind = .net_open };
-    const bridge_violation = drc.Violation{ .x = 1, .y = 2, .gap = 0, .clearance = 0.1, .kind = .net_open, .who = .{ .bridge = .{ 1, 2, 3, 4 } } };
+    const bridge_violation = drc.Violation{ .x = 1, .y = 2, .gap = 0, .clearance = 0.1, .kind = .net_open, .who = .{ .extra = .{ .bridge = .{ 1, 2, 3, 4 } } } };
     const base_evidence = Evidence{
         .report = .{ .errors = &finding_one, .warnings = &.{}, .stats = .{ .parts = 1 } },
         .design = .{

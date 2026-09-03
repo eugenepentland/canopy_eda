@@ -4915,7 +4915,6 @@ pub fn setNetParams(ctx: *Ctx, placement: optimizer.Placement, net_i: usize) voi
         ctx.keep.halo = r.rf.keepout_mm;
     }
     if (net_i < placement.nets.len) {
-        const name = placement.nets[net_i].name;
         // Current capacity is an electrical target, not a routing primitive.
         // Search an ordinary fabrication-legal centreline for an unpoured
         // rail, then let the final adaptive-width pass grow it as far as exact
@@ -4928,10 +4927,12 @@ pub fn setNetParams(ctx: *Ctx, placement: optimizer.Placement, net_i: usize) voi
             p.track_width = @max(placement.rules.design.min_width, @min(authored_width, ctx.base.track_width))
         else
             p.track_width = power_route_width.exactWidth(ctx.zones, placement, net_i, authored_width);
-        if (placement.rules.powerViaDrillForNet(name)) |required_drill| {
-            p.via_drill = @max(p.via_drill, required_drill);
-            p.via_dia = @max(p.via_dia, p.via_drill + 2.0 * placement.rules.design.min_annular);
-        }
+        // Barrels keep the class/board via geometry. Fattening every via on a
+        // rail to the drill ONE barrel would need for the whole rail current
+        // was both wrong (the solver divides current between parallel barrels)
+        // and self-defeating (the enlarged barrel often could not clear its
+        // neighbours). `drc_power_via.zig` now measures each barrel's solved
+        // share after routing and says where another via is needed.
     }
     // Refresh the escape gate for the net about to route: which zones admit it
     // (it owns a pad inside them) is a per-net answer the maze then reads per node.

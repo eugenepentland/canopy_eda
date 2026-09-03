@@ -7383,9 +7383,15 @@ function trackW(net){var s=document.getElementById("r-dw"),mode=s?s.value:"net",
 // centreline is complete. Explicit width selections retain their authored
 // geometry. Plane-backed rails are screened before this metadata is emitted;
 // a small local same-net zone must not disable widening everywhere else.
+// A NEW hand-drawn run has no solve yet: it is not on the board, so the
+// per-track power-integrity screen has no row whose coordinates could match it,
+// and powerTargetForTrack falls back to this rail envelope by construction.
+// That is deliberate rather than a gap — drawNetGeometry below then steers the
+// stroke at the routing FLOOR, and the release-time rewidenHeal recuts the
+// committed run to the solved branch target once the next server screen lands.
 function drawPowerTarget(net){var s=document.getElementById("r-dw"),c=netClassInfo(net||""),v=c&&+c.adaptive_power_width;
  if((s&&s.value!=="net")||!(v>0))return 0;
- return v;}
+ return powerTargetForTrack({net:net||""}).target||v;}
 function drawNetGeometry(net){var nominal=trackW(net),target=drawPowerTarget(net),rules=PCB.rules||{};
  var ordinary=+rules.track_width||baseTrackW(),floor=Math.max(+rules.min_width||0,Math.min(target,ordinary));
  if(!(target>floor+1e-9))return {width:nominal,target:0};
@@ -7913,6 +7919,12 @@ function drawJointNeighbourWidth(net,layer,x,y,skip){var hits=[],key=net||"",l=+
  if(hits.length!==1)return 0;
  if((PCB.vias||[]).some(function(v){return (v.net||"")===key&&Math.hypot(v.x-x,v.y-y)<=DRAW_JOINT_SNAP;}))return 0;
  return +hits[0].w||0;}
+// `target` is the run's electrical width goal, and its PROVENANCE differs by
+// caller: rewidenPlan passes rewidenRunTarget's per-track solved answer (the
+// widest powerTargetForTrack over the chain), while the pen passes the whole-
+// rail envelope because copper it has not committed yet cannot be in the
+// screen. One number per run is exact rather than a simplification — a run is
+// an unbranched chain, so KCL gives every segment in it the same current.
 function drawAdaptivePowerPlan(tracks,startPad,endPad,floor,target,clearWidth){var old=(tracks||[]).slice();
  if(!old.length||!(target>floor+1e-9))return {tracks:old,paths:[],maxWidth:floor,power:true};
  var runs=[],at=0;while(at<old.length){var stop=at+1,l=old[at].l||0;while(stop<old.length&&(old[stop].l||0)===l)stop++;
@@ -9291,6 +9303,12 @@ function drcNets(d){var a=(d.a&&d.a.net)?nLeaf(d.a.net):"",b=(d.b&&d.b.net)?nLea
 // Just the pads/parts — the row's secondary column.
 function drcPads(d){var a=drcPad(d.a),b=drcPad(d.b);
  if(a&&b)return a+" ↔ "+b;return a||b;}
+// A finding's free-text explanation, when the checker attached one. Only the
+// server-solved power rules carry one today, and which key it arrives under is
+// decided server-side, so accept the three spellings rather than silently
+// dropping the sentence the user needs.
+function drcReason(d){var s=(d&&(d.reason||d.why||d.msg))||"";
+ return typeof s==="string"?s:"";}
 // Per-kind marker tooltip. Courtyard/silk have no clearance rule, so the
 // generic "gap X < clr" form reads as nonsense ("< 0 mm") — give them their own.
 // Every form names its parties, so a marker says WHICH nets/pads are at fault
@@ -9308,6 +9326,15 @@ function drcMsg(d){
  if(d.k=="courtyard overlap")return tag+d.k+on+" — parts overlap by "+drcMm(-d.gap)+" mm";
  if(d.k=="silkscreen overlap")return tag+d.k+on+" — silkscreen crosses a pad's solder-mask opening";
  if(d.k=="track width")return tag+d.k+on+" — "+drcMm(d.gap)+" mm < "+drcMm(d.clr)+" mm required";
+ // The server-only power findings know WHY they were sized the way they were —
+ // a solved branch current, or the whole-rail envelope it fell back to — and
+ // the client cannot re-derive it. Print the server's own sentence when it
+ // ships one. Its field name is the server's to pick, so read the three
+ // plausible spellings rather than losing the reason to a rename.
+ if(d.k&&d.k.indexOf("via current")===0)return tag+d.k+on+
+  (drcReason(d)?(" — "+drcReason(d)):" — fewer vias than the solved current needs");
+ if(d.k&&d.k.indexOf("power width")===0)return tag+d.k+on+" — "+drcMm(d.gap)+" mm < "+drcMm(d.clr)+
+  " mm required"+(drcReason(d)?(" ("+drcReason(d)+")"):"");
  // The copper-topology findings carry no clearance pair at all (gap=clr=0), so
  // the generic form below would print "gap 0.000 mm < 0.000 mm" — say what the
  // copper is instead.
@@ -9942,9 +9969,60 @@ window.PCBApplyPowerWidths=applyPowerWidths;
 // Only authoritative `power width` findings seed the manual repair. Merely
 // standing below the class target is not a defect: a bounded land neck may be
 // intentionally exempt, and recutting it can manufacture dozens of findings.
+// The kind is matched EXACTLY, not by the `power width` prefix the deferral
+// list uses: the server's envelope variant ("power width (envelope)") is a
+// warning about a rail it could not solve, and a warning must not drive an
+// automatic recut of copper the user placed.
 function adaptiveWidthDrcTracks(){var out=[],seen=[];if(!powerWidthDrcFresh)return out;
  (PCB.drc||[]).forEach(function(d){if(d.k!=="power width")return;var t=powerWidthDrcTrack(d,seen);
   if(t){seen.push(t);out.push(t);}});return out;}
+
+// ── Per-track electrical width target ────────────────────────────────────────
+// A class row's `adaptive_power_width` is ONE number per net: the IPC width for
+// the WHOLE rail's current. Every branch of that rail inherited it, so a fanout
+// carrying a tenth of the load was widened as if it carried all of it. The
+// deferred power-integrity screen already solves each segment's own current and
+// publishes `required_width_typical_mm` / `required_width_maximum_mm` per track,
+// so prefer that whenever the server actually SOLVED the flow. Fall back to the
+// whole-rail envelope — today's behaviour — when the screen is absent, stale
+// after a copper edit (`powerIntegrityDirty`), has no row for this copper, or
+// reports an unsolved rail.
+var POWER_WIDTH_STEP=0.0254; // 1 mil manufacturing increment, as powerWidthPlan
+function powerWidthRound(mm){var v=+mm;if(!isFinite(v)||v<=0)return 0;
+ return Math.ceil((v-1e-7)/POWER_WIDTH_STEP)*POWER_WIDTH_STEP;}
+// The server spells a completed solve "solved"; a rail whose loads were only
+// partly resolvable comes back "solved-partial" and still carries real branch
+// currents on the segments it did resolve. Anything else is an envelope.
+// "solved-partial" is admitted deliberately and is the one place this trades
+// conservatism for usefulness: an unmapped load means the solved branch current
+// can be an UNDER-estimate, so its target can be narrower than the rail
+// envelope's. The authoritative server power-width finding still judges the
+// committed copper, and the inspector names the basis on every segment.
+function powerFlowSolved(status){return status==="solved"||status==="solved-partial";}
+// `{target, source, status, current}` for one copper object. `source` is
+// "branch" when the number came from the solved per-track screen and "rail"
+// when it is the whole-rail envelope. A pen stroke that is not on the board yet
+// has no coordinates to match, so it lands on "rail" by construction — see
+// drawPowerTarget.
+function powerTargetForTrack(t){var net=(t&&t.net)||"",c=netClassInfo(net),
+  rail=c?+c.adaptive_power_width||0:0,fab=+((PCB.rules||{}).min_width)||0,
+  branchFloor=c?+c.power_branch_width||0:0;
+ var a=powerIntegrityDirty?null:powerIntegrityInfo(net),g=a?powerIntegrityTrack(a,t||{}):null;
+ if(!g)return {target:rail,source:"rail",status:a?"no-screen-row":"no-screen",current:null};
+ // The maximum column governs when the server published one: it is the worst
+ // case the copper has to survive, and its own flow status is the one that says
+ // whether that column was solved or conservatively charged with the full rail.
+ var useMax=g.required_width_maximum_mm!=null,
+  status=useMax?a.flow_maximum_status:a.flow_typical_status,
+  req=useMax?+g.required_width_maximum_mm:(g.required_width_typical_mm!=null?+g.required_width_typical_mm:null),
+  current=useMax?g.current_maximum_a:g.current_typical_a;
+ current=current==null?null:+current;
+ if(!powerFlowSolved(status)||req==null||!isFinite(req))
+  return {target:rail,source:"rail",status:status||"unresolved",current:current};
+ // A solved branch carrying no current still has to be manufacturable: the
+ // fabrication minimum and any declared branch floor are hard lower bounds.
+ return {target:Math.max(fab,branchFloor,powerWidthRound(req)),source:"branch",status:status,current:current};}
+window.PCBPowerTargetForTrack=powerTargetForTrack;
 
 // Width on an adaptive rail is derived data, not an authored value: the moment
 // its copper moves, the clearance-limited answer moves with it. Recut each
@@ -9953,13 +10031,22 @@ function adaptiveWidthDrcTracks(){var out=[],seen=[];if(!powerWidthDrcFresh)retu
 // and commit the shaped copper only when the exact gate sees no new violation.
 // The widen action above cannot cover these: an unclassed IPC rail carries an
 // adaptive_power_width but no power_branch_width and no `track width` finding.
-function rewidenTarget(net){var c=netClassInfo(net||""),target=c?+c.adaptive_power_width||0:0;
- if(!(target>0))return null;
+// Enrolment is unchanged — only a net the server marked adaptive is healed —
+// but the VALUE now comes from powerTargetForTrack, so a branch is sized by the
+// current it actually carries instead of the whole rail's.
+function rewidenTarget(t){var net=(t&&t.net)||"",c=netClassInfo(net),
+  rail=c?+c.adaptive_power_width||0:0;
+ if(!(rail>0))return null;
+ // Widening only, exactly as before. A solved branch target BELOW the copper
+ // already on the board would otherwise recut a wide trunk down; hold whatever
+ // the rail envelope would have produced today for copper that already stands
+ // there, so this change can only ever remove over-widening, never metal.
+ var q=powerTargetForTrack(t),target=Math.max(q.target,Math.min(+((t&&t.w))||0,rail));
  // drawNetGeometry's floor, read from the class instead of the pen's width
  // selector: this heals saved copper whatever the pen is set to right now.
  var rules=PCB.rules||{},ordinary=+rules.track_width||baseTrackW(),
   floor=Math.max(+rules.min_width||0,Math.min(target,ordinary));
- return target>floor+1e-9?{floor:floor,target:target}:null;}
+ return target>floor+1e-9?{floor:floor,target:target,source:q.source}:null;}
 // Copper a run may contain. An arc keeps its authored sweep (the station sampler
 // would leave chords in its place), and an overlay-owned handle belongs to a
 // controlled-impedance proof that Route regenerates instead.
@@ -9996,10 +10083,19 @@ function rewidenRun(seed,claimed){var used={};used[trackIdEnsure(seed)]=1;
  chain.forEach(function(w){claimed[trackIdEnsure(w.t)]=1;});
  return {tracks:chain.map(function(w){return w.t;}),run:chain.map(function(w){return w.q;}),
   startPad:behind.pad,endPad:ahead.pad,startJoint:behind.joint,endJoint:ahead.joint};}
+// One unbranched chain carries ONE current — a branch would have stopped the
+// walk — so its members' solved targets normally agree. They can still differ
+// where a segment predates the screen, sits under a pour that took part of the
+// load, or was grown into copper the last solve never saw. A run is committed
+// at ONE target, so take the widest: the narrower answer would under-size the
+// rest of the chain, and widening only is the standing rule.
+function rewidenRunTarget(tracks,geo){var target=geo.target;
+ (tracks||[]).forEach(function(t){var q=rewidenTarget(t);if(q&&q.target>target)target=q.target;});
+ return target;}
 function rewidenRuns(seeds){var ts=PCB.tracks||[],claimed={},out=[];
  (seeds||ts).forEach(function(t){if(!t||ts.indexOf(t)<0||claimed[trackIdEnsure(t)])return;
-  var geo=rewidenTarget(t.net||"");if(!geo||!rewidenTrack(t,t.net||"",t.l||0))return;
-  var run=rewidenRun(t,claimed);run.floor=geo.floor;run.target=geo.target;out.push(run);});
+  var geo=rewidenTarget(t);if(!geo||!rewidenTrack(t,t.net||"",t.l||0))return;
+  var run=rewidenRun(t,claimed);run.floor=geo.floor;run.target=rewidenRunTarget(run.tracks,geo);out.push(run);});
  return out;}
 function rewidenSame(a,b){if(a.length!==b.length)return false;
  for(var i=0;i<a.length;i++){var p=a[i],q=b[i];
@@ -10029,7 +10125,7 @@ function rewidenPlan(seeds){var runs=[],tracks=0,nets=Object.create(null),maxWid
 // Cheap eligibility only: adaptive copper standing below its class target. What
 // the recut actually produces needs the exact gate, so it belongs to the plan.
 function rewidenStatus(){var tracks=0,nets=Object.create(null);
- (PCB.tracks||[]).forEach(function(t){var geo=rewidenTarget(t.net||"");
+ (PCB.tracks||[]).forEach(function(t){var geo=rewidenTarget(t);
   if(!geo||!rewidenTrack(t,t.net||"",t.l||0)||(+t.w||0)>=geo.target-1e-9)return;
   tracks++;nets[t.net||""]=1;});
  return {tracks:tracks,nets:Object.keys(nets).length,changed:tracks,editable:!RO};}
@@ -10170,7 +10266,16 @@ function powerIntegrityPanel(o,kind){var a=powerIntegrityInfo(o.net||"");if(!a)r
  var dropTyp=g.drop_typical_v!=null?n2(g.drop_typical_v*1000)+" mV":"—",dropMax=g.drop_maximum_v!=null?n2(g.drop_maximum_v*1000)+" mV":"—";
  var method=solved?"Solved resistive branch current":"Conservative whole-rail fallback ("+(status||"unresolved")+")";
  var rows=pRow("Typical rail load",typ)+pRow("Maximum rail load",max)+pRow("Local current · typical",localTyp)+pRow("Local current · maximum",localMax)+pRow("Local drop · typical",dropTyp)+pRow("Local drop · maximum",dropMax)+pRow("Current method",method)+((a.source_terminals||[]).length?pRow("Physical source",a.source_terminals.join(", ")):"")+(a.source?pRow("Rated rail source",a.source):"")+pRow("Conductor resistance",n2(g.resistance_mohm)+" mΩ");
- if(kind==="track")rows+=pRow("Required width · typical",g.required_width_typical_mm!=null?n2(g.required_width_typical_mm)+" mm":"—")+pRow("Required width · maximum",g.required_width_maximum_mm!=null?n2(g.required_width_maximum_mm)+" mm":"—");
+ // Say which of the two numbers above the editor will actually widen this
+ // segment to, and on what authority — a required width is only as good as the
+ // current behind it, and an envelope number charges one branch with the whole
+ // rail. This reads the same powerTargetForTrack the recut uses, so the panel
+ // cannot claim a basis the widener does not honour.
+ if(kind==="track"){var basis=powerTargetForTrack(o);
+  rows+=pRow("Required width · typical",g.required_width_typical_mm!=null?n2(g.required_width_typical_mm)+" mm":"—")+pRow("Required width · maximum",g.required_width_maximum_mm!=null?n2(g.required_width_maximum_mm)+" mm":"—")+
+   pRow("Width basis",basis.source==="branch"?
+    ("Sized by branch current: "+(basis.current!=null?powerIntegrityAmps(basis.current):"—")):
+    ("Sized by whole-rail envelope: "+(basis.status||"unresolved")));}
  else rows+=pRow("Required vias · typical",g.required_count_typical!=null?String(g.required_count_typical):"—")+pRow("Required vias · maximum",g.required_count_maximum!=null?String(g.required_count_maximum):"—");
  var planes="",surfaceUnproven=false;(a.planes||[]).forEach(function(p){var neck=p.required_neck_typical_mm!=null?" · "+n2(p.required_neck_typical_mm)+" mm typ neck":"";if(p.required_neck_maximum_mm!=null)neck+=" · "+n2(p.required_neck_maximum_mm)+" mm max neck";var ps=useMax?p.maximum_status:p.typical_status;if(ps==="not-proven")surfaceUnproven=true;var label=(p.kind==="user-pour"?"User pour":p.kind==="pour"?"Pour":"Plane")+" "+powerIntegrityLayer(p.physical_layer);var rule=" · "+n2(p.design_min_width_mm)+" mm rule = "+powerIntegrityAmps(p.capacity_at_design_min_a);var proof=ps==="verified"?" · verified":ps==="not-proven"?" · not proven":"";planes+=pRow(label,n2(p.capacity_a_per_mm)+" A/mm"+neck+rule+proof);});
  var why={"no-source-terminal":"No physical source pad could be resolved.","incomplete-load-terminals":"At least one annotated load could not be mapped to pads on this routed net.","disconnected":"The computed trace, via, plane, and pour copper does not connect every load to the source.","singular":"The routed resistance graph could not be solved."}[status]||"";
@@ -10703,10 +10808,11 @@ function applyDrcOverrides(list){var ov=drcOverrideByLabel(),out=[];
  return out;}
 function applyWasmDrc(resp){if(!resp||!resp.drc)return;
  // The zone-blind WASM checker cannot perform the current/fill solve that
- // decides an opted-in power branch's local width. Hide that same deferred
- // verdict from the fast marker list as well as from the synchronous commit
- // gate; the shortly-following server reconcile remains authoritative. Widths
- // below the declared branch floor are not deferred and still appear at once.
+ // decides an opted-in power branch's local width, its whole-rail envelope, or
+ // a net's required via count. Hide those deferred verdicts from the fast
+ // marker list as well as from the synchronous commit gate; the shortly-
+ // following server reconcile remains authoritative. Widths below the declared
+ // branch floor are not deferred and still appear at once.
  var engine=applyDrcOverrides(resp.drc).filter(function(d){return !drcGateDefersPowerWidth(d);}),list=engine.slice();
  // Connectivity (`net open`) is server-only. Keep the last authoritative rows
  // through the fast geometry refresh instead of tearing them down for 150 ms
@@ -10879,7 +10985,18 @@ function drcGateRun(tracks,vias,parts,rfPaths,includeFenceVias){
 // those exact fills. A declared branch floor remains authoritative in the fast
 // tier; without one, the board's fabrication minimum is the only width verdict
 // WASM can prove. Every other geometric/fabrication finding stays synchronous.
-function drcGateDefersPowerWidth(d){if(!d||d.k!=="track width"||!d.a||!d.a.net)return false;
+// The kinds only the server can produce, because each one needs the current /
+// fill solve the browser has no engine for: the solved power width, its
+// whole-rail envelope variant, and the via-count rule. Matched by PREFIX on
+// purpose — the server distinguishes a solved finding from an envelope one by
+// appending a parenthesised qualifier ("power width (envelope)"), and a
+// deferral list that had to be edited every time a qualifier was added would
+// leak an unprovable finding into the fast tier the first time it fell behind.
+function drcPowerKindDeferred(k){k=String(k||"");
+ return k.indexOf("power width")===0||k.indexOf("via current")===0;}
+function drcGateDefersPowerWidth(d){if(!d)return false;
+ if(drcPowerKindDeferred(d.k))return true;
+ if(d.k!=="track width"||!d.a||!d.a.net)return false;
  var c=netClassInfo(d.a.net),branch=c&&+c.power_branch_width;
  if(branch>0)return +d.gap+1e-7>=branch;
  var adaptive=c&&+c.adaptive_power_width,fab=+((PCB.rules||{}).min_width)||0;

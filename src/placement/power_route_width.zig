@@ -35,8 +35,29 @@ pub fn exactWidth(
     return @max(authored, placement.rules.powerWidthForNet(placement.nets[net_i].name) orelse 0);
 }
 
+/// The fabrication-legal centreline the router searches for a rail this pass
+/// may widen afterwards.
+///
+/// TWIN of the width branch in `router.setNetParams`, which is where the route
+/// context's own copy is resolved. Spelled again here because the finisher has
+/// to know every net's floor BEFORE it configures the context for any one of
+/// them, and reaching into `setNetParams` for that answer would clear per-net
+/// route policy the passes after it still read.
+pub fn adaptiveFloorWidth(placement: optimizer.Placement, net_i: usize, base_width: f64) f64 {
+    var authored = base_width;
+    if (net_i < placement.rules.net.len and placement.rules.net[net_i].width > 0)
+        authored = placement.rules.net[net_i].width;
+    return @max(placement.rules.design.min_width, @min(authored, base_width));
+}
+
 /// Desired width for a rail that can be routed narrow and widened after the
 /// centreline is known. Null preserves exact geometry.
+///
+/// This is the WHOLE-RAIL answer: one width for every segment of the net. It is
+/// the ceiling and the fallback, not the final target — `power_branch_width`
+/// refines it per segment from the power-integrity solve's local branch current
+/// once the copper exists, and returns to this width exactly where that solve
+/// cannot judge a branch.
 pub fn adaptiveTargetWidth(
     zones: []const route_policy.ExistingZone,
     placement: optimizer.Placement,

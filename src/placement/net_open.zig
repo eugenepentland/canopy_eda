@@ -426,7 +426,7 @@ fn emitOpens(
                 .pad_a = islands[from].pad.pad,
                 .part_b = islands[pick].pad.part,
                 .pad_b = islands[pick].pad.pad,
-                .bridge = .{ best.a[0], best.a[1], best.b[0], best.b[1] },
+                .extra = .{ .bridge = .{ best.a[0], best.a[1], best.b[0], best.b[1] } },
             },
         });
     }
@@ -831,7 +831,7 @@ test "two same-net track islands with a small gap flag one net_open at the gap" 
     try testing.expect(@abs(v.gap - 0.4) < 0.05); // copper-edge gap ≈ 0.4 mm
     try testing.expect(@abs(v.x - 5.0) < 0.2); // marker in the gap midpoint
     try testing.expect(@abs(v.y - 0.0) < 0.2);
-    const bridge = v.who.bridge orelse return error.TestExpectedEqual;
+    const bridge = v.who.bridgePoints() orelse return error.TestExpectedEqual;
     try testing.expect(@abs(@min(bridge[0], bridge[2]) - 4.7) < 0.05);
     try testing.expect(@abs(@max(bridge[0], bridge[2]) - 5.3) < 0.05);
     try testing.expect(@abs(bridge[1]) < 0.05);
@@ -1535,7 +1535,7 @@ fn expectSameReport(cold: Report, warm: Report) !void {
         try testing.expectEqual(c.who.part_b, w.who.part_b);
         try testing.expectEqualStrings(c.who.pad_a, w.who.pad_a);
         try testing.expectEqualStrings(c.who.pad_b, w.who.pad_b);
-        try testing.expectEqual(c.who.bridge, w.who.bridge);
+        try testing.expectEqual(c.who.bridgePoints(), w.who.bridgePoints());
     }
     try testing.expectEqual(cold.connectivity.len, warm.connectivity.len);
     for (cold.connectivity, warm.connectivity) |c, w| {

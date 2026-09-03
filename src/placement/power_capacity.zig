@@ -51,9 +51,12 @@ pub fn viaCapacityA(drill_mm: f64, plating_mm: f64) f64 {
     return capacityForArea(std.math.pi * drill_mm * plating_mm, false, temperature_rise_c);
 }
 
-/// Drill diameter needed for one plated barrel to carry `amps`. The router
-/// may elect to use several smaller barrels instead; this is the safe one-via
-/// fallback used until a connected via-array placement succeeds.
+/// Drill diameter needed for one plated barrel to carry `amps` — the answer
+/// for a transition that has exactly one via. Routed boards normally divide a
+/// rail between parallel barrels instead, which the post-route screen solves
+/// per barrel (`power_integrity.routedViaRequirements`), so this remains the
+/// conservative single-barrel reference rather than a geometry the router
+/// imposes.
 pub fn requiredViaDrillMm(amps: f64, plating_mm: f64) ?f64 {
     if (!positiveFinite(amps) or !positiveFinite(plating_mm)) return null;
     const k = inner_k;

@@ -61,6 +61,7 @@ test {
     _ = @import("deploy_unit.zig");
     _ = @import("docgen.zig");
     _ = @import("drc_dump.zig");
+    _ = @import("power_flow_cli.zig");
     _ = @import("gerber_dump.zig");
     _ = @import("netlist_dump.zig");
     _ = @import("pins_by_name.zig");
@@ -227,6 +228,8 @@ test {
     _ = @import("placement/board_keepout.zig");
     _ = @import("placement/drc_board_keepout.zig");
     _ = @import("placement/drc_perimeter_keepout.zig");
+    _ = @import("placement/drc_power_width.zig");
+    _ = @import("placement/drc_power_via.zig");
     _ = @import("placement/drc_pour.zig");
     _ = @import("placement/drc_scope.zig");
     _ = @import("placement/edge_rotation.zig");
@@ -265,6 +268,7 @@ test {
     _ = @import("placement/near_bind.zig");
     _ = @import("placement/net_identity.zig");
     _ = @import("placement/net_rewrite_pass.zig");
+    _ = @import("placement/net_graph.zig");
     _ = @import("placement/net_open.zig");
     _ = @import("placement/net_rules.zig");
     _ = @import("placement/net_topology.zig");
@@ -295,6 +299,7 @@ test {
     _ = @import("placement/plane_via.zig");
     _ = @import("placement/power_integrity.zig");
     _ = @import("placement/pdn_impedance.zig");
+    _ = @import("placement/power_branch_width.zig");
     _ = @import("placement/power_capacity.zig");
     _ = @import("placement/power_current.zig");
     _ = @import("placement/port_escape.zig");

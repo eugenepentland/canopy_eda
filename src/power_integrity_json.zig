@@ -84,9 +84,9 @@ pub fn write(w: *std.Io.Writer, allocators: Allocators, in: Inputs) std.Io.Write
         }
         try w.writeByte(']');
         try w.writeAll(",\"flow_typical_status\":");
-        try json_writer.writeScriptString(w, net.typical_status.name());
+        try json_writer.writeScriptString(w, net.flow.typical.status.name());
         try w.writeAll(",\"flow_maximum_status\":");
-        try json_writer.writeScriptString(w, net.maximum_status.name());
+        try json_writer.writeScriptString(w, net.flow.maximum.status.name());
         try w.writeAll(",\"demand_typical_a\":");
         try writeOptionalNumber(w, net.demand.typical_a);
         try w.writeAll(",\"demand_maximum_a\":");
@@ -159,7 +159,9 @@ pub fn write(w: *std.Io.Writer, allocators: Allocators, in: Inputs) std.Io.Write
             try json_writer.writeScriptString(w, plane.maximum_status.name());
             try w.writeByte('}');
         }
-        try w.writeAll("]}");
+        try w.writeAll("],");
+        try writeFlow(w, net.flow);
+        try w.writeByte('}');
     }
     try w.writeAll("],\"ac\":");
     // A null here is not "no PDN" — an absent key is. It tells the viewer the
@@ -295,6 +297,66 @@ fn writeAcCap(w: *std.Io.Writer, cap: pdn_impedance.Capacitor) std.Io.Writer.Err
     });
 }
 
+/// Why one rail solved the way it did, under `"flow"`.
+///
+/// Public because `power_flow_cli.zig` reports the SAME object offline: the
+/// script-safe escaping is ordinary JSON, so one writer serves the page blob
+/// and the CLI rather than two copies that can drift apart.
+///
+/// The status words alone never said WHICH consumer a rail failed on, so an
+/// `incomplete-load-terminals` verdict was un-actionable from the page. This
+/// carries the per-terminal source tally and the per-load resolution beside
+/// them: a load with `contacts: 0` was never found on the rail's copper, one
+/// with `complete: false` had only some of its pins found, and a resolved load
+/// with `placed: false` sits on copper the source cannot reach.
+pub fn writeFlow(w: *std.Io.Writer, flow: power_integrity.Flow) std.Io.Writer.Error!void {
+    try w.writeAll("\"flow\":{\"typical\":");
+    try writeAxisFlow(w, flow.typical);
+    try w.writeAll(",\"maximum\":");
+    try writeAxisFlow(w, flow.maximum);
+    try w.writeAll(",\"sources\":[");
+    for (flow.sources, 0..) |source, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.writeAll("{\"terminal\":");
+        try json_writer.writeScriptString(w, source.terminal);
+        try w.print(",\"contacts\":{d}}}", .{source.contacts});
+    }
+    try w.writeAll("],\"loads\":[");
+    for (flow.loads, 0..) |load, i| {
+        if (i > 0) try w.writeByte(',');
+        try writeLoadFlow(w, load);
+    }
+    try w.print("],\"islands\":{d}}}", .{flow.islands});
+}
+
+fn writeAxisFlow(w: *std.Io.Writer, axis: power_integrity.AxisFlow) std.Io.Writer.Error!void {
+    try w.writeAll("{\"status\":");
+    try json_writer.writeScriptString(w, axis.status.name());
+    try w.print(",\"unplaced_a\":{d}}}", .{axis.unplaced_a});
+}
+
+fn writeLoadFlow(w: *std.Io.Writer, load: power_integrity.LoadFlow) std.Io.Writer.Error!void {
+    try w.writeAll("{\"ref\":");
+    try json_writer.writeScriptString(w, load.ref);
+    try w.writeAll(",\"net\":");
+    try json_writer.writeScriptString(w, load.net);
+    try w.writeAll(",\"pins\":[");
+    for (load.pins, 0..) |pin, i| {
+        if (i > 0) try w.writeByte(',');
+        try json_writer.writeScriptString(w, pin);
+    }
+    try w.writeAll("],\"i_typ\":");
+    try writeOptionalNumber(w, load.draw.typical_a);
+    try w.writeAll(",\"i_max\":");
+    try writeOptionalNumber(w, load.draw.maximum_a);
+    try w.print(",\"contacts\":{d},\"complete\":{s},\"placed\":{{\"typical\":{s},\"maximum\":{s}}}}}", .{
+        load.contacts,
+        if (load.complete) "true" else "false",
+        if (load.placed.typical) "true" else "false",
+        if (load.placed.maximum) "true" else "false",
+    });
+}
+
 fn writeOptionalNumber(w: *std.Io.Writer, value: ?f64) std.Io.Writer.Error!void {
     if (value) |number| return w.print("{d}", .{number});
     return w.writeAll("null");
@@ -382,4 +444,71 @@ test "power-integrity JSON escapes a closing script tag in every design-derived 
     const source = @embedFile("power_integrity_json.zig");
     const unsafe_sink = "json_writer." ++ "writeString(";
     try std.testing.expect(std.mem.indexOf(u8, source, unsafe_sink) == null);
+}
+
+// spec: Web Server - Each power net in the PCB blob carries a "flow" object naming its per-axis status, unplaced current, per-terminal source contacts and per-load resolution
+test "the power-integrity flow object pins the per-load diagnosis keys" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    // `writeFlow` emits the KEY and its object, exactly as `write` splices it
+    // into a net; the braces here are the enclosing net object.
+    try out.writer.writeByte('{');
+    try writeFlow(&out.writer, .{
+        .typical = .{ .status = .incomplete_load_terminals, .unplaced_a = 0.25 },
+        .maximum = .{ .status = .solved_partial, .unplaced_a = 0.5 },
+        .sources = &.{ .{ .terminal = "reg/VOUT", .contacts = 2 }, .{ .terminal = "missing/VOUT", .contacts = 0 } },
+        .loads = &.{.{
+            .ref = "mcu/U1",
+            .net = "V3P3",
+            .pins = &.{ "12", "34" },
+            .draw = .{ .typical_a = 0.1, .maximum_a = 0.2 },
+            .contacts = 0,
+            .complete = false,
+            .placed = .{},
+        }},
+    });
+    try out.writer.writeByte('}');
+
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, alloc, out.written(), .{});
+    const flow = parsed.object.get("flow").?.object;
+    try std.testing.expectEqualStrings("incomplete-load-terminals", flow.get("typical").?.object.get("status").?.string);
+    try std.testing.expectEqual(@as(f64, 0.25), flow.get("typical").?.object.get("unplaced_a").?.float);
+    try std.testing.expectEqualStrings("solved-partial", flow.get("maximum").?.object.get("status").?.string);
+
+    // The terminal that resolved to no pad IS the `no-source-terminal` answer,
+    // so its zero has to survive to the page.
+    const sources = flow.get("sources").?.array;
+    try std.testing.expectEqual(@as(usize, 2), sources.items.len);
+    try std.testing.expectEqual(@as(i64, 0), sources.items[1].object.get("contacts").?.integer);
+
+    const load = flow.get("loads").?.array.items[0].object;
+    try std.testing.expectEqualStrings("mcu/U1", load.get("ref").?.string);
+    try std.testing.expectEqualStrings("V3P3", load.get("net").?.string);
+    try std.testing.expectEqualStrings("34", load.get("pins").?.array.items[1].string);
+    try std.testing.expectEqual(@as(f64, 0.1), load.get("i_typ").?.float);
+    try std.testing.expectEqual(@as(f64, 0.2), load.get("i_max").?.float);
+    try std.testing.expectEqual(@as(i64, 0), load.get("contacts").?.integer);
+    try std.testing.expectEqual(false, load.get("complete").?.bool);
+    try std.testing.expectEqual(false, load.get("placed").?.object.get("typical").?.bool);
+    try std.testing.expectEqual(false, load.get("placed").?.object.get("maximum").?.bool);
+
+    // A rail that solved reports no unplaced current and a placed load.
+    var clean: std.Io.Writer.Allocating = .init(alloc);
+    try writeFlow(&clean.writer, .{
+        .typical = .{ .status = .solved },
+        .maximum = .{ .status = .solved },
+        .loads = &.{.{
+            .ref = "U1",
+            .net = "V3P3",
+            .pins = &.{"1"},
+            .draw = .{ .typical_a = 0.1, .maximum_a = 0.1 },
+            .contacts = 1,
+            .complete = true,
+            .placed = .{ .typical = true, .maximum = true },
+        }},
+    });
+    try std.testing.expect(std.mem.indexOf(u8, clean.written(), "\"unplaced_a\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, clean.written(), "\"placed\":{\"typical\":true,\"maximum\":true}") != null);
 }

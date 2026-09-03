@@ -245,7 +245,7 @@ fn writeViolation(w: *std.Io.Writer, v: drc.Violation) std.Io.Writer.Error!void 
     try w.print(" net_a={d} net_b={d} part_a={d} part_b={d} track_a={d} pad_a={s} pad_b={s} bridge=", .{
         v.who.net_a, v.who.net_b, v.who.part_a, v.who.part_b, v.who.track_a, v.who.pad_a, v.who.pad_b,
     });
-    if (v.who.bridge) |b| {
+    if (v.who.bridgePoints()) |b| {
         try w.print("{d:.6},{d:.6},{d:.6},{d:.6}", .{ b[0], b[1], b[2], b[3] });
     } else try w.writeAll("-");
 }
@@ -692,7 +692,7 @@ test "a dumped violation carries every field and sorts stably" {
     const arena = arena_state.allocator();
     const violations = [_]drc.Violation{
         .{ .x = 2, .y = 0, .gap = 0.1, .clearance = 0.2, .kind = .track_track, .who = .{ .track_a = 7, .pad_a = "3" } },
-        .{ .x = 1, .y = 0, .gap = 0, .clearance = 0, .kind = .net_open, .severity = .warn, .who = .{ .bridge = .{ 1, 2, 3, 4 } } },
+        .{ .x = 1, .y = 0, .gap = 0, .clearance = 0, .kind = .net_open, .severity = .warn, .who = .{ .extra = .{ .bridge = .{ 1, 2, 3, 4 } } } },
     };
     const sorted = try lines(arena, &violations);
     try testing.expectEqual(@as(usize, 2), sorted.len);

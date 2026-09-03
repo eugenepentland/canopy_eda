@@ -22,6 +22,7 @@ const tool_cli = @import("tool_cli.zig");
 const bench_route = @import("bench_route.zig");
 const bench_page = @import("bench_page.zig");
 const drc_dump = @import("drc_dump.zig");
+const power_flow_cli = @import("power_flow_cli.zig");
 const gerber_dump = @import("gerber_dump.zig");
 const netlist_dump = @import("netlist_dump.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
@@ -312,6 +313,10 @@ fn dispatchQueryCommand(
         try bench_page.cmdBenchPage(allocator, args);
         return true;
     }
+    if (std.mem.eql(u8, command, "power-flow")) {
+        try power_flow_cli.cmdPowerFlow(allocator, args);
+        return true;
+    }
     return dispatchDumpCommand(allocator, command, args);
 }
 
@@ -565,6 +570,7 @@ fn printUsage() !void {
         \\  netlisp bench-thermal [--project-dir <d>] [--layout <name>] [--reps <n>] <name>  Benchmark only the built-in four-scenario thermal field solve
         \\  netlisp bench-page [--project-dir <d>] [--reps <n>] [--json] [--baseline <file>] [<name>…]  Benchmark PCB-page load + DRC latency per board (--baseline gates against a committed recording)
         \\  netlisp gerber-dump [--project-dir <d>] [--layout <name>] [--digest] <name>…  Dump the unstamped fabrication artwork of a saved layout — every Gerber layer, the job file and both drills (read-only; `#` lines carry the timings, so `diff -I '^#'` compares artwork alone)
+        \\  netlisp power-flow [--project-dir <d>] [--layout <name>] [--net <name>] [--text] <name>  Explain every power rail's current solve — the two axis statuses, source terminals with contact counts, each load's resolution (contacts / complete / placed) and unplaced amperes, then per-track and per-via required vs actual with the reason (read-only; JSON unless --text)
         \\  netlisp netlist-dump [--project-dir <d>] <name>…  Dump the flattened netlist — one sorted line per net carrying its sorted refdes.pad members (read-only; `#` lines carry the timings)
         \\  netlisp export-schematic-png [--project-dir <d>] <name> [--sub <slug>|--ref <hub>] [--view sequential|functional] [--theme light|dark] [--width <px>] [--output <file>]  Export a schematic block PNG without a browser
         \\  netlisp convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
@@ -757,6 +763,7 @@ test {
     _ = @import("placement/fill_cache.zig");
     _ = @import("placement/content_key.zig");
     _ = @import("drc_dump.zig");
+    _ = @import("power_flow_cli.zig");
     _ = @import("gerber_dump.zig");
     _ = @import("netlist_dump.zig");
     _ = @import("placement/bypass_intent.zig");

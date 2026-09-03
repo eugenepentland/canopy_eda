@@ -55,6 +55,39 @@ pub const Identity = struct {
         return if (i < self.owner.len) self.owner[i] else net;
     }
 
+    /// True when `net` owns its own fabricated copper — every net that is not a
+    /// proven bypass stub of another one. A physical screen iterates roots and
+    /// gathers each root's whole family, so a stub is never analyzed as if it
+    /// were a rail of its own.
+    pub fn isRoot(self: Identity, net: usize) bool {
+        const wide: i32 = @intCast(net);
+        return self.canonical(wide) == wide;
+    }
+
+    /// Every flattened net index sharing `net`'s canonical owner, the owner
+    /// first and the rest in net order. On the board these are ONE piece of
+    /// copper: `(decouple … per-pin …)` splits a rail into `<rail>.<IC>.<pad>`
+    /// connection nets, and a current or continuity screen that reads only the
+    /// parent sees a fraction of the rail's pins.
+    ///
+    /// An uninitialised `Identity` (empty `owner`) yields the singleton family,
+    /// which is exactly the pre-alias behaviour.
+    pub fn familyOf(
+        self: Identity,
+        arena: std.mem.Allocator,
+        net: usize,
+    ) std.mem.Allocator.Error![]const usize {
+        const root = self.canonical(@intCast(net));
+        if (root < 0 or self.owner.len == 0) return arena.dupe(usize, &.{net});
+        var out: std.ArrayList(usize) = .empty;
+        try out.append(arena, @intCast(root));
+        for (self.owner, 0..) |owner, i| {
+            if (i == @as(usize, @intCast(root)) or owner != root) continue;
+            try out.append(arena, i);
+        }
+        return out.items;
+    }
+
     /// Return the physical owner's flattened name, or empty for an invalid net.
     pub fn canonicalName(self: Identity, nets: []const optimizer.FlatNet, net: i32) []const u8 {
         const canonical_i = self.canonical(net);
@@ -155,4 +188,18 @@ test "only a structurally proven bypass connection aliases its parent rail" {
     try std.testing.expect(!identity.same(0, 2));
     try std.testing.expect(!identity.same(0, 3));
     try std.testing.expect(!identity.same(-1, -1));
+
+    // The rail and its proven stub are one family with one root; the lookalike
+    // stays a rail of its own.
+    try std.testing.expect(identity.isRoot(0));
+    try std.testing.expect(!identity.isRoot(1));
+    try std.testing.expect(identity.isRoot(2));
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1 }, try identity.familyOf(arena, 0));
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1 }, try identity.familyOf(arena, 1));
+    try std.testing.expectEqualSlices(usize, &.{2}, try identity.familyOf(arena, 2));
+
+    // Without proof the family is the singleton, byte for byte the old rule.
+    const bare = Identity{};
+    try std.testing.expect(bare.isRoot(1));
+    try std.testing.expectEqualSlices(usize, &.{1}, try bare.familyOf(arena, 1));
 }

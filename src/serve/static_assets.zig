@@ -1044,6 +1044,53 @@ test "PCB hand router defers adaptive electrical width without hiding hard width
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
+// Every finding whose verdict needs the server's current / fill solve is
+// deferred by PREFIX, so a parenthesised qualifier the checker adds later
+// ("power width (envelope)") cannot leak an unprovable error into the fast
+// client tier before this list is updated.
+// spec: Web Server - The PCB editor defers every server-solved power finding — the solved width, its whole-rail envelope variant, and the via-count rule — to the authoritative server DRC
+test "PCB editor defers every server-only power DRC kind by prefix" {
+    const markers = [_][]const u8{
+        "function drcPowerKindDeferred(k)",
+        "k.indexOf(\"power width\")===0||k.indexOf(\"via current\")===0",
+        "if(drcPowerKindDeferred(d.k))return true;",
+        "if(d.k&&d.k.indexOf(\"via current\")===0)return tag+d.k+on+",
+        "if(d.k&&d.k.indexOf(\"power width\")===0)return tag+d.k+on+",
+        "function drcReason(d)",
+        "d.reason||d.why||d.msg",
+        // The recut is seeded by the SOLVED kind only: the envelope variant is
+        // a warning about a rail the server could not solve, and a warning must
+        // not drive an automatic recut of copper the user placed.
+        "forEach(function(d){if(d.k!==\"power width\")return;",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
+// spec: Web Server - The PCB editor widens adaptive power copper to each track's own solved branch current, falling back to the whole-rail envelope only when that screen is absent, stale, or unsolved
+test "PCB editor sizes adaptive power copper per track from the solved screen" {
+    const markers = [_][]const u8{
+        "var POWER_WIDTH_STEP=0.0254;",
+        "function powerWidthRound(mm)",
+        "function powerFlowSolved(status)",
+        "status===\"solved\"||status===\"solved-partial\"",
+        "function powerTargetForTrack(t)",
+        "var a=powerIntegrityDirty?null:powerIntegrityInfo(net),g=a?powerIntegrityTrack(a,t||{}):null;",
+        "source:\"rail\"",
+        "source:\"branch\"",
+        "Math.max(fab,branchFloor,powerWidthRound(req))",
+        // Widening only: a solved branch target below the copper already on the
+        // board must never recut a wide trunk down.
+        "var q=powerTargetForTrack(t),target=Math.max(q.target,Math.min(+((t&&t.w))||0,rail));",
+        "function rewidenRunTarget(tracks,geo)",
+        "run.target=rewidenRunTarget(run.tracks,geo)",
+        "return powerTargetForTrack({net:net||\"\"}).target||v;",
+        // The inspector names the authority behind the required width.
+        "Sized by branch current: ",
+        "Sized by whole-rail envelope: ",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+}
+
 // spec: Web Server - A click that magnetically snaps to a same-net pad or existing trace endpoint finishes the manual trace only after the path reaches that endpoint.
 test "PCB editor finishes a manual trace on a magnetic endpoint snap" {
     const markers = [_][]const u8{
@@ -1271,7 +1318,7 @@ test "PCB editor re-widens adaptive power runs after an edit moves them" {
         // The class target and the pen's own routing floor, read without the
         // width selector so saved copper heals whatever the pen is set to.
         "function rewidenTarget",
-        "target=c?+c.adaptive_power_width||0:0",
+        "rail=c?+c.adaptive_power_width||0:0",
         "floor=Math.max(+rules.min_width||0,Math.min(target,ordinary))",
         // One unambiguous same-net, same-layer chain: a land, a branch, an arc
         // or another run's copper ends it.
@@ -1331,7 +1378,7 @@ test "PCB editor offers a DRC-targeted adaptive width repair" {
         // Server findings select the failing copper; below-target but exempt
         // runs never enter the repair plan.
         "var before=snapAll(),n=rewidenApply(seeds,true);",
-        "var geo=rewidenTarget(t.net||\"\");",
+        "var geo=rewidenTarget(t);if(!geo||!rewidenTrack(t,t.net||\"\",t.l||0))return;",
         "recordUndo(before);PCB.drc=[];",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
