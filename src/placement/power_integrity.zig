@@ -209,20 +209,87 @@ const Surface = struct {
     fill: pour.Fill,
 };
 
+/// One declared source terminal and how many physical pads it resolved to.
+/// Zero contacts is the whole explanation for a `no-source-terminal` rail:
+/// the terminal was declared, and no pad on this net answered to it.
+pub const SourceFlow = struct {
+    terminal: []const u8,
+    contacts: usize,
+};
+
+/// The current one consumer declares, on both axes.
+pub const Draw = struct {
+    typical_a: ?f64 = null,
+    maximum_a: ?f64 = null,
+};
+
+/// Whether each axis's solve actually placed a load on reachable copper.
+/// A load can resolve to contacts (`LoadFlow.contacts > 0`) and still not be
+/// placed, which is precisely the `disconnected` / `solved_partial` story.
+pub const Placed = struct {
+    typical: bool = false,
+    maximum: bool = false,
+};
+
+/// One consumer of a rail as the current solve resolved it. This is the whole
+/// diagnosis for an unsolved rail: `contacts = 0` means no pad of this load
+/// was found on the rail's copper at all, `complete = false` means only some
+/// of its declared pins were, and `placed = false` on a resolved load means
+/// the copper it sits on never reaches the source.
+pub const LoadFlow = struct {
+    /// The consumer's reference designator (or sub-block port path).
+    ref: []const u8,
+    /// The net the power budget annotated the consumer on.
+    net: []const u8,
+    /// The consumer's declared pins.
+    pins: []const []const u8,
+    /// Declared current on each axis.
+    draw: Draw,
+    /// Physical pads this load resolved to on the rail's copper.
+    contacts: usize,
+    /// True when every declared pin resolved to a pad.
+    complete: bool,
+    /// Per-axis placement outcome.
+    placed: Placed,
+};
+
+/// One current axis's outcome for a whole rail.
+pub const AxisFlow = struct {
+    status: power_current.Status,
+    /// Amperes belonging to loads this axis could not place. Zero on a full
+    /// solve; nonzero is the size of what a partial solve does not know.
+    unplaced_a: f64 = 0,
+};
+
+/// Why a rail solved the way it did: the two axis verdicts plus the terminal
+/// resolution that produced them.
+pub const Flow = struct {
+    typical: AxisFlow,
+    maximum: AxisFlow,
+    sources: []const SourceFlow = &.{},
+    loads: []const LoadFlow = &.{},
+    /// How many separate islands this rail's copper forms under the canonical
+    /// contact policy, counted ONLY for a rail that came back `disconnected`
+    /// (0 otherwise — "not asked", not "no copper"). It is the difference
+    /// between the two ways that verdict happens: more than one island means
+    /// the copper really is in pieces, and exactly one means the solve refused
+    /// a rail the contact policy calls whole.
+    islands: usize = 0,
+};
+
 /// All screened copper belonging to one power-like flattened net.
-const Net = struct {
+pub const Net = struct {
     index: usize,
     name: []const u8,
     demand: Demand,
-    typical_status: power_current.Status,
-    maximum_status: power_current.Status,
+    flow: Flow,
     tracks: []const Track,
     vias: []const Via,
     planes: []const Plane,
 };
 
 /// Post-route power-copper analysis grouped by flattened net.
-const Analysis = struct {
+pub const Analysis = struct {
     nets: []const Net,
 };
 
@@ -353,29 +420,36 @@ fn boundaryContacts(
     }
 }
 
+/// Every source pad of a rail, plus the per-terminal tally a reader needs to
+/// see WHICH declared terminal found nothing. The combined list is built once
+/// and deduplicated across terminals exactly as before; each terminal's count
+/// is the contacts it contributed to that one list, so the counts sum to the
+/// list's length and a zero names the terminal that resolved to no pad.
 fn sourceContacts(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
     family: Family,
     terminals: []const []const u8,
-) std.mem.Allocator.Error![]const power_current.Contact {
+) std.mem.Allocator.Error!struct { contacts: []const power_current.Contact, per_terminal: []const SourceFlow } {
     var out: std.ArrayList(power_current.Contact) = .empty;
-    for (terminals) |path| {
+    const per_terminal = try alloc.alloc(SourceFlow, terminals.len);
+    for (terminals, per_terminal) |path, *entry| {
+        const before = out.items.len;
         // External board power enters through top-level connector pads on the
         // declared port net.
         if (std.mem.startsWith(u8, path, "@external/")) {
             try boundaryContacts(alloc, placement, family, &out);
-            continue;
+        } else if (net_names.parent(path)) |prefix| {
+            for (family.pins) |pin| {
+                if (!descendantOf(pin.ref_des, prefix)) continue;
+                const part = partForRef(placement, pin.ref_des) orelse continue;
+                if (part.kind != .hub) continue;
+                if (contactForPin(placement, pin)) |contact| try appendContact(alloc, &out, contact);
+            }
         }
-        const prefix = net_names.parent(path) orelse continue;
-        for (family.pins) |pin| {
-            if (!descendantOf(pin.ref_des, prefix)) continue;
-            const part = partForRef(placement, pin.ref_des) orelse continue;
-            if (part.kind != .hub) continue;
-            if (contactForPin(placement, pin)) |contact| try appendContact(alloc, &out, contact);
-        }
+        entry.* = .{ .terminal = path, .contacts = out.items.len - before };
     }
-    return out.items;
+    return .{ .contacts = out.items, .per_terminal = per_terminal };
 }
 
 fn loadContacts(
@@ -732,6 +806,47 @@ fn sheetsForNet(
     return .{ .sheets = out.items, .touch = touch };
 }
 
+/// One rail's current solve together with the terminal resolution that
+/// produced it. They are one answer: a status without its loads explains
+/// nothing, and every consumer of the solve wants the pair.
+const Solved = struct {
+    flow: power_current.Result,
+    sources: []const SourceFlow = &.{},
+    loads: []const LoadFlow = &.{},
+    /// Islands the rail's copper forms; see `Flow.islands`. Counted only for a
+    /// `disconnected` rail, where it is the whole difference between broken
+    /// copper and a solve that disagrees with the contact policy.
+    islands: usize = 0,
+
+    /// The per-net diagnosis in payload terms.
+    fn diagnosis(self: Solved) Flow {
+        return .{
+            .typical = .{ .status = self.flow.typical.status, .unplaced_a = self.flow.typical.unplaced.typical_a },
+            .maximum = .{ .status = self.flow.maximum.status, .unplaced_a = self.flow.maximum.unplaced.maximum_a },
+            .sources = self.sources,
+            .loads = self.loads,
+            .islands = self.islands,
+        };
+    }
+};
+
+/// A rail whose declared demand is zero on both axes: the solver's own
+/// `no-current` verdict, reached without building a copper graph OR a sheet
+/// contact map. Ground is the reason this exists — it is a power net by
+/// classification, carries the board's largest pour and most of its barrels,
+/// and rastering sheet contacts for a solve that can only answer `no-current`
+/// was the single largest avoidable cost in the copper screen.
+fn currentlessSolve(alloc: std.mem.Allocator, routed: router.RouteResult) std.mem.Allocator.Error!Solved {
+    const empty: power_current.Input = .{
+        .segments = &.{},
+        .barrels = &.{},
+        .counts = .{ .tracks = routed.tracks.len, .vias = routed.vias.len },
+        .source = .{ .contacts = &.{}, .complete = false },
+        .loads = &.{},
+    };
+    return .{ .flow = try power_current.solve(alloc, empty) };
+}
+
 fn solveCurrent(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -739,7 +854,7 @@ fn solveCurrent(
     family: Family,
     demand: Demand,
     poured: Poured,
-) std.mem.Allocator.Error!power_current.Result {
+) std.mem.Allocator.Error!Solved {
     const plating_mm = placement.rules.physical.via_plating_mm;
     var segments: std.ArrayList(power_current.Segment) = .empty;
     for (routed.tracks, 0..) |track, route_index| {
@@ -769,6 +884,7 @@ fn solveCurrent(
     }
     const sources = try sourceContacts(alloc, placement, family, demand.source_terminals);
     const loads = try alloc.alloc(power_current.Load, demand.consumers.len);
+    const resolutions = try alloc.alloc(LoadFlow, demand.consumers.len);
     for (demand.consumers, 0..) |consumer, i| {
         const resolved = try loadContacts(alloc, placement, family, consumer);
         loads[i] = .{
@@ -777,13 +893,22 @@ fn solveCurrent(
             .maximum_a = consumer.i_max,
             .complete = resolved.complete,
         };
+        resolutions[i] = .{
+            .ref = consumer.ref_des,
+            .net = consumer.net,
+            .pins = consumer.pins,
+            .draw = .{ .typical_a = consumer.i_typ, .maximum_a = consumer.i_max },
+            .contacts = resolved.contacts.len,
+            .complete = resolved.complete,
+            .placed = .{},
+        };
     }
     var flow: power_current.Input = .{
         .segments = segments.items,
         .barrels = barrels.items,
         .sheets = poured.sheets.sheets,
         .counts = .{ .tracks = routed.tracks.len, .vias = routed.vias.len },
-        .source = .{ .contacts = sources, .complete = sources.len > 0 },
+        .source = .{ .contacts = sources.contacts, .complete = sources.contacts.len > 0 },
         .loads = loads,
     };
     // The solver's own centreline snapping is tighter than the fabrication
@@ -791,7 +916,18 @@ fn solveCurrent(
     // but only for a net that will actually be solved, since that sweep is
     // quadratic in the net's copper and ground would pay it for nothing.
     if (power_current.needsGraph(flow)) flow.joins = try net_graph.joinsFor(alloc, flow);
-    return power_current.solve(alloc, flow);
+    const result = try power_current.solve(alloc, flow);
+    for (resolutions, 0..) |*resolution, i| resolution.placed = .{
+        .typical = i < result.typical.placed.len and result.typical.placed[i],
+        .maximum = i < result.maximum.placed.len and result.maximum.placed[i],
+    };
+    const disconnected = result.typical.status == .disconnected or result.maximum.status == .disconnected;
+    return .{
+        .flow = result,
+        .sources = sources.per_terminal,
+        .loads = resolutions,
+        .islands = if (disconnected) try net_graph.islandCount(alloc, flow) else 0,
+    };
 }
 
 fn localCurrent(axis: power_current.Axis, route_index: usize, fallback: ?f64, via: bool) ?f64 {
@@ -1044,21 +1180,28 @@ pub fn routedTrackRequiredWidthsMemoZones(
     memo: ?pour.FillMemo,
     zones: []const pour.UserZone,
 ) std.mem.Allocator.Error![]const ?LocalWidth {
-    var needs_surfaces = false;
+    const surfaces = try demandedSurfaces(alloc, placement, routed, memo, zones);
+    return routedTrackRequiredWidthsFromSurfaces(alloc, placement, routed, surfaces);
+}
+
+/// Poured surfaces for a board whose rails need them, and nothing at all for a
+/// board that does not. Rastering is the expensive half of an unprepared pass,
+/// so it still only runs for a board that actually has poured copper to raster
+/// under a rail carrying declared current.
+fn demandedSurfaces(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    memo: ?pour.FillMemo,
+    zones: []const pour.UserZone,
+) std.mem.Allocator.Error![]const Surface {
     for (placement.nets) |net| {
         const demand = demandFor(placement.rules.physical.rails, net.name);
         if (demand.typical_a == null and demand.maximum_a == null) continue;
-        // Rastering is the expensive half of this pass, so it still only runs
-        // for a board that actually has poured copper to raster.
         if (!router.netHasPlane(placement, net.name) and !zoneCarriesNet(zones, net.name)) continue;
-        needs_surfaces = true;
-        break;
+        return buildSurfaces(alloc, placement, routed, zones, null, memo);
     }
-    const surfaces = if (needs_surfaces)
-        try buildSurfaces(alloc, placement, routed, zones, null, memo)
-    else
-        &.{};
-    return routedTrackRequiredWidthsFromSurfaces(alloc, placement, routed, surfaces);
+    return &.{};
 }
 
 fn zoneCarriesNet(zones: []const pour.UserZone, net_name: []const u8) bool {
@@ -1078,6 +1221,21 @@ pub fn routedTrackRequiredWidthsPrepared(
     zones: []const pour.UserZone,
     zone_fills: []const pour.Fill,
 ) std.mem.Allocator.Error![]const ?LocalWidth {
+    const surfaces = try preparedSurfaces(alloc, placement, plane_fills, zones, zone_fills);
+    return routedTrackRequiredWidthsFromSurfaces(alloc, placement, routed, surfaces);
+}
+
+/// The already-poured fills of the reporting seam, in this module's surface
+/// terms. One spelling for every `*Prepared` entry point, so the track rule,
+/// the via rule and their shared solve can never disagree about which copper
+/// a rail is screened against.
+fn preparedSurfaces(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    plane_fills: []const pour.NetFills,
+    zones: []const pour.UserZone,
+    zone_fills: []const pour.Fill,
+) std.mem.Allocator.Error![]const Surface {
     var surfaces: std.ArrayList(Surface) = .empty;
     for (plane_fills) |net_fills| {
         for (net_fills.layers, net_fills.fills) |layer, fill| try surfaces.append(alloc, .{
@@ -1099,7 +1257,172 @@ pub fn routedTrackRequiredWidthsPrepared(
         .signal_layer = zone.layer,
         .fill = fill,
     });
-    return routedTrackRequiredWidthsFromSurfaces(alloc, placement, routed, surfaces.items);
+    return surfaces.items;
+}
+
+/// Both rules' requirements from one solve per rail, over the bare board.
+pub fn routedPowerRequirements(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+) std.mem.Allocator.Error!PowerRequirements {
+    return routedPowerRequirementsMemo(alloc, placement, routed, null);
+}
+
+/// `routedPowerRequirements` with a per-fill memo. The pour is gated by the
+/// TRACK rule's predicate, which is the broader of the two: a rail that is
+/// worth rastering for its traces is worth rastering for its barrels, and the
+/// two rules now read one solve, so there is only one gate left to state.
+pub fn routedPowerRequirementsMemo(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    memo: ?pour.FillMemo,
+) std.mem.Allocator.Error!PowerRequirements {
+    return routedPowerRequirementsMemoZones(alloc, placement, routed, memo, &.{});
+}
+
+/// `routedPowerRequirementsMemo` with the board's saved user zones, on exactly
+/// the terms `routedTrackRequiredWidthsMemoZones` states: a rail fed only by a
+/// hand-drawn pour is unsolvable without that pour in the graph.
+pub fn routedPowerRequirementsMemoZones(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    memo: ?pour.FillMemo,
+    zones: []const pour.UserZone,
+) std.mem.Allocator.Error!PowerRequirements {
+    const surfaces = try demandedSurfaces(alloc, placement, routed, memo, zones);
+    return routedPowerRequirementsFromSurfaces(alloc, placement, routed, surfaces);
+}
+
+/// The reporting DRC spelling: both rules' requirements over the exact fills
+/// the seam already poured, from one solve per rail.
+pub fn routedPowerRequirementsPrepared(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    plane_fills: []const pour.NetFills,
+    zones: []const pour.UserZone,
+    zone_fills: []const pour.Fill,
+) std.mem.Allocator.Error!PowerRequirements {
+    const surfaces = try preparedSurfaces(alloc, placement, plane_fills, zones, zone_fills);
+    return routedPowerRequirementsFromSurfaces(alloc, placement, routed, surfaces);
+}
+
+/// Both post-route power-copper verdicts, from ONE current solve per rail.
+///
+/// The track rule and the via rule ask the same question of the same copper —
+/// "how much current does this conductor carry?" — and used to answer it by
+/// solving every power net TWICE per DRC pass, once each. The solve is the
+/// expensive half (a conductance graph plus a dense elimination per axis), so
+/// they now share it, and each rule reads its own index-aligned array out of
+/// this pair.
+pub const PowerRequirements = struct {
+    /// Index-aligned with `routed.tracks`; see `routedTrackRequiredWidths`.
+    tracks: []const ?LocalWidth,
+    /// Index-aligned with `routed.vias`; see `routedViaRequirements`.
+    vias: []const ?ViaCurrent,
+};
+
+/// One rail's screening current on one conductor: its solved branch share, or
+/// the whole-rail envelope when the solve did not resolve.
+const Charged = struct {
+    axis: power_current.Axis,
+    envelope_a: f64,
+    resolved: bool,
+
+    fn track(self: Charged, route_index: usize) f64 {
+        return if (self.resolved) self.axis.track_current_a[route_index] else self.envelope_a;
+    }
+
+    fn via(self: Charged, route_index: usize) f64 {
+        return if (self.resolved) self.axis.via_current_a[route_index] else self.envelope_a;
+    }
+};
+
+fn fillTrackWidths(
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    family: Family,
+    charged: Charged,
+    out: []?LocalWidth,
+) void {
+    for (routed.tracks, 0..) |track, route_index| {
+        if (!family.has(track.net)) continue;
+        const amps = charged.track(route_index);
+        // A failed topology solve means we cannot divide current among
+        // branches, not that IPC-2221 has no answer. Conservatively charge
+        // EVERY segment with the full rail envelope, flagged as such: it is an
+        // upper bound on any one branch, and the caller can see from
+        // `envelope`/`reason` that it is a bound rather than a measurement.
+        if (!charged.resolved) {
+            out[route_index] = .{
+                .width_mm = trackWidthForAmps(placement, track, amps) orelse continue,
+                .envelope = true,
+                .reason = charged.axis.status.name(),
+            };
+            continue;
+        }
+        if (!std.math.isFinite(amps) or amps < 0) continue;
+        out[route_index] = .{
+            .width_mm = if (amps == 0) 0 else trackWidthForAmps(placement, track, amps) orelse continue,
+            .envelope = false,
+        };
+    }
+}
+
+fn fillViaCurrents(
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    family: Family,
+    charged: Charged,
+    out: []?ViaCurrent,
+) void {
+    for (routed.vias, 0..) |via, route_index| {
+        if (!family.has(via.net)) continue;
+        const amps = charged.via(route_index);
+        if (!std.math.isFinite(amps) or amps < 0) continue;
+        out[route_index] = .{
+            .current_a = amps,
+            .capacity_a = viaBarrelCapacityA(placement, via),
+            .envelope = !charged.resolved,
+            .reason = charged.axis.status.name(),
+        };
+    }
+}
+
+fn routedPowerRequirementsFromSurfaces(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    surfaces: []const Surface,
+) std.mem.Allocator.Error!PowerRequirements {
+    const widths = try alloc.alloc(?LocalWidth, routed.tracks.len);
+    @memset(widths, null);
+    const barrels = try alloc.alloc(?ViaCurrent, routed.vias.len);
+    @memset(barrels, null);
+    const identity = try net_identity.Identity.init(alloc, placement);
+    for (placement.nets, 0..) |net, net_index| {
+        // A per-pin bypass stub is judged as its rail's own copper.
+        if (!identity.isRoot(net_index)) continue;
+        const demand = demandFor(placement.rules.physical.rails, net.name);
+        // The declared whole-rail envelope, on the axis the verdict is taken
+        // on: never substitute the smaller typical axis for a declared maximum
+        // (for example, because a max-only consumer is disconnected).
+        const envelope_a = (if (demand.maximum_a != null) demand.maximum_a else demand.typical_a) orelse continue;
+        const family = try familyFor(alloc, placement, identity, net_index);
+        const poured = try pourFor(alloc, placement, routed, family, surfaces);
+        const solved = try solveCurrent(alloc, placement, routed, family, demand, poured);
+        const axis = if (demand.maximum_a != null) solved.flow.maximum else solved.flow.typical;
+        // A partial solve cannot say what an unplaced load's current does at
+        // this conductor, so it is screened at the envelope with its status as
+        // the reason.
+        const charged: Charged = .{ .axis = axis, .envelope_a = envelope_a, .resolved = axis.status == .solved };
+        fillTrackWidths(placement, routed, family, charged, widths);
+        fillViaCurrents(placement, routed, family, charged, barrels);
+    }
+    return .{ .tracks = widths, .vias = barrels };
 }
 
 fn routedTrackRequiredWidthsFromSurfaces(
@@ -1108,48 +1431,7 @@ fn routedTrackRequiredWidthsFromSurfaces(
     routed: router.RouteResult,
     surfaces: []const Surface,
 ) std.mem.Allocator.Error![]const ?LocalWidth {
-    const required = try alloc.alloc(?LocalWidth, routed.tracks.len);
-    @memset(required, null);
-    const identity = try net_identity.Identity.init(alloc, placement);
-    for (placement.nets, 0..) |net, net_index| {
-        if (!identity.isRoot(net_index)) continue;
-        const demand = demandFor(placement.rules.physical.rails, net.name);
-        if (demand.typical_a == null and demand.maximum_a == null) continue;
-        const family = try familyFor(alloc, placement, identity, net_index);
-        const poured = try pourFor(alloc, placement, routed, family, surfaces);
-        const flow = try solveCurrent(alloc, placement, routed, family, demand, poured);
-        // Never substitute the smaller typical axis when a declared maximum
-        // axis is unprovable (for example, because a max-only consumer is
-        // disconnected). Typical is sufficient only on a typical-only rail.
-        const axis = if (demand.maximum_a != null) flow.maximum else flow.typical;
-        if (axis.status != .solved) {
-            // A failed topology solve means we cannot divide current among
-            // branches, not that IPC-2221 has no answer. Conservatively charge
-            // EVERY segment with the full rail envelope, flagged as such: it is
-            // an upper bound on any one branch, and the caller can see from
-            // `envelope`/`reason` that it is a bound rather than a measurement.
-            const amps = if (demand.maximum_a != null) demand.maximum_a else demand.typical_a;
-            for (routed.tracks, 0..) |track, route_index| {
-                if (!family.has(track.net)) continue;
-                required[route_index] = .{
-                    .width_mm = trackWidthForAmps(placement, track, amps.?) orelse continue,
-                    .envelope = true,
-                    .reason = axis.status.name(),
-                };
-            }
-            continue;
-        }
-        for (routed.tracks, 0..) |track, route_index| {
-            if (!family.has(track.net)) continue;
-            const amps = axis.track_current_a[route_index];
-            if (!std.math.isFinite(amps) or amps < 0) continue;
-            required[route_index] = .{
-                .width_mm = if (amps == 0) 0 else trackWidthForAmps(placement, track, amps) orelse continue,
-                .envelope = false,
-            };
-        }
-    }
-    return required;
+    return (try routedPowerRequirementsFromSurfaces(alloc, placement, routed, surfaces)).tracks;
 }
 
 /// IPC-2221 width for `amps` on the foil this track is actually printed on.
@@ -1181,8 +1463,19 @@ pub fn analyzeCopper(
         const demand = demandFor(placement.rules.physical.rails, net.name);
         if (!isPowerNet(placement, net_index, demand)) continue;
         const family = try familyFor(alloc, placement, identity, net_index);
-        const poured = try pourFor(alloc, placement, routed, family, surfaces);
-        const flow = try solveCurrent(alloc, placement, routed, family, demand, poured);
+        // A rail with no declared current on either axis can only ever answer
+        // `no-current`, and neither its sheet contact map nor its conductance
+        // graph changes that. Ground takes this door.
+        const currentless = demand.typical_a == null and demand.maximum_a == null;
+        const poured: Poured = if (currentless)
+            .{ .surfaces = surfaces }
+        else
+            try pourFor(alloc, placement, routed, family, surfaces);
+        const solved = if (currentless)
+            try currentlessSolve(alloc, routed)
+        else
+            try solveCurrent(alloc, placement, routed, family, demand, poured);
+        const flow = solved.flow;
         const tracks = try analyzeTracks(alloc, placement, routed, family, demand, flow);
         const vias = try analyzeVias(alloc, placement, routed, family, demand, flow);
         const planes = try analyzePlanes(alloc, placement, net.name, demand, poured, flow);
@@ -1191,8 +1484,7 @@ pub fn analyzeCopper(
             .index = net_index,
             .name = net.name,
             .demand = demand,
-            .typical_status = flow.typical.status,
-            .maximum_status = flow.maximum.status,
+            .flow = solved.diagnosis(),
             .tracks = tracks,
             .vias = vias,
             .planes = planes,
@@ -1382,7 +1674,7 @@ test "analysis assigns split branch currents and required widths from physical s
     const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
 
     const result = try analyze(arena_inst.allocator(), placement, routed);
-    try testing.expectEqual(power_current.Status.solved, result.nets[0].typical_status);
+    try testing.expectEqual(power_current.Status.solved, result.nets[0].flow.typical.status);
     try testing.expectApproxEqAbs(@as(f64, 1), result.nets[0].tracks[0].current_typical_a.?, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0.8), result.nets[0].tracks[1].current_typical_a.?, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 0.2), result.nets[0].tracks[2].current_typical_a.?, 1e-9);
@@ -1505,9 +1797,13 @@ test "external power source terminals resolve only top-level connector pads" {
     };
 
     const family = try familyFor(alloc, placement, .{}, 0);
-    const contacts = try sourceContacts(alloc, placement, family, &.{"@external/VDD"});
-    try testing.expectEqual(@as(usize, 1), contacts.len);
-    try testing.expectApproxEqAbs(@as(f64, 0), contacts[0].at[0], 1e-9);
+    const sources = try sourceContacts(alloc, placement, family, &.{"@external/VDD"});
+    try testing.expectEqual(@as(usize, 1), sources.contacts.len);
+    try testing.expectApproxEqAbs(@as(f64, 0), sources.contacts[0].at[0], 1e-9);
+    // The per-terminal tally is what names the terminal that found nothing.
+    try testing.expectEqual(@as(usize, 1), sources.per_terminal.len);
+    try testing.expectEqualStrings("@external/VDD", sources.per_terminal[0].terminal);
+    try testing.expectEqual(@as(usize, 1), sources.per_terminal[0].contacts);
 }
 
 // spec: placement/power-routing - a port-keyed consumer whose module-side net reaches only passive parts resolves those pads as its load contacts
@@ -1916,28 +2212,8 @@ pub fn routedViaRequirementsPrepared(
     zones: []const pour.UserZone,
     zone_fills: []const pour.Fill,
 ) std.mem.Allocator.Error![]const ?ViaCurrent {
-    var surfaces: std.ArrayList(Surface) = .empty;
-    for (plane_fills) |net_fills| {
-        for (net_fills.layers, net_fills.fills) |layer, fill| try surfaces.append(alloc, .{
-            .net = net_fills.net_name,
-            .kind = if (layer.track_layer == null) .plane else .pour,
-            .physical_layer = if (layer.stack > 0) layer.stack else if (layer.track_layer) |signal|
-                placement.rules.signalStackIndex(signal)
-            else
-                0,
-            .signal_layer = layer.track_layer,
-            .fill = fill,
-        });
-    }
-    const zone_count = @min(zones.len, zone_fills.len);
-    for (zones[0..zone_count], zone_fills[0..zone_count]) |zone, fill| try surfaces.append(alloc, .{
-        .net = zone.net,
-        .kind = .zone,
-        .physical_layer = placement.rules.signalStackIndex(zone.layer),
-        .signal_layer = zone.layer,
-        .fill = fill,
-    });
-    return routedViaRequirementsFromSurfaces(alloc, placement, routed, surfaces.items);
+    const surfaces = try preparedSurfaces(alloc, placement, plane_fills, zones, zone_fills);
+    return routedViaRequirementsFromSurfaces(alloc, placement, routed, surfaces);
 }
 
 fn routedViaRequirementsFromSurfaces(
@@ -1946,46 +2222,222 @@ fn routedViaRequirementsFromSurfaces(
     routed: router.RouteResult,
     surfaces: []const Surface,
 ) std.mem.Allocator.Error![]const ?ViaCurrent {
-    const out = try alloc.alloc(?ViaCurrent, routed.vias.len);
-    @memset(out, null);
-    if (routed.vias.len == 0) return out;
-    const identity = try net_identity.Identity.init(alloc, placement);
-    for (placement.nets, 0..) |net, net_index| {
-        // A per-pin bypass stub is judged as its rail's own copper.
-        if (!identity.isRoot(net_index)) continue;
-        const demand = demandFor(placement.rules.physical.rails, net.name);
-        // The declared whole-rail envelope, on the axis the verdict is taken
-        // on: never substitute the smaller typical axis for a declared maximum.
-        const envelope = (if (demand.maximum_a != null) demand.maximum_a else demand.typical_a) orelse continue;
-        const family = try familyFor(alloc, placement, identity, net_index);
-        var owns_via = false;
-        for (routed.vias) |via| {
-            if (!family.has(via.net)) continue;
-            owns_via = true;
-            break;
-        }
-        // A rail with no barrels pays for no solve. The track rule solved this
-        // same net a moment ago; the cost of asking twice is only worth paying
-        // where there is actually a barrel to judge.
-        if (!owns_via) continue;
-        const poured = try pourFor(alloc, placement, routed, family, surfaces);
-        const flow = try solveCurrent(alloc, placement, routed, family, demand, poured);
-        const axis = if (demand.maximum_a != null) flow.maximum else flow.typical;
-        // Same rule as the track twin: a partial solve cannot say what an
-        // unplaced load's current does at this barrel, so it is screened at
-        // the envelope with its status as the reason.
-        const solved = axis.status == .solved;
-        for (routed.vias, 0..) |via, route_index| {
-            if (!family.has(via.net)) continue;
-            const amps = if (solved) axis.via_current_a[route_index] else envelope;
-            if (!std.math.isFinite(amps) or amps < 0) continue;
-            out[route_index] = .{
-                .current_a = amps,
-                .capacity_a = viaBarrelCapacityA(placement, via),
-                .envelope = !solved,
-                .reason = axis.status.name(),
-            };
+    if (routed.vias.len == 0) return try alloc.alloc(?ViaCurrent, 0);
+    return (try routedPowerRequirementsFromSurfaces(alloc, placement, routed, surfaces)).vias;
+}
+
+// ── One solve, two rules ────────────────────────────────────────────────────
+
+/// A two-layer rail: a source pad, a track up to a barrel, the barrel, and a
+/// track on down to the load pad. The smallest board that exercises BOTH
+/// power-copper rules at once, which is what the shared solve has to answer
+/// identically to the two per-array spellings.
+const LayerJumpRig = struct {
+    parts: [2]optimizer.Part,
+    pins: [2]flat_netlist.FlatPin,
+    nets: [1]optimizer.FlatNet,
+    consumers: [1]power_budget.RailConsumer,
+    terminals: [1][]const u8,
+    rails: [1]power_budget.Rail,
+
+    const pad = @import("geometry.zig").Pad{ .number = "1", .x = 0, .y = 0, .w = 0.2, .h = 0.2, .thru = true };
+    const pads = [_]@import("geometry.zig").Pad{pad};
+    const foils = [_]@import("impedance.zig").Foil{
+        .{ .index = 1, .thickness_mm = 0.035 },
+        .{ .index = 2, .thickness_mm = 0.035 },
+    };
+
+    fn init(amps: f64) LayerJumpRig {
+        return .{
+            .parts = .{
+                .{ .ref_des = "src/U1", .kind = .hub, .hw = 0.1, .hh = 0.1, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+                .{ .ref_des = "load/U1", .kind = .hub, .hw = 0.1, .hh = 0.1, .pads = &pads, .fallback = false, .x = 4, .y = 0 },
+            },
+            .pins = .{
+                .{ .ref_des = "src/U1", .pin = "1" },
+                .{ .ref_des = "load/U1", .pin = "1" },
+            },
+            .nets = .{.{ .name = "VDD", .pins = &.{} }},
+            .consumers = .{.{ .ref_des = "load/U1", .net = "VDD", .pins = &.{"1"}, .i_typ = amps, .i_max = amps }},
+            .terminals = .{"src/VOUT"},
+            .rails = .{.{
+                .net = "VDD",
+                .load_typ_a = amps,
+                .load_max_a = amps,
+                .any_typ_load = true,
+                .any_max_load = true,
+                .status = .no_source,
+            }},
+        };
+    }
+
+    fn placement(self: *LayerJumpRig) optimizer.Placement {
+        self.nets[0].pins = &self.pins;
+        self.rails[0].consumers = &self.consumers;
+        self.rails[0].source_terminals = &self.terminals;
+        return .{
+            .parts = &self.parts,
+            .links = &.{},
+            .loops = &.{},
+            .stubs = &.{},
+            .instances = &.{},
+            .nets = &self.nets,
+            .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+            .minx = 0,
+            .miny = -1,
+            .maxx = 4,
+            .maxy = 1,
+            .generated = true,
+            .rules = .{
+                .copper_layers = 2,
+                .physical = .{
+                    .board_thickness = 1.6,
+                    .via_plating_mm = 0.02,
+                    .stack = .{ .layers = 2, .foils = &foils, .board_mm = 1.6 },
+                    .rails = &self.rails,
+                },
+            },
+        };
+    }
+};
+
+const layer_jump_tracks = [_]router.Track{
+    .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.5, .net = 0 },
+    .{ .x1 = 2, .y1 = 0, .x2 = 4, .y2 = 0, .layer = 1, .width = 0.5, .net = 0 },
+};
+const layer_jump_vias = [_]router.Via{.{ .x = 2, .y = 0, .dia = 0.4, .drill = 0.2, .net = 0 }};
+
+// spec: placement/power-routing - one shared current solve answers the track-width and via-current rules with exactly the arrays the two per-rule entry points return
+test "the shared power requirements equal the two per-array spellings" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+    var rig = LayerJumpRig.init(0.62);
+    const placement = rig.placement();
+    const routed = router.RouteResult{ .tracks = &layer_jump_tracks, .vias = &layer_jump_vias, .routed = 1, .total = 1 };
+
+    const both = try routedPowerRequirements(alloc, placement, routed);
+    const widths = try routedTrackRequiredWidths(alloc, placement, routed);
+    const barrels = try routedViaRequirements(alloc, placement, routed);
+
+    try expectSameWidths(widths, both.tracks);
+    try expectSameVias(barrels, both.vias);
+    // The rig is only worth anything if it actually solved and actually put the
+    // rail's whole current through the one barrel that carries it.
+    try testing.expect(!both.vias[0].?.envelope);
+    try testing.expectApproxEqAbs(@as(f64, 0.62), both.vias[0].?.current_a, 1e-6);
+    try testing.expect(!both.tracks[0].?.envelope);
+
+    // …and an unsolvable rail agrees on the envelope verdict too, which is the
+    // half of the answer the two rules used to reach by solving twice.
+    var missing = rig;
+    missing.terminals = .{"missing/VOUT"};
+    const unsolved = missing.placement();
+    const both_unsolved = try routedPowerRequirements(alloc, unsolved, routed);
+    try expectSameWidths(try routedTrackRequiredWidths(alloc, unsolved, routed), both_unsolved.tracks);
+    try expectSameVias(try routedViaRequirements(alloc, unsolved, routed), both_unsolved.vias);
+    try testing.expect(both_unsolved.tracks[0].?.envelope);
+    try testing.expectEqualStrings("no-source-terminal", both_unsolved.vias[0].?.reason);
+}
+
+/// Two required-width arrays agree entry for entry, presence included.
+fn expectSameWidths(want: []const ?LocalWidth, got: []const ?LocalWidth) !void {
+    try testing.expectEqual(want.len, got.len);
+    for (want, got) |a, b| {
+        try testing.expectEqual(a == null, b == null);
+        if (a) |width| {
+            try testing.expectApproxEqAbs(width.width_mm, b.?.width_mm, 1e-12);
+            try testing.expectEqual(width.envelope, b.?.envelope);
+            try testing.expectEqualStrings(width.reason, b.?.reason);
         }
     }
-    return out;
+}
+
+/// Two barrel-current arrays agree entry for entry, presence included.
+fn expectSameVias(want: []const ?ViaCurrent, got: []const ?ViaCurrent) !void {
+    try testing.expectEqual(want.len, got.len);
+    for (want, got) |a, b| {
+        try testing.expectEqual(a == null, b == null);
+        if (a) |via| {
+            try testing.expectApproxEqAbs(via.current_a, b.?.current_a, 1e-12);
+            try testing.expectApproxEqAbs(via.capacity_a, b.?.capacity_a, 1e-12);
+            try testing.expectEqual(via.envelope, b.?.envelope);
+            try testing.expectEqualStrings(via.reason, b.?.reason);
+        }
+    }
+}
+
+// spec: placement/power-routing - a net declaring no current is answered no-current without building a copper graph or rastering its sheet contacts
+test "a currentless net short-circuits before the copper graph and the sheet raster" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+    const routed = router.RouteResult{ .tracks = &layer_jump_tracks, .vias = &layer_jump_vias, .routed = 1, .total = 1 };
+
+    // Ground's shape: real copper, real barrels, and not one declared ampere.
+    // `needsGraph` is the solver's own statement that it will answer from the
+    // pre-status alone, which is what lets `analyzeCopper` skip both the
+    // quadratic junction sweep and the sheet contact raster for this net.
+    try testing.expect(!power_current.needsGraph(.{
+        .segments = &.{.{ .route_index = 0, .a = .{ 0, 0 }, .b = .{ 2, 0 }, .layer = 0, .resistance_ohm_per_mm = 1, .width_mm = 0.5 }},
+        .barrels = &.{.{ .route_index = 0, .at = .{ 2, 0 }, .resistance_ohm = 0.002, .radius_mm = 0.2 }},
+        .counts = .{ .tracks = routed.tracks.len, .vias = routed.vias.len },
+        .source = .{ .contacts = &.{}, .complete = false },
+        .loads = &.{},
+    }));
+
+    const solved = try currentlessSolve(alloc, routed);
+    try testing.expectEqual(power_current.Status.no_current, solved.flow.typical.status);
+    try testing.expectEqual(power_current.Status.no_current, solved.flow.maximum.status);
+    try testing.expectEqual(@as(usize, 0), solved.loads.len);
+    // The arrays a currentless answer hands back are still route-index shaped,
+    // so `analyzeTracks`/`analyzeVias` read them exactly as they read a solve.
+    try testing.expectEqual(routed.tracks.len, solved.flow.typical.track_current_a.len);
+    try testing.expectEqual(routed.vias.len, solved.flow.maximum.via_current_a.len);
+
+    // A rail that DOES declare current is not short-circuited by any of this.
+    var rig = LayerJumpRig.init(0.62);
+    const analysis = try analyzeCopper(alloc, rig.placement(), routed, &.{}, null);
+    try testing.expectEqual(power_current.Status.solved, analysis.nets[0].flow.typical.status);
+}
+
+// spec: placement/power-routing - the per-net diagnosis names every source terminal's contact count and every load's contacts, pin completeness and per-axis placement
+test "the rail diagnosis names the load that failed to resolve" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+    const routed = router.RouteResult{ .tracks = &layer_jump_tracks, .vias = &layer_jump_vias, .routed = 1, .total = 1 };
+
+    var rig = LayerJumpRig.init(0.62);
+    const solved = try analyzeCopper(alloc, rig.placement(), routed, &.{}, null);
+    const flow = solved.nets[0].flow;
+    try testing.expectEqual(@as(usize, 1), flow.sources.len);
+    try testing.expectEqualStrings("src/VOUT", flow.sources[0].terminal);
+    try testing.expectEqual(@as(usize, 1), flow.sources[0].contacts);
+    try testing.expectEqual(@as(usize, 1), flow.loads.len);
+    try testing.expectEqualStrings("load/U1", flow.loads[0].ref);
+    try testing.expectEqual(@as(usize, 1), flow.loads[0].contacts);
+    try testing.expect(flow.loads[0].complete);
+    try testing.expect(flow.loads[0].placed.typical and flow.loads[0].placed.maximum);
+    try testing.expectApproxEqAbs(@as(f64, 0), flow.typical.unplaced_a, 1e-12);
+
+    // A consumer named on a reference designator the board does not carry is
+    // the `incomplete-load-terminals` story, and the diagnosis says WHICH one.
+    var orphaned = rig;
+    orphaned.consumers = .{.{ .ref_des = "ghost/U9", .net = "VDD", .pins = &.{"1"}, .i_typ = 0.62, .i_max = 0.62 }};
+    const broken = try analyzeCopper(alloc, orphaned.placement(), routed, &.{}, null);
+    const bad = broken.nets[0].flow;
+    try testing.expectEqual(power_current.Status.incomplete_load_terminals, bad.typical.status);
+    try testing.expectEqualStrings("ghost/U9", bad.loads[0].ref);
+    try testing.expectEqual(@as(usize, 0), bad.loads[0].contacts);
+    try testing.expect(!bad.loads[0].complete);
+    try testing.expect(!bad.loads[0].placed.typical);
+
+    // A source terminal naming nothing on the board reports zero contacts,
+    // which is the whole of the `no-source-terminal` explanation.
+    var unsourced = rig;
+    unsourced.terminals = .{"missing/VOUT"};
+    const no_source = try analyzeCopper(alloc, unsourced.placement(), routed, &.{}, null);
+    try testing.expectEqual(power_current.Status.no_source_terminal, no_source.nets[0].flow.maximum.status);
+    try testing.expectEqual(@as(usize, 0), no_source.nets[0].flow.sources[0].contacts);
 }

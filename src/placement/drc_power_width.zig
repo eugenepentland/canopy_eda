@@ -216,21 +216,21 @@ test "a solved width supersedes the class width and is floored, never narrowed, 
     const placement = testPlacement(&net_rules, &nets);
 
     // A real branch current: the solved width wins outright over the trunk class.
-    const solved = duty(placement, 0, .{ .width_mm = 0.33 }, 0.127);
+    const solved = duty(placement, 0, .{ .width_mm = 0.33, .envelope = false }, 0.127);
     try testing.expectEqual(drc.Kind.power_width, solved.kind.?);
     try testing.expect(solved.supersedes_class);
     try testing.expectApproxEqAbs(@as(f64, 0.33), solved.required_mm, 1e-12);
     try testing.expectEqualStrings("", solved.reason);
 
     // The authored branch floor still binds under a thinner solve…
-    const floored = duty(placement, 0, .{ .width_mm = 0.08 }, 0.127);
+    const floored = duty(placement, 0, .{ .width_mm = 0.08, .envelope = false }, 0.127);
     try testing.expectApproxEqAbs(@as(f64, 0.15), floored.required_mm, 1e-12);
 
     // …and a 0 A stub falls to fabrication, NOT to the 0.2532 class width,
     // with no branch floor authored.
     const bare_rules = [_]optimizer.NetRule{.{ .width = 0.2532 }};
     const bare = testPlacement(&bare_rules, &nets);
-    const stub = duty(bare, 0, .{ .width_mm = 0 }, 0.127);
+    const stub = duty(bare, 0, .{ .width_mm = 0, .envelope = false }, 0.127);
     try testing.expectApproxEqAbs(@as(f64, 0.127), stub.required_mm, 1e-12);
     try testing.expectEqual(drc.Kind.power_width, stub.kind.?);
 }

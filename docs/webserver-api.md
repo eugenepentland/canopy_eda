@@ -178,6 +178,39 @@ Local dev still uses `http://localhost:7050`.
   a second for the whole corpus), then the two analysis tiers — and a
   plain-page cache miss starts a capped background warm, so an edit's payloads
   are usually already rendering before the browser asks.
+- **Per-rail current-solve diagnosis (`power_integrity.nets[].flow`)**: each
+  power net in the `?derived=1` payload carries a `flow` object explaining WHY
+  its current solve reached the verdict `flow_typical_status` /
+  `flow_maximum_status` names (both of which keep their existing spelling and
+  meaning):
+
+  ```json
+  "flow": {
+    "typical": {"status": "disconnected", "unplaced_a": 0},
+    "maximum": {"status": "disconnected", "unplaced_a": 0},
+    "sources": [{"terminal": "buck_3v3d/VOUT", "contacts": 1},
+                {"terminal": "base-interface/V_3V3_ID", "contacts": 0}],
+    "loads": [{"ref": "mcu/U23", "net": "V_3V3D", "pins": ["64", "60"],
+               "i_typ": 0.16, "i_max": 0.3, "contacts": 18, "complete": true,
+               "placed": {"typical": false, "maximum": false}}],
+    "islands": 2
+  }
+  ```
+
+  `sources[].contacts` is how many physical pads that declared source terminal
+  resolved to — a zero is the whole of a `no-source-terminal` verdict, and it
+  names which terminal failed. Per load, `contacts` is how many of its pads
+  were found on the rail's copper (zero = none), `complete` says whether every
+  declared pin resolved, and `placed` says per axis whether the solve could
+  reach it from the source. A load with contacts and `complete: true` but
+  `placed: false` is reachable-on-paper copper the source never reaches.
+  `unplaced_a` is the current belonging to loads that axis had to drop (zero
+  on a full solve). `islands` counts the separate pieces the rail's copper
+  forms under the canonical copper-contact policy, and is filled in only for a
+  `disconnected` rail — more than one means the copper really is in pieces,
+  exactly one means the solve refused a rail the contact policy calls whole.
+  The same facts are available offline from `netlisp power-flow` (see
+  `src/power_flow_cli.zig`).
 - **Named layouts + per-layout URLs (2026-07-27)**: every block — top-level
   DESIGNS included — keeps as many named saved layouts as you save, listed in
   the Sub-circuits pane's Layouts panel. (This *replaces* the 2026-07-02

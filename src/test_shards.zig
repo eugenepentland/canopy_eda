@@ -59,6 +59,7 @@ pub const shards: []const []const []const u8 = &.{
         "placement.fill_cache.test.",
         "placement.content_key.test.",
         "drc_dump.test.",
+        "power_flow_cli.test.",
         "gerber_dump.test.",
         "netlist_dump.test.",
         "pins_by_name.test.",
