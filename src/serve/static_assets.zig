@@ -1152,7 +1152,7 @@ test "PCB hand router gates pad entry and exit at the prospective tapered width"
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
-// spec: placement/power-routing - the hand router steers an unpoured current-rated rail at ordinary fabrication width, then independently exact-DRC-fits each local interval up to its electrical target with 45-degree tapers from the pad's smaller dimension
+// spec: placement/power-routing - the hand router steers an unpoured current-rated rail at ordinary fabrication width, then independently exact-DRC-fits each local interval as the same ordinary track capsule it will commit, up to its electrical target with 45-degree tapers from the pad's smaller dimension
 test "PCB hand router adaptively widens power copper after steering" {
     const markers = [_][]const u8{
         "adaptive_power_width",
@@ -1161,7 +1161,7 @@ test "PCB hand router adaptively widens power copper after steering" {
         "function drawAdaptiveClearWidth",
         "for(var i=0;i<11;i++)",
         "function drawAdaptiveExactClearWidth",
-        "drawAdaptiveProbePath(a,b,layer,net,w)",
+        "drawAdaptiveProbeTrack(a,b,layer,net,w)",
         "for(var i=0;i<7;i++)",
         "function drawAdaptiveRefinedClearWidth",
         "function drawAdaptiveIntervalBlocker",
@@ -1254,9 +1254,13 @@ test "PCB editor re-widens adaptive power runs after an edit moves them" {
         "drawAdaptivePowerPlan(r.run,r.startPad||drawJointProfile(r.startJoint,r.target),r.endPad||drawJointProfile(r.endJoint,r.target),r.floor,r.target,drawAdaptiveRefinedClearWidth)",
         "shaped=r.run.map(function(q){return rewidenAtFloor(q,r.floor);});",
         "function rewidenStatus",
+        "function adaptiveWidthDrcTracks",
+        "function rewidenTry",
         "function rewidenApply",
         "if(RO||!drcGate.ready||drcGate.failed)return 0;",
-        "drcGateDiffBlocks(PCB.tracks||[],PCB.vias||[],rest.concat(shaped),PCB.vias||[],PCB.rf_paths||[],PCB.rf_paths||[])",
+        "afterVias=baseVias.filter(function(v){return !routeFenceVia(v)||!shaped.some(function(t){return routeFenceHitsTrack(v,t);});});",
+        "var blocked=drcGateDiffBlocks(base,baseVias,rest.concat(shaped),afterVias,PCB.rf_paths||[],PCB.rf_paths||[],includeFenceVias);",
+        "runs.forEach(function(r){var n=rewidenTry([r],drcRepair);",
         "drawCommitShaped(r.tracks,r.shaped)",
         "window.PCBRewidenPlan",
         "window.PCBRewidenStatus",
@@ -1274,8 +1278,8 @@ test "PCB editor re-widens adaptive power runs after an edit moves them" {
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, pcb_board_js, "rewidenHeal("));
 }
 
-// spec: placement/power-routing - the PCB DRC panel offers an undoable whole-board recheck that loads the exact geometry gate on demand, then recuts every adaptive run against its current clearance without moving its centre line, while fixed-width copper remains untouched
-test "PCB editor offers a whole-board adaptive width recheck" {
+// spec: placement/power-routing - the PCB DRC panel offers an undoable repair for every authoritative adaptive power-width finding that loads the exact geometry gate on demand, recuts only failing runs without moving their centre lines, removes generated stitching posts crossed by the wider copper, commits independently clean repairs when another run is constrained, and never expands one finding into more taper-slice findings
+test "PCB editor offers a DRC-targeted adaptive width repair" {
     const markers = [_][]const u8{
         // The manual action deliberately stays available for every board with
         // an adaptive class: stored width alone cannot prove a fit is fresh.
@@ -1288,9 +1292,9 @@ test "PCB editor offers a whole-board adaptive width recheck" {
         "drcGateInit().then(function(ok){adaptiveRewidenPending=false;",
         "if(ok){applyAdaptiveRewiden();return;}",
         "if(drcGate.load)return drcGate.load;",
-        // Null seeds select every eligible run; eligibility is limited to an
-        // adaptive target, leaving fixed-width tracks outside the plan.
-        "var before=snapAll(),n=rewidenApply(null);",
+        // Server findings select the failing copper; below-target but exempt
+        // runs never enter the repair plan.
+        "var before=snapAll(),n=rewidenApply(seeds,true);",
         "var geo=rewidenTarget(t.net||\"\");",
         "recordUndo(before);PCB.drc=[];",
     };
@@ -1375,7 +1379,7 @@ test "PCB hand router routes through generated RF fence vias and culls the cross
         "dropped=routeFenceCull(newTracks,newVias,tapered.paths)",
         "dropped=routeFenceCull(newTracks,newVias,(tapered.paths||[]).concat(a.rf_paths))",
         "payload.vias=(payload.vias||[]).filter(function(v){return !routeFenceVia(v);})",
-        "ignore_rf_fence_vias:true",
+        "ignore_rf_fence_vias:includeFenceVias?false:true",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
     // Both the segment and via fallback gates skip disposable posts.

@@ -3482,7 +3482,7 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - an unpoured current-rated rail routes through a QFN-sized land at fabrication width, then grows to its electrical target with an automatic pad taper
 - an adaptive power launch uses the pad's smaller physical dimension and the shortest 45-degree taper to nominal width
 - the hand router receives an electrical target for every unpoured current-rated rail, including an otherwise-unclassed net
-- the hand router steers an unpoured current-rated rail at ordinary fabrication width, then independently exact-DRC-fits each local interval up to its electrical target with 45-degree tapers from the pad's smaller dimension
+- the hand router steers an unpoured current-rated rail at ordinary fabrication width, then independently exact-DRC-fits each local interval as the same ordinary track capsule it will commit, up to its electrical target with 45-degree tapers from the pad's smaller dimension
 - adaptive routing retains the full maximum-current target while a pour-backed rail keeps its short authored fanout width
 - an adaptive rail reports every actionable electrical shortfall in one pass while the fabrication minimum remains a hard error
 - power-width comparison accepts the one-micrometre persistence quantum but rejects a material shortfall
@@ -3495,7 +3495,7 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - power-routing named tests remain assigned to exactly one test shard
 - an adaptive rail carries its width as ordinary copper: a drawn run commits its shaped tracks with equal-width collinear stations collapsed, an inherited overlay bakes its sample widths onto the tracks it owns before any edit releases it, and a gesture that collapses copper to zero length takes the crumb with it
 - moving adaptive power copper recuts the maximal same-net runs the gesture touched to the clearance they have after the move, growing or shrinking under the exact DRC gate and never below the routing floor
-- the PCB DRC panel offers an undoable whole-board recheck that loads the exact geometry gate on demand, then recuts every adaptive run against its current clearance without moving its centre line, while fixed-width copper remains untouched
+- the PCB DRC panel offers an undoable repair for every authoritative adaptive power-width finding that loads the exact geometry gate on demand, recuts only failing runs without moving their centre lines, removes generated stitching posts crossed by the wider copper, commits independently clean repairs when another run is constrained, and never expands one finding into more taper-slice findings
 - Two adaptive slices meeting at a bend or at a plain two-way splice with existing copper are emitted at one width, with the 45-degree transition moved onto the adjoining straight, while pad lands, via corners and T-junctions keep their free trunk/branch step
 - two adaptive power tracks that meet at a bend take the narrower of their two widths at that joint, including where one side is copper this pass left alone, and the wider side tapers back to its electrical target along its own straight
 - a three-track junction, a same-net barrel, or a pad land at the meeting point leaves every leg its own width, so only a bare two-track joint is equalized

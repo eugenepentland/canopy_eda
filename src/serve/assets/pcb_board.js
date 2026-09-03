@@ -7816,12 +7816,13 @@ function drawAdaptiveClearWidth(a,b,layer,net,floor,cap,skip){cap=Math.max(floor
   if(segViolation(a.x,a.y,b.x,b.y,layer,net,mid/2,skip))hi=mid;else lo=mid;}return lo;}
 // The fast editor probe intentionally stays cheap, but on a dense board it can
 // both overestimate a pad box and miss a filled custom zone. Ask the exact WASM
-// gate about ONE local interval at a time: a clean interval keeps growing even
-// when a different interval on the same gesture is constrained.
-function drawAdaptiveProbePath(a,b,layer,net,width){return {net:net,l:layer,track_ids:[],samples:[[a.x,a.y,width],[b.x,b.y,width]]};}
+// gate about ONE local interval at a time, using the same round-ended ordinary
+// track the planner will commit. A custom-path probe has butt ends, so it can
+// falsely clear a via or pad that the emitted track's end cap then hits.
+function drawAdaptiveProbeTrack(a,b,layer,net,width){return {x1:a.x,y1:a.y,x2:b.x,y2:b.y,l:layer,w:width,net:net,source:"human"};}
 function drawAdaptiveExactClearWidth(a,b,layer,net,floor,cap,skip,blocker){cap=Math.max(floor,cap);
  if(!drcGate.ready||drcGate.failed)return drawAdaptiveClearWidth(a,b,layer,net,floor,cap,skip);
- function blocked(w){var path=drawAdaptiveProbePath(a,b,layer,net,w);return blocker?blocker(path):drcGateBlocks([],[],[path]);}
+ function blocked(w){var track=drawAdaptiveProbeTrack(a,b,layer,net,w);return blocker?blocker(track):drcGateBlocks([track],[],[]);}
  if(cap<=floor+1e-9||!blocked(cap))return cap;if(drcGate.failed||blocked(floor))return floor;
  var lo=floor,hi=cap;for(var i=0;i<7;i++){var mid=(lo+hi)/2;
   if(blocked(mid))hi=mid;else lo=mid;if(drcGate.failed)return floor;}return lo;}
@@ -7831,15 +7832,15 @@ function drawAdaptiveRefinedClearWidth(a,b,layer,net,floor,cap,skip){var quick=d
 // same unchanged copper/parts, so cache that baseline while still keeping the
 // candidate side small; the expensive whole-board model is never rebuilt.
 function drawAdaptiveIntervalBlocker(a,b,layer,net,cap,baseCache){if(!drcGate.ready||drcGate.failed)return null;
- var probe=drawAdaptiveProbePath(a,b,layer,net,cap),bt=PCB.tracks||[],bv=PCB.vias||[],brf=PCB.rf_paths||[],
-  scope=drcGateScope(bt,bv,bt,bv,brf,brf.concat([probe]));if(!scope)return null;
+ var probe=drawAdaptiveProbeTrack(a,b,layer,net,cap),bt=PCB.tracks||[],bv=PCB.vias||[],brf=PCB.rf_paths||[],
+  scope=drcGateScope(bt,bv,bt.concat([probe]),bv,brf,brf);if(!scope)return null;
  var key=scope.bt.map(function(o){return bt.indexOf(o);}).join(",")+"|"+
   scope.bv.map(function(o){return bv.indexOf(o);}).join(",")+"|"+
   scope.parts.map(function(o){return P.indexOf(o);}).join(",")+"|"+
   scope.brf.map(function(o){return brf.indexOf(o);}).join(","),baseCounts=baseCache[key];
  if(!baseCounts)try{baseCounts=drcBlockCounts(drcGateRun(scope.bt,scope.bv,scope.parts,scope.brf));baseCache[key]=baseCounts;}
  catch(e){drcGate.failed=true;return null;}
- return function(path){var after;try{after=drcBlockCounts(drcGateRun(scope.at,scope.av,scope.parts,scope.brf.concat([path])));}
+ return function(track){var after;try{after=drcBlockCounts(drcGateRun(scope.bt.concat([track]),scope.bv,scope.parts,scope.brf));}
   catch(e){drcGate.failed=true;return true;}for(var id in after)if(after[id]>(baseCounts[id]||0))return true;return false;};}
 function drawAdaptiveRunClearer(tracks,target,refine){var baseCache={};
  return function(a,b,layer,net,floor,cap,skip){if(refine){var quick=drawAdaptiveClearWidth(a,b,layer,net,floor,cap,skip);if(quick>=cap-1e-7)return cap;}
@@ -9435,7 +9436,7 @@ function renderDrcList(){drcTabBadge();var lst=ensureDrcList();if(!lst)return;
   adaptiveClasses=classes.some(function(c){return +c.adaptive_power_width>0;}),
   openLabel=sum.open?(sum.open+" open net"+(sum.open>1?"s":"")):"",
   actions=(powerClasses?'<button id="drc-power-width" class="btn"'+(power.changed?'':' disabled')+' title="Widen only current-aware power segments that the latest post-route current check found undersized. Unsolved branches use the conservative full-rail width. Undoable.">'+(power.changed?('Widen power ('+power.tracks+')'):'Power widths ✓')+'</button>':'')+
-   (adaptiveClasses?'<button id="drc-adaptive-width" class="btn" title="Re-evaluate every adaptive-width power trace against the clearance it has now, widening newly open stretches and narrowing newly constrained ones without moving centre lines. Undoable.">↻ Recheck adaptive</button>':'');
+   (adaptiveClasses?'<button id="drc-adaptive-width" class="btn" title="Repair the adaptive power traces that authoritative DRC currently reports undersized. Clean runs are widened without moving their centre lines; physically constrained runs stay unchanged. Undoable.">↻ Repair adaptive widths</button>':'');
  var h='<div class="drc-row" style="cursor:default;font-weight:600"><span class="drc-k">'+
   (v.length?((sum.open?('<button type="button" id="drc-open-summary" class="drc-summary-link" title="Show and locate the first open net">'+pEsc(openLabel)+'</button>'+(other?(" · "+other+" other issue"+(other>1?"s":"")):"")):
    (issues+" issue"+(issues>1?"s":"")))+(nt>1?" · "+nt+" types":"")):"No DRC violations")+'</span>'+
@@ -9857,18 +9858,22 @@ window.PCBNetClassGeometryStatus=netClassGeometryStatus;
 window.PCBApplyNetClassGeometry=applyNetClassGeometry;
 
 // Turn current-aware power `track width` findings into an exact, non-mutating
+// Match one server DRC marker back to the editable copper it describes. The
+// browser payload deliberately carries no array index, so midpoint + layer +
+// net + recorded width is the stable identity across a DRC round trip.
+function powerWidthDrcTrack(d,seen){if(!d||!d.a||!d.a.net)return null;var best=null,score=1e9;
+ (PCB.tracks||[]).forEach(function(t){if(seen&&seen.indexOf(t)>=0||netCollapse(t.net||"")!==netCollapse(d.a.net))return;
+  if(d.l!=null&&Number(t.l||0)!==Number(d.l))return;
+  var mx=((+t.x1)+(+t.x2))/2,my=((+t.y1)+(+t.y2))/2,dist=Math.hypot(mx-(+d.x),my-(+d.y));
+  if(dist>1e-4)return;var s=dist+Math.abs((+t.w||0)-(+d.gap||0));if(s<score){score=s;best=t;}});return best;}
 // edit plan. The server DRC has already solved each segment's DC current (or
 // conservatively charged it with the full rail current when it could not), so
-// the client only has to match each midpoint back to saved editable copper.
+// the client only has to match each marker back to saved editable copper.
 // Targets round upward to a 1 mil manufacturing increment and never shrink.
 function powerWidthPlan(){var fixes=[],seen=[],step=0.0254,eps=1e-7;if(!powerWidthDrcFresh)return {tracks:fixes,nets:0};
  (PCB.drc||[]).forEach(function(d){if(d.k!=="track width"||!d.a||!d.a.net||!(+d.clr>0))return;
   var c=netClassInfo(d.a.net);if(!c||!(+c.power_branch_width>0))return;
-  var best=null,score=1e9;
-  (PCB.tracks||[]).forEach(function(t){if(netCollapse(t.net||"")!==netCollapse(d.a.net))return;
-   if(d.l!=null&&Number(t.l||0)!==Number(d.l))return;
-   var mx=((+t.x1)+(+t.x2))/2,my=((+t.y1)+(+t.y2))/2,dist=Math.hypot(mx-(+d.x),my-(+d.y));
-   if(dist>1e-4)return;var s=dist+Math.abs((+t.w||0)-(+d.gap||0));if(s<score){score=s;best=t;}});
+  var best=powerWidthDrcTrack(d,seen);
   if(!best||seen.indexOf(best)>=0)return;
   var target=Math.ceil(((+d.clr)-eps)/step)*step;
   target=Math.max(target,+c.power_branch_width||0);
@@ -9886,6 +9891,13 @@ function applyPowerWidths(){if(RO)return powerWidthStatus();var p=powerWidthPlan
 window.PCBPowerWidthPlan=powerWidthPlan;
 window.PCBPowerWidthStatus=powerWidthStatus;
 window.PCBApplyPowerWidths=applyPowerWidths;
+
+// Only authoritative `power width` findings seed the manual repair. Merely
+// standing below the class target is not a defect: a bounded land neck may be
+// intentionally exempt, and recutting it can manufacture dozens of findings.
+function adaptiveWidthDrcTracks(){var out=[],seen=[];if(!powerWidthDrcFresh)return out;
+ (PCB.drc||[]).forEach(function(d){if(d.k!=="power width")return;var t=powerWidthDrcTrack(d,seen);
+  if(t){seen.push(t);out.push(t);}});return out;}
 
 // Width on an adaptive rail is derived data, not an authored value: the moment
 // its copper moves, the clearance-limited answer moves with it. Recut each
@@ -9964,7 +9976,7 @@ function rewidenPlan(seeds){var runs=[],tracks=0,nets=Object.create(null),maxWid
    if(!r.run.some(function(q){return (+q.w||0)>r.floor+1e-9;}))return;
    shaped=r.run.map(function(q){return rewidenAtFloor(q,r.floor);});}
   else if(rewidenSame(r.run,shaped))return;
-  runs.push({tracks:r.tracks,shaped:shaped});tracks+=shaped.length;
+  runs.push({tracks:r.tracks,shaped:shaped,target:r.target});tracks+=shaped.length;
   nets[r.run[0].net||""]=1;maxWidth=Math.max(maxWidth,plan.maxWidth||0);});
  return {runs:runs,tracks:tracks,nets:Object.keys(nets).length,maxWidth:maxWidth};}
 // Cheap eligibility only: adaptive copper standing below its class target. What
@@ -9974,16 +9986,36 @@ function rewidenStatus(){var tracks=0,nets=Object.create(null);
   if(!geo||!rewidenTrack(t,t.net||"",t.l||0)||(+t.w||0)>=geo.target-1e-9)return;
   tracks++;nets[t.net||""]=1;});
  return {tracks:tracks,nets:Object.keys(nets).length,changed:tracks,editable:!RO};}
-function rewidenApply(seeds){if(RO||!drcGate.ready||drcGate.failed)return 0;
- var p=rewidenPlan(seeds);if(!p.runs.length)return 0;
- var old=[],shaped=[];
- p.runs.forEach(function(r){Array.prototype.push.apply(old,r.tracks);Array.prototype.push.apply(shaped,r.shaped);});
- var rest=(PCB.tracks||[]).filter(function(t){return old.indexOf(t)<0;});
- // Derived width is never worth a new violation: one all-or-nothing exact check
- // of the whole recut against the board exactly as it stands.
- if(drcGate.failed||drcGateDiffBlocks(PCB.tracks||[],PCB.vias||[],rest.concat(shaped),PCB.vias||[],PCB.rf_paths||[],PCB.rf_paths||[]))return 0;
- p.runs.forEach(function(r){drawCommitShaped(r.tracks,r.shaped);});
- cuGeomDrop();gpuCuEdit();ovPaintSoon();return p.tracks;}
+function rewidenTry(runs,includeFenceVias){var old=[],shaped=[];
+ runs.forEach(function(r){Array.prototype.push.apply(old,r.tracks);Array.prototype.push.apply(shaped,r.shaped);});
+ var base=(PCB.tracks||[]).slice(),rest=base.filter(function(t){return old.indexOf(t)<0;}),baseVias=PCB.vias||[],afterVias=baseVias;
+ // Generated stitching posts are disposable routing cache. Cull only posts the
+ // proposed wider copper actually crosses, then include every remaining post
+ // in the release-grade exact check the authoritative server DRC will repeat.
+ if(includeFenceVias)afterVias=baseVias.filter(function(v){return !routeFenceVia(v)||!shaped.some(function(t){return routeFenceHitsTrack(v,t);});});
+ var blocked=drcGateDiffBlocks(base,baseVias,rest.concat(shaped),afterVias,PCB.rf_paths||[],PCB.rf_paths||[],includeFenceVias);
+ if(drcGate.failed||blocked)return 0;
+ runs.forEach(function(r){drawCommitShaped(r.tracks,r.shaped);});PCB.vias=afterVias;
+ rewidenTry.dropped=baseVias.length-afterVias.length;return shaped.length;}
+function rewidenApply(seeds,drcRepair){if(RO||!drcGate.ready||drcGate.failed)return 0;
+ rewidenApply.accepted=0;rewidenApply.skipped=0;rewidenApply.dropped=0;
+ var p=rewidenPlan(seeds),runs=p.runs,skipped=0;if(!runs.length)return 0;
+ // A DRC-driven repair must strictly reduce the number of electrical width
+ // findings on each run. A clearance-fitted taper with MORE sub-target slices
+ // is geometrically legal but makes the release checklist worse, so retain the
+ // simpler original run for the user to reroute instead.
+ if(drcRepair){runs=runs.filter(function(r){var before=r.tracks.filter(function(t){return (+t.w||0)<r.target-1e-3;}).length,
+    after=r.shaped.filter(function(t){return (+t.w||0)<r.target-1e-3;}).length;
+   if(after<before)return true;skipped++;return false;});}
+ if(!runs.length){rewidenApply.skipped=skipped;return 0;}
+ // Take the fast all-board path when the combined answer is clean. If one run
+ // collides, retry each disjoint run against the copper already accepted: one
+ // constrained branch must not throw away every valid width repair on board.
+ var changed=rewidenTry(runs,drcRepair),accepted=changed?runs.length:0,dropped=changed?(rewidenTry.dropped||0):0;
+ if(!changed&&!drcGate.failed){runs.forEach(function(r){var n=rewidenTry([r],drcRepair);
+   if(n){changed+=n;accepted++;dropped+=rewidenTry.dropped||0;}else skipped++;});}
+ rewidenApply.accepted=accepted;rewidenApply.skipped=skipped;rewidenApply.dropped=dropped;
+ if(changed){cuGeomDrop();gpuCuEdit();ovPaintSoon();}return changed;}
 var adaptiveRewidenPending=false;
 function applyAdaptiveRewiden(){if(RO)return rewidenStatus();
  if(drcGate.failed){
@@ -9995,11 +10027,18 @@ function applyAdaptiveRewiden(){if(RO)return rewidenStatus();
     if(ok){applyAdaptiveRewiden();return;}
     routeStatMsg("adaptive power widths are unavailable because the exact geometry engine could not load — reload the page to retry",true);});}
   return rewidenStatus();}
- var before=snapAll(),n=rewidenApply(null);
- if(!n){routeStatMsg("adaptive power copper already fits the clearance it has");return rewidenStatus();}
+ var seeds=adaptiveWidthDrcTracks();
+ if(!powerWidthDrcFresh){routeStatMsg("waiting for the authoritative power-width check to finish");return rewidenStatus();}
+ if(!seeds.length){routeStatMsg("authoritative DRC shows no adaptive power-width errors to repair");return rewidenStatus();}
+ var before=snapAll(),n=rewidenApply(seeds,true);
+ var skipped=rewidenApply.skipped||0,dropped=rewidenApply.dropped||0;
+ if(!n){routeStatMsg(skipped?("all "+skipped+" adaptive power run"+(skipped===1?" was":"s were")+" left unchanged because widening would create a clearance error"):
+   "adaptive power copper already fits the clearance it has",!!skipped);return rewidenStatus();}
  recordUndo(before);PCB.drc=[];drawRoute();drawClr();drawDrc();scheduleDrc();
  if(poursDeclared())refillPours();
- routeStatMsg("recut "+n+" adaptive power segment"+(n===1?"":"s")+" to the clearance it has now — DRC and pours are refreshing; Save/Update to keep");
+ routeStatMsg("recut "+n+" adaptive power segment"+(n===1?"":"s")+" to the clearance it has now"+
+  (dropped?("; removed "+dropped+" crossed generated stitching via"+(dropped===1?"":"s")):"")+
+  (skipped?("; left "+skipped+" constrained run"+(skipped===1?"":"s")+" unchanged"):"")+" — DRC and pours are refreshing; Save/Update to keep");
  return rewidenStatus();}
 window.PCBRewidenRuns=rewidenRuns;
 window.PCBRewidenPlan=rewidenPlan;
@@ -10773,10 +10812,10 @@ function drcSessClipSeg(x1,y1,x2,y2,layer,net,hw){
  return (t<0)?null:t;}
 // Run the wasm engine synchronously over explicit copper overrides → drc list
 // (override-filtered, same as the worker path). Two-call ABI mirrors drc_worker.js.
-function drcGateRun(tracks,vias,parts,rfPaths){
+function drcGateRun(tracks,vias,parts,rfPaths,includeFenceVias){
  var ex=drcGate.inst.exports;
  var input=JSON.stringify(buildDrcInput(PCB,{clearance:clrVal(),outline:PCB.outline||null,parts:parts||P,tracks:tracks,vias:vias,
-  rf_paths:rfPaths==null?(PCB.rf_paths||[]):rfPaths,ignore_rf_fence_vias:true}));
+  rf_paths:rfPaths==null?(PCB.rf_paths||[]):rfPaths,ignore_rf_fence_vias:includeFenceVias?false:true}));
  var bytes=new TextEncoder().encode(input);
  var p=ex.wasm_alloc(bytes.length);
  new Uint8Array(drcGate.mem.buffer).set(bytes,p);
@@ -10838,11 +10877,11 @@ function drcGateScope(baseTracks,baseVias,afterTracks,afterVias,baseRfPaths,afte
  var parts=P.filter(function(p,i){return (p.pads||[]).some(function(pd){return drcBoxHit(wrect(i,pd),box);});});
  return {bt:pick(baseTracks,false),bv:pick(baseVias,true),at:pick(afterTracks,false),av:pick(afterVias,true),parts:parts,
   brf:drcRfScope(box,baseRfPaths),arf:drcRfScope(box,afterRfPaths)};}
-function drcGateDiffBlocks(baseTracks,baseVias,afterTracks,afterVias,baseRfPaths,afterRfPaths){
+function drcGateDiffBlocks(baseTracks,baseVias,afterTracks,afterVias,baseRfPaths,afterRfPaths,includeFenceVias){
  if(!drcGate.ready)return false; // wasm not up → tier-1 only
  var live=PCB.rf_paths||[];baseRfPaths=baseRfPaths==null?live:baseRfPaths;afterRfPaths=afterRfPaths==null?live:afterRfPaths;
  var base,after,scope=drcGateScope(baseTracks,baseVias,afterTracks,afterVias,baseRfPaths,afterRfPaths);if(!scope)return false;
- try{base=drcGateRun(scope.bt,scope.bv,scope.parts,scope.brf);after=drcGateRun(scope.at,scope.av,scope.parts,scope.arf);}
+ try{base=drcGateRun(scope.bt,scope.bv,scope.parts,scope.brf,includeFenceVias);after=drcGateRun(scope.at,scope.av,scope.parts,scope.arf,includeFenceVias);}
  catch(e){drcGate.failed=true;return false;}
  var bc=drcBlockCounts(base),ac=drcBlockCounts(after);
  for(var id in ac){if(ac[id]>(bc[id]||0))return true;}

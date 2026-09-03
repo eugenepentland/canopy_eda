@@ -376,7 +376,7 @@ function assertBendContinuity(shaped, label) {
   const attempted = [];
   const g = load([
     "drawAdaptiveClearWidth",
-    "drawAdaptiveProbePath",
+    "drawAdaptiveProbeTrack",
     "drawAdaptiveExactClearWidth",
     "drawAdaptiveRefinedClearWidth",
   ], {
@@ -384,8 +384,9 @@ function assertBendContinuity(shaped, label) {
     segViolation(_x1, _y1, _x2, _y2, _layer, _net, hw) {
       return 2 * hw > 0.18 ? { k: "conservative pad box" } : null;
     },
-    drcGateBlocks(_tracks, _vias, paths) {
-      const width = paths[0].samples[0][2];
+    drcGateBlocks(tracks, _vias, paths) {
+      assert.equal(paths.length, 0, "adaptive copper must be probed as the ordinary track it will commit");
+      const width = tracks[0].w;
       attempted.push(width);
       return width > exactLimit + 1e-9;
     },
@@ -406,15 +407,15 @@ function assertBendContinuity(shaped, label) {
   const existingPart = { ref: "U1" };
   let baselineRuns = 0;
   let candidateRuns = 0;
-  const g = load(["drawAdaptiveProbePath", "drawAdaptiveIntervalBlocker"], {
+  const g = load(["drawAdaptiveProbeTrack", "drawAdaptiveIntervalBlocker"], {
     drcGate: { ready: true, failed: false },
     PCB: { tracks: [existingTrack], vias: [], rf_paths: [] },
     P: [existingPart],
-    drcGateScope(bt, bv) {
-      return { bt, bv, at: bt, av: bv, parts: [existingPart], brf: [] };
+    drcGateScope(bt, bv, at) {
+      return { bt, bv, at, av: bv, parts: [existingPart], brf: [] };
     },
-    drcGateRun(_tracks, _vias, _parts, paths) {
-      if (paths.length) candidateRuns++;
+    drcGateRun(tracks) {
+      if (tracks.length > 1) candidateRuns++;
       else baselineRuns++;
       return [];
     },
@@ -425,8 +426,8 @@ function assertBendContinuity(shaped, label) {
   const b = { x: 0.05, y: 0 };
   const first = g.drawAdaptiveIntervalBlocker(a, b, 1, "V_12V", 0.4, cache);
   const second = g.drawAdaptiveIntervalBlocker(a, b, 1, "V_12V", 0.4, cache);
-  assert.equal(first(g.drawAdaptiveProbePath(a, b, 1, "V_12V", 0.4)), false);
-  assert.equal(second(g.drawAdaptiveProbePath(a, b, 1, "V_12V", 0.3)), false);
+  assert.equal(first(g.drawAdaptiveProbeTrack(a, b, 1, "V_12V", 0.4)), false);
+  assert.equal(second(g.drawAdaptiveProbeTrack(a, b, 1, "V_12V", 0.3)), false);
   assert.equal(baselineRuns, 1, "identical local scopes must reuse their unchanged DRC baseline");
   assert.equal(candidateRuns, 2, "each proposed interval width must still receive its own exact DRC run");
 }
@@ -1123,6 +1124,25 @@ function loadRewidenWalk(PCB, lands = [], owned = []) {
 }
 
 {
+  const failing = { id: "failing", net: "V_5V", l: 1, x1: 0, y1: 0, x2: 2, y2: 0, w: 0.2532 };
+  const exempt = { id: "exempt", net: "V_5V", l: 1, x1: 0, y1: 2, x2: 2, y2: 2, w: 0.2532 };
+  const PCB = { tracks: [failing, exempt], drc: [
+    { k: "power width", x: 1, y: 0, l: 1, gap: 0.2532, a: { net: "V_5V" } },
+    { k: "power width", x: 1, y: 0, l: 1, gap: 0.2532, a: { net: "V_5V" } },
+    { k: "dangling copper", x: 1, y: 2, l: 1, gap: 0.2532, a: { net: "V_5V" } },
+  ] };
+  const g = load(["powerWidthDrcTrack", "adaptiveWidthDrcTracks"], {
+    PCB,
+    powerWidthDrcFresh: true,
+    netCollapse(net) { return String(net).split(".")[0]; },
+  });
+  assert.deepEqual(Array.from(g.adaptiveWidthDrcTracks(), (t) => t.id), ["failing"],
+    "only unique tracks named by authoritative adaptive power-width findings seed the repair");
+  g.powerWidthDrcFresh = false;
+  assert.equal(g.adaptiveWidthDrcTracks().length, 0, "stale server DRC never drives an adaptive repair");
+}
+
+{
   // The recut itself, through the planner the pen uses. Growing and shrinking
   // are equally correct: width on an adaptive rail is derived from the clearance
   // it has right now, and the exact gate has the final say either way.
@@ -1141,7 +1161,7 @@ function loadRewidenWalk(PCB, lands = [], owned = []) {
     "drawSamePointXY", "drawShapedPush", "drawAdaptivePowerRun", "drawJointProfile", "drawAdaptivePowerPlan",
     "drawReverseTrack", "drawTrackFromPoint", "drawCommitShaped",
     "rewidenTarget", "rewidenTrack", "rewidenGrow", "rewidenRun", "rewidenRuns", "rewidenSame",
-    "rewidenDeclined", "rewidenAtFloor", "rewidenPlan", "rewidenStatus", "rewidenApply", "rewidenHeal",
+    "rewidenDeclined", "rewidenAtFloor", "rewidenPlan", "rewidenStatus", "rewidenTry", "rewidenApply", "rewidenHeal",
   ], {
     PCB,
     RO: false,
@@ -1151,6 +1171,8 @@ function loadRewidenWalk(PCB, lands = [], owned = []) {
     netClassInfo(net) { return net === "V_12V" ? { adaptive_power_width: target } : null; },
     rfOwnsTrack() { return false; },
     drawEndpointLand() { return null; },
+    routeFenceVia(v) { return !!v.generated; },
+    routeFenceHitsTrack(v) { return !!v.hit; },
     trackIdEnsure(t) { return t.id; },
     trackIdNew() { return `s${++minted}`; },
     trackLength(t) { return Math.hypot(t.x2 - t.x1, t.y2 - t.y1); },
@@ -1245,6 +1267,43 @@ function loadRewidenWalk(PCB, lands = [], owned = []) {
   assert(g.rewidenApply(null) >= 1, "the whole-board action covers every adaptive run");
   assert(Math.abs(PCB.tracks[1].w - target) < 1e-9);
 
+  // A collision between two simultaneous recuts must fall back to independent
+  // commits instead of silently discarding every clean repair on the board.
+  const splitA = { id: "split-a", net: "V_12V", l: 0, x1: 0, y1: 10, x2: 3, y2: 10, w: floor, source: "human" };
+  const splitB = { id: "split-b", net: "V_12V", l: 0, x1: 0, y1: 15, x2: 3, y2: 15, w: floor, source: "human" };
+  PCB.tracks = [splitA, splitB];
+  blocked = false;
+  g.drcGateDiffBlocks = (_bt, _bv, after) => after.filter((t) => Math.abs(t.w - target) < 1e-9).length > 1;
+  assert(g.rewidenApply(null) >= 1, "a rejected combined recut still commits its first independently clean run");
+  assert(Math.abs(PCB.tracks[0].w - target) < 1e-9, "the clean run is widened");
+  assert.equal(PCB.tracks[1], splitB, "the conflicting run remains untouched");
+  assert.equal(g.rewidenApply.skipped, 1, "the caller can report the constrained run instead of claiming all widths fit");
+  g.drcGateDiffBlocks = (_bt, _bv, after) => { gated.push(after); return blocked; };
+
+  // A DRC-driven repair may touch only failing runs, and must not turn one
+  // coarse finding into many taper-slice findings.
+  const failing = { id: "failing", net: "V_12V", l: 0, x1: 0, y1: 20, x2: 3, y2: 20, w: floor, source: "human" };
+  const exempt = { id: "exempt", net: "V_12V", l: 0, x1: 0, y1: 25, x2: 3, y2: 25, w: floor, source: "human" };
+  PCB.tracks = [failing, exempt];
+  assert(g.rewidenApply([failing], true) >= 1, "the authoritative failing run is repaired");
+  assert(Math.abs(PCB.tracks[0].w - target) < 1e-9);
+  assert.equal(PCB.tracks[1], exempt, "a below-target run absent from server DRC remains untouched");
+
+  const post = { id: "post", generated: true, hit: true };
+  const posted = { id: "posted", net: "V_12V", l: 0, x1: 0, y1: 27, x2: 3, y2: 27, w: floor, source: "human" };
+  PCB.tracks = [posted]; PCB.vias = [post];
+  assert(g.rewidenApply([posted], true) >= 1, "a generated stitching post does not prevent a valid width repair");
+  assert.equal(PCB.vias.length, 0, "a generated stitching post crossed by repaired copper is culled");
+  assert.equal(g.rewidenApply.dropped, 1, "the caller can report regenerated cache geometry it removed");
+
+  limit = (x) => (x > 1 && x < 2 ? 0.2 : Infinity);
+  const expanding = { id: "expanding", net: "V_12V", l: 0, x1: 0, y1: 30, x2: 3, y2: 30, w: floor, source: "human" };
+  PCB.tracks = [expanding]; PCB.vias = [];
+  assert.equal(g.rewidenApply([expanding], true), 0, "a repair that splits one finding into several sub-target slices is skipped");
+  assert.equal(PCB.tracks[0], expanding, "the simpler original error remains available for manual rerouting");
+  assert.equal(g.rewidenApply.skipped, 1);
+  limit = () => Infinity;
+
   // A recut whose walk stops against copper it may not reshape has to LAND on
   // that copper's width, then flare back to target on its own straight.
   const butt = { id: "butt", net: "V_12V", l: 0, x1: 0, y1: 0, x2: 3, y2: 0, w: floor, source: "human" };
@@ -1282,16 +1341,19 @@ function loadRewidenWalk(PCB, lands = [], owned = []) {
   const messages = [];
   let finishLoad, initCalls = 0, applyCalls = 0, undoCalls = 0;
   const loading = new Promise((resolve) => { finishLoad = resolve; });
+  function rewidenApplyStub() { applyCalls++; rewidenApplyStub.skipped = 0; return 2; }
   const g = load(["applyAdaptiveRewiden"], {
     RO: false,
     adaptiveRewidenPending: false,
     drcGate: gate,
     PCB: { drc: [] },
+    powerWidthDrcFresh: true,
+    adaptiveWidthDrcTracks() { return [{ id: "failing" }]; },
     rewidenStatus() { return status; },
     drcGateInit() { initCalls++; return loading; },
     routeStatMsg(message, error) { messages.push({ message, error: !!error }); },
     snapAll() { return { before: true }; },
-    rewidenApply() { applyCalls++; return 2; },
+    rewidenApply: rewidenApplyStub,
     recordUndo() { undoCalls++; },
     drawRoute() {}, drawClr() {}, drawDrc() {}, scheduleDrc() {},
     poursDeclared() { return false; }, refillPours() {},
@@ -1307,7 +1369,7 @@ function loadRewidenWalk(PCB, lands = [], owned = []) {
   finishLoad(true);
   await loading;
   assert.equal(applyCalls, 1, "the original click resumes automatically after the gate loads");
-  assert.equal(undoCalls, 1, "the resumed whole-board recheck remains one undo step");
+  assert.equal(undoCalls, 1, "the resumed DRC-targeted repair remains one undo step");
   assert.match(messages.at(-1).message, /recut 2 adaptive power segments/);
 }
 

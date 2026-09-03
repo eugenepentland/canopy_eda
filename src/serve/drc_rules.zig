@@ -834,8 +834,8 @@ test "viewer scopes commit DRC and retains drag-time work across frames" {
     try std.testing.expect(std.mem.indexOf(u8, js, "function drcGateScope(") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function drcRfScope(box,paths)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "brf:drcRfScope(box,baseRfPaths),arf:drcRfScope(box,afterRfPaths)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "drcGateRun(scope.bt,scope.bv,scope.parts,scope.brf)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "drcGateRun(scope.at,scope.av,scope.parts,scope.arf)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drcGateRun(scope.bt,scope.bv,scope.parts,scope.brf,includeFenceVias)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "drcGateRun(scope.at,scope.av,scope.parts,scope.arf,includeFenceVias)") != null);
     // Worker/session consumers share one full-board serialization generation,
     // while session refill waits for idle. Arming a copper gesture may request
     // the refill, but must never synchronously load the full board on that
