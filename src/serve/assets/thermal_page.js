@@ -77,6 +77,8 @@
   var ambientInput = document.getElementById("tp-ambient");
   var jsonLink = document.getElementById("tp-json");
   var layoutSel = document.getElementById("tp-layout");
+  var fanToggle = document.getElementById("tp-use-fan");
+  var heatsinkToggle = document.getElementById("tp-use-heatsink");
   var faceButtons = page.querySelectorAll("[data-board-side]");
   var viewButtons = page.querySelectorAll("[data-board-view]");
 
@@ -231,6 +233,20 @@
     heatRefresh();
     syncUrl();
   }
+  function scenarioUsesFan(next) { return next === "fan" || next === "fan_heatsink"; }
+  function scenarioUsesHeatsink(next) { return next === "heatsink" || next === "fan_heatsink"; }
+  function coolingTogglesSync() {
+    if (fanToggle) fanToggle.checked = scenarioUsesFan(scenario);
+    if (heatsinkToggle) heatsinkToggle.checked = scenarioUsesHeatsink(scenario);
+  }
+  function coolingScenario() {
+    var useFan = !!(fanToggle && fanToggle.checked);
+    var useHeatsink = !!(heatsinkToggle && heatsinkToggle.checked);
+    if (useFan && useHeatsink) return "fan_heatsink";
+    if (useFan) return "fan";
+    if (useHeatsink) return "heatsink";
+    return "natural";
+  }
   function applyScenario() {
     var btns = page.querySelectorAll(".tp-seg-btn");
     for (var i = 0; i < btns.length; i++) {
@@ -246,7 +262,10 @@
     for (var t = 0; t < tables.length; t++) {
       tables[t].hidden = tables[t].getAttribute("data-scenario") !== scenario;
     }
+    coolingTogglesSync();
   }
+  if (fanToggle) fanToggle.addEventListener("change", function () { tpSelect(coolingScenario()); });
+  if (heatsinkToggle) heatsinkToggle.addEventListener("change", function () { tpSelect(coolingScenario()); });
 
   // ---- Ambient (one server round trip) -----------------------------------
   var pending = null, seq = 0;

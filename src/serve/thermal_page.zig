@@ -455,6 +455,25 @@ fn writeControls(w: *std.Io.Writer, alloc: std.mem.Allocator, v: View) RenderErr
     try w.writeAll("<section class=\"tp-controls\" aria-label=\"Thermal controls\">");
     try writeLayoutPicker(w, v);
     if (v.scenarios.ladder) |ladder| {
+        const fan_row = rowFor(ladder, .fan);
+        // A physical, authored sink carries a concrete PCB face. The generic
+        // fallback heatsink rung deliberately does not: it is a sizing aid,
+        // not saved hardware that can be included/excluded from an assembly.
+        const has_saved_sink = ladder.heatsink_face != null;
+        if (fan_row != null or has_saved_sink) {
+            try w.writeAll("<fieldset class=\"tp-cooling\"><legend>Include saved cooling</legend><div class=\"tp-cooling-switches\">");
+            if (fan_row != null) {
+                try w.print("<label class=\"tp-cooling-switch\"><input id=\"tp-use-fan\" type=\"checkbox\"{s}> Fan</label>", .{
+                    if (v.scenario == .fan or v.scenario == .fan_heatsink) " checked" else "",
+                });
+            }
+            if (has_saved_sink) {
+                try w.print("<label class=\"tp-cooling-switch\"><input id=\"tp-use-heatsink\" type=\"checkbox\"{s}> Heatsink</label>", .{
+                    if (v.scenario == .heatsink or v.scenario == .fan_heatsink) " checked" else "",
+                });
+            }
+            try w.writeAll("</div><p>Simulation only — the saved fan and heatsink stay in the layout.</p></fieldset>");
+        }
         try w.writeAll("<div class=\"tp-seg\" id=\"tp-seg\" role=\"group\" aria-label=\"Cooling scenario\">");
         for (ladder.rows) |row| {
             const label = try thermal_scenarios.scenarioLabel(alloc, row.scenario, thermal_scenarios.sinkOf(ladder));
@@ -1147,6 +1166,23 @@ fn writeFixture(dir: std.Io.Dir) !void {
         \\    (pin 2 "GND")
         \\    (power 1.0)))
     });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "src/cooled-heater.sexp", .data =
+        \\(import hot-ic)
+        \\
+        \\(design-block "Cooled Heater Board"
+        \\  (board (size 40 20)
+        \\    (heatsink (rect 0 0 40 20) (side bottom) (target "" "U1")
+        \\      (material aluminum_6063) (base-mm 2) (fin-height-mm 10)
+        \\      (fin-thickness-mm 1) (fin-gap-mm 1.5) (fin-axis length)
+        \\      (pad-thickness-mm 0.5) (pad-k-w-mk 6))
+        \\    (fan (model "9A0812G4D011") (rect -20 -30 80 80) (side top)
+        \\      (distance-mm 10) (free-air-flow-m3-s 0.025)
+        \\      (max-static-pressure-pa 80.4) (operating-flow-fraction 0.6)))
+        \\  (instance "U1" hot-ic
+        \\    (pin 1 "VIN")
+        \\    (pin 2 "GND")
+        \\    (power 1.0)))
+    });
     try dir.writeFile(std.testing.io, .{ .sub_path = "src/quiet.sexp", .data =
         \\(import hot-ic)
         \\
@@ -1513,6 +1549,30 @@ test "the scenario parameter selects the rung the page opens on" {
     try testing.expect(std.mem.indexOf(u8, typo.body, "data-scenario=\"natural\" aria-pressed=\"true\"") != null);
 }
 
+// spec: serve/thermal-page - saved fan and heatsink assemblies can be independently included in or excluded from the active simulation without mutating their layout definitions
+test "saved cooling assemblies render independent simulation toggles" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp);
+
+    const combined = try serve(alloc, project, "cooled-heater", &.{.{ "scenario", "fan_heatsink" }});
+    try testing.expectEqual(@as(u16, 200), combined.status);
+    try testing.expect(containsAll(combined.body, &.{
+        "<fieldset class=\"tp-cooling\">",
+        "id=\"tp-use-fan\" type=\"checkbox\" checked",
+        "id=\"tp-use-heatsink\" type=\"checkbox\" checked",
+        "Simulation only — the saved fan and heatsink stay in the layout.",
+    }));
+
+    const natural = try serve(alloc, project, "cooled-heater", &.{});
+    try testing.expect(std.mem.indexOf(u8, natural.body, "id=\"tp-use-fan\" type=\"checkbox\" checked") == null);
+    try testing.expect(std.mem.indexOf(u8, natural.body, "id=\"tp-use-heatsink\" type=\"checkbox\" checked") == null);
+}
+
 // spec: serve/thermal-page - the page puts its panel beside a live board frame rather than a static heat image, embedding the read-only PCB viewer with the thermal overlay on
 test "the page embeds the read-only board viewer instead of a heat image" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1747,6 +1807,10 @@ test "the thermal client fetches per ambient and switches scenario locally" {
         // Scenario switching is a class/hidden change plus one message to the
         // board frame — no round trip, and no second fetch of the field.
         "function tpSelect(",
+        "function coolingScenario()",
+        "fanToggle.addEventListener",
+        "heatsinkToggle.addEventListener",
+        "fan_heatsink",
         "data-scenario",
         "tp-frame",
         "thermal:view",

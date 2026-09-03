@@ -179,6 +179,18 @@ button { color: inherit; }
 }
 .tp-seg-btn:hover { color: var(--text); }
 .tp-seg-btn.on { background: #223049; border-color: var(--accent); color: var(--text); }
+.tp-cooling {
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.tp-cooling legend { padding: 0 5px; color: var(--muted); font-size: 12px; }
+.tp-cooling-switches { display: flex; gap: 16px; flex-wrap: wrap; }
+.tp-cooling-switch { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.tp-cooling-switch input { accent-color: var(--accent); }
+.tp-cooling p { margin: 7px 0 0; color: var(--muted); font-size: 11.5px; }
 .tp-amb { display: flex; align-items: center; gap: 5px; color: var(--muted); white-space: nowrap; }
 .tp-amb input {
   width: 68px;

@@ -6403,6 +6403,12 @@ browser is exactly the disagreement this page is built to prevent. Switching
 cooling scenario needs no round trip: every available scenario's per-part table is rendered into
 the document and the client reveals one.
 
+Saved fan and heatsink assemblies can be independently included in or excluded
+from the active simulation without mutating their layout definitions. The two
+controls select still air, fan only, heatsink only, or the simultaneous
+fan-plus-heatsink scenario from the already-rendered ladder, so comparing their
+effects is instantaneous and neither assembly has to be deleted and recreated.
+
 `?scale_min=NN&scale_max=NN` selects the heat-map colour range only. The two
 legend endpoints are editable number controls, default to 25–125 °C, require a
 finite maximum above the minimum, recolour the cached field without a solve,
@@ -6432,6 +6438,7 @@ Read-only: nothing here writes to the project dir.
 - a design with no cooling ladder renders the reason in place of the picker, the board frame and the ladder, and still lists the parts the lumped screen saw
 - ?ambient=NN screens the whole page at that ambient clamped to the control's range, and ?fragment=1 answers the verdict and table regions alone
 - ?scenario=<tag> opens the page on that rung with its own part table shown and the board frame opened on it
+- saved fan and heatsink assemblies can be independently included in or excluded from the active simulation without mutating their layout definitions
 - the page's client swaps only the ambient-dependent regions, keeps scenario switching local, and broadcasts a picked ref on the shared cross-probe channel
 - the page puts its panel beside a live board frame rather than a static heat image, embedding the read-only PCB viewer with the thermal overlay on
 - the board's legend starts at 25 °C to 125 °C, lets the reader edit both endpoints without another solve, and preserves a valid manual range in the page URL
