@@ -6355,7 +6355,8 @@ const writeSavedTextsJson = sidecar_json.writeSavedTextsJson;
 /// Serialize zone records in the sidecar/embedded `PCB.zones` shape.
 const writeSavedZonesJson = sidecar_json.writeSavedZonesJson;
 
-fn writeFreshRfPathsJson(w: *std.Io.Writer, outcomes: []const rf_port_report.Outcome, nets: []const export_kicad.FlatNet) std.Io.Writer.Error!void {
+/// Serialize successful router RF path proofs in the live saved-route shape.
+pub fn writeFreshRfPathsJson(w: *std.Io.Writer, outcomes: []const rf_port_report.Outcome, nets: []const export_kicad.FlatNet) std.Io.Writer.Error!void {
     var first = true;
     try w.writeByte('[');
     for (outcomes) |outcome| {

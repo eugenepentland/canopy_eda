@@ -7403,7 +7403,7 @@ is what makes the predicate exact rather than approximately right.
 - the board PNG paints the canonical stages in order
 - the board PNG fills inner planes from the same pour engine the fabrication outputs use
 - the board PNG strokes a routed arc as a curve and drops the chords it owns
-- RF-only saved paths paint their sampled physical chords even when no ordinary track handle is present
+- RF-only saved paths paint the same butt-ended swept polygons as Gerber instead of round-capped conservative DRC chords
 - the board PNG paints bottom-side parts under top-side parts
 - A DRC violation carries a stable 4-hex id emitted by the shared JSON writer
 - The shared DRC JSON writer emits each violation's named parties and omits the sides the checker could not name
@@ -7855,6 +7855,7 @@ mutex-guarded, idle-evicted, capped table held in ServerState.
 - the distilled plan fragment parses as a valid s-expression
 - the stuck block serializes each layer's occupancy grid alongside the frontier
 - a second start replaces the design's existing session
+- manual completion serializes successful swept RF paths instead of discarding their fabrication geometry
 - idle sessions are evicted on access
 - the frontier grid cells round-trip through base64
 - completeness-waiver: empty inputs (a design with no parts/nets solves to an empty placement that routes to a done summary with empty board arrays; a hint body with no net/points/layers answers 400 via parseHint; distilling zero accepted hints yields a bare `(pcb-plan)`)

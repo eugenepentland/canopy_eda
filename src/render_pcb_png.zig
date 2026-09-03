@@ -53,12 +53,13 @@ const silk_font = @import("silk_font.zig");
 const subcircuit_silkscreen = @import("subcircuit_silkscreen.zig");
 const testpoint_silkscreen = @import("testpoint_silkscreen.zig");
 const mask_relief = @import("placement/mask_relief.zig");
+const path_copper = @import("placement/path_copper.zig");
+const variable_width_copper = @import("placement/variable_width_copper.zig");
 
-/// Replace an RF path's compact editor handles with the conservative physical
-/// chords/collars consumed by render-time geometry, and suppress any native
-/// arc whose copper is already represented by those samples. The sampled proof
-/// remains attached for exact pour geometry; re-lowering first removes every
-/// proof-owned chord, so the returned view stays idempotent.
+/// Replace an RF path's compact editor handles with conservative physical
+/// chords/collars for auxiliary capsule-based bounds. Actual pixels use the
+/// exact swept polygons below. Re-lowering first removes every proof-owned
+/// chord, so this private probe view stays idempotent.
 fn physicalRoute(arena: std.mem.Allocator, routed: router.RouteResult) std.mem.Allocator.Error!router.RouteResult {
     if (routed.rf_port_outcomes.len == 0) return routed;
     const copper = try export_gerber.physicalCopper(arena, .{
@@ -75,12 +76,6 @@ fn physicalRoute(arena: std.mem.Allocator, routed: router.RouteResult) std.mem.A
     // `path_copper.tracks` first removes every chord the proof owns.
     physical.rf_port_outcomes = routed.rf_port_outcomes;
     return physical;
-}
-
-fn physicalOptions(arena: std.mem.Allocator, input: Options) std.mem.Allocator.Error!Options {
-    var opts = input;
-    if (opts.routed) |r| opts.routed = try physicalRoute(arena, r);
-    return opts;
 }
 
 /// The shown copper's mask relief for the sub-circuit silk pass — empty when
@@ -310,9 +305,7 @@ pub fn render(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options) p
 /// returned canvas owns its pixels, so the temporary route slices can be freed
 /// as soon as the synchronous render completes.
 fn renderPhysicalCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, input_opts: Options) png.Error!raster.Canvas {
-    var copper_arena_state = std.heap.ArenaAllocator.init(alloc);
-    defer copper_arena_state.deinit();
-    return renderCanvas(alloc, p, try physicalOptions(copper_arena_state.allocator(), input_opts));
+    return renderCanvas(alloc, p, input_opts);
 }
 
 /// Render `p` onto a fresh canvas (the body of `render`, reusable by the
@@ -441,6 +434,8 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
         },
     );
     defer subcircuit_silkscreen.deinitPinOneMarkers(alloc, pin_one_silk);
+    var copper_arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer copper_arena_state.deinit();
     var ctx = Ctx{
         .cv = &cv,
         .scale = scale,
@@ -462,6 +457,7 @@ fn renderCanvas(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options)
         .sub_silk = sub_silk,
         .testpoint_silk = testpoint_silk,
         .pin_one_silk = pin_one_silk,
+        .copper_arena = copper_arena_state.allocator(),
     };
 
     for (board_passes) |bp| {
@@ -804,6 +800,8 @@ const Ctx = struct {
     testpoint_silk: []const testpoint_silkscreen.Label,
     /// Uniform, collision-aware filled dots beside detected pin-one pads.
     pin_one_silk: []const subcircuit_silkscreen.PinOneMarker,
+    /// Scratch lifetime for exact swept-copper pieces drawn during this frame.
+    copper_arena: std.mem.Allocator,
 
     fn xpx(self: *Ctx, mm: f64) f32 {
         return @floatCast((mm - self.minx + view_margin_mm) * self.scale);
@@ -1290,7 +1288,8 @@ const Ctx = struct {
         }
     }
 
-    /// Routed copper: straight tracks, then the true arcs, then via barrels.
+    /// Routed copper: ordinary tracks, true arcs, exact swept RF paths, then
+    /// via barrels.
     ///
     /// An arc's copper is present TWICE in a route result — as the arc itself
     /// and as the bounded chords the router keeps for connectivity/clearance —
@@ -1302,10 +1301,27 @@ const Ctx = struct {
     fn drawRouted(self: *Ctx, r: router.RouteResult) void {
         for (r.tracks) |t| {
             if (export_gerber.arcOwnsTrack(r.arcs, t)) continue;
+            if (path_copper.ownsTrack(r.rf_port_outcomes, t)) continue;
             const col = trackColor(self.p.rules, t.layer);
             self.cv.line(self.xpx(t.x1), self.ypx(t.y1), self.xpx(t.x2), self.ypx(t.y2), @max(self.len(t.width), self.pw(0.6)), col, 0.92, .round);
         }
-        for (r.arcs) |a| self.drawArc(a);
+        const arcs = path_copper.filterArcs(self.copper_arena, r.rf_port_outcomes, r.arcs) catch r.arcs;
+        for (arcs) |a| self.drawArc(a);
+        for (r.rf_port_outcomes) |path| {
+            if (!path.success or path.physical.gate_removed or path.physical.samples.len < 2) continue;
+            const pieces = variable_width_copper.pieces(self.copper_arena, path.physical.samples) catch continue;
+            const col = trackColor(self.p.rules, path.physical.layer);
+            for (pieces) |piece| {
+                if (piece.poly.len < 3) continue;
+                var stack: [8][2]f32 = undefined;
+                const pixels = if (piece.poly.len <= stack.len)
+                    stack[0..piece.poly.len]
+                else
+                    self.copper_arena.alloc([2]f32, piece.poly.len) catch continue;
+                for (piece.poly, pixels) |point, *pixel| pixel.* = .{ self.xpx(point[0]), self.ypx(point[1]) };
+                self.cv.fillPoly(pixels, col, 0.92);
+            }
+        }
         for (r.vias) |v| {
             const c = [_]f32{ self.xpx(v.x), self.ypx(v.y) };
             const rad = @max(self.len(v.dia / 2), self.pw(1.2));
@@ -2243,8 +2259,8 @@ fn containsCopperRedPixel(rgb: []const u8) bool {
     return false;
 }
 
-// spec: Web Server - RF-only saved paths paint their sampled physical chords even when no ordinary track handle is present
-test "PNG draws an RF-only physical path" {
+// spec: Web Server - RF-only saved paths paint the same butt-ended swept polygons as Gerber instead of round-capped conservative DRC chords
+test "PNG draws exact swept RF copper without round end caps" {
     const alloc = std.testing.allocator;
     const p = optimizer.Placement{
         .parts = &.{},
@@ -2286,8 +2302,15 @@ test "PNG draws an RF-only physical path" {
     defer cv.deinit();
 
     // An otherwise empty board has no copper-red pixels. The RF-only proof
-    // therefore has to be lowered and painted for any such pixel to exist.
+    // therefore has to be painted for any such pixel to exist.
     try std.testing.expect(containsCopperRedPixel(cv.buf));
+    const px_mm = @as(f64, @floatFromInt(cv.iw)) / 14.0; // 10 mm board + two 2 mm margins
+    const y: usize = @intFromFloat(@round(4 * px_mm)); // world y=2 plus the 2 mm view margin
+    const start_x: usize = @intFromFloat(@round(4 * px_mm));
+    const before_start = (y * cv.iw + start_x - 4) * 3;
+    const inside_start = (y * cv.iw + start_x + 4) * 3;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x10, 0x23 }, cv.buf[before_start .. before_start + 3]);
+    try std.testing.expect(cv.buf[inside_start] > 0x80);
 }
 
 // spec: Web Server - the board PNG paints bottom-side parts under top-side parts

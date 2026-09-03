@@ -854,7 +854,9 @@ fn writeCompletion(w: *std.Io.Writer, prep: pcb_layout_page.RoutePrep, result: r
         try pcb_layout_page.writeJsonStr(w, completionNetName(prep, via.net));
         try w.writeAll(",\"source\":\"autorouter\"}");
     }
-    try w.writeAll("],\"rf_paths\":[],\"unrouted\":[");
+    try w.writeAll("],\"rf_paths\":");
+    try pcb_layout_page.writeFreshRfPathsJson(w, result.rf_port_outcomes, prep.placement.nets);
+    try w.writeAll(",\"unrouted\":[");
     for (result.failed, 0..) |name, i| {
         if (i > 0) try w.writeByte(',');
         try pcb_layout_page.writeJsonStr(w, name);
@@ -998,6 +1000,45 @@ test "manual completion returns only the requested fixture bridge" {
     try testing.expectEqual(result.tracks.len, root.object.get("tracks").?.array.items.len);
     try testing.expectEqual(@as(usize, 0), root.object.get("vias").?.array.items.len);
     try testing.expectEqual(@as(i64, 1), root.object.get("routed").?.integer);
+}
+
+// spec: serve/route-session - manual completion serializes successful swept RF paths instead of discarding their fabrication geometry
+test "manual completion preserves swept RF paths" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const placement = try buildFixture(arena);
+    const prep = pcb_layout_page.RoutePrep{
+        .eff_block = &route_review_fixture_block,
+        .placement = placement,
+        .rp = placement.rules.design.routeParams(),
+        .scoped = .{},
+        .user_zones = &.{},
+        .steering = .{},
+    };
+    const Outcome = @typeInfo(@FieldType(router.RouteResult, "rf_port_outcomes")).pointer.child;
+    const Physical = @FieldType(Outcome, "physical");
+    const Sample = @typeInfo(@FieldType(Physical, "samples")).pointer.child;
+    const samples = [_]Sample{
+        .{ .at = .{ 0, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 0.2 },
+        .{ .at = .{ 3, 0 }, .s_mm = 3, .curvature = 0, .width_mm = 0.4 },
+    };
+    const paths = [_]Outcome{.{
+        .net = 0,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .sample_count = samples.len, .samples = &samples, .layer = 0 },
+    }};
+    var json: std.Io.Writer.Allocating = .init(arena);
+    try writeCompletion(&json.writer, prep, .{ .tracks = &.{}, .vias = &.{}, .rf_port_outcomes = &paths, .routed = 1, .total = 1 });
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, json.written(), .{});
+    const saved = root.object.get("rf_paths").?.array.items;
+    try testing.expectEqual(@as(usize, 1), saved.len);
+    try testing.expectEqualStrings("SIG", saved[0].object.get("net").?.string);
+    try testing.expectEqual(@as(usize, 2), saved[0].object.get("samples").?.array.items.len);
 }
 
 // spec: serve/route-session - a hint's layer name resolves through the shared board layer lookup, so a plane-claimed inner names no bit
