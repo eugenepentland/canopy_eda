@@ -242,6 +242,15 @@ name = "pcb-region-triangulation"
 command = ["node", "scripts/test_pcb_region.js"]
 inputs = ["src/serve/assets/pcb_earcut.js", "src/serve/assets/pcb_region.js", "scripts/test_pcb_region.js"]
 
+# The per-track power width targets: the client reads the deferred power-
+# integrity screen's solved branch requirement and falls back to the whole-rail
+# envelope only when that screen is absent, stale, or unsolved. Zig marker tests
+# can only prove the source text still SAYS this; the probe proves it computes.
+[[external]]
+name = "pcb-power-branch-width"
+command = ["node", "scripts/power_branch_width_test.mjs"]
+inputs = ["src/serve/assets/pcb_board.js", "scripts/power_branch_width_test.mjs"]
+
 [[external]]
 name = "pcb-browser-perf-js-syntax"
 command = ["node", "--check", "scripts/pcb_browser_perf/run.js"]

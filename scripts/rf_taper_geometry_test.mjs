@@ -51,7 +51,7 @@ function assertBendContinuity(shaped, label) {
 {
   const PCB = { rules: { min_width: 0.127 } };
   let klass = { width: 0.4, adaptive_power_width: 0.4, power_branch_width: 0 };
-  const g = load(["drcGateDefersPowerWidth"], {
+  const g = load(["drcPowerKindDeferred", "drcGateDefersPowerWidth"], {
     PCB,
     netClassInfo() { return klass; },
   });
@@ -78,9 +78,19 @@ function assertBendContinuity(shaped, label) {
 {
   const document = { getElementById() { return { value: "net" }; } };
   const PCB = { rules: { track_width: 0.127, min_width: 0.1 }, zones: [] };
-  const g = load(["trackW", "drawPowerTarget", "drawNetGeometry"], {
+  const g = load([
+    "trackW", "drawPowerTarget", "drawNetGeometry",
+    // A pen stroke is not on the board yet, so the per-track screen can never
+    // match it and the rail envelope is what comes back — assert exactly that.
+    "powerWidthRound", "powerFlowSolved", "powerTargetForTrack",
+    "powerIntegrityInfo", "powerIntegrityTrack",
+  ], {
     PCB,
     document,
+    POWER_WIDTH_STEP: 0.0254,
+    powerIntegrityDirty: false,
+    powerIntegrityIdx: null,
+    netCollapse(n) { return String(n || ""); },
     netClassInfo() { return { width: 0.4, adaptive_power_width: 0.4 }; },
     baseTrackW() { return 0.127; },
   });
@@ -1037,10 +1047,16 @@ function loadRfLifecycle(PCB, impedance) {
 function loadRewidenWalk(PCB, lands = [], owned = []) {
   return load([
     "drawSamePointXY", "drawReverseTrack", "drawTrackFromPoint",
-    "rewidenTarget", "rewidenTrack", "rewidenGrow", "rewidenRun", "rewidenRuns",
+    "powerWidthRound", "powerFlowSolved", "powerTargetForTrack",
+    "powerIntegrityInfo", "powerIntegrityTrack",
+    "rewidenTarget", "rewidenRunTarget", "rewidenTrack", "rewidenGrow", "rewidenRun", "rewidenRuns",
   ], {
     PCB,
     RO: false,
+    POWER_WIDTH_STEP: 0.0254,
+    powerIntegrityDirty: false,
+    powerIntegrityIdx: null,
+    netCollapse(n) { return String(n || ""); },
     baseTrackW() { return 0.127; },
     netClassInfo(net) { return net.slice(0, 2) === "V_" ? { adaptive_power_width: 0.4 } : null; },
     rfOwnsTrack(t) { return owned.indexOf(t.id) >= 0; },
@@ -1160,13 +1176,19 @@ function loadRewidenWalk(PCB, lands = [], owned = []) {
     "drawAdaptiveExactClearWidth", "drawAdaptiveRefinedClearWidth",
     "drawSamePointXY", "drawShapedPush", "drawAdaptivePowerRun", "drawJointProfile", "drawAdaptivePowerPlan",
     "drawReverseTrack", "drawTrackFromPoint", "drawCommitShaped",
-    "rewidenTarget", "rewidenTrack", "rewidenGrow", "rewidenRun", "rewidenRuns", "rewidenSame",
+    "powerWidthRound", "powerFlowSolved", "powerTargetForTrack",
+    "powerIntegrityInfo", "powerIntegrityTrack",
+    "rewidenTarget", "rewidenRunTarget", "rewidenTrack", "rewidenGrow", "rewidenRun", "rewidenRuns", "rewidenSame",
     "rewidenDeclined", "rewidenAtFloor", "rewidenPlan", "rewidenStatus", "rewidenTry", "rewidenApply", "rewidenHeal",
   ], {
     PCB,
     RO: false,
     DRAW_ADAPTIVE_STEP: 0.05,
     drcGate: gate,
+    POWER_WIDTH_STEP: 0.0254,
+    powerIntegrityDirty: false,
+    powerIntegrityIdx: null,
+    netCollapse(n) { return String(n || ""); },
     baseTrackW() { return floor; },
     netClassInfo(net) { return net === "V_12V" ? { adaptive_power_width: target } : null; },
     rfOwnsTrack() { return false; },
