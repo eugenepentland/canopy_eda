@@ -2026,6 +2026,7 @@ src/placement/dive_elide.zig::channelPoints | fn channelPoints(a: [2]f64, b: [2]
 src/placement/dive_elide.zig::passBoard | fn passBoard(board: Board) std.mem.Allocator.Error!void
 src/placement/dive_elide.zig::policyAdmits | fn policyAdmits(policy: route_policy.NetPolicy, layer: u8) bool
 src/placement/dive_elide.zig::strandedAt | fn strandedAt(d: f64, other_reach: f64, via_r: f64, trace_w: f64) bool
+src/placement/drc.zig::Extra union_
 src/placement/drc.zig::Kind enum_
 src/placement/drc.zig::Parties struct_
 src/placement/drc.zig::PreparedCopper struct_
@@ -2036,6 +2037,7 @@ src/placement/drc.zig::ViaAdditionGate struct_
 src/placement/drc.zig::Violation struct_
 src/placement/drc.zig::accept | fn accept(self: *ViaAdditionGate, arena: std.mem.Allocator, v: router.Via) std.mem.Allocator.Error!void
 src/placement/drc.zig::addsError | fn addsError(self: *ViaAdditionGate, arena: std.mem.Allocator, v: router.Via) std.mem.Allocator.Error!bool
+src/placement/drc.zig::bridgePoints | fn bridgePoints(self: Parties) ?[4]f64
 src/placement/drc.zig::build | fn build( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, ) std.mem.Allocator.Error!TrackAdditionGate
 src/placement/drc.zig::build | fn build( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, probe: router.Via, ) std.mem.Allocator.Error!ViaAdditionGate
 src/placement/drc.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, ) std.mem.Allocator.Error![]Violation
@@ -2048,6 +2050,7 @@ src/placement/drc.zig::countKind | fn countKind(v: []const Violation, k: Kind) u
 src/placement/drc.zig::defaultSeverity | fn defaultSeverity(k: Kind) Severity
 src/placement/drc.zig::eps value
 src/placement/drc.zig::errorCount | fn errorCount(violations: []const Violation) usize
+src/placement/drc.zig::noteText | fn noteText(self: Parties) []const u8
 src/placement/drc.zig::partyIndex | fn partyIndex(i: usize) i32
 src/placement/drc.zig::segSegDist | fn segSegDist(ax1: f64, ay1: f64, ax2: f64, ay2: f64, bx1: f64, by1: f64, bx2: f64, by2: f64) f64
 src/placement/drc.zig::staging_exempt_mm value
@@ -2097,6 +2100,12 @@ src/placement/drc_pour.zig::Scope struct_
 src/placement/drc_pour.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, prepared: drc.PreparedCopper, ) std.mem.Allocator.Error![]const drc.Violation
 src/placement/drc_pour.zig::checkAudited | fn checkAudited( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, prepared: drc.PreparedCopper, scope: ?Scope, pads: ?PadShapes, ) std.mem.Allocator.Error!Audited
 src/placement/drc_pour.zig::padShapes | fn padShapes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!PadShapes
+src/placement/drc_power_width.zig::Duty struct_
+src/placement/drc_power_width.zig::LocalWidth struct_
+src/placement/drc_power_width.zig::Shortfall struct_
+src/placement/drc_power_width.zig::duty | fn duty( placement: optimizer.Placement, net_index: usize, local: ?LocalWidth, min_width: f64, ) Duty
+src/placement/drc_power_width.zig::promote | fn promote( alloc: std.mem.Allocator, widths: []const ?f64, ) std.mem.Allocator.Error![]const ?LocalWidth
+src/placement/drc_power_width.zig::report | fn report( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), board: pad_neck.PowerNeckBoard, candidates: []const Shortfall, ) std.mem.Allocator.Error!void
 src/placement/drc_return_path.zig::check | fn check( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), placement: optimizer.Placement, routed: router.RouteResult, zones: []const copper_support.Zone, ) std.mem.Allocator.Error!void
 src/placement/drc_return_path.zig::default_stitch_radius_mm value
 src/placement/drc_scope.zig::Box struct_

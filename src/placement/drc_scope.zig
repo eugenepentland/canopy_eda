@@ -129,7 +129,7 @@ pub fn violationKey(v: drc.Violation) u64 {
     h.update("\x00");
     h.update(v.who.pad_b);
     h.update("\x00");
-    if (v.who.bridge) |bridge| {
+    if (v.who.bridgePoints()) |bridge| {
         h.update("\x01");
         for (bridge) |value| h.update(std.mem.asBytes(&value));
     } else h.update("\x00");

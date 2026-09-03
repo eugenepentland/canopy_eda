@@ -802,7 +802,7 @@ pub const scope_form_docs = blk: {
             "[(keepout MM [(escape MM)])] [(mask-relief MM)] [(nets \"A\" \"B\"…)])",
         .summary = "Routing geometry + routing order profile and/or membership for named nets: " ++
             "trace width, copper clearance, " ++
-            "an optional power-branch-width that starts plane-backed rail fanouts narrow while preserving width as the conservative whole-rail fallback (post-route DRC solves each segment's current and identifies only the branches that must grow), " ++
+            "an optional power-branch-width that starts plane-backed rail fanouts narrow and is the authored FLOOR under every branch of the rail (post-route DRC solves each segment's OWN current and reports only the branches that must grow; where a solve exists it — not the class width — is the rule, so a leaf carrying a few milliamps is never charged against the trunk, and where the per-branch solve fails the whole-rail envelope is reported as an explained power_width_envelope WARNING instead of a fab error), " ++
             "an optional short pad-local neck width/maximum length/linear taper back to the class width " ++
             "(applied only where the land's span across the actual launch is narrower than the trace), " ++
             "and via size (diameter + drill) in mm, plus a routing-priority tier — the autorouter " ++
