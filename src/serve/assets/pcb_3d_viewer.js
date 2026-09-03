@@ -646,7 +646,15 @@
     addHeatsinkBox(heatsinkGroup, metal, +s.w, +s.h, baseT, cx, cy,
       faceZ + sign * (padT + baseT / 2));
 
-    if (finH > 0 && finT > 0) {
+    var extraH = finH;
+    if (s.shape === "stepped") {
+      var lowerW = Math.max(0, +s.lower_width_mm || 0);
+      var lowerL = Math.max(0, +s.lower_length_mm || 0);
+      var lowerH = Math.max(0, +s.lower_height_mm || 0);
+      addHeatsinkBox(heatsinkGroup, metal, lowerW, lowerL, lowerH, cx, cy,
+        faceZ + sign * (padT + baseT + lowerH / 2));
+      extraH = lowerH;
+    } else if (finH > 0 && finT > 0) {
       var lengthAxis = (s.fin_axis || "length") === "length";
       var across = lengthAxis ? +s.w : +s.h;
       var along = lengthAxis ? +s.h : +s.w;
@@ -662,7 +670,7 @@
       }
     }
     heatsinkGroup.visible = layerVisible.heatsink;
-    span = Math.max(span, 2 * (padT + baseT + finH), 8);
+    span = Math.max(span, 2 * (padT + baseT + extraH), 8);
   }
 
   // This face mesh is the board's only visible cap and carries the one

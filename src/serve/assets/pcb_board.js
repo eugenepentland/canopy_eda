@@ -587,9 +587,11 @@ function drawHeatsink(){var s=heatsinkRect();if(!viewSt.vis.heatsink&&!heatsinkM
  if(heatsinkBehindBoard(s))return;
  var col=s.side==="top"?"#f59e0b":"#38bdf8",x=X(s.x),y=Y(s.y),w=s.w*S,h=s.h*S;
  gB.appendChild(el("rect",{x:x.toFixed(1),y:y.toFixed(1),width:w.toFixed(1),height:h.toFixed(1),fill:col,stroke:col,"stroke-width":1.7,opacity:0.24,"stroke-dasharray":heatsinkDraw?"6 4":"0",class:"heatsink-box"}));
- var axis=s.fin_axis||"length",pitch=(+s.fin_thickness_mm||1)+Math.max(+s.fin_gap_mm||0,0),across=axis==="length"?s.w:s.h,n=Math.min(512,Math.max(1,Math.floor((across+Math.max(+s.fin_gap_mm||0,0))/pitch)));
- for(var i=0;i<n;i++){var q=(i+.5)/n;if(axis==="length")gB.appendChild(el("line",{x1:(x+q*w).toFixed(1),y1:y.toFixed(1),x2:(x+q*w).toFixed(1),y2:(y+h).toFixed(1),stroke:col,"stroke-width":1,opacity:.7}));
-  else gB.appendChild(el("line",{x1:x.toFixed(1),y1:(y+q*h).toFixed(1),x2:(x+w).toFixed(1),y2:(y+q*h).toFixed(1),stroke:col,"stroke-width":1,opacity:.7}));}
+ if(s.shape==="stepped"){var lw=(+s.lower_width_mm||0)*S,ll=(+s.lower_length_mm||0)*S;
+  if(lw>0&&ll>0)gB.appendChild(el("rect",{x:(x+(w-lw)/2).toFixed(1),y:(y+(h-ll)/2).toFixed(1),width:lw.toFixed(1),height:ll.toFixed(1),fill:"none",stroke:col,"stroke-width":1.3,opacity:.9,"stroke-dasharray":"5 3",class:"heatsink-box"}));}
+ else{var axis=s.fin_axis||"length",pitch=(+s.fin_thickness_mm||1)+Math.max(+s.fin_gap_mm||0,0),across=axis==="length"?s.w:s.h,n=Math.min(512,Math.max(1,Math.floor((across+Math.max(+s.fin_gap_mm||0,0))/pitch)));
+  for(var i=0;i<n;i++){var q=(i+.5)/n;if(axis==="length")gB.appendChild(el("line",{x1:(x+q*w).toFixed(1),y1:y.toFixed(1),x2:(x+q*w).toFixed(1),y2:(y+h).toFixed(1),stroke:col,"stroke-width":1,opacity:.7}));
+   else gB.appendChild(el("line",{x1:x.toFixed(1),y1:(y+q*h).toFixed(1),x2:(x+w).toFixed(1),y2:(y+q*h).toFixed(1),stroke:col,"stroke-width":1,opacity:.7}));}}
  var t=el("text",{x:(x+5).toFixed(1),y:(y+13).toFixed(1),fill:col,"font-size":"10","font-weight":"700"});t.textContent="HEATSINK · "+(s.side||"bottom").toUpperCase()+" · PCB CONTACT";gB.appendChild(t);
  if(heatsinkMode&&!heatsinkDraw&&!RO){[[x,y],[x+w,y],[x+w,y+h],[x,y+h]].forEach(function(p){gB.appendChild(el("rect",{x:(p[0]-4).toFixed(1),y:(p[1]-4).toFixed(1),width:8,height:8,fill:TH.bg,stroke:col,"stroke-width":1.5,class:"heatsink-handle"}));});}}
 function fanRect(){if(fanDraw)return {x:Math.min(fanDraw.x0,fanDraw.x1),y:Math.min(fanDraw.y0,fanDraw.y1),w:Math.abs(fanDraw.x1-fanDraw.x0),h:Math.abs(fanDraw.y1-fanDraw.y0),side:(PCB.fan&&PCB.fan.side)||"top"};return PCB.fan;}
@@ -5748,30 +5750,35 @@ function hsDragMove(m){var d=heatsinkDrag,o=d&&d.orig,s=PCB.heatsink;if(!d||!o||
  if(s.x===x0&&s.y===y0&&s.w===x1-x0&&s.h===y1-y0)return;s.x=x0;s.y=y0;s.w=x1-x0;s.h=y1-y0;d.moved=true;drawBoardRect();}
 function hsNum(id,fallback){var e=document.getElementById(id),n=parseFloat(e&&e.value);return isFinite(n)?n:fallback;}
 function hsMaterialK(name){return {aluminum_6063:201,aluminum_6061:167,copper_c110:391,steel:50}[name]||201;}
-function hsEstimate(s){var axis=s.fin_axis||"length",across=(axis==="length"?s.w:s.h),along=(axis==="length"?s.h:s.w),pitch=s.fin_thickness_mm+s.fin_gap_mm;
- var n=Math.min(512,Math.max(1,Math.floor((across+s.fin_gap_mm)/pitch))),k=hsMaterialK(s.material),hm=s.fin_height_mm/1000,tm=s.fin_thickness_mm/1000,lm=along/1000,am=across/1000;
+function hsEstimate(s){var k=hsMaterialK(s.material),bm=s.base_mm/1000,wm=s.w/1000,lm0=s.h/1000;
+ if(s.shape==="stepped"){var lw=s.lower_width_mm/1000,ll=s.lower_length_mm/1000,lh=s.lower_height_mm/1000,ov=Math.min(wm,lw)*Math.min(lm0,ll),ua=wm*lm0,la=lw*ll;
+  var area=Math.max(ua-ov,0)+Math.max(la-ov,0)+la+2*(wm+lm0)*bm+2*(lw+ll)*lh;
+  return {count:0,theta:1/(10*area)+bm/(k*ua)+lh/(k*ov),eta:1};}
+ var axis=s.fin_axis||"length",across=(axis==="length"?s.w:s.h),along=(axis==="length"?s.h:s.w),pitch=s.fin_thickness_mm+s.fin_gap_mm;
+ var n=Math.min(512,Math.max(1,Math.floor((across+s.fin_gap_mm)/pitch))),hm=s.fin_height_mm/1000,tm=s.fin_thickness_mm/1000,lm=along/1000,am=across/1000;
  var ml=hm*Math.sqrt(20/(k*tm)),eta=ml>1e-9?Math.tanh(ml)/ml:1,fa=n*lm*(2*hm+tm),ba=lm*Math.max(am-n*tm,0),ae=ba+eta*fa;
  var theta=1/(10*ae)+(s.base_mm/1000)/(k*(s.w/1000)*(s.h/1000));return {count:n,theta:theta,eta:eta};}
-function hsFromForm(){var s={x:hsNum("hs-x-mm",0),y:hsNum("hs-y-mm",0),w:hsNum("hs-w",0),h:hsNum("hs-h",0),side:(document.getElementById("hs-side")||{}).value||"bottom",target_ref:"",material:(document.getElementById("hs-material")||{}).value||"aluminum_6063",base_mm:hsNum("hs-base",2),fin_height_mm:hsNum("hs-fin-h",10),fin_thickness_mm:hsNum("hs-fin-t",1),fin_gap_mm:hsNum("hs-fin-g",1.5),fin_axis:(document.getElementById("hs-axis")||{}).value||"length",pad_thickness_mm:hsNum("hs-pad-t",.5),pad_k_w_mk:hsNum("hs-pad-k",6)};return s;}
-function hsFormValid(s){return s.w>0&&s.h>0&&s.base_mm>0&&s.fin_height_mm>=0&&s.fin_thickness_mm>0&&s.fin_gap_mm>=0&&s.pad_thickness_mm>=0&&s.pad_k_w_mk>0;}
+function hsFromForm(){var s={x:hsNum("hs-x-mm",0),y:hsNum("hs-y-mm",0),w:hsNum("hs-w",0),h:hsNum("hs-h",0),side:(document.getElementById("hs-side")||{}).value||"bottom",target_ref:"",material:(document.getElementById("hs-material")||{}).value||"aluminum_6063",shape:(document.getElementById("hs-shape")||{}).value||"finned",base_mm:hsNum("hs-base",2),fin_height_mm:hsNum("hs-fin-h",10),fin_thickness_mm:hsNum("hs-fin-t",1),fin_gap_mm:hsNum("hs-fin-g",1.5),fin_axis:(document.getElementById("hs-axis")||{}).value||"length",lower_width_mm:hsNum("hs-lower-w",0),lower_length_mm:hsNum("hs-lower-l",0),lower_height_mm:hsNum("hs-lower-h",0),pad_thickness_mm:hsNum("hs-pad-t",.5),pad_k_w_mk:hsNum("hs-pad-k",6)};return s;}
+function hsFormValid(s){return s.w>0&&s.h>0&&s.base_mm>0&&s.pad_thickness_mm>=0&&s.pad_k_w_mk>0&&(s.shape==="stepped"?(s.lower_width_mm>0&&s.lower_length_mm>0&&s.lower_height_mm>0):(s.fin_height_mm>=0&&s.fin_thickness_mm>0&&s.fin_gap_mm>=0));}
 function hsRequestedCount(){return hsNum("hs-fin-count",0);}
-function hsCountFits(s){var n=hsRequestedCount(),across=(s.fin_axis==="length"?s.w:s.h);return Number.isInteger(n)&&n>=1&&n<=512&&n*s.fin_thickness_mm<=across+1e-9;}
-function hsCountToGap(){var s=hsFromForm(),n=hsRequestedCount(),across=(s.fin_axis==="length"?s.w:s.h),gap=document.getElementById("hs-fin-g");
+function hsCountFits(s){if(s.shape==="stepped")return true;var n=hsRequestedCount(),across=(s.fin_axis==="length"?s.w:s.h);return Number.isInteger(n)&&n>=1&&n<=512&&n*s.fin_thickness_mm<=across+1e-9;}
+function hsCountToGap(){var s=hsFromForm();if(s.shape==="stepped"){hsResult();return;}var n=hsRequestedCount(),across=(s.fin_axis==="length"?s.w:s.h),gap=document.getElementById("hs-fin-g");
  if(!gap||!hsCountFits(s)){hsResult();return;}var v=n===1?across-s.fin_thickness_mm:(across-n*s.fin_thickness_mm)/(n-1);gap.value=Math.max(0,v-(v>0?1e-6:0)).toFixed(6);hsResult();}
 function hsCountFromGap(){var count=document.getElementById("hs-fin-count");if(count)count.value=hsEstimate(hsFromForm()).count;hsResult();}
 function hsResult(){var out=document.getElementById("hs-result"),s=hsFromForm();if(!out)return;
  if(!hsFormValid(s)){out.textContent="Enter positive physical dimensions for the board-contact sink.";return;}
  if(!hsCountFits(s)){out.textContent="Fin count must be 1–512 and the fins must fit across the selected base direction.";return;}
- var e=hsEstimate(s);out.textContent=e.count+" fins · estimated θSA "+e.theta.toFixed(2)+" °C/W · fin efficiency "+(100*e.eta).toFixed(1)+"% · total height "+(s.base_mm+s.fin_height_mm).toFixed(1)+" mm";}
+ var e=hsEstimate(s);out.textContent=s.shape==="stepped"?("2 solid blocks · estimated exposed-surface θSA "+e.theta.toFixed(2)+" °C/W · total height "+(s.base_mm+s.lower_height_mm).toFixed(1)+" mm"):(e.count+" fins · estimated θSA "+e.theta.toFixed(2)+" °C/W · fin efficiency "+(100*e.eta).toFixed(1)+"% · total height "+(s.base_mm+s.fin_height_mm).toFixed(1)+" mm");}
+function hsProfileSync(){var stepped=((document.getElementById("hs-shape")||{}).value==="stepped");document.querySelectorAll(".hs-finned").forEach(function(e){e.hidden=stepped;});document.querySelectorAll(".hs-stepped").forEach(function(e){e.hidden=!stepped;});}
 function hsModalClose(){var m=document.getElementById("heatsink-modal");if(m)m.hidden=true;heatsinkEditSnap=null;}
 function hsModalShown(){var m=document.getElementById("heatsink-modal");return !!m&&!m.hidden;}
 function hsModalOpen(rect){var m=document.getElementById("heatsink-modal");if(!m)return;var old=PCB.heatsink||{},side=old.side||(activeLayer===0?"top":"bottom");
- var vals={"hs-x-mm":rect.x,"hs-y-mm":rect.y,"hs-w":rect.w,"hs-h":rect.h,"hs-side":side,"hs-material":old.material||"aluminum_6063","hs-base":old.base_mm==null ? 2 : old.base_mm,"hs-fin-h":old.fin_height_mm==null ? 10 : old.fin_height_mm,"hs-fin-t":old.fin_thickness_mm==null ? 1 : old.fin_thickness_mm,"hs-fin-g":old.fin_gap_mm==null ? 1.5 : old.fin_gap_mm,"hs-axis":old.fin_axis||"length","hs-pad-t":old.pad_thickness_mm==null ? .5 : old.pad_thickness_mm,"hs-pad-k":old.pad_k_w_mk==null ? 6 : old.pad_k_w_mk};
+ var vals={"hs-x-mm":rect.x,"hs-y-mm":rect.y,"hs-w":rect.w,"hs-h":rect.h,"hs-side":side,"hs-material":old.material||"aluminum_6063","hs-shape":old.shape||"finned","hs-base":old.base_mm==null ? 2 : old.base_mm,"hs-fin-h":old.fin_height_mm==null ? 10 : old.fin_height_mm,"hs-fin-t":old.fin_thickness_mm==null ? 1 : old.fin_thickness_mm,"hs-fin-g":old.fin_gap_mm==null ? 1.5 : old.fin_gap_mm,"hs-axis":old.fin_axis||"length","hs-lower-w":old.lower_width_mm>0?old.lower_width_mm:rect.w,"hs-lower-l":old.lower_length_mm>0?old.lower_length_mm:rect.h,"hs-lower-h":old.lower_height_mm>0?old.lower_height_mm:10,"hs-pad-t":old.pad_thickness_mm==null ? .5 : old.pad_thickness_mm,"hs-pad-k":old.pad_k_w_mk==null ? 6 : old.pad_k_w_mk};
  Object.keys(vals).forEach(function(id){var e=document.getElementById(id);if(e)e.value=vals[id];});
- var count=document.getElementById("hs-fin-count");if(count)count.value=hsEstimate(hsFromForm()).count;var title=document.getElementById("hs-title"),save=document.getElementById("hs-save");if(title)title.textContent=PCB.heatsink?"Edit physical heatsink":"Physical heatsink";if(save)save.textContent=PCB.heatsink?"Update heatsink":"Use heatsink";
+ hsProfileSync();var count=document.getElementById("hs-fin-count");if(count)count.value=hsEstimate(hsFromForm()).count;var title=document.getElementById("hs-title"),save=document.getElementById("hs-save");if(title)title.textContent=PCB.heatsink?"Edit physical heatsink":"Physical heatsink";if(save)save.textContent=PCB.heatsink?"Update heatsink":"Use heatsink";
  heatsinkEditSnap=snapAll();m.hidden=false;hsResult();}
 var hsBtn=document.getElementById("pcb-heatsink");if(hsBtn)hsBtn.addEventListener("click",function(){heatsinkArm(!heatsinkMode);});
-(function(){var ids=["hs-x-mm","hs-y-mm","hs-side","hs-material","hs-base","hs-fin-h","hs-pad-t","hs-pad-k"];ids.forEach(function(id){var e=document.getElementById(id);if(e){e.addEventListener("input",hsResult);e.addEventListener("change",hsResult);}});
+(function(){var ids=["hs-x-mm","hs-y-mm","hs-side","hs-material","hs-base","hs-fin-h","hs-lower-w","hs-lower-l","hs-lower-h","hs-pad-t","hs-pad-k"];ids.forEach(function(id){var e=document.getElementById(id);if(e){e.addEventListener("input",hsResult);e.addEventListener("change",hsResult);}});var shape=document.getElementById("hs-shape");if(shape){shape.addEventListener("change",function(){hsProfileSync();if(shape.value==="finned")hsCountFromGap();else hsResult();});}
  ["hs-w","hs-h","hs-fin-t","hs-axis"].forEach(function(id){var e=document.getElementById(id);if(e){e.addEventListener("input",hsCountToGap);e.addEventListener("change",hsCountToGap);}});var count=document.getElementById("hs-fin-count"),gap=document.getElementById("hs-fin-g");if(count){count.addEventListener("input",hsCountToGap);count.addEventListener("change",hsCountToGap);}if(gap){gap.addEventListener("input",hsCountFromGap);gap.addEventListener("change",hsCountFromGap);}
  var close=function(){hsModalClose();};["hs-x","hs-cancel"].forEach(function(id){var e=document.getElementById(id);if(e)e.addEventListener("click",close);});
  var save=document.getElementById("hs-save");if(save)save.addEventListener("click",function(){var s=hsFromForm();if(!hsFormValid(s)||!hsCountFits(s)){hsResult();return;}recordUndo(heatsinkEditSnap||snapAll());PCB.heatsink=s;hsModalClose();heatsinkArm(false);drawBoardRect();if(window.PCB3D&&window.PCB3D.sync)window.PCB3D.sync();outlineMsg("heatsink updated — Save/Update to keep and refresh Thermal");});
@@ -11556,7 +11563,7 @@ loadDeferredAnalysis();
   {key:"antipads",name:"Antipads",c:"#f59e0b",desc:"Solved plane antipads around controlled-impedance vias"},
   {key:"keepouts",name:"Keepouts",c:"linear-gradient(90deg,#a855f7,#f59e0b)",
    desc:"Purple = fixed board keepout; amber = active-layer net-class halo. Keepout escape policy remains enforced by DRC without decorative rings."},
-  {key:"heatsink",name:"Heatsink",c:"linear-gradient(90deg,#f59e0b,#38bdf8)",desc:"Physical heatsink base and fins; hiding it does not remove it or change thermal simulations"},
+  {key:"heatsink",name:"Heatsink",c:"linear-gradient(90deg,#f59e0b,#38bdf8)",desc:"Physical heatsink fins or two-block cold plate; hiding it does not remove it or change thermal simulations"},
   {key:"fan",name:"Fan",c:"linear-gradient(90deg,#a78bfa,#38bdf8)",desc:"Axial fan outlet and circular airflow target; hiding it does not remove it or change thermal simulations"},
   {key:"refdes",name:"Reference designators",c:TH.silk,desc:"Component reference labels over each courtyard"},
   {key:"padnum",name:"Pad numbers",c:"#d6d7db",desc:"Pad-number labels, drawn over the copper"}];}

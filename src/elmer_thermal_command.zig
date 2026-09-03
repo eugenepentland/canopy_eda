@@ -272,9 +272,9 @@ fn applyValueOption(args: *Args, arg: []const u8, value: []const u8, compare_mod
     } else if (std.mem.eql(u8, arg, "--sink-base-mm")) {
         args.heatsink.geometry.base_mm = parseFloatOption(arg, value);
     } else if (std.mem.eql(u8, arg, "--sink-fin-height-mm")) {
-        args.heatsink.geometry.fin_height_mm = parseFloatOption(arg, value);
+        args.heatsink.geometry.profile.finned.height_mm = parseFloatOption(arg, value);
     } else if (std.mem.eql(u8, arg, "--sink-fin-count")) {
-        args.heatsink.geometry.fin_count = std.fmt.parseInt(usize, value, 10) catch exit.fatal("Invalid value '{s}' after {s}\n", .{ value, arg });
+        args.heatsink.geometry.profile.finned.count = std.fmt.parseInt(usize, value, 10) catch exit.fatal("Invalid value '{s}' after {s}\n", .{ value, arg });
     } else if (std.mem.eql(u8, arg, "--sink-theta-sa")) {
         args.heatsink.theta_sa_c_per_w = parseFloatOption(arg, value);
     } else if (std.mem.eql(u8, arg, "--pad-thickness-mm")) {
@@ -294,8 +294,12 @@ fn isHeatsinkOption(arg: []const u8) bool {
 
 fn validHeatsink(hs: thermal_field.Heatsink) bool {
     if (!(hs.geometry.width_mm > 0) or !(hs.geometry.length_mm > 0)) return false;
-    if (!(hs.geometry.base_mm >= 0) or !(hs.geometry.fin_height_mm >= 0)) return false;
-    if (hs.geometry.fin_count == 0 or !(hs.theta_sa_c_per_w >= 0)) return false;
+    if (!(hs.geometry.base_mm >= 0)) return false;
+    switch (hs.geometry.profile) {
+        .finned => |fins| if (!(fins.height_mm >= 0) or fins.count == 0) return false,
+        .stepped => |lower| if (!(lower.width_mm > 0 and lower.length_mm > 0 and lower.height_mm > 0)) return false,
+    }
+    if (!(hs.theta_sa_c_per_w >= 0)) return false;
     if (!(hs.pad.thickness_mm >= 0) or !(hs.pad.conductivity_w_mk > 0)) return false;
     return true;
 }

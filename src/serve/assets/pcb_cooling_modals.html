@@ -3,20 +3,24 @@
 <div class="hs-grid">
 <label>PCB face<select id="hs-side"><option value="top">Top</option><option value="bottom">Bottom</option></select></label>
 <label>Material<select id="hs-material"><option value="aluminum_6063">Aluminum 6063</option><option value="aluminum_6061">Aluminum 6061</option><option value="copper_c110">Copper C110</option><option value="steel">Steel</option></select></label>
-<label>Fin direction<select id="hs-axis"><option value="length">Along length</option><option value="width">Along width</option></select></label>
+<label>Profile<select id="hs-shape"><option value="finned">Base + fins</option><option value="stepped">Two solid blocks</option></select></label>
+<label class="hs-finned">Fin direction<select id="hs-axis"><option value="length">Along length</option><option value="width">Along width</option></select></label>
 <label>X (mm)<input id="hs-x-mm" type="number" step="0.1"></label>
 <label>Y (mm)<input id="hs-y-mm" type="number" step="0.1"></label>
-<label>Width (mm)<input id="hs-w" type="number" step="0.1" min="0.1"></label>
-<label>Length (mm)<input id="hs-h" type="number" step="0.1" min="0.1"></label>
-<label>Base thickness (mm)<input id="hs-base" type="number" step="0.1" min="0.1"></label>
-<label>Fin height (mm)<input id="hs-fin-h" type="number" step="0.1" min="0"></label>
-<label>Fin thickness (mm)<input id="hs-fin-t" type="number" step="0.1" min="0.1"></label>
-<label>Fin count<input id="hs-fin-count" type="number" step="1" min="1" max="512"></label>
-<label>Fin gap (mm)<input id="hs-fin-g" type="number" step="0.1" min="0"></label>
+<label>PCB-contact width (mm)<input id="hs-w" type="number" step="0.1" min="0.1"></label>
+<label>PCB-contact length (mm)<input id="hs-h" type="number" step="0.1" min="0.1"></label>
+<label>PCB-contact block height (mm)<input id="hs-base" type="number" step="0.1" min="0.1"></label>
+<label class="hs-finned">Fin height (mm)<input id="hs-fin-h" type="number" step="0.1" min="0"></label>
+<label class="hs-finned">Fin thickness (mm)<input id="hs-fin-t" type="number" step="0.1" min="0.1"></label>
+<label class="hs-finned">Fin count<input id="hs-fin-count" type="number" step="1" min="1" max="512"></label>
+<label class="hs-finned">Fin gap (mm)<input id="hs-fin-g" type="number" step="0.1" min="0"></label>
+<label class="hs-stepped" hidden>Lower block width (mm)<input id="hs-lower-w" type="number" step="0.1" min="0.1"></label>
+<label class="hs-stepped" hidden>Lower block length (mm)<input id="hs-lower-l" type="number" step="0.1" min="0.1"></label>
+<label class="hs-stepped" hidden>Lower block height (mm)<input id="hs-lower-h" type="number" step="0.1" min="0.1"></label>
 <label>Pad thickness (mm)<input id="hs-pad-t" type="number" step="0.1" min="0"></label>
 <label>Pad conductivity (W/m·K)<input id="hs-pad-k" type="number" step="0.1" min="0.1"></label>
 </div><div class="hs-result" id="hs-result"></div>
-<div class="court-note">The thermal pad couples every PCB thermal cell beneath the drawn base to this sink. The solver derives fin count and θSA from the extrusion. A fan on this PCB face cools the fins according to jet overlap; a fan on the opposite face adds no airflow to the sink.</div>
+<div class="court-note">The thermal pad couples every PCB thermal cell beneath the drawn rectangle to the first block. “Two solid blocks” centers the lower rectangle beneath it for a board-to-case cold plate. The thermal estimate treats exposed metal as convection area; actual enclosure cooling still depends on the case temperature and case-to-air path.</div>
 <div class="court-actions"><button id="hs-save" class="btn">Use heatsink</button><button id="hs-delete" class="btn fab-danger">Remove</button><button id="hs-cancel" class="btn">Cancel</button></div>
 </div></div>
 <div id="fan-modal" class="court-modal" hidden><div class="court-dialog fan-dialog">
@@ -33,6 +37,6 @@
 <label>Maximum static pressure (Pa)<input id="fan-pressure" type="number" step="0.1" min="0.1"></label>
 <label>Installed-flow fraction<input id="fan-fraction" type="number" step="0.05" min="0.01" max="1"></label>
 </div><div class="hs-result" id="fan-result"></div>
-<div class="court-note">The rectangle is the fan outlet projected onto the target; the circle positions it in board coordinates. Distance is measured from the outlet face to the PCB normally, or to the fin tips when the fan and a board-mounted heatsink share the selected face. Installed-flow fraction accounts for enclosure and flow restriction until a measured system operating point is available.</div>
+<div class="court-note">The rectangle is the fan outlet projected onto the target; the circle positions it in board coordinates. Distance is measured from the outlet face to the PCB normally, or to the sink's outer face when the fan and a board-mounted heatsink share the selected face. Installed-flow fraction accounts for enclosure and flow restriction until a measured system operating point is available.</div>
 <div class="court-actions"><button id="fan-save" class="btn">Use fan</button><button id="fan-delete" class="btn fab-danger">Remove</button><button id="fan-cancel" class="btn">Cancel</button></div>
 </div></div>

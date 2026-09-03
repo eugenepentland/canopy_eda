@@ -1411,8 +1411,14 @@ pub fn writeSavedHeatsinkJson(w: *std.Io.Writer, sink: page.SavedHeatsink) std.I
     try writeJsonStr(w, sink.target_ref);
     try w.writeAll(",\"material\":");
     try writeJsonStr(w, sink.material);
-    try w.print(",\"base_mm\":{d},\"fin_height_mm\":{d},\"fin_thickness_mm\":{d},\"fin_gap_mm\":{d},\"fin_axis\":", .{ sink.base_mm, sink.fin_height_mm, sink.fin_thickness_mm, sink.fin_gap_mm });
-    try writeJsonStr(w, sink.fin_axis);
+    try w.print(",\"base_mm\":{d}", .{sink.base_mm});
+    switch (sink.profile) {
+        .finned => |fins| {
+            try w.print(",\"shape\":\"finned\",\"fin_height_mm\":{d},\"fin_thickness_mm\":{d},\"fin_gap_mm\":{d},\"fin_axis\":", .{ fins.height_mm, fins.thickness_mm, fins.gap_mm });
+            try writeJsonStr(w, fins.axis);
+        },
+        .stepped => |lower| try w.print(",\"shape\":\"stepped\",\"lower_width_mm\":{d},\"lower_length_mm\":{d},\"lower_height_mm\":{d}", .{ lower.width_mm, lower.length_mm, lower.height_mm }),
+    }
     try w.print(",\"pad_thickness_mm\":{d},\"pad_k_w_mk\":{d}}}", .{ sink.pad_thickness_mm, sink.pad_k_w_mk });
 }
 
@@ -1706,16 +1712,25 @@ pub fn parseSavedHeatsink(v: ?std.json.Value) ?page.SavedHeatsink {
     const fin_height = jsonOptNum(obj.get("fin_height_mm")) orelse 10;
     const fin_thickness = jsonOptNum(obj.get("fin_thickness_mm")) orelse 1;
     const fin_gap = jsonOptNum(obj.get("fin_gap_mm")) orelse 1.5;
+    const lower_width = jsonOptNum(obj.get("lower_width_mm")) orelse 0;
+    const lower_length = jsonOptNum(obj.get("lower_length_mm")) orelse 0;
+    const lower_height = jsonOptNum(obj.get("lower_height_mm")) orelse 0;
     const pad_thickness = jsonOptNum(obj.get("pad_thickness_mm")) orelse 0.5;
     const pad_k = jsonOptNum(obj.get("pad_k_w_mk")) orelse 6;
     if (!(w > 0) or !(h > 0)) return null;
     if (!(base > 0) or !(fin_height >= 0)) return null;
-    if (!(fin_thickness > 0) or !(fin_gap >= 0)) return null;
     if (!(pad_thickness >= 0) or !(pad_k > 0)) return null;
 
     const side = stringChoice(obj.get("side"), &.{ "top", "bottom" }, "bottom");
     const material = stringChoice(obj.get("material"), &.{ "aluminum_6063", "aluminum_6061", "copper_c110", "steel" }, "aluminum_6063");
+    const shape = stringChoice(obj.get("shape"), &.{ "finned", "stepped" }, "finned");
     const fin_axis = stringChoice(obj.get("fin_axis"), &.{ "length", "width" }, "length");
+    const is_finned = std.mem.eql(u8, shape, "finned");
+    if (is_finned) {
+        if (!(fin_thickness > 0) or !(fin_gap >= 0)) return null;
+    }
+    const lower_block_ok = lower_width > 0 and lower_length > 0 and lower_height > 0;
+    if (!is_finned and !lower_block_ok) return null;
     const target_ref = if (obj.get("target_ref")) |target| blk: {
         if (target != .string) return null;
         break :blk target.string;
@@ -1729,10 +1744,16 @@ pub fn parseSavedHeatsink(v: ?std.json.Value) ?page.SavedHeatsink {
         .target_ref = target_ref,
         .material = material,
         .base_mm = base,
-        .fin_height_mm = fin_height,
-        .fin_thickness_mm = fin_thickness,
-        .fin_gap_mm = fin_gap,
-        .fin_axis = fin_axis,
+        .profile = if (is_finned) .{ .finned = .{
+            .height_mm = fin_height,
+            .thickness_mm = fin_thickness,
+            .gap_mm = fin_gap,
+            .axis = fin_axis,
+        } } else .{ .stepped = .{
+            .width_mm = lower_width,
+            .length_mm = lower_length,
+            .height_mm = lower_height,
+        } },
         .pad_thickness_mm = pad_thickness,
         .pad_k_w_mk = pad_k,
     };

@@ -90,7 +90,7 @@ const h_airflow_1ms: f64 = 22.0;
 const h_airflow_2ms: f64 = 35.0;
 /// Lateral growth of a free axial-fan jet per millimetre of outlet-to-target
 /// clearance. The target is the board unless a same-face board sink intercepts
-/// the jet, in which case it is the fin tips. A 0.1 half-angle is the
+/// the jet, in which case it is the sink's outer face. A 0.1 half-angle is the
 /// deliberately blunt screening convention:
 /// it conserves the authored delivered flow while making distance widen and
 /// slow the footprint instead of pretending an 80 mm fan is a uniform room
@@ -293,14 +293,20 @@ pub const HeatsinkGeometry = struct {
     width_mm: f64 = default_sink_width_mm,
     length_mm: f64 = default_sink_length_mm,
     base_mm: f64 = default_sink_base_mm,
-    fin_height_mm: f64 = default_sink_fin_height_mm,
-    fin_count: usize = default_sink_fin_count,
-    /// Positive thickness + non-negative gap switch the sink to a geometry-
-    /// derived fin count and theta-SA. Zero thickness preserves the historical
-    /// explicit `fin_count` / rated theta-SA path used by the CLI defaults.
-    fin_thickness_mm: f64 = 0,
-    fin_gap_mm: f64 = 0,
-    fin_axis: FinAxis = .length,
+    /// Physical profile away from the PCB-contact base. Positive fin thickness
+    /// plus non-negative gap switches a finned profile to geometry-derived
+    /// theta-SA; zero thickness preserves the CLI's rated-theta path.
+    profile: union(enum) {
+        finned: struct {
+            height_mm: f64 = default_sink_fin_height_mm,
+            count: usize = default_sink_fin_count,
+            thickness_mm: f64 = 0,
+            gap_mm: f64 = 0,
+            axis: FinAxis = .length,
+        },
+        /// Centered second solid carrying heat toward an enclosure wall.
+        stepped: struct { width_mm: f64, length_mm: f64, height_mm: f64 },
+    } = .{ .finned = .{} },
 };
 
 /// Thermal-interface layer between the target surface and the sink base.
@@ -329,7 +335,7 @@ pub const Heatsink = struct {
 
 /// One axial fan aimed normal to a PCB face. `footprint` is the projection of
 /// its outlet frame onto the target surface at zero clearance. `distance_mm`
-/// is outlet-to-board normally and outlet-to-fin-tip when a board-mounted
+/// is outlet-to-board normally and outlet-to-outer-sink when a board-mounted
 /// heatsink occupies the same face. The two catalog maxima are
 /// kept separately because they are opposite endpoints of the P-Q curve, not a
 /// simultaneously available operating point. `operating_flow_fraction` makes
@@ -1468,35 +1474,69 @@ pub fn sinkToAmbientFor(inputs: Inputs, scenario: Scenario) f64 {
 
 /// Number of whole fins that fit the authored base at its stated pitch.
 pub fn finCount(geometry: HeatsinkGeometry) usize {
-    if (!geometryDriven(geometry)) return @max(geometry.fin_count, 1);
-    const across = if (geometry.fin_axis == .length) geometry.width_mm else geometry.length_mm;
-    const pitch = geometry.fin_thickness_mm + geometry.fin_gap_mm;
+    const fins = switch (geometry.profile) {
+        .finned => |fins| fins,
+        .stepped => return 0,
+    };
+    if (!geometryDriven(geometry)) return @max(fins.count, 1);
+    const across = if (fins.axis == .length) geometry.width_mm else geometry.length_mm;
+    const pitch = fins.thickness_mm + fins.gap_mm;
     if (!(across > 0 and pitch > 0)) return 1;
-    const count = @floor((across + geometry.fin_gap_mm) / pitch);
+    const count = @floor((across + fins.gap_mm) / pitch);
     return @min(@max(numeric.checkedInt(usize, @max(count, 1)) orelse 1, 1), max_sink_fin_count);
 }
 
 fn geometryDriven(geometry: HeatsinkGeometry) bool {
-    return std.math.isFinite(geometry.fin_thickness_mm) and geometry.fin_thickness_mm > 0 and
-        std.math.isFinite(geometry.fin_gap_mm) and geometry.fin_gap_mm >= 0;
+    return switch (geometry.profile) {
+        .finned => |fins| std.math.isFinite(fins.thickness_mm) and fins.thickness_mm > 0 and
+            std.math.isFinite(fins.gap_mm) and fins.gap_mm >= 0,
+        .stepped => |lower| lower.width_mm > 0 and lower.length_mm > 0 and lower.height_mm > 0,
+    };
 }
 
 fn estimatedThetaSaAtFilm(hs: Heatsink, film_w_m2k: f64) f64 {
     const g = hs.geometry;
     const width_m = g.width_mm * 1.0e-3;
     const length_m = g.length_mm * 1.0e-3;
-    const fin_h_m = g.fin_height_mm * 1.0e-3;
-    const fin_t_m = g.fin_thickness_mm * 1.0e-3;
     const base_m = g.base_mm * 1.0e-3;
     if (!(width_m > 0)) return default_theta_sa_c_per_w;
     if (!(length_m > 0)) return default_theta_sa_c_per_w;
-    if (!(fin_h_m >= 0)) return default_theta_sa_c_per_w;
-    if (!(fin_t_m > 0)) return default_theta_sa_c_per_w;
     if (!(base_m > 0)) return default_theta_sa_c_per_w;
 
+    switch (g.profile) {
+        .stepped => |lower| {
+            const lower_w_m = lower.width_mm * 1.0e-3;
+            const lower_l_m = lower.length_mm * 1.0e-3;
+            const lower_h_m = lower.height_mm * 1.0e-3;
+            if (!(lower_w_m > 0 and lower_l_m > 0 and lower_h_m > 0)) return default_theta_sa_c_per_w;
+            const overlap = @min(width_m, lower_w_m) * @min(length_m, lower_l_m);
+            if (!(overlap > 0)) return default_theta_sa_c_per_w;
+            const upper_area = width_m * length_m;
+            const lower_area = lower_w_m * lower_l_m;
+            // The PCB-facing side of the upper block is covered. Everything else
+            // is exposed except the centered mating patch shared by the blocks.
+            const horizontal = @max(upper_area - overlap, 0) +
+                @max(lower_area - overlap, 0) + lower_area;
+            const sidewalls = 2 * (width_m + length_m) * base_m +
+                2 * (lower_w_m + lower_l_m) * lower_h_m;
+            const exposed_area = horizontal + sidewalls;
+            if (!(exposed_area > 0)) return default_theta_sa_c_per_w;
+            const k = hs.material.conductivity();
+            const h = if (std.math.isFinite(film_w_m2k) and film_w_m2k > 0) film_w_m2k else h_natural;
+            const conduction = base_m / (k * upper_area) + lower_h_m / (k * overlap);
+            return 1.0 / (h * exposed_area) + conduction;
+        },
+        .finned => {},
+    }
+
+    const fins = g.profile.finned;
+    const fin_h_m = fins.height_mm * 1.0e-3;
+    const fin_t_m = fins.thickness_mm * 1.0e-3;
+    if (!(fin_h_m >= 0)) return default_theta_sa_c_per_w;
+    if (!(fin_t_m > 0)) return default_theta_sa_c_per_w;
     const n: f64 = @floatFromInt(finCount(g));
-    const fin_length_m = if (g.fin_axis == .length) length_m else width_m;
-    const across_m = if (g.fin_axis == .length) width_m else length_m;
+    const fin_length_m = if (fins.axis == .length) length_m else width_m;
+    const across_m = if (fins.axis == .length) width_m else length_m;
     const k = hs.material.conductivity();
     const h = if (std.math.isFinite(film_w_m2k) and film_w_m2k > 0) film_w_m2k else h_natural;
     const m_l = fin_h_m * @sqrt(2.0 * h / (k * fin_t_m));
@@ -2102,7 +2142,7 @@ pub fn fanFilmCoefficient(fan: Fan) f64 {
 }
 
 /// Fraction of a board sink's clipped contact footprint intercepted by the
-/// fan jet at the fin tips. Opposite-face assemblies are deliberately isolated.
+/// fan jet at the sink's outer face. Opposite-face assemblies are deliberately isolated.
 fn fanSinkOverlapFraction(inputs: Inputs, scenario: Scenario) f64 {
     if (scenario != .fan_heatsink) return 0;
     const hs = inputs.cooling.heatsink;
@@ -2130,16 +2170,19 @@ fn sameFaceBoardHeatsink(inputs: Inputs, scenario: Scenario) bool {
         hs.physical_face == inputs.cooling.fan.face;
 }
 
-/// The authored fan clearance ends at the fin tips for a same-face assembly.
+/// The authored fan clearance ends at the sink's outer face for a same-face assembly.
 /// Bare PCB outside the sink is one sink height farther from the outlet.
 fn fanAtBoardSurface(inputs: Inputs, scenario: Scenario) Fan {
     var fan = inputs.cooling.fan;
     if (!sameFaceBoardHeatsink(inputs, scenario)) return fan;
     const g = inputs.cooling.heatsink.geometry;
     const base = if (std.math.isFinite(g.base_mm)) @max(g.base_mm, 0) else 0;
-    const fins = if (std.math.isFinite(g.fin_height_mm)) @max(g.fin_height_mm, 0) else 0;
+    const profile_height = switch (g.profile) {
+        .stepped => |lower| if (std.math.isFinite(lower.height_mm)) @max(lower.height_mm, 0) else 0,
+        .finned => |fins| if (std.math.isFinite(fins.height_mm)) @max(fins.height_mm, 0) else 0,
+    };
     const target_clearance = if (std.math.isFinite(fan.distance_mm)) @max(fan.distance_mm, 0) else 0;
-    fan.distance_mm = target_clearance + base + fins;
+    fan.distance_mm = target_clearance + base + profile_height;
     return fan;
 }
 
@@ -2872,19 +2915,26 @@ test "drawn heatsink geometry drives resistance and exact contact" {
         .width_mm = 20,
         .length_mm = 20,
         .base_mm = 2,
-        .fin_height_mm = 10,
-        .fin_thickness_mm = 1,
-        .fin_gap_mm = 1.5,
-        .fin_axis = .length,
+        .profile = .{ .finned = .{ .height_mm = 10, .thickness_mm = 1, .gap_mm = 1.5, .axis = .length } },
     };
     try testing.expectEqual(@as(usize, 8), finCount(geometry));
     const aluminum = Heatsink{ .geometry = geometry, .material = .aluminum_6063 };
     var taller = aluminum;
-    taller.geometry.fin_height_mm = 20;
+    taller.geometry.profile.finned.height_mm = 20;
     try testing.expect(sinkToAmbient(taller) < sinkToAmbient(aluminum));
     var steel = aluminum;
     steel.material = .steel;
     try testing.expect(sinkToAmbient(aluminum) < sinkToAmbient(steel));
+
+    const stepped = Heatsink{ .geometry = .{
+        .width_mm = 20,
+        .length_mm = 16,
+        .base_mm = 3,
+        .profile = .{ .stepped = .{ .width_mm = 36, .length_mm = 28, .height_mm = 8 } },
+    }, .material = .aluminum_6063 };
+    try testing.expectEqual(@as(usize, 0), finCount(stepped.geometry));
+    try testing.expect(std.math.isFinite(sinkToAmbient(stepped)));
+    try testing.expect(sinkToAmbient(stepped) > 0);
 
     const parts = [_]PartInput{.{
         .ref_des = "U1",
@@ -3221,9 +3271,7 @@ test "same-face fan cools the heatsink from fin-tip distance without cooling thr
             .width_mm = 8,
             .length_mm = 8,
             .base_mm = 2,
-            .fin_height_mm = 10,
-            .fin_thickness_mm = 1,
-            .fin_gap_mm = 1,
+            .profile = .{ .finned = .{ .height_mm = 10, .thickness_mm = 1, .gap_mm = 1 } },
         },
     };
     const inputs = Inputs{

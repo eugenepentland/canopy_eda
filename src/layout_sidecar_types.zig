@@ -36,7 +36,10 @@ pub const SavedPartEdgeDimension = struct {
 /// beside a saved layout.
 pub const LayoutScore = struct { hpwl: f64, loop: f64, caps: usize, objective: f64 = 0 };
 
-/// One physical finned heatsink authored on a saved PCB layout.
+/// One physical heatsink authored on a saved PCB layout. The profile is either
+/// the historical straight fins or one centered lower rectangular block for
+/// carrying heat from a PCB face down to an enclosure wall. The JSON codec
+/// preserves the flat `shape="finned"|"stepped"` wire format used by the UI.
 pub const SavedHeatsink = struct {
     x: f64,
     y: f64,
@@ -48,17 +51,26 @@ pub const SavedHeatsink = struct {
     target_ref: []const u8 = "",
     material: []const u8 = "aluminum_6063",
     base_mm: f64 = 2,
-    fin_height_mm: f64 = 10,
-    fin_thickness_mm: f64 = 1,
-    fin_gap_mm: f64 = 1.5,
-    fin_axis: []const u8 = "length",
+    profile: union(enum) {
+        finned: struct {
+            height_mm: f64 = 10,
+            thickness_mm: f64 = 1,
+            gap_mm: f64 = 1.5,
+            axis: []const u8 = "length",
+        },
+        stepped: struct {
+            width_mm: f64,
+            length_mm: f64,
+            height_mm: f64,
+        },
+    } = .{ .finned = .{} },
     pad_thickness_mm: f64 = 0.5,
     pad_k_w_mk: f64 = 6,
 };
 
 /// One axial fan aimed normal to a PCB face. The rectangle is the outlet
 /// footprint projected into board coordinates; `distance_mm` is the clear
-/// outlet-to-board distance normally, or outlet-to-fin-tip clearance when a
+/// outlet-to-board distance normally, or outlet-to-outer-sink clearance when a
 /// board-mounted heatsink occupies the selected face.
 pub const SavedFan = struct {
     /// Projected outlet rectangle in absolute board coordinates.

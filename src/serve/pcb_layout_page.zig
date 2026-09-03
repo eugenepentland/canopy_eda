@@ -241,7 +241,7 @@ pub const SavedPartEdgeDimension = sidecar_types.SavedPartEdgeDimension;
 /// entries saved before it was recorded.
 const LayoutScore = sidecar_types.LayoutScore;
 
-/// One physical finned heatsink authored on a saved PCB layout. The rectangle
+/// One physical heatsink authored on a saved PCB layout. The rectangle
 /// is the base/contact footprint in board coordinates; `side` is the physical
 /// PCB face, not a package-relative direction. Its thermal pad couples every
 /// covered board cell to the passive sink; no component target is required.
@@ -7822,8 +7822,8 @@ const tip_text = "Silkscreen text (T): click on the board to place a label " ++
     "Gerber.";
 const tip_backing = "Edit fabrication backing regions with the shared shape-sketch palette: lines/arcs, dimensions, constraints, fillet, chamfer, offset and mirror. " ++
     "The authored side, material, thickness, and automatic footprint cutouts remain unchanged. Saved with the layout and emitted in its named Gerber.";
-const tip_heatsink = "Draw or edit a physical heatsink. Drag its body to move it, drag corner handles to resize it, or click it to edit its face, material, fin count/dimensions, and thermal pad. On a populated face it contacts covered package lids through declared theta-JC-top; on an unobstructed face its pad contacts the PCB. Saved with the layout; the thermal ladder and 3D view use it.";
-const tip_fan = "Place or edit an axial fan. Drag its circular footprint to move it, drag corner handles to resize its outlet, or click it to edit the PCB face, outlet-to-target distance, and airflow specifications. The target is the fin tips when a heatsink shares that face, otherwise the PCB. Saved with the layout and used by the fan thermal scenario.";
+const tip_heatsink = "Draw or edit a physical heatsink or two-block cold plate. Drag its PCB-contact body to move it, drag corner handles to resize it, or click it to edit its face, material, fin/second-block dimensions, and thermal pad. On a populated face it contacts covered package lids through declared theta-JC-top; on an unobstructed face its pad contacts the PCB. Saved with the layout; the thermal ladder and 3D view use it.";
+const tip_fan = "Place or edit an axial fan. Drag its circular footprint to move it, drag corner handles to resize its outlet, or click it to edit the PCB face, outlet-to-target distance, and airflow specifications. The target is the heatsink outer face when a sink shares that face, otherwise the PCB. Saved with the layout and used by the fan thermal scenario.";
 const tip_ruler = "Ruler / dimension (D): drag to measure, or select a footprint first and drag its origin to a straight board edge to create a driving dimension.";
 const tip_move = "Move the selection by an X/Y distance (M): select footprints, tracks, vias, or outline-sketch geometry, then press M (or this button) and type how far to move it; one undo step.";
 const pad_align_tool_html = @embedFile("assets/pcb_pad_align_tool.html");
@@ -13654,10 +13654,13 @@ test "PCB header links board designs to assembly and keeps modules scoped" {
     try std.testing.expect(std.mem.indexOf(u8, pcb_3d_stage_html, "id=\"pcb3d-t-heatsink\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, @embedFile("assets/pcb_board.js"), "function hsModalOpen(rect)") != null);
     try std.testing.expect(std.mem.indexOf(u8, cooling_modals, "id=\"hs-fin-count\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cooling_modals, "id=\"hs-shape\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cooling_modals, "id=\"hs-lower-w\"") != null);
     const board_js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, board_js, "function hsDragMove(m)") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "heatsink moved/resized") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "function hsCountToGap()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, board_js, "function hsProfileSync()") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "hsModalOpen(PCB.heatsink)") != null);
     try std.testing.expect(std.mem.indexOf(u8, toolstrip_html, "id=\"pcb-fan\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, cooling_modals, "id=\"fan-distance\"") != null);
@@ -13667,6 +13670,7 @@ test "PCB header links board designs to assembly and keeps modules scoped" {
     try std.testing.expect(std.mem.indexOf(u8, board_js, "fanModalOpen(PCB.fan)") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "fan:savedFan") != null);
     try std.testing.expect(std.mem.indexOf(u8, @embedFile("assets/pcb_3d_viewer.js"), "function rebuildHeatsink()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, @embedFile("assets/pcb_3d_viewer.js"), "s.shape === \"stepped\"") != null);
     const surface_asset = std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_3d_surface.js") orelse return error.TestUnexpectedResult;
     const step_export_asset = std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_step_export.js") orelse return error.TestUnexpectedResult;
     const viewer_asset = std.mem.indexOf(u8, pcb_3d_toggle_js, "pcb_3d_viewer.js") orelse return error.TestUnexpectedResult;
@@ -15517,29 +15521,44 @@ test "layouts sidecar round-trips a physical heatsink assembly" {
     const alloc = arena_state.allocator();
 
     const parts = [_]PartPose{.{ .ref = "U15", .x = 12, .y = 8, .rot = 0 }};
-    const layouts = [_]SavedLayout{.{
-        .name = "bottom sink",
-        .kind = kind_manual,
-        .ts = 1,
-        .score = null,
-        .parts = &parts,
-        .heatsink = .{
-            .x = 4,
-            .y = 5,
-            .w = 24,
-            .h = 18,
-            .side = "bottom",
-            .material = "aluminum_6061",
-            .base_mm = 2.5,
-            .fin_height_mm = 12,
-            .fin_thickness_mm = 0.8,
-            .fin_gap_mm = 1.2,
-            .fin_axis = "width",
-            .pad_thickness_mm = 0.5,
-            .pad_k_w_mk = 6,
+    const layouts = [_]SavedLayout{
+        .{
+            .name = "bottom sink",
+            .kind = kind_manual,
+            .ts = 1,
+            .score = null,
+            .parts = &parts,
+            .heatsink = .{
+                .x = 4,
+                .y = 5,
+                .w = 24,
+                .h = 18,
+                .side = "bottom",
+                .material = "aluminum_6061",
+                .base_mm = 2.5,
+                .profile = .{ .finned = .{ .height_mm = 12, .thickness_mm = 0.8, .gap_mm = 1.2, .axis = "width" } },
+                .pad_thickness_mm = 0.5,
+                .pad_k_w_mk = 6,
+            },
+            .fan = .{ .model = "Sanyo Denki 9A0812G4D011", .rect = .{ .x = 0.5, .y = -27.6, .w = 80, .h = 80 }, .side = "top", .distance_mm = 10, .curve = .{ .free_air_flow_m3_s = 0.025, .max_static_pressure_pa = 80.4 }, .operating_flow_fraction = 0.6 },
         },
-        .fan = .{ .model = "Sanyo Denki 9A0812G4D011", .rect = .{ .x = 0.5, .y = -27.6, .w = 80, .h = 80 }, .side = "top", .distance_mm = 10, .curve = .{ .free_air_flow_m3_s = 0.025, .max_static_pressure_pa = 80.4 }, .operating_flow_fraction = 0.6 },
-    }};
+        .{
+            .name = "case cold plate",
+            .kind = kind_manual,
+            .ts = 2,
+            .score = null,
+            .parts = &parts,
+            .heatsink = .{
+                .x = 4,
+                .y = 5,
+                .w = 24,
+                .h = 18,
+                .side = "bottom",
+                .base_mm = 3,
+                .profile = .{ .stepped = .{ .width_mm = 40, .length_mm = 30, .height_mm = 8 } },
+            },
+        },
+    };
     var aw: std.Io.Writer.Allocating = .init(alloc);
     try writeLayoutsFileJson(&aw.writer, &layouts, null);
     const got = parseLayouts(alloc, aw.written()) orelse return error.TestParseFailed;
@@ -15547,15 +15566,21 @@ test "layouts sidecar round-trips a physical heatsink assembly" {
     try std.testing.expectEqualStrings("", sink.target_ref);
     try std.testing.expectEqualStrings("bottom", sink.side);
     try std.testing.expectEqualStrings("aluminum_6061", sink.material);
-    try std.testing.expectEqualStrings("width", sink.fin_axis);
+    const fins = sink.profile.finned;
+    try std.testing.expectEqualStrings("width", fins.axis);
     try std.testing.expectEqual(@as(f64, 24), sink.w);
-    try std.testing.expectEqual(@as(f64, 0.8), sink.fin_thickness_mm);
+    try std.testing.expectEqual(@as(f64, 0.8), fins.thickness_mm);
     try std.testing.expectEqual(@as(f64, 0.5), sink.pad_thickness_mm);
     // Layouts saved before board contact became target-free carried a nearest-
     // package hint. They remain readable and no longer depend on that part
     // having a thermal-power row when lowered at the thermal boundary.
     const legacy = parseSavedHeatsink(try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"x\":0,\"y\":0,\"w\":10,\"h\":10,\"side\":\"bottom\",\"target_ref\":\"U99\"}", .{})) orelse return error.TestParseFailed;
     try std.testing.expectEqualStrings("U99", legacy.target_ref);
+    const stepped = got[1].heatsink orelse return error.TestParseFailed;
+    const lower = stepped.profile.stepped;
+    try std.testing.expectEqual(@as(f64, 40), lower.width_mm);
+    try std.testing.expectEqual(@as(f64, 30), lower.length_mm);
+    try std.testing.expectEqual(@as(f64, 8), lower.height_mm);
     const fan = got[0].fan orelse return error.TestParseFailed;
     try std.testing.expectEqualStrings("Sanyo Denki 9A0812G4D011", fan.model);
     try std.testing.expectEqual(@as(f64, 0.5), fan.rect.x);

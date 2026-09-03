@@ -1425,7 +1425,7 @@ pub const PerimeterFenceSpec = struct {
     keepout: PerimeterKeepoutSpec = .{},
 };
 
-/// One physical finned heatsink that belongs to the board design rather than
+/// One physical heatsink that belongs to the board design rather than
 /// to an editor sidecar. Coordinates and dimensions are board-local mm from
 /// the outline's top-left. The target is a stable source identity: sub-block
 /// name plus module-local origin,
@@ -1437,11 +1437,15 @@ pub const BoardHeatsinkSpec = struct {
     target: struct { scope: []const u8, origin: []const u8 },
     material: []const u8 = "aluminum_6063",
     geometry: struct {
+        shape: []const u8 = "finned",
         base_mm: f64 = 2,
         fin_height_mm: f64 = 10,
         fin_thickness_mm: f64 = 1,
         fin_gap_mm: f64 = 1.5,
         fin_axis: []const u8 = "length",
+        lower_width_mm: f64 = 0,
+        lower_length_mm: f64 = 0,
+        lower_height_mm: f64 = 0,
     } = .{},
     pad: struct { thickness_mm: f64 = 0.5, conductivity_w_mk: f64 = 6 } = .{},
 };

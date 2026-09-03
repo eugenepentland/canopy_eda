@@ -319,6 +319,38 @@ fn writeManifest(alloc: std.mem.Allocator, input: Input, groups: Groups) Error![
         const ref_des = appliedHeatsinkRef(input);
         const theta_sa = thermal_field.sinkToAmbientFor(input.solver_inputs, scenario);
         const fin_count = thermal_field.finCount(hs.geometry);
+        const ManifestGeometry = struct {
+            shape: []const u8,
+            fin_height: f64,
+            fin_thickness: f64,
+            fin_gap: f64,
+            fin_axis: []const u8,
+            lower_width: f64,
+            lower_length: f64,
+            lower_height: f64,
+        };
+        const geometry: ManifestGeometry = switch (hs.geometry.profile) {
+            .finned => |fins| .{
+                .shape = "finned",
+                .fin_height = fins.height_mm,
+                .fin_thickness = fins.thickness_mm,
+                .fin_gap = fins.gap_mm,
+                .fin_axis = @tagName(fins.axis),
+                .lower_width = 0.0,
+                .lower_length = 0.0,
+                .lower_height = 0.0,
+            },
+            .stepped => |lower| .{
+                .shape = "stepped",
+                .fin_height = 0.0,
+                .fin_thickness = 0.0,
+                .fin_gap = 0.0,
+                .fin_axis = "length",
+                .lower_width = lower.width_mm,
+                .lower_length = lower.length_mm,
+                .lower_height = lower.height_mm,
+            },
+        };
         const interface = input.builtin.cooling.heatsink.interface;
         const projection = switch (interface) {
             .none => "direct_boundary",
@@ -335,10 +367,10 @@ fn writeManifest(alloc: std.mem.Allocator, input: Input, groups: Groups) Error![
             input.builtin.cooling.heatsink.package_contacts, input.builtin.cooling.heatsink.missing_theta_jc_top,
         });
         if (input.builtin.cooling.heatsink.rise_c) |rise| try w.print("{d}", .{input.ambient_c + rise}) else try w.writeAll("null");
-        try w.print(",\"material\":\"{s}\",\"thetaSaCPerW\":{d},\"geometryMm\":{{\"width\":{d},\"length\":{d},\"base\":{d},\"finHeight\":{d},\"finThickness\":{d},\"finGap\":{d},\"finAxis\":\"{s}\",\"finCount\":{d}}},\"contactRectMm\":", .{
-            @tagName(hs.material),          theta_sa,                  hs.geometry.width_mm,         hs.geometry.length_mm,
-            hs.geometry.base_mm,            hs.geometry.fin_height_mm, hs.geometry.fin_thickness_mm, hs.geometry.fin_gap_mm,
-            @tagName(hs.geometry.fin_axis), fin_count,
+        try w.print(",\"material\":\"{s}\",\"thetaSaCPerW\":{d},\"geometryMm\":{{\"shape\":\"{s}\",\"width\":{d},\"length\":{d},\"base\":{d},\"finHeight\":{d},\"finThickness\":{d},\"finGap\":{d},\"finAxis\":\"{s}\",\"finCount\":{d},\"lowerWidth\":{d},\"lowerLength\":{d},\"lowerHeight\":{d}}},\"contactRectMm\":", .{
+            @tagName(hs.material), theta_sa,             geometry.shape,         hs.geometry.width_mm,  hs.geometry.length_mm,
+            hs.geometry.base_mm,   geometry.fin_height,  geometry.fin_thickness, geometry.fin_gap,      geometry.fin_axis,
+            fin_count,             geometry.lower_width, geometry.lower_length,  geometry.lower_height,
         });
         if (hs.contact) |rect| {
             try w.print("[{d},{d},{d},{d}]", .{ rect.x_mm, rect.y_mm, rect.w_mm, rect.h_mm });
@@ -358,9 +390,12 @@ fn writeManifest(alloc: std.mem.Allocator, input: Input, groups: Groups) Error![
         try w.writeAll("  \"fan\":{\"model\":");
         try json_writer.writeString(w, fan.model);
         try w.print(",\"face\":\"{s}\",\"footprintMm\":[{d},{d},{d},{d}],\"distanceMm\":{d},\"distanceTarget\":\"{s}\",\"freeAirFlowM3s\":{d},\"maxStaticPressurePa\":{d},\"operatingFlowFraction\":{d},\"operatingFlowM3s\":{d},\"estimatedPressurePa\":{d},\"velocityAtTargetMps\":{d}}},\n", .{
-            @tagName(fan.face),                                   rect.x_mm,              rect.y_mm,                  rect.w_mm,                   rect.h_mm,           fan.distance_mm,
-            if (fan_targets_sink) "heatsink_fin_tips" else "pcb", fan.free_air_flow_m3_s, fan.max_static_pressure_pa, fan.operating_flow_fraction, fan.operatingFlow(), fan.estimatedPressure(),
-            thermal_field.fanVelocity(fan),
+            @tagName(fan.face),     rect.x_mm,                  rect.y_mm,                   rect.w_mm,           rect.h_mm,               fan.distance_mm,
+            if (fan_targets_sink) (switch (hs.geometry.profile) {
+                .stepped => "heatsink_outer_face",
+                .finned => "heatsink_fin_tips",
+            }) else "pcb",
+            fan.free_air_flow_m3_s, fan.max_static_pressure_pa, fan.operating_flow_fraction, fan.operatingFlow(), fan.estimatedPressure(), thermal_field.fanVelocity(fan),
         });
     } else {
         try w.writeAll("  \"fan\":null,\n");
@@ -416,13 +451,22 @@ fn writeReadme(alloc: std.mem.Allocator, input: Input) Error![]const u8 {
     const sink_assembly = if (input.builtin.scenario == .heatsink or input.builtin.scenario == .fan_heatsink) blk: {
         const hs = input.solver_inputs.cooling.heatsink;
         const contact = if (hs.ref_des.len == 0 and hs.contact != null and hs.physical_face != null) "the drawn PCB footprint" else appliedHeatsinkRef(input);
-        break :blk try std.fmt.allocPrint(alloc, "\nHeatsink assembly: **{s}** contact on **{s}** at the PCB **{s}** face; {d} x {d} mm **{s}** base, {d} mm base thickness + {d} mm fins ({d} derived fins, {d} mm thick / {d} mm gap), estimated theta-SA {d} C/W, with a {d} mm / {d} W/mK thermal pad.\n", .{
-            @tagName(hs.side),            contact,                   physicalSinkFace(input, appliedHeatsinkRef(input)),
-            hs.geometry.width_mm,         hs.geometry.length_mm,     @tagName(hs.material),
-            hs.geometry.base_mm,          hs.geometry.fin_height_mm, thermal_field.finCount(hs.geometry),
-            hs.geometry.fin_thickness_mm, hs.geometry.fin_gap_mm,    thermal_field.sinkToAmbient(hs),
-            hs.pad.thickness_mm,          hs.pad.conductivity_w_mk,
-        });
+        switch (hs.geometry.profile) {
+            .stepped => |lower| break :blk try std.fmt.allocPrint(alloc, "\nHeatsink assembly: **{s}** contact on **{s}** at the PCB **{s}** face; {d} x {d} x {d} mm **{s}** PCB-contact block plus centered {d} x {d} x {d} mm lower block, estimated exposed-surface theta-SA {d} C/W, with a {d} mm / {d} W/mK thermal pad. Enclosure contact resistance is not included.\n", .{
+                @tagName(hs.side),        contact,                         physicalSinkFace(input, appliedHeatsinkRef(input)),
+                hs.geometry.width_mm,     hs.geometry.length_mm,           hs.geometry.base_mm,
+                @tagName(hs.material),    lower.width_mm,                  lower.length_mm,
+                lower.height_mm,          thermal_field.sinkToAmbient(hs), hs.pad.thickness_mm,
+                hs.pad.conductivity_w_mk,
+            }),
+            .finned => |fins| break :blk try std.fmt.allocPrint(alloc, "\nHeatsink assembly: **{s}** contact on **{s}** at the PCB **{s}** face; {d} x {d} mm **{s}** base, {d} mm base thickness + {d} mm fins ({d} derived fins, {d} mm thick / {d} mm gap), estimated theta-SA {d} C/W, with a {d} mm / {d} W/mK thermal pad.\n", .{
+                @tagName(hs.side),    contact,                  physicalSinkFace(input, appliedHeatsinkRef(input)),
+                hs.geometry.width_mm, hs.geometry.length_mm,    @tagName(hs.material),
+                hs.geometry.base_mm,  fins.height_mm,           thermal_field.finCount(hs.geometry),
+                fins.thickness_mm,    fins.gap_mm,              thermal_field.sinkToAmbient(hs),
+                hs.pad.thickness_mm,  hs.pad.conductivity_w_mk,
+            }),
+        }
     } else "";
     const fan_assembly = if (input.builtin.scenario == .fan or input.builtin.scenario == .fan_heatsink) blk: {
         const fan = input.solver_inputs.cooling.fan;
@@ -789,9 +833,7 @@ test "Elmer export emits a native hexahedral mesh and still-air case" {
             .width_mm = 20,
             .length_mm = 20,
             .base_mm = 2,
-            .fin_height_mm = 10,
-            .fin_thickness_mm = 1,
-            .fin_gap_mm = 1.5,
+            .profile = .{ .finned = .{ .height_mm = 10, .thickness_mm = 1, .gap_mm = 1.5 } },
         },
         .material = .aluminum_6061,
         .contact = .{ .x_mm = 1, .y_mm = 2, .w_mm = 20, .h_mm = 20 },

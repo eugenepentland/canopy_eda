@@ -614,8 +614,9 @@ pub const scope_form_docs = blk: {
             "[(keepout \"NAME\" (rect X Y W H) (side top|bottom|both) " ++
             "[(blocks components tracks vias)] [(allow-nets \"NET\"…)] [(reason \"WHY\")])]… " ++
             "[(heatsink (rect X Y W H) (side top|bottom) (target \"SCOPE\" \"ORIGIN\") " ++
-            "[(material aluminum_6063|aluminum_1050|copper)] [(base-mm N)] [(fin-height-mm N)] " ++
+            "[(material aluminum_6063|aluminum_1050|copper)] [(shape finned|stepped)] [(base-mm N)] [(fin-height-mm N)] " ++
             "[(fin-thickness-mm N)] [(fin-gap-mm N)] [(fin-axis length|width)] " ++
+            "[(lower-rect WIDTH LENGTH HEIGHT)] " ++
             "[(pad-thickness-mm N)] [(pad-k-w-mk N)])] " ++
             "[(fan (model \"MPN\") (rect X Y W H) (side top|bottom) (distance-mm N) " ++
             "(free-air-flow-m3-s N) (max-static-pressure-pa N) (operating-flow-fraction N))] " ++
@@ -651,11 +652,12 @@ pub const scope_form_docs = blk: {
             "A rectangle outside the outline, a non-positive size, or an unknown side/blocks word is an error, not a " ++
             "warning. (heatsink …) authors the board's rebuildable default thermal assembly; " ++
             "its rectangle uses board-local millimetres from the outline's top-left, its physical construction feeds " ++
-            "the heatsink scenario, and its target is the stable sub-block/source-origin pair rather than a renumberable " ++
+            "the heatsink scenario, and `(shape stepped)` replaces fins with one centered `(lower-rect WIDTH LENGTH HEIGHT)` " ++
+            "solid for a board-to-enclosure cold plate. Its target is the stable sub-block/source-origin pair rather than a renumberable " ++
             "ref-des. A saved layout can override its physical assembly; " ++
             "removing or rebuilding the sidecar falls back to this declaration. Each (left|right|top|bottom …) list " ++
             "(fan …) authors an axial fan normal to one PCB face: its frame projection is board-local, distance is " ++
-            "outlet-to-board normally or outlet-to-fin-tip when a board sink shares that face, and the catalog " ++
+            "outlet-to-board normally or outlet-to-outer-sink-surface when a board sink shares that face, and the catalog " ++
             "free-flow/shutoff-pressure endpoints remain distinct. The required " ++
             "operating-flow-fraction states the installed-flow assumption instead of silently claiming both maxima at once. " ++
             "Its optional fan scenario applies distance-expanded forced convection only beneath that projected jet. " ++

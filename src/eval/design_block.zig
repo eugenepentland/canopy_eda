@@ -2459,9 +2459,13 @@ fn parseBoardFan(self: *Evaluator, form: Node, children: []const Node) EvalError
 ///
 ///   (heatsink
 ///     (rect X Y W H) (side top|bottom) (target "SCOPE" "ORIGIN")
-///     (material aluminum_6063) (base-mm N)
+///     (material aluminum_6063) [(shape finned|stepped)] (base-mm N)
 ///     (fin-height-mm N) (fin-thickness-mm N) (fin-gap-mm N)
 ///     (fin-axis length|width) (pad-thickness-mm N) (pad-k-w-mk N))
+///
+/// A stepped profile replaces the fins with `(lower-rect W L H)`, centered
+/// beneath the PCB-contact base. It models the second solid carrying heat
+/// toward an enclosure wall.
 ///
 /// `rect` is board-local from the outline's top-left. `target` is intentionally
 /// not a mutable ref-des. SCOPE is the sub-block
@@ -2476,11 +2480,15 @@ fn parseBoardHeatsink(self: *Evaluator, form: Node, children: []const Node) Eval
     var target_scope: ?[]const u8 = null;
     var target_origin: ?[]const u8 = null;
     var material: []const u8 = "aluminum_6063";
+    var shape: []const u8 = "finned";
     var base_mm: f64 = 2;
     var fin_height_mm: f64 = 10;
     var fin_thickness_mm: f64 = 1;
     var fin_gap_mm: f64 = 1.5;
     var fin_axis: []const u8 = "length";
+    var lower_width_mm: f64 = 0;
+    var lower_length_mm: f64 = 0;
+    var lower_height_mm: f64 = 0;
     var pad_thickness_mm: f64 = 0.5;
     var pad_k_w_mk: f64 = 6;
 
@@ -2506,6 +2514,8 @@ fn parseBoardHeatsink(self: *Evaluator, form: Node, children: []const Node) Eval
             target_origin = c[2].asString() orelse c[2].asAtom();
         } else if (std.mem.eql(u8, head, "material") and c.len == 2) {
             material = c[1].asString() orelse c[1].asAtom() orelse material;
+        } else if (std.mem.eql(u8, head, "shape") and c.len == 2) {
+            shape = c[1].asString() orelse c[1].asAtom() orelse "";
         } else if (std.mem.eql(u8, head, "base-mm") and c.len == 2) {
             base_mm = c[1].asNumber() orelse -1;
         } else if (std.mem.eql(u8, head, "fin-height-mm") and c.len == 2) {
@@ -2516,6 +2526,10 @@ fn parseBoardHeatsink(self: *Evaluator, form: Node, children: []const Node) Eval
             fin_gap_mm = c[1].asNumber() orelse -1;
         } else if (std.mem.eql(u8, head, "fin-axis") and c.len == 2) {
             fin_axis = c[1].asString() orelse c[1].asAtom() orelse "";
+        } else if (std.mem.eql(u8, head, "lower-rect") and c.len == 4) {
+            lower_width_mm = c[1].asNumber() orelse -1;
+            lower_length_mm = c[2].asNumber() orelse -1;
+            lower_height_mm = c[3].asNumber() orelse -1;
         } else if (std.mem.eql(u8, head, "pad-thickness-mm") and c.len == 2) {
             pad_thickness_mm = c[1].asNumber() orelse -1;
         } else if (std.mem.eql(u8, head, "pad-k-w-mk") and c.len == 2) {
@@ -2525,14 +2539,17 @@ fn parseBoardHeatsink(self: *Evaluator, form: Node, children: []const Node) Eval
 
     const complete = x != null and y != null and w != null and h != null and side != null and
         target_scope != null and target_origin != null and target_origin.?.len > 0;
+    const finned = std.mem.eql(u8, shape, "finned");
+    const stepped = std.mem.eql(u8, shape, "stepped");
+    const profile_ok = (finned and fin_height_mm >= 0 and fin_thickness_mm > 0 and fin_gap_mm >= 0) or
+        (stepped and lower_width_mm > 0 and lower_length_mm > 0 and lower_height_mm > 0);
     const dimensions_ok = complete and w.? > 0 and h.? > 0 and base_mm > 0 and
-        fin_height_mm >= 0 and fin_thickness_mm > 0 and fin_gap_mm >= 0 and
-        pad_thickness_mm >= 0 and pad_k_w_mk > 0;
+        profile_ok and pad_thickness_mm >= 0 and pad_k_w_mk > 0;
     const enums_ok = (std.mem.eql(u8, material, "aluminum_6063") or std.mem.eql(u8, material, "aluminum_1050") or
         std.mem.eql(u8, material, "copper")) and
         (std.mem.eql(u8, fin_axis, "length") or std.mem.eql(u8, fin_axis, "width"));
     if (!dimensions_ok or !enums_ok) {
-        self.setError(form.span, "malformed (heatsink …): require positive (rect X Y W H), top|bottom side, stable (target \"SCOPE\" \"ORIGIN\"), supported material/fin-axis, and nonnegative physical dimensions");
+        self.setError(form.span, "malformed (heatsink …): require positive (rect X Y W H), top|bottom side, stable (target \"SCOPE\" \"ORIGIN\"), supported material/profile, and either valid fins or (shape stepped) with positive (lower-rect W L H)");
         return EvalError.InvalidForm;
     }
     return .{
@@ -2541,11 +2558,15 @@ fn parseBoardHeatsink(self: *Evaluator, form: Node, children: []const Node) Eval
         .target = .{ .scope = target_scope.?, .origin = target_origin.? },
         .material = material,
         .geometry = .{
+            .shape = shape,
             .base_mm = base_mm,
             .fin_height_mm = fin_height_mm,
             .fin_thickness_mm = fin_thickness_mm,
             .fin_gap_mm = fin_gap_mm,
             .fin_axis = fin_axis,
+            .lower_width_mm = lower_width_mm,
+            .lower_length_mm = lower_length_mm,
+            .lower_height_mm = lower_height_mm,
         },
         .pad = .{ .thickness_mm = pad_thickness_mm, .conductivity_w_mk = pad_k_w_mk },
     };
@@ -5495,6 +5516,30 @@ test "design-block parses a (board ...) form" {
     try testing.expectEqual(@as(f64, 90), block.board.sides[1].items[0].rot.?);
     try testing.expectEqual(@as(usize, 4), block.board.corners.len);
     try testing.expectEqualStrings("MK3", block.board.corners[2].ref);
+}
+
+test "design-block parses a two-block stepped heatsink" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (board (size 80 55)
+        \\    (heatsink (rect 10 12 20 16) (side bottom) (target "" "U1")
+        \\      (material aluminum_6063) (shape stepped) (base-mm 3)
+        \\      (lower-rect 36 28 8) (pad-thickness-mm 0.5) (pad-k-w-mk 6))))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+    const sink = block.board.thermal.heatsink orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("stepped", sink.geometry.shape);
+    try testing.expectApproxEqAbs(@as(f64, 3), sink.geometry.base_mm, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 36), sink.geometry.lower_width_mm, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 28), sink.geometry.lower_length_mm, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 8), sink.geometry.lower_height_mm, 1e-9);
 }
 
 // spec: eval/design_block - board form accepts an outline-approved digest only in the exact hex shape the drift finding prints, warning and dropping anything else
