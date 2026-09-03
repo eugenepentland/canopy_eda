@@ -15,6 +15,8 @@
   const load3dModels = document.getElementById('load-3d-models');
   const camReviewButton = document.getElementById('cam-review');
   const camReviewStatus = document.getElementById('cam-review-status');
+  const measureButton = document.getElementById('measure-tool');
+  const measureStatus = document.getElementById('measure-status');
   const camLayerMenu = document.getElementById('cam-layer-menu');
   let camLayerInputs = Array.from(document.querySelectorAll('[data-cam-layer]'));
   const innerCopperLayers = document.getElementById('inner-copper-layers');
@@ -56,6 +58,8 @@
   let camReviewActive = false;
   let camReviewLoading = false;
   let camReviewError = '';
+  let measureRequested = false;
+  let measureResult = null;
   let activeGuideFocus = null;
   const guides = Array.isArray(model.guides) ? model.guides : [];
   let openGuideIndex = -1;
@@ -691,7 +695,10 @@
   function setCamReviewRequested(enabled, updateUrl) {
     camReviewRequested = Boolean(enabled);
     camReviewError = '';
-    if (!camReviewRequested) camReviewActive = false;
+    if (!camReviewRequested) {
+      camReviewActive = false;
+      if (measureRequested) setMeasureRequested(false);
+    }
     camReviewLoading = camReviewRequested && !camReviewActive;
     syncCamReviewControl();
     postCamReviewRequest();
@@ -701,6 +708,58 @@
       else url.searchParams.delete('cam');
       replaceUrl(url);
     }
+  }
+
+  function formatMeasurement(payload) {
+    if (!payload || !Number.isFinite(payload.distanceMm)) return 'Drag edge-to-edge';
+    const distance = Math.abs(payload.distanceMm);
+    return `${distance.toFixed(3)} mm · ${(distance / 0.0254).toFixed(1)} mil`;
+  }
+
+  function syncMeasureControl() {
+    if (measureButton) {
+      measureButton.setAttribute('aria-pressed', measureRequested ? 'true' : 'false');
+      measureButton.textContent = measureRequested ? '✓ Measuring' : '📏 Measure';
+      measureButton.title = measureRequested
+        ? 'Drag between exact Gerber edges; press Escape to leave measure mode'
+        : 'Measure exact Gerber geometry: drag from one copper edge to another';
+    }
+    if (measureStatus) {
+      const dx = measureResult ? Math.abs(Number(measureResult.dxMm) || 0) : 0;
+      const dy = measureResult ? Math.abs(Number(measureResult.dyMm) || 0) : 0;
+      measureStatus.dataset.state = measureResult ? 'result' : (measureRequested ? 'active' : 'idle');
+      measureStatus.textContent = measureResult ? formatMeasurement(measureResult)
+        : (measureRequested ? (camReviewActive ? 'Drag edge-to-edge · Esc exits' : 'Waiting for exact CAM…') : 'Edge-to-edge');
+      measureStatus.title = measureResult
+        ? `Distance ${formatMeasurement(measureResult)} · Δx ${dx.toFixed(3)} mm · Δy ${dy.toFixed(3)} mm`
+        : measureStatus.textContent;
+    }
+  }
+
+  function postMeasureRequest() {
+    if (!frame || !frame.contentWindow) return;
+    // A requested ruler waits until the generated-Gerber film is actually
+    // active. This prevents a fast semantic-board measurement from being
+    // mistaken for verification of the manufacturing data while CAM loads.
+    if (measureRequested && !camReviewActive) return;
+    try {
+      if (typeof frame.contentWindow.PCBReviewMeasureMode === 'function') {
+        frame.contentWindow.PCBReviewMeasureMode(measureRequested);
+        return;
+      }
+    } catch (_) {}
+    frame.contentWindow.postMessage({
+      type: 'netlisp-pcb-measure-mode',
+      enabled: measureRequested
+    }, messageTargetOrigin);
+  }
+
+  function setMeasureRequested(enabled) {
+    measureRequested = Boolean(enabled);
+    if (measureRequested && !camReviewRequested && !camReviewActive) setCamReviewRequested(true, true);
+    if (!measureRequested) measureResult = null;
+    syncMeasureControl();
+    postMeasureRequest();
   }
 
   function camLayerState() {
@@ -1245,6 +1304,9 @@
   if (camReviewButton) camReviewButton.addEventListener('click', () => {
     setCamReviewRequested(!camReviewActive, true);
   });
+  if (measureButton) measureButton.addEventListener('click', () => {
+    setMeasureRequested(!measureRequested);
+  });
   camLayerInputs.forEach((input) => input.addEventListener('change', () => applyCamLayers(true)));
   if (guideTab) guideTab.addEventListener('click', () => showWorkspacePanel('guide'));
   if (guideBack) guideBack.addEventListener('click', showGuideList);
@@ -1255,9 +1317,16 @@
   assemblySearch.addEventListener('input', () => beginSearch(assemblyKeyboard, renderLists));
   assemblySearch.addEventListener('keydown', (event) => handleSearchKey(assemblyKeyboard, event));
   window.addEventListener('keydown', (event) => {
+    const typing = event.target && (event.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName));
+    if ((event.key === 'd' || event.key === 'D') && !typing && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault();
+      setMeasureRequested(!measureRequested);
+      return;
+    }
     if (event.key !== 'Escape') return;
     event.preventDefault();
-    clearSelection(true);
+    if (measureRequested) setMeasureRequested(false);
+    else clearSelection(true);
   });
   showDnp.addEventListener('change', () => {
     renderLists();
@@ -1271,6 +1340,7 @@
     applyBoardOrientation(false);
     applyCamLayers(false);
     setCamReviewRequested(camReviewRequested, false);
+    postMeasureRequest();
     if (activeGuideFocus) {
       focusMessage(
         activeGuideFocus.refs,
@@ -1305,11 +1375,24 @@
         camReviewRequested = false;
         camReviewActive = false;
         camReviewLoading = false;
+        if (measureRequested) setMeasureRequested(false);
         const url = new URL(window.location.href);
         url.searchParams.delete('cam');
         replaceUrl(url);
       }
       syncCamReviewControl();
+      syncMeasureControl();
+      postMeasureRequest();
+      return;
+    }
+    if (payload.type === 'netlisp-pcb-measure-state') {
+      measureRequested = Boolean(payload.enabled);
+      measureResult = Number.isFinite(payload.distanceMm) ? payload : null;
+      syncMeasureControl();
+      return;
+    }
+    if (payload.type === 'netlisp-pcb-measure-toggle') {
+      setMeasureRequested(!measureRequested);
       return;
     }
     if (payload.type === 'netlisp-pcb-parts') {
@@ -1355,6 +1438,7 @@
   restoreBoardOrientation();
   restoreModelLoading();
   syncCamReviewControl();
+  syncMeasureControl();
   restoreCamLayers();
   requestBoardParts();
   renderGuideList();
