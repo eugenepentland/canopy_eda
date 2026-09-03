@@ -1,5 +1,6 @@
 //! `generate_fence` CLI tool + `POST /api/pcb-fence/:name` — lay the RF ground
-//! via fence a `(net-class … (fence …))` asked for onto a saved layout.
+//! via fence a `(net-class … (fence …))` asked for onto a saved layout, then
+//! fill the rest of the board with the generated GND stitching lattice.
 //!
 //! A net is a fence target when its resolved class DECLARES a fence or carries
 //! a `(max-freq …)` — the second arm being the "fence the board's RF traces"
@@ -95,12 +96,18 @@ pub const FenceError = error{
 
 /// How much copper one run moved.
 pub const Counts = struct {
-    /// Fence vias persisted after the DRC ratchet.
+    /// All generated vias persisted after the DRC ratchet.
     placed: usize = 0,
+    /// RF trace-fence subset of `placed`.
+    fence_placed: usize = 0,
+    /// Board-wide stitching-grid subset of `placed`.
+    grid_placed: usize = 0,
     /// Sites the generator produced that the ratchet then culled.
     culled: usize = 0,
     /// Pre-existing fence vias this run replaced.
     replaced: usize = 0,
+    /// Board-wide square stitching lattice report.
+    grid: via_fence.GridReport = .{},
 };
 
 /// The board's DRC around the edit: every violation, the fab-blocking subset,
@@ -210,6 +217,14 @@ fn dropExistingFence(
         .routes = .{ .tracks = sr.tracks, .vias = try vias.toOwnedSlice(alloc), .zones = sr.zones, .rf_paths = sr.rf_paths },
         .dropped = dropped,
     };
+}
+
+fn provenanceCount(vias: []const SavedVia, provenance: []const u8) usize {
+    var count: usize = 0;
+    for (vias) |via| if (std.mem.eql(u8, via.f, provenance)) {
+        count += 1;
+    };
+    return count;
 }
 
 /// The generator's sites lowered to persisted vias, each carrying its fenced
@@ -392,6 +407,8 @@ pub fn run(
     const routes = working.routes orelse return error.NoCopper;
 
     var drop = try targetNets(alloc, placement, only);
+    const add_grid = only.len == 0;
+    if (add_grid) try drop.put(alloc, via_fence.board_grid_provenance, {});
     const dropped = try dropExistingFence(alloc, routes, &drop);
     const base = dropped.routes;
 
@@ -405,6 +422,7 @@ pub fn run(
         .rf_paths = if (restored) |r| r.rf_port_outcomes else &.{},
         .only = only,
         .mode = opt.mode,
+        .board_grid = add_grid,
     });
 
     const ctx = Ctx{
@@ -442,14 +460,21 @@ pub fn run(
             .texts = working.texts,
         }, false);
     }
+    const grid_surviving = provenanceCount(gated.fence, via_fence.board_grid_provenance);
+    var grid = res.grid;
+    grid.culled = grid.placed -| grid_surviving;
+    grid.placed = grid_surviving;
     return .{
         .layout = entry_name,
         .nets = res.nets,
         .ground = res.ground,
         .counts = .{
             .placed = gated.fence.len,
+            .fence_placed = gated.fence.len - grid_surviving,
+            .grid_placed = grid_surviving,
             .culled = res.sites.len - gated.fence.len,
             .replaced = dropped.dropped,
+            .grid = grid,
         },
         .drc = gated.drc,
         .tally = tally,
@@ -502,13 +527,14 @@ fn writeOutcome(w: *std.Io.Writer, o: Outcome, version: u64) std.Io.Writer.Error
     try w.print("{{\"ok\":true,\"live_version\":{d},\"layout\":", .{version});
     try json_writer.writeScriptString(w, o.layout);
     try w.print(
-        ",\"mode\":\"{s}\",\"placed\":{d},\"culled\":{d},\"replaced\":{d},\"dry_run\":{}," ++
+        ",\"mode\":\"{s}\",\"placed\":{d},\"fence_placed\":{d},\"grid_placed\":{d}," ++
+            "\"culled\":{d},\"replaced\":{d},\"dry_run\":{}," ++
             "\"drc\":{d},\"drc_errors\":{d},\"drc_errors_before\":{d}," ++
             "\"routed\":{d},\"total\":{d},\"ground\":",
         .{
-            @tagName(o.opt.mode), o.counts.placed, o.counts.culled, o.counts.replaced,
-            o.opt.dry_run,        o.drc.all,       o.drc.errors,    o.drc.before,
-            o.tally.routed,       o.tally.total,
+            @tagName(o.opt.mode), o.counts.placed,   o.counts.fence_placed, o.counts.grid_placed,
+            o.counts.culled,      o.counts.replaced, o.opt.dry_run,         o.drc.all,
+            o.drc.errors,         o.drc.before,      o.tally.routed,        o.tally.total,
         },
     );
     try json_writer.writeScriptString(w, o.ground);
@@ -537,7 +563,24 @@ fn writeOutcome(w: *std.Io.Writer, o: Outcome, version: u64) std.Io.Writer.Error
         }
         try w.writeAll("}");
     }
-    try w.writeAll("]}");
+    try w.writeAll("],\"grid\":{");
+    try w.print(
+        "\"placed\":{d},\"candidates\":{d},\"shifted\":{d},\"culled\":{d}," ++
+            "\"pitch_mm\":{d:.3},\"relocate_mm\":{d:.3}," ++
+            "\"skipped\":{{\"pad\":{d},\"track\":{d},\"via\":{d}," ++
+            "\"keepout\":{d},\"outline\":{d},\"dedup\":{d}}}",
+        .{
+            o.counts.grid.placed,          o.counts.grid.candidates,        o.counts.grid.shifted,
+            o.counts.grid.culled,          o.counts.grid.geometry.pitch_mm, o.counts.grid.geometry.relocate_mm,
+            o.counts.grid.skipped.pad,     o.counts.grid.skipped.track,     o.counts.grid.skipped.via,
+            o.counts.grid.skipped.keepout, o.counts.grid.skipped.outline,   o.counts.grid.skipped.dedup,
+        },
+    );
+    if (o.counts.grid.err.len > 0) {
+        try w.writeAll(",\"error\":");
+        try json_writer.writeScriptString(w, o.counts.grid.err);
+    }
+    try w.writeAll("}}");
 }
 
 /// `POST /api/pcb-fence/:name[?layout=<row>&mode=legal|all&dry_run=1&nets=A,B]` —
@@ -736,6 +779,7 @@ fn resultFloat(body: []const u8, key: []const u8) ?f64 {
 }
 
 // spec: Web Server - POST /api/pcb-fence/:name lays (and regenerates) the RF ground via fence onto a saved layout's persisted copper — every declared (fence …) or (max-freq …) RF trace — and reports what it placed and skipped
+// spec: Web Server - The unfiltered fence endpoint also persists a 5 mm board-wide GND stitching grid, reports its shifted and blocked nominal sites, and replaces that generated grid on a repeated run
 // spec: Web Server - The fence endpoint reports the resolved layer count for each fenced net
 // spec: Web Server - A fence dry run reports what it would place and writes nothing to the layout
 test "the fence endpoint fences a saved layout, and a dry run writes nothing" {
@@ -770,16 +814,22 @@ test "the fence endpoint fences a saved layout, and a dry run writes nothing" {
     try testing.expect(std.mem.indexOf(u8, real.body, "\"dry_run\":false") != null);
     const vias = savedFenceVias(alloc, project);
     try testing.expect(vias.len > 0);
-    // Every persisted via stitches GND and carries SIG as its provenance.
+    // Every persisted via stitches GND; RF rows carry SIG provenance and the
+    // board-wide lattice carries its reserved regeneration tag.
     for (vias) |v| {
         try testing.expectEqualStrings("GND", v.net);
-        try testing.expectEqualStrings("SIG", v.f);
+        try testing.expect(std.mem.eql(u8, "SIG", v.f) or
+            std.mem.eql(u8, via_fence.board_grid_provenance, v.f));
     }
     // The counters agree with the vias on disk, and the default vets: the fixture
     // parks a foreign 0.2 mm track across the guide, so the ring's candidates are
     // more than what landed and the difference is all counted as skips.
     try testing.expectEqual(@as(i64, @intCast(vias.len)), resultInt(real.body, "placed").?);
-    try testing.expect(resultInt(real.body, "placed").? < resultInt(real.body, "candidates").?);
+    try testing.expect(resultInt(real.body, "fence_placed").? < resultInt(real.body, "candidates").?);
+    try testing.expect(resultInt(real.body, "grid_placed").? > 0);
+    try testing.expect(std.mem.indexOf(u8, real.body, "\"grid\":{") != null);
+    try testing.expect(std.mem.indexOf(u8, real.body, "\"pitch_mm\":5.000") != null);
+    try testing.expect(std.mem.indexOf(u8, real.body, "\"relocate_mm\":1.000") != null);
     // A clean board stays clean: the fence adds no error-severity violation at all.
     try testing.expectEqual(@as(i64, 0), resultInt(real.body, "drc_errors_before").?);
     try testing.expectEqual(@as(i64, 0), resultInt(real.body, "drc_errors").?);
@@ -832,7 +882,8 @@ test "the fence endpoint fences a max-freq RF class that declares no fence" {
     try testing.expect(vias.len > 0);
     for (vias) |v| {
         try testing.expectEqualStrings("GND", v.net);
-        try testing.expectEqualStrings("SIG", v.f);
+        try testing.expect(std.mem.eql(u8, "SIG", v.f) or
+            std.mem.eql(u8, via_fence.board_grid_provenance, v.f));
     }
     // The board's own DRC stays the judge: the derived fence adds no error-level
     // violation, the same contract a declared fence holds to.
@@ -876,10 +927,10 @@ test "the default fence mode vets every site and mode all keeps every non-coinci
     try testing.expectEqual(@as(i64, 0), resultInt(all.body, "culled").?);
     try testing.expectEqual(
         resultInt(all.body, "candidates").?,
-        resultInt(all.body, "placed").? + resultInt(all.body, "dedup").?,
+        resultInt(all.body, "fence_placed").? + resultInt(all.body, "dedup").?,
     );
     try testing.expectEqual(resultInt(all.body, "candidates"), resultInt(legal.body, "candidates"));
-    try testing.expect(resultInt(legal.body, "placed").? < resultInt(all.body, "placed").?);
+    try testing.expect(resultInt(legal.body, "fence_placed").? < resultInt(all.body, "fence_placed").?);
     try testing.expect(resultInt(all.body, "drc_errors").? > resultInt(all.body, "drc_errors_before").?);
 }
 

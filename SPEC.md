@@ -2327,6 +2327,8 @@ the trace: the same 0.2 mm that clears a 0.3 mm trace buries a via inside a 0.6 
 spacing at all, which is the signal that its fence is unresolvable rather than an
 invitation to guess one.
 
+- the end-of-design pass adds a centred 5 mm square GND stitching lattice across the board after RF fences, and a blocked nominal point moves to a legal site no farther than 1 mm away
+
 `(layers N)` selects 1–32 concentric rows and defaults to one, preserving every
 existing design. The first row uses the resolved edge gap; each later row is one
 effective pitch farther outward. Effective pitch is the authored/derived pitch
@@ -7512,6 +7514,7 @@ is what makes the predicate exact rather than approximately right.
 - A moved RF part drops its trace's fence with its copper, because a fence via is invalidated by the net it flanks and not by the ground net it stitches
 - Two vias in the same hole on the same net are one via whatever their provenance tags say, and the first row is the one kept
 - POST /api/pcb-fence/:name lays (and regenerates) the RF ground via fence onto a saved layout's persisted copper — every declared (fence …) or (max-freq …) RF trace — and reports what it placed and skipped
+- The unfiltered fence endpoint also persists a 5 mm board-wide GND stitching grid, reports its shifted and blocked nominal sites, and replaces that generated grid on a repeated run
 - The fence endpoint reports the resolved layer count for each fenced net
 - A board whose RF class carries only (max-freq …) — no (fence …) — is still fenced by the endpoint, the pitch deriving as λg/10 and the vias persisting with the flanked net as provenance
 - The fence endpoint accepts a max-freq-only RF board and reports a normal dry run on it, so the Fence action covers RF traces that never spelled (fence) out
@@ -7555,7 +7558,7 @@ is what makes the predicate exact rather than approximately right.
 - The PCB page blob names the declared plane nets, and omits the key entirely when the design declares no stackup
 - The PCB page blob names the implicit model's supply-rail plane so the client DRC shares the server's plane-carried verdict
 - The PCB page blob always carries the ground-name token vocabulary so the browser's ground test cannot drift from the server's
-- The PCB viewer offers one Tapers + fence action that preserves RF route centerlines while refreshing controlled-impedance widths and ground-pour gaps, replaces stale taper paths from current pad and route geometry, DRC-gates and saves the result, then regenerates the RF ground via fence around that exact copper
+- The PCB viewer offers one Tapers + fence action that preserves RF route centerlines while refreshing controlled-impedance widths and ground-pour gaps, replaces stale taper paths from current pad and route geometry, DRC-gates and saves the result, then regenerates the RF ground via fence around that exact copper and a board-wide 5 mm GND stitching grid whose blocked sites may shift by at most 1 mm
 - Saving an unchanged PCB state rechecks DRC without invalidating a concurrent copper-pour refill for that same state
 - Copper-pour refill responses are accepted only when their exact board and pour inputs still match; the RF finish action waits for an existing refill instead of treating the occupied refill slot as a failure
 - The PCB hand-routing editor offers one undoable GND-vias action that seeds DRC-legal exposed-pad arrays and centred ground-pad barrels, then places nearest-legal barrels beside pads still failing the ground-via-distance rule without replacing submitted copper

@@ -3458,6 +3458,7 @@ src/placement/via_antipad.zig::default_system_ohms value
 src/placement/via_antipad.zig::solve | fn solve( stack: impedance.Stack, target_ohms: f64, pad_dia_mm: f64, drill_mm: f64, min_clearance_mm: f64, ) ?Result
 src/placement/via_centre.zig::passBoard | fn passBoard(board: Board) std.mem.Allocator.Error!void
 src/placement/via_fence.zig::FenceVia struct_
+src/placement/via_fence.zig::GridReport struct_
 src/placement/via_fence.zig::Input struct_
 src/placement/via_fence.zig::March struct_
 src/placement/via_fence.zig::Mode enum_
@@ -3468,6 +3469,7 @@ src/placement/via_fence.zig::SkipReason enum_
 src/placement/via_fence.zig::Skips struct_
 src/placement/via_fence.zig::anyFenceable | fn anyFenceable(placement: optimizer.Placement) bool
 src/placement/via_fence.zig::assumed_er value
+src/placement/via_fence.zig::board_grid_provenance value
 src/placement/via_fence.zig::c_mm_per_s value
 src/placement/via_fence.zig::effectivePitchMm | fn effectivePitchMm(rule: NetRule, design: DesignRules) f64
 src/placement/via_fence.zig::err_no_ground value

@@ -10437,6 +10437,8 @@ function poursDeclared(){return !!PCB.pours_declared||((PCB.plane_fills||[]).len
 // stale taper polygons a footprint or route edit may have invalidated.
 var fenceInFlight=false;
 function fenceBtn(){return document.getElementById("pcb-fence");}
+function fenceSkipReport(r){var s=(r&&r.skipped)||{};
+ return (s.pad||0)+(s.track||0)+(s.via||0)+(s.keepout||0)+(s.outline||0)+(s.dedup||0);}
 function fenceSkipped(nets){var n=0;(nets||[]).forEach(function(r){var s=r.skipped||{};
  n+=(s.pad||0)+(s.track||0)+(s.via||0)+(s.keepout||0)+(s.outline||0)+(s.dedup||0);});return n;}
 function fenceDone(b,msg,bad){fenceInFlight=false;b.disabled=false;routeStatMsg(msg,!!bad);}
@@ -10447,9 +10449,12 @@ function fencePost(b,tapers,widths,gap){routeStatMsg("generating the RF via fenc
   .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});})
   .then(function(o){
    if(!o.ok||!o.j||!o.j.ok){fenceDone(b,(o.j&&o.j.error)||"fence failed",true);return;}
-   var sk=fenceSkipped(o.j.nets);
-   routeStatMsg("RF finish: "+widths+" trace width"+(widths===1?"":"s")+" updated, "+tapers.added+" taper"+(tapers.added===1?"":"s")+" rebuilt"+(gap?", ground gaps refreshed":"")+", "+o.j.placed+" fence via"+(o.j.placed===1?"":"s")+" placed, "+sk+" site"+
-    (sk===1?"":"s")+" skipped"+(o.j.replaced?" ("+o.j.replaced+" replaced)":""));
+   var sk=fenceSkipped(o.j.nets),grid=o.j.grid||{},gsk=fenceSkipReport(grid);
+   routeStatMsg("RF finish: "+widths+" trace width"+(widths===1?"":"s")+" updated, "+tapers.added+" taper"+(tapers.added===1?"":"s")+" rebuilt"+(gap?", ground gaps refreshed":"")+", "+(o.j.fence_placed||0)+" fence via"+(o.j.fence_placed===1?"":"s")+" placed, "+sk+" site"+
+    (sk===1?"":"s")+" skipped, "+(grid.placed||0)+" board stitch via"+(grid.placed===1?"":"s")+" placed"+
+    ((grid.shifted||0)?" ("+grid.shifted+" shifted ≤1 mm)":"")+(gsk?", "+gsk+" grid site"+(gsk===1?"":"s")+" blocked":"")+
+    ((grid.culled||0)?", "+grid.culled+" grid site"+(grid.culled===1?"":"s")+" culled by final DRC":"")+
+    (o.j.replaced?" ("+o.j.replaced+" generated vias replaced)":""));
    // The fence is already saved, so the row on disk is the authority: reload
    // onto it rather than trying to reconstruct the merged copper client-side.
    location.reload();})

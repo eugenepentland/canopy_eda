@@ -44,6 +44,11 @@
 //! when a buried crossing blocks it, a bounded grid searches the land for a
 //! DRC-clean bore position. These anchors give series filters and launches a
 //! deterministic local return instead of leaving via-in-pad to contour phase.
+//! When requested by the end-of-design action, a 5 mm square stitching lattice
+//! is filled across the rest of the board after those electrically critical RF
+//! sites. A blocked nominal lattice point searches outward for the nearest legal
+//! position, never farther than 1 mm, so obstacles make small local jogs instead
+//! of punching large holes in the board-wide ground stitching.
 //!
 //! How hard a ring site is vetted is the caller's `Mode`:
 //!
@@ -124,6 +129,24 @@ pub const pitch_wavelength_divisor: f64 = 10;
 /// edge gap, so a generated fence clears the net's copper by more than exactly
 /// the clearance rule and survives the usual etch/registration slop.
 pub const offset_margin_mm: f64 = 0.1;
+
+/// Board-wide stitching lattice added by the Tapers + fence action. Five
+/// millimetres is dense enough to keep a useful distributed plane tie without
+/// turning a medium board into hundreds of unnecessary drills.
+const board_grid_pitch_mm: f64 = 5.0;
+
+/// Maximum displacement of a blocked nominal lattice site.
+const board_grid_relocate_mm: f64 = 1.0;
+
+/// Persisted provenance for board-wide generated stitching. It deliberately
+/// uses the same generated-fence namespace as RF rows, so route editing can
+/// treat these sites as disposable and the finish action can regenerate them.
+pub const board_grid_provenance: []const u8 = "@stitch-grid";
+
+/// Radial/arc sampling resolution of the bounded relocation search. This is
+/// below the ordinary via radius while keeping the on-demand pass finite on a
+/// dense board where most nominal sites need a jog.
+const board_grid_search_step_mm: f64 = 0.1;
 
 /// A resolved fence-via geometry in mm: copper diameter + drill diameter.
 pub const FenceVia = struct { dia: f64, drill: f64 };
@@ -410,12 +433,31 @@ pub const NetReport = struct {
     err: []const u8 = "",
 };
 
+/// Board-wide square stitching-lattice report. `candidates` counts nominal
+/// grid points, not every bounded-search probe; each nominal point either lands
+/// once (possibly shifted), is culled by the final ratchet, or contributes one
+/// skip reason.
+pub const GridReport = struct {
+    geometry: struct {
+        pitch_mm: f64 = board_grid_pitch_mm,
+        relocate_mm: f64 = board_grid_relocate_mm,
+    } = .{},
+    candidates: usize = 0,
+    placed: usize = 0,
+    shifted: usize = 0,
+    /// Accepted sites removed by the final whole-board DRC ratchet.
+    culled: usize = 0,
+    skipped: Skips = .{},
+    err: []const u8 = "",
+};
+
 /// A whole generator run: the sites to add, one report per fenced net, and the
 /// board's resolved default ground net ("" when none was found).
 pub const Result = struct {
     sites: []const Site,
     nets: []const NetReport,
     ground: []const u8 = "",
+    grid: GridReport = .{},
 };
 
 /// A fence run's inputs: a solved placement plus the layout's persisted copper
@@ -433,6 +475,10 @@ pub const Input = struct {
     /// How hard each ring site is vetted. `.legal` — only sites the board's own
     /// rules accept — is the default; `.all` is the debug view of the raw ring.
     mode: Mode = .legal,
+    /// Add the board-wide stitching lattice after the RF rows. Kept opt-in at
+    /// this low-level seam so geometry-only callers and focused RF tests retain
+    /// their historical output; the Tapers + fence endpoint enables it.
+    board_grid: bool = false,
 };
 
 /// Error text for a class whose pitch cannot be resolved. Surfaced verbatim by
@@ -687,6 +733,20 @@ const Pass = struct {
         }
         if (self.in.mode == .all) return null;
         return self.illegal(x, y, plan.via, plan.stitch_i);
+    }
+
+    /// A board-grid point uses the ordinary fence vetoes plus an explicit
+    /// same-net spacing check against every earlier generated via. RF rings
+    /// already guarantee their own authored pitch and intentionally do not use
+    /// this extra test; keeping it grid-local preserves their exact contour
+    /// division while preventing a relocated lattice site crowding an RF post.
+    fn judgeGrid(self: Pass, x: f64, y: f64, plan: FencePlan) ?SkipReason {
+        if (self.judge(x, y, plan, self.accepted.items.len)) |reason| return reason;
+        if (self.in.mode == .all) return null;
+        for (self.accepted.items) |v| {
+            if (self.crowdsStitch(x, y, plan.via, plan.stitch_i, v)) return .dedup;
+        }
+        return null;
     }
 
     /// The board's own veto on a `via` at (x,y), checked cheapest-and-most-
@@ -1279,6 +1339,95 @@ fn fenceNet(pass: *Pass, net_i: i32, plan: FencePlan, rep: *NetReport) std.mem.A
     }
 }
 
+/// Number and first coordinate of one centred board-grid axis. The pitch stays
+/// exact; only the equal margins on the two sides vary. Even a board narrower
+/// than one pitch receives a centre candidate.
+fn gridAxis(min: f64, span: f64) struct { first: f64, count: usize } {
+    const whole = numeric.toCount(@floor(span / board_grid_pitch_mm));
+    const count = @max(@as(usize, 1), whole);
+    const covered = @as(f64, @floatFromInt(count - 1)) * board_grid_pitch_mm;
+    return .{ .first = min + (span - covered) / 2, .count = count };
+}
+
+/// Nearest sampled legal point around a blocked nominal board-grid site. The
+/// search proceeds in 0.1 mm radial shells and samples each shell closely
+/// enough that adjacent probes are at most about the same distance apart.
+fn relocateGridSite(pass: Pass, x0: f64, y0: f64, plan: FencePlan) ?[2]f64 {
+    const radial_steps = numeric.toCount(@ceil(board_grid_relocate_mm / board_grid_search_step_mm));
+    for (1..radial_steps + 1) |ri| {
+        const radius = @min(
+            board_grid_relocate_mm,
+            @as(f64, @floatFromInt(ri)) * board_grid_search_step_mm,
+        );
+        const around = @max(
+            @as(usize, 8),
+            numeric.toCount(@ceil(2 * std.math.pi * radius / board_grid_search_step_mm)),
+        );
+        for (0..around) |ai| {
+            const angle = 2 * std.math.pi * @as(f64, @floatFromInt(ai)) /
+                @as(f64, @floatFromInt(around));
+            const p = [2]f64{ x0 + radius * @cos(angle), y0 + radius * @sin(angle) };
+            if (pass.judgeGrid(p[0], p[1], plan) == null) return p;
+        }
+    }
+    return null;
+}
+
+/// Fill the board interior with a centred square GND stitching lattice. RF
+/// rings have already landed and therefore keep first claim. A nominal point
+/// that is illegal searches locally, but never farther than 1 mm; if that whole
+/// neighbourhood is blocked, the original veto is reported as one skipped site.
+fn stitchBoardGrid(pass: *Pass, ground: ?usize, rep: *GridReport) std.mem.Allocator.Error!void {
+    if (!pass.in.board_grid) return;
+    const rect = pass.in.placement.board_rect orelse {
+        rep.err = "board-wide stitching needs a board outline";
+        return;
+    };
+    const stitch = ground orelse {
+        rep.err = err_no_ground;
+        return;
+    };
+    const via = FenceVia{ .dia = pass.design.via_dia, .drill = pass.design.via_drill };
+    if (!viaBuildable(via, pass.design)) {
+        rep.err = err_via_unbuildable;
+        return;
+    }
+    // `judge` uses half the plan pitch as its same-run coincidence radius.
+    // Twice the fabrication floor makes that radius exactly the minimum legal
+    // centre spacing while GridReport retains the actual 5 mm lattice pitch.
+    const plan = FencePlan{
+        .pitch = 2 * minPitchMm(via, pass.design),
+        .dist = 0,
+        .layers = 1,
+        .via = via,
+        .stitch_i = @intCast(stitch),
+        .stitch_name = pass.in.placement.nets[stitch].name,
+        .fenced_name = board_grid_provenance,
+    };
+    const gx = gridAxis(rect.minx, rect.w);
+    const gy = gridAxis(rect.miny, rect.h);
+    for (0..gy.count) |yi| {
+        const y = gy.first + @as(f64, @floatFromInt(yi)) * board_grid_pitch_mm;
+        for (0..gx.count) |xi| {
+            const x = gx.first + @as(f64, @floatFromInt(xi)) * board_grid_pitch_mm;
+            rep.candidates += 1;
+            const initial = pass.judgeGrid(x, y, plan);
+            if (initial == null) {
+                try pass.accept(x, y, plan);
+                rep.placed += 1;
+                continue;
+            }
+            if (pass.in.mode == .legal) if (relocateGridSite(pass.*, x, y, plan)) |p| {
+                try pass.accept(p[0], p[1], plan);
+                rep.placed += 1;
+                rep.shifted += 1;
+                continue;
+            };
+            rep.skipped.bump(initial.?);
+        }
+    }
+}
+
 /// Generate the ground via fence for every net whose resolved class declares a
 /// fence OR carries a `(max-freq …)` — the end-of-design, on-demand pass over a
 /// saved layout's persisted copper. The max-freq arm is the derived default: an
@@ -1313,10 +1462,13 @@ pub fn generate(arena: std.mem.Allocator, in: Input) std.mem.Allocator.Error!Res
         }
         try reports.append(arena, rep);
     }
+    var grid = GridReport{};
+    try stitchBoardGrid(&pass, ground, &grid);
     return .{
         .sites = try pass.sites.toOwnedSlice(arena),
         .nets = try reports.toOwnedSlice(arena),
         .ground = if (ground) |g| placement.nets[g].name else "",
+        .grid = grid,
     };
 }
 
@@ -1548,6 +1700,48 @@ fn fencedAmong(sites: []const Site, a: []const u8, b: []const u8) bool {
         return false;
     }
     return true;
+}
+
+// spec: placement/via-fence - the end-of-design pass adds a centred 5 mm square GND stitching lattice across the board after RF fences, and a blocked nominal point moves to a legal site no farther than 1 mm away
+test "the board stitching grid relocates a blocked nominal site within one millimetre" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    var parts = [_]optimizer.Part{};
+    const placement = rfFixture(&parts);
+    // A foreign-net via occupies the first centred lattice point on the 40x20
+    // fixture. There is clear board around it, so the point should jog rather
+    // than become a permanent hole in the lattice.
+    const blocker = [_]router.Via{.{ .x = 2.5, .y = 2.5, .dia = 0.4, .drill = 0.2, .net = 0 }};
+    const res = try generate(arena, .{
+        .placement = placement,
+        .vias = &blocker,
+        .board_grid = true,
+    });
+
+    try testing.expectEqual(@as(usize, 8 * 4), res.grid.candidates);
+    try testing.expectEqual(res.grid.candidates, res.grid.placed);
+    try testing.expectEqual(@as(usize, 1), res.grid.shifted);
+    try testing.expectEqual(@as(usize, 0), res.grid.skipped.total());
+    try testing.expectApproxEqAbs(board_grid_pitch_mm, res.grid.geometry.pitch_mm, 1e-12);
+    try testing.expectApproxEqAbs(board_grid_relocate_mm, res.grid.geometry.relocate_mm, 1e-12);
+    try testing.expectEqual(res.grid.placed, res.sites.len);
+
+    var relocated: ?Site = null;
+    for (res.sites) |site| {
+        try testing.expectEqualStrings("GND", site.net);
+        try testing.expectEqualStrings(board_grid_provenance, site.fenced);
+        const d = std.math.hypot(site.x - 2.5, site.y - 2.5);
+        if (d > eps and d <= board_grid_relocate_mm + eps) relocated = site;
+    }
+    try testing.expect(relocated != null);
+    const moved = relocated.?;
+    try testing.expect(passDistanceFromVia(moved, blocker[0]) >= placement.rules.design.clearance - eps);
+}
+
+fn passDistanceFromVia(site: Site, via: router.Via) f64 {
+    return std.math.hypot(site.x - via.x, site.y - via.y) - site.dia / 2 - via.dia / 2;
 }
 
 // spec: placement/via-fence - the generator marches the resolved pitch evenly around each guide contour of the net's copper, so the fence closes with no seam
@@ -2129,6 +2323,7 @@ test "an unbuildably tight pitch clamps to the copper and hole-to-hole floor" {
     // over the floor rather than half of it.
     try testing.expectEqual(ringSites(rep.march.guide_mm, 0.527), rep.march.sites);
     try testing.expectEqual(@as(usize, 49), rep.march.sites);
+    try testing.expectEqual(rep.march.sites, res.sites.len);
     const spacing = rep.march.guide_mm / @as(f64, @floatFromInt(rep.march.sites));
     try testing.expect(spacing >= 0.527);
     try testing.expect(wrapGapRange(res.sites)[1] <= spacing * 1.01);

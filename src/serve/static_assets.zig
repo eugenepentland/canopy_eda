@@ -684,7 +684,7 @@ test "PCB editor rigidly mirrors the complete selected target and its owned copp
 }
 
 // spec: Web Server - Generated RF fence sites render with a dashed annular ring in both Canvas and WebGPU views, while ordinary and perimeter vias stay solid; all remain selectable and editable, and provenance remains internal for safe regeneration
-// spec: Web Server - The PCB viewer offers one Tapers + fence action that preserves RF route centerlines while refreshing controlled-impedance widths and ground-pour gaps, replaces stale taper paths from current pad and route geometry, DRC-gates and saves the result, then regenerates the RF ground via fence around that exact copper
+// spec: Web Server - The PCB viewer offers one Tapers + fence action that preserves RF route centerlines while refreshing controlled-impedance widths and ground-pour gaps, replaces stale taper paths from current pad and route geometry, DRC-gates and saves the result, then regenerates the RF ground via fence around that exact copper and a board-wide 5 mm GND stitching grid whose blocked sites may shift by at most 1 mm
 // spec: Web Server - The PCB editor always shows the RF via-fence action, regardless of whether the board declares perimeter fencing or currently resolves a fenceable RF class
 test "PCB editor renders generated RF fence vias as dashed editable annuli" {
     const Check = struct { haystack: []const u8 = pcb_board_js, marker: []const u8, present: bool = true };
@@ -716,6 +716,7 @@ test "PCB editor renders generated RF fence vias as dashed editable annuli" {
         .{ .marker = "persistLayout(curLayout,\"updating\",false)" },
         .{ .marker = "Tapers + fence" },
         .{ .marker = "/api/pcb-fence/" },
+        .{ .marker = "grid.shifted+\" shifted ≤1 mm" },
         // The action is never hidden based on board metadata. In particular,
         // perimeter-fence and RF-class declarations do not gate visibility.
         .{ .marker = "function fenceBtnSync", .present = false },
