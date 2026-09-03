@@ -295,6 +295,7 @@ test {
     _ = @import("placement/plane_via.zig");
     _ = @import("placement/power_integrity.zig");
     _ = @import("placement/pdn_impedance.zig");
+    _ = @import("placement/power_branch_width.zig");
     _ = @import("placement/power_capacity.zig");
     _ = @import("placement/power_current.zig");
     _ = @import("placement/port_escape.zig");

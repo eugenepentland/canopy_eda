@@ -2899,6 +2899,17 @@ src/placement/pour.zig::stampSeg | fn stampSeg(g: Grid, x1: f64, y1: f64, x2: f6
 src/placement/pour.zig::userZoneSpec | fn userZoneSpec(net_name: []const u8, side: optimizer.Side, clip: []const [2]f64) LayerSpec
 src/placement/pour.zig::viaPlaneClearance | fn viaPlaneClearance(placement: optimizer.Placement, via: router.Via, plane_net: PlaneNet, base: f64) f64
 src/placement/pour.zig::zoneLayerSpec | fn zoneLayerSpec(net_name: []const u8, side: ?optimizer.Side, track_layer: u8, clip: []const [2]f64) LayerSpec
+src/placement/power_branch_width.zig::Limits struct_
+src/placement/power_branch_width.zig::LocalWidth value
+src/placement/power_branch_width.zig::NetLimits struct_
+src/placement/power_branch_width.zig::boardTargets | fn boardTargets( board: router.CleanupBoard, limits: []const NetLimits, ) std.mem.Allocator.Error![]f64
+src/placement/power_branch_width.zig::margin value
+src/placement/power_branch_width.zig::netLimits | fn netLimits(board: router.CleanupBoard) std.mem.Allocator.Error![]const NetLimits
+src/placement/power_branch_width.zig::solveLocalWidths | fn solveLocalWidths( alloc: std.mem.Allocator, placement: optimizer.Placement, tracks: []const router.Track, vias: []const router.Via, ) std.mem.Allocator.Error![]const ?LocalWidth
+src/placement/power_branch_width.zig::solve_passes value
+src/placement/power_branch_width.zig::targetFor | fn targetFor(limits: Limits, local: ?LocalWidth) f64
+src/placement/power_branch_width.zig::trackLimits | fn trackLimits(limits: []const NetLimits, track: router.Track) ?Limits
+src/placement/power_branch_width.zig::wantsBranchSizing | fn wantsBranchSizing(limits: []const NetLimits) bool
 src/placement/power_capacity.zig::area_exponent value
 src/placement/power_capacity.zig::capacityForArea | fn capacityForArea(area_mm2: f64, outer: bool, rise_c: f64) f64
 src/placement/power_capacity.zig::requiredTraceWidthMm | fn requiredTraceWidthMm(amps: f64, foil_mm: f64, outer: bool) ?f64
@@ -2928,6 +2939,7 @@ src/placement/power_integrity.zig::routedTrackRequiredWidthsMemo | fn routedTrac
 src/placement/power_integrity.zig::routedTrackRequiredWidthsPrepared | fn routedTrackRequiredWidthsPrepared( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, plane_fills: []const pour.NetFills, zones: []const pour.UserZone, zone_fills: []const pour.Fill, ) std.mem.Allocator.Error![]const ?f64
 src/placement/power_integrity.zig::temperature_rise_c value
 src/placement/power_integrity.zig::via_plating_mm value
+src/placement/power_route_width.zig::adaptiveFloorWidth | fn adaptiveFloorWidth(placement: optimizer.Placement, net_i: usize, base_width: f64) f64
 src/placement/power_route_width.zig::adaptiveTargetWidth | fn adaptiveTargetWidth( zones: []const route_policy.ExistingZone, placement: optimizer.Placement, net_i: usize, authored: f64, ) ?f64
 src/placement/power_route_width.zig::exactWidth | fn exactWidth( zones: []const route_policy.ExistingZone, placement: optimizer.Placement, net_i: usize, authored: f64, ) f64
 src/placement/progress.zig::Inputs struct_
