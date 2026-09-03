@@ -29,6 +29,7 @@ pub fn kindStr(k: drc.Kind) []const u8 {
         .min_drill => "min drill",
         .track_width => "track width",
         .power_width => "power width",
+        .power_width_envelope => "power width (envelope)",
         .pour_invalid => "invalid copper pour",
         .pour_overlap => "pour overlap",
         .copper_stub => "copper stub",
@@ -90,7 +91,7 @@ pub const drawer_groups = [_]DrawerGroup{
     .{
         .title = "Electrical quality",
         .blurb = "Power capacity, controlled-impedance, and RF routing discipline.",
-        .kinds = &.{ .power_width, .diff_uncoupled, .diff_skew, .length_mismatch, .sharp_bend, .ground_via_distance, .reference_plane_gap, .reference_transition, .loop_area, .bypass_open },
+        .kinds = &.{ .power_width, .power_width_envelope, .diff_uncoupled, .diff_skew, .length_mismatch, .sharp_bend, .ground_via_distance, .reference_plane_gap, .reference_transition, .loop_area, .bypass_open },
     },
     .{
         .title = "Keepouts",
@@ -284,8 +285,10 @@ fn writeFiniteNumber(w: *std.Io.Writer, value: f64) std.Io.Writer.Error!void {
 
 /// One violation as a JSON object, `id` first, then `"l"` (the routable copper
 /// layer, OMITTED when the finding has no single layer), an optional four-value
-/// open-net `bridge`, then the `a`/`b` parties (nets / pads that clashed)
-/// whenever the checker could name them.
+/// open-net `bridge`, an optional `note` (the explanation a finding whose
+/// numbers under-state it carries — a `power width (envelope)` names the
+/// power-solve status that forced the whole-rail width), then the `a`/`b`
+/// parties (nets / pads that clashed) whenever the checker could name them.
 pub fn writeViolation(w: *std.Io.Writer, v: drc.Violation, names: Names) std.Io.Writer.Error!void {
     try w.print("{{\"id\":\"{x:0>4}\",\"x\":", .{violationId(v)});
     try writeFiniteNumber(w, v.x);
@@ -297,13 +300,18 @@ pub fn writeViolation(w: *std.Io.Writer, v: drc.Violation, names: Names) std.Io.
     try writeFiniteNumber(w, v.clearance);
     try w.print(",\"k\":\"{s}\",\"sev\":\"{s}\"", .{ kindStr(v.kind), sevStr(v.severity) });
     if (v.layer) |layer| try w.print(",\"l\":{d}", .{layer.int()});
-    if (v.who.bridge) |b| {
+    if (v.who.bridgePoints()) |b| {
         try w.writeAll(",\"bridge\":[");
         for (b, 0..) |value, i| {
             if (i > 0) try w.writeByte(',');
             try writeFiniteNumber(w, value);
         }
         try w.writeByte(']');
+    }
+    const note = v.who.noteText();
+    if (note.len > 0) {
+        try w.writeAll(",\"note\":");
+        try writeJsonStr(w, note);
     }
     try writeParty(w, "a", party(names, v.who.net_a, v.who.part_a, v.who.pad_a));
     try writeParty(w, "b", party(names, v.who.net_b, v.who.part_b, v.who.pad_b));
@@ -332,6 +340,38 @@ test "non-finite DRC measurements serialize as valid JSON nulls" {
     try std.testing.expect(parsed.value.object.get("gap").? == .null);
 }
 
+// spec: Web Server - The whole-rail power-width warning ships its own kind word and the power-solve status that forced it
+test "an envelope power-width finding serializes as its own kind with a note" {
+    const v = drc.Violation{
+        .x = 3.5,
+        .y = 1.25,
+        .gap = 0.2,
+        .clearance = 0.62,
+        .kind = .power_width_envelope,
+        .severity = .warn,
+        .who = .{ .net_a = 0, .extra = .{ .note = "no-source-terminal" } },
+    };
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeViolation(&aw.writer, v, .{});
+    const out = aw.written();
+    // The wire spelling the viewer's deferred-kind set and help table key on.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"k\":\"power width (envelope)\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"sev\":\"warn\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"note\":\"no-source-terminal\"") != null);
+    // It is a DIFFERENT record from the solved rule, not a relabelling of it.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"k\":\"power width\"") == null);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("no-source-terminal", parsed.value.object.get("note").?.string);
+
+    // A finding with no note omits the key entirely.
+    var plain: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer plain.deinit();
+    try writeViolation(&plain.writer, .{ .x = 0, .y = 0, .gap = 0.2, .clearance = 0.3, .kind = .power_width }, .{});
+    try std.testing.expect(std.mem.indexOf(u8, plain.written(), "\"note\"") == null);
+}
+
 // spec: Web Server - A DRC violation carries a stable 4-hex id emitted by the shared JSON writer
 test "violation id is deterministic, position-sensitive, and 4 hex chars in the JSON" {
     const v = drc.Violation{ .x = 2.05, .y = -3.7, .gap = 0, .clearance = 0.25, .kind = .hole_hole };
@@ -358,7 +398,7 @@ test "net-open bridge probes serialize only when present" {
         .gap = 0.4,
         .clearance = 0,
         .kind = .net_open,
-        .who = .{ .bridge = .{ 4.7, 0, 5.3, 0 } },
+        .who = .{ .extra = .{ .bridge = .{ 4.7, 0, 5.3, 0 } } },
     };
     var with_bridge: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer with_bridge.deinit();

@@ -112,6 +112,7 @@ pub const shards: []const []const []const u8 = &.{
         "placement.copper_topology_route_regression.test.",
         "placement.diff_shape.test.",
         "placement.drc.test.",
+        "placement.drc_power_width.test.",
         "placement.fine_window.test.",
         "placement.geometry.test.",
         "placement.layout_lint.test.",

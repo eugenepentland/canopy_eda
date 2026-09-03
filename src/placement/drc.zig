@@ -15,6 +15,7 @@ const router = @import("router.zig");
 const drc_diffpair = @import("drc_diffpair.zig");
 const drc_keepout = @import("drc_keepout.zig");
 const drc_perimeter_keepout = @import("drc_perimeter_keepout.zig");
+const drc_power_width = @import("drc_power_width.zig");
 const drc_board_keepout = @import("drc_board_keepout.zig");
 const drc_match = @import("drc_match.zig");
 const geometry = @import("geometry.zig");
@@ -69,9 +70,17 @@ pub const Kind = enum {
     hole_hole,
     min_drill,
     track_width,
-    /// Routed power copper is below its IPC/current target at the worst
-    /// clearance-constrained neck. Fabrication geometry remains legal.
+    /// Routed power copper is below the IPC-2221 width SOLVED for the current
+    /// this very track was measured to carry. Fabrication geometry remains
+    /// legal, but the copper cannot carry its proven load: an error.
     power_width,
+    /// Routed power copper is below the whole-rail current ENVELOPE, used
+    /// because the per-branch solve failed (no source terminal, a disconnected
+    /// load, a singular graph — the finding carries the status name as its
+    /// note). Nobody has proven this branch carries the rail's whole demand,
+    /// so it is a warning: fix the model or widen the copper, but do not block
+    /// fabrication on an unproven number. See `drc_power_width.zig`.
+    power_width_envelope,
     /// A final plane/pour component cannot be represented as one unambiguous
     /// solid: an outer or hole is degenerate/self-intersecting, a hole crosses
     /// or escapes its outer, or sibling holes touch/overlap.
@@ -211,6 +220,13 @@ pub fn defaultSeverity(k: Kind) Severity {
         // RF bend discipline: a corner the smoothing pass could not round to its
         // required radius is a signal-integrity preference, not a fab rule.
         .sharp_bend => .warn,
+        // A whole-rail current ENVELOPE is what the checker falls back to when
+        // the per-branch solve fails, so the shortfall it reports is against a
+        // number nobody has proven THIS branch owes. `drc.errorCount` gates
+        // add_tracks / close_open_nets / the fence ratchet and the fab gate, and
+        // an unproven width must not lock any of them: the solved twin
+        // (`power_width`) stays an error, this one reports and explains itself.
+        .power_width_envelope => .warn,
         // An RF keepout intrusion is likewise a preference: the board still
         // builds. Error severity is what `drc.errorCount` gates — add_tracks,
         // close_open_nets and the fence ratchet all refuse to write above zero —
@@ -287,10 +303,45 @@ pub const Parties = struct {
     track_a: i32 = -1,
     pad_a: []const u8 = "",
     pad_b: []const u8 = "",
-    /// Reporting-only nearest probe points for an open net: ax, ay, bx, by.
-    /// The connectivity checker supplies these so a viewer can draw the
-    /// specific missing join without re-running copper geometry in JavaScript.
-    bridge: ?[4]f64 = null,
+    /// The at-most-one EXTRA payload this finding carries beyond its numbers.
+    extra: Extra = .none,
+
+    /// The open-net probe points, or null on any other finding.
+    pub fn bridgePoints(self: Parties) ?[4]f64 {
+        return switch (self.extra) {
+            .bridge => |points| points,
+            else => null,
+        };
+    }
+
+    /// The finding's explanatory note, or "" when it carries none.
+    pub fn noteText(self: Parties) []const u8 {
+        return switch (self.extra) {
+            .note => |text| text,
+            else => "",
+        };
+    }
+};
+
+/// Reporting-only detail some findings carry and most do not. A UNION rather
+/// than one optional field per shape: exactly one form is ever populated, and
+/// `Parties` sits at the field-count cap, so a second optional would have to
+/// widen the type instead of naming the alternative it actually is.
+pub const Extra = union(enum) {
+    /// Nothing beyond the parties — every finding whose gap/clearance pair
+    /// already says the whole thing.
+    none,
+    /// Nearest probe points for an open net: ax, ay, bx, by. The connectivity
+    /// checker supplies these so a viewer can draw the specific missing join
+    /// without re-running copper geometry in JavaScript.
+    bridge: [4]f64,
+    /// Why the broken rule is the number it is, when that number alone
+    /// under-states the finding. `power_width_envelope` carries the
+    /// `power_current` status name that forced the whole-rail envelope
+    /// ("no-source-terminal", …) so the reader repairs the model rather than
+    /// the copper. Borrowed, never owned — a static status name or a slice
+    /// into the arena the check ran in.
+    note: []const u8,
 };
 
 /// A part index as a `Parties` field (out-of-range → "unknown" rather than a
@@ -752,7 +803,7 @@ fn checkImpl(
     try checkSilkOverPad(arena, &out, placement, pads, &pad_grid, rules.mask.margin);
     var current_routed = routed;
     current_routed.tracks = tracks;
-    const local_power_widths = if (power.copper) |prepared|
+    const solved_power_widths = if (power.copper) |prepared|
         try power_integrity.routedTrackRequiredWidthsPrepared(
             arena,
             placement,
@@ -763,6 +814,7 @@ fn checkImpl(
         )
     else
         try power_integrity.routedTrackRequiredWidthsMemo(arena, placement, current_routed, power.fills);
+    const local_power_widths = solved_power_widths;
     try checkTrackWidth(arena, &out, .{
         .placement = placement,
         .routed = routed,
@@ -1924,36 +1976,22 @@ fn openingBefore(_: void, a: Opening, b: Opening) bool {
 const SilkHit = struct { x: f64, y: f64, pad: usize };
 
 /// track width: each track must be at least its net-class `(width …)`, else the
-/// board `min_width`. A thinner track is an error; width-less tracks are skipped.
+/// board `min_width`, and at least what the current it carries needs
+/// (`drc_power_width.zig`, which owns that second, electrical half).
 const TrackWidthInput = struct {
     placement: optimizer.Placement,
     routed: router.RouteResult,
     tracks: []const router.Track,
     min_width: f64,
-    /// Index-aligned IPC-2221 widths from a solved power-copper graph.
-    /// Null entries retain the conservative whole-net class rule.
-    local_power_widths: []const ?power_integrity.LocalWidth = &.{},
+    /// Index-aligned per-track current-capacity requirements from the power
+    /// solve. A NULL entry means the net declared no current demand at all,
+    /// which is the only case still judged by the conservative whole-rail
+    /// class fallback; everything else is judged by its own solved (or
+    /// envelope) width. See `drc_power_width.duty`.
+    local_power_widths: []const ?drc_power_width.LocalWidth = &.{},
     /// Same-net pours consulted by the pad-entry neck exemption: a bounded
     /// neck may legitimately end IN a zone rather than on wide track copper.
     zones: []const TopologyZone = &.{},
-};
-
-fn adaptivePowerNet(placement: optimizer.Placement, net_i: usize) bool {
-    if (net_i >= placement.nets.len) return false;
-    const name = placement.nets[net_i].name;
-    if (placement.rules.powerWidthForNet(name) == null or router.netHasPlane(placement, name)) return false;
-    if (net_i < placement.rules.net.len) {
-        const rule = placement.rules.net[net_i];
-        if (rule.rf.impedance.ohms > 0 or rule.rf.impedance.diff_ohms > 0) return false;
-    }
-    for (placement.diff_pairs) |pair| if (pair.p == net_i or pair.n == net_i) return false;
-    return true;
-}
-
-const WidthShortfall = struct {
-    track_index: usize,
-    actual: f64,
-    required: f64,
 };
 
 fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) std.mem.Allocator.Error!void {
@@ -1962,30 +2000,24 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
     // can judge whether NEIGHBOURING copper satisfies its own requirement.
     const requirements = try arena.alloc(f64, in.tracks.len);
     @memset(requirements, 0);
-    var power_candidates: std.ArrayList(WidthShortfall) = .empty;
+    var power_candidates: std.ArrayList(drc_power_width.Shortfall) = .empty;
     for (in.tracks, 0..) |t, track_index| {
         if (t.width <= eps) continue; // no recorded width — not a real defect
         var want = in.min_width;
-        var adaptive_power = false;
+        var duty: drc_power_width.Duty = .{};
         if (t.net >= 0) {
             const ni: usize = @intCast(t.net);
             if (ni < nrules.len and nrules[ni].width > 0) want = nrules[ni].width;
-            if (ni < in.placement.nets.len and adaptivePowerNet(in.placement, ni)) {
-                adaptive_power = true;
-                want = @max(want, in.placement.rules.powerWidthForNet(in.placement.nets[ni].name) orelse 0);
-            }
-        }
-        const local_power_width = if (track_index < in.local_power_widths.len) in.local_power_widths[track_index] else null;
-        if (local_power_width) |local| {
-            const branch_floor = if (t.net >= 0 and @as(usize, @intCast(t.net)) < nrules.len)
-                nrules[@intCast(t.net)].pad_neck.power_branch_width
-            else
-                0;
-            want = @max(in.min_width, @max(branch_floor, local.width_mm));
+            const local = if (track_index < in.local_power_widths.len) in.local_power_widths[track_index] else null;
+            duty = drc_power_width.duty(in.placement, ni, local, in.min_width);
+            // A solved requirement REPLACES the class width (the class is one
+            // number for a whole rail; the solve is this track's own current).
+            // The whole-rail fallback is the same order of conservatism as the
+            // class, so it stacks with it instead.
+            want = if (duty.supersedes_class) duty.required_mm else @max(want, duty.required_mm);
         }
         requirements[track_index] = want;
         const under_width = t.width < want - eps;
-        const under_power_width = t.width < want - power_width_eps_mm;
         // Fabrication width and electrical power capacity are both hard rules.
         // Keep every electrical candidate so the DRC report exposes the full
         // repair set in one pass instead of revealing one shortfall at a time.
@@ -2001,24 +2033,18 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
             });
             continue;
         }
-        if (adaptive_power) {
-            if (under_power_width)
-                try power_candidates.append(arena, .{ .track_index = track_index, .actual = t.width, .required = want });
-            continue;
-        }
-        // A solved local-current width is already the electrical exception to
-        // the whole-net class. Do not then let a geometric pad-neck exception
-        // shrink below that proven current requirement.
-        if (local_power_width != null) {
-            if (under_width) try out.append(arena, .{
-                .x = (t.x1 + t.x2) / 2,
-                .y = (t.y1 + t.y2) / 2,
-                .gap = t.width,
-                .clearance = want,
-                .kind = .track_width,
-                .who = .{ .net_a = t.net, .track_a = partyIndex(track_index) },
-                .layer = layerOf(t.layer),
-            });
+        if (duty.kind) |kind| {
+            // Power-capacity widths are solved from floating-point current and
+            // stackup inputs while persisted widths are rounded to micrometres,
+            // so a sub-micrometre shortfall is serialization noise, not copper.
+            if (t.width < want - power_width_eps_mm and !portFramePadTaper(in.routed, t, want))
+                try power_candidates.append(arena, .{
+                    .track_index = track_index,
+                    .actual = t.width,
+                    .required = want,
+                    .kind = kind,
+                    .reason = duty.reason,
+                });
             continue;
         }
         const neck_ok = if (under_width)
@@ -2030,38 +2056,13 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
         if (neck_ok or taper_ok) continue;
         try out.append(arena, .{ .x = (t.x1 + t.x2) / 2, .y = (t.y1 + t.y2) / 2, .gap = t.width, .clearance = want, .kind = .track_width, .who = .{ .net_a = t.net, .track_a = partyIndex(track_index) }, .layer = layerOf(t.layer) });
     }
-    // A pad the neck serves can be narrower than the solved width: a short
-    // neck into wide copper is accepted practice, so it never becomes a
-    // reported shortfall. Exempt it silently, exactly like the own-land and
-    // port-frame-taper exemptions. One geometric walk covers a whole taper
-    // chain, so its verdict is cached across that chain's slices.
-    var neck_verdicts: std.AutoHashMapUnmanaged(usize, bool) = .empty;
-    const neck_board = pad_neck.PowerNeckBoard{
+    try drc_power_width.report(arena, out, .{
         .placement = in.placement,
         .tracks = in.tracks,
         .vias = in.routed.vias,
         .zones = in.zones,
         .required = requirements,
-    };
-    for (power_candidates.items) |candidate| {
-        const exempt = neck_verdicts.get(candidate.track_index) orelse blk: {
-            const verdict = try pad_neck.judgePowerNeck(arena, neck_board, candidate.track_index);
-            for (verdict.chain) |member| try neck_verdicts.put(arena, member, verdict.exempt);
-            break :blk verdict.exempt;
-        };
-        if (exempt) continue;
-        const t = in.tracks[candidate.track_index];
-        try out.append(arena, .{
-            .x = (t.x1 + t.x2) / 2,
-            .y = (t.y1 + t.y2) / 2,
-            .gap = candidate.actual,
-            .clearance = candidate.required,
-            .kind = .power_width,
-            .severity = defaultSeverity(.power_width),
-            .who = .{ .net_a = t.net, .track_a = partyIndex(candidate.track_index) },
-            .layer = layerOf(t.layer),
-        });
-    }
+    }, power_candidates.items);
 }
 
 /// The controlled-width rule applies to the transmission-line body, not to
@@ -3839,7 +3840,7 @@ test "check flags sub-width tracks against class and board rules" {
     try testing.expectEqual(@as(usize, 0), countKind(try check(arena, placement, wr, 0.127), .track_width));
 }
 
-// spec: placement/drc - a solved local-current requirement replaces the whole-net class width for that power track, but never permits copper below its own IPC-2221 requirement
+// spec: placement/drc - a solved local-current requirement replaces the whole-net class width for that power track, but never permits copper below its own IPC-2221 requirement or the authored branch floor
 test "track width accepts a solved narrow power branch but enforces its local requirement" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -3855,7 +3856,45 @@ test "track width accepts a solved narrow power branch but enforces its local re
         .{ .x1 = 1, .y1 = 0, .x2 = 2, .y2 = -1, .layer = 0, .width = 0.13, .net = 0 },
     };
     const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
-    const local = [_]?power_integrity.LocalWidth{ .{ .width_mm = 0.2727, .envelope = false }, .{ .width_mm = 0.10, .envelope = false }, .{ .width_mm = 0.10, .envelope = false } };
+    const local = [_]?drc_power_width.LocalWidth{
+        .{ .width_mm = 0.2727 },
+        .{ .width_mm = 0.10 },
+        .{ .width_mm = 0.10 },
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkTrackWidth(arena, &violations, .{
+        .placement = placement,
+        .routed = routed,
+        .tracks = &tracks,
+        .min_width = 0.127,
+        .local_power_widths = &local,
+    });
+    // The 0.3048 class width binds nowhere: every track carries a solve, so
+    // each is judged by its own current and the 0.1524 authored branch floor.
+    try testing.expectEqual(@as(usize, 1), violations.items.len);
+    try testing.expectEqual(Kind.power_width, violations.items[0].kind);
+    try testing.expectEqual(Severity.err, violations.items[0].severity);
+    try testing.expectApproxEqAbs(@as(f64, 0.13), violations.items[0].gap, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.1524), violations.items[0].clearance, 1e-12);
+}
+
+// spec: placement/drc - a whole-rail envelope width, used when the per-branch current solve fails, is reported as an explained warning rather than as the solved error
+test "an unsolved power branch reports the envelope kind, its reason, and warning severity" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const net_rules = [_]optimizer.NetRule{.{ .width = 0.3048 }};
+    const nets = [_]FlatNet{.{ .name = "V3P3", .pins = &.{} }};
+    var placement = partsOnly(&.{});
+    placement.nets = &nets;
+    placement.rules.net = &net_rules;
+    const tracks = [_]router.Track{.{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 }};
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
+    const local = [_]?drc_power_width.LocalWidth{.{
+        .width_mm = 0.62,
+        .envelope = true,
+        .reason = "no-source-terminal",
+    }};
     var violations: std.ArrayList(Violation) = .empty;
     try checkTrackWidth(arena, &violations, .{
         .placement = placement,
@@ -3865,8 +3904,13 @@ test "track width accepts a solved narrow power branch but enforces its local re
         .local_power_widths = &local,
     });
     try testing.expectEqual(@as(usize, 1), violations.items.len);
-    try testing.expectApproxEqAbs(@as(f64, 0.13), violations.items[0].gap, 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.1524), violations.items[0].clearance, 1e-12);
+    try testing.expectEqual(Kind.power_width_envelope, violations.items[0].kind);
+    try testing.expectEqual(Severity.warn, violations.items[0].severity);
+    try testing.expectEqualStrings("no-source-terminal", violations.items[0].who.noteText());
+    try testing.expectApproxEqAbs(@as(f64, 0.62), violations.items[0].clearance, 1e-12);
+    // An unproven width must not reach the gate that blocks fabrication and
+    // rolls back hand copper.
+    try testing.expectEqual(@as(usize, 0), errorCount(violations.items));
 }
 
 // spec: placement/power-routing - an adaptive rail reports every actionable electrical shortfall in one pass while the fabrication minimum remains a hard error
@@ -3990,7 +4034,7 @@ test "adaptive power width forgives a bounded pad-entry neck but not the same co
         .{ .x1 = 1, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.55, .net = 0 },
     };
     const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
-    const local = [_]?power_integrity.LocalWidth{ .{ .width_mm = 0.5, .envelope = false }, .{ .width_mm = 0.5, .envelope = false } };
+    const local = [_]?drc_power_width.LocalWidth{ .{ .width_mm = 0.5 }, .{ .width_mm = 0.5 } };
     for ([_]bool{ true, false }) |landed| {
         var placement = partsOnly(&parts);
         placement.nets = if (landed) &netted else &unnetted;
@@ -4899,7 +4943,7 @@ const KindSet = [@typeInfo(Kind).@"enum".field_names.len]bool;
 /// (keepout halo, sharp bend), both differential-pair rules, the match-group
 /// length mismatch, the single-layer via, and copper drawn dead on its own land.
 /// Error kinds come along for the ride and are checked the same way.
-fn severityFixtures(arena: std.mem.Allocator) ![7][]const Violation {
+fn severityFixtures(arena: std.mem.Allocator) ![8][]const Violation {
     return .{
         try hygieneBoard(arena),
         try rfBoard(arena),
@@ -4908,7 +4952,41 @@ fn severityFixtures(arena: std.mem.Allocator) ![7][]const Violation {
         try topologyBoard(arena),
         try deadCopperBoard(arena),
         try groundViaDistanceBoard(arena),
+        try powerEnvelopeBoard(arena),
     };
+}
+
+/// One routed power branch whose PER-BRANCH current solve failed, so the width
+/// rule falls back to the whole-rail envelope and reports the explained warning
+/// (`power_width_envelope`) instead of the solved error.
+///
+/// Driven through `checkTrackWidth` rather than the whole-board `check`, and
+/// deliberately: an envelope width exists only after `power_integrity` has
+/// failed a real rail solve over a fabricated copper graph, which a fixture
+/// cannot ask for cheaply. The seam that stamps the severity is the same one
+/// either way, which is what this table is proving.
+fn powerEnvelopeBoard(arena: std.mem.Allocator) ![]const Violation {
+    const net_rules = [_]optimizer.NetRule{.{ .width = 0.3048 }};
+    const nets = [_]FlatNet{.{ .name = "V3P3", .pins = &.{} }};
+    var placement = partsOnly(&.{});
+    placement.nets = &nets;
+    placement.rules.net = &net_rules;
+    const tracks = [_]router.Track{.{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 }};
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
+    const local = [_]?drc_power_width.LocalWidth{.{
+        .width_mm = 0.62,
+        .envelope = true,
+        .reason = "no-source-terminal",
+    }};
+    var out: Viol = .empty;
+    try checkTrackWidth(arena, &out, .{
+        .placement = placement,
+        .routed = routed,
+        .tracks = &tracks,
+        .min_width = 0.127,
+        .local_power_widths = &local,
+    });
+    return out.items;
 }
 
 /// One plane-carried SMD GND pad with no nearby via, proving the optional

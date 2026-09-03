@@ -3234,7 +3234,12 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - silk-over-pad checks authored footprint silk rather than inventing reference-designator artwork
 - flags a plated through-hole pad whose annular ring is under the minimum; NPTH pads exempt
 - flags a track narrower than its net-class width, else the board minimum, as an error
-- a solved local-current requirement replaces the whole-net class width for that power track, but never permits copper below its own IPC-2221 requirement
+- a solved local-current requirement replaces the whole-net class width for that power track, but never permits copper below its own IPC-2221 requirement or the authored branch floor
+- a solved local-current width replaces the net-class width for that track, floored by fabrication and the authored power-branch-width
+- a whole-rail envelope width, used when the per-branch current solve fails, is reported as an explained warning rather than as the solved error
+- an unsolvable rail is judged against the whole-rail envelope as a warning naming the solver status, not as a fabrication error
+- a net with no solved entry and no rail demand imposes no current-capacity requirement at all
+- each power-width shortfall becomes one finding of its own kind and severity, with the envelope reason attached
 - a short neck forced by a same-net land narrower than the solved power width is exempt when its far end reaches solved-width copper, while an overlong neck is not
 - a mid-run pinch between two solved-width runs and a neck narrower than its forcing land both keep the power-width finding
 - a bounded pad-entry neck may terminate in a same-net poured zone instead of solved-width track copper
@@ -7426,6 +7431,7 @@ is what makes the predicate exact rather than approximately right.
 - RF-only saved paths paint their sampled physical chords even when no ordinary track handle is present
 - the board PNG paints bottom-side parts under top-side parts
 - A DRC violation carries a stable 4-hex id emitted by the shared JSON writer
+- The whole-rail power-width warning ships its own kind word and the power-solve status that forced it
 - The shared DRC JSON writer emits each violation's named parties and omits the sides the checker could not name
 - The WASM DRC bridge parses board-state JSON to the same violations as a direct drc.check run
 - Both client DRC bridges read the blob's design-rule object through one shared reader, so the stateless check and the session probe resolve identical board rules
