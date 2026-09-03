@@ -3236,7 +3236,7 @@ Public functions: check, checkTopology, checkWithZones, checkWithPreparedCopper,
 - a short neck forced by a same-net land narrower than the solved power width is exempt when its far end reaches solved-width copper, while an overlong neck is not
 - a mid-run pinch between two solved-width runs and a neck narrower than its forcing land both keep the power-width finding
 - a bounded pad-entry neck may terminate in a same-net poured zone instead of solved-width track copper
-- the adaptive power-width warning skips a bounded neck forced by a same-net land narrower than the solved width, and returns the moment that land no longer explains the narrowing
+- the adaptive power-width error skips a bounded neck forced by a same-net land narrower than the solved width, and returns the moment that land no longer explains the narrowing
 - flags a routed trace endpoint that reaches no same-net copper as a copper-stub error when its section still carries support connectivity
 - warns once when same-net trace capsules touch across separate explicit centreline components
 - warns once per stored trace section whose deletion preserves all pad, live-via, and pour connectivity
@@ -3482,7 +3482,8 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - the hand router receives an electrical target for every unpoured current-rated rail, including an otherwise-unclassed net
 - the hand router steers an unpoured current-rated rail at ordinary fabrication width, then independently exact-DRC-fits each local interval up to its electrical target with 45-degree tapers from the pad's smaller dimension
 - adaptive routing retains the full maximum-current target while a pour-backed rail keeps its short authored fanout width
-- an adaptive rail reports one warning at its worst electrical shortfall while the fabrication minimum remains a hard error
+- an adaptive rail reports one error at its worst electrical shortfall while the fabrication minimum remains a hard error
+- power-width comparison accepts the one-micrometre persistence quantum but rejects a material shortfall
 - a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an incomplete opted-in rail screens every segment at the whole-rail current
 - a port-keyed consumer whose module-side net reaches only passive parts resolves those pads as its load contacts
 - a consumer whose annotated pad sits behind a two-terminal series part on a sibling net enters this net's copper at that part's pad

@@ -203,7 +203,7 @@ pub fn defaultSeverity(k: Kind) Severity {
         .land_transit => .warn,
         // A legal board can still have a long ground return. The authored
         // distance is an SI budget, so report it without blocking fabrication.
-        .ground_via_distance, .reference_plane_gap, .reference_transition, .loop_area, .power_width => .warn,
+        .ground_via_distance, .reference_plane_gap, .reference_transition, .loop_area => .warn,
         // The board can still fabricate, but the authored bypass relationship
         // is electrically ineffective at high frequency until its local
         // surface leg reaches the intended IC land.
@@ -378,6 +378,11 @@ const Hole = struct {
 /// slack — a filter that is stricter by even a rounding step drops geometry this
 /// checker would have passed.
 pub const eps: f64 = 1e-6;
+
+/// Power-capacity widths are solved from floating-point current and stackup
+/// inputs, while persisted layout widths are rounded to micrometres. Treat a
+/// sub-micrometre shortfall as serialization noise, not undersized copper.
+const power_width_eps_mm: f64 = 1e-3;
 
 /// Effective copper clearance for a pair: MAX of the board default and each net's
 /// `(net-class (clearance …))` override. Empty `rules.net` ⇒ every pair is `base`.
@@ -1982,11 +1987,10 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
         }
         requirements[track_index] = want;
         const under_width = t.width < want - eps;
-        // Fabrication width remains a hard rule. Electrical power capacity is
-        // intentionally advisory: the router has already widened this route as
-        // far as exact clearance allows, and one warning at the worst neck is
-        // more useful than rejecting a connected board or flooding every 50 um
-        // taper slice with the same finding.
+        const under_power_width = t.width < want - power_width_eps_mm;
+        // Fabrication width and electrical power capacity are both hard rules.
+        // Power capacity is aggregated to one finding at the worst neck so a
+        // routed rail does not flood the report with every taper slice.
         if (t.width < in.min_width - eps) {
             try out.append(arena, .{
                 .x = (t.x1 + t.x2) / 2,
@@ -1999,8 +2003,9 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
             });
             continue;
         }
-        if (adaptive_power and under_width) {
-            try power_candidates.append(arena, .{ .track_index = track_index, .actual = t.width, .required = want });
+        if (adaptive_power) {
+            if (under_power_width)
+                try power_candidates.append(arena, .{ .track_index = track_index, .actual = t.width, .required = want });
             continue;
         }
         // A solved local-current width is already the electrical exception to
@@ -2031,7 +2036,7 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
     // neck into wide copper is accepted practice, so it never becomes the
     // rail's reported worst shortfall. Exempted silently, exactly like the
     // own-land and port-frame-taper exemptions; everything else competes for
-    // the one worst-neck warning as before. One geometric walk covers a whole
+    // the one worst-neck error as before. One geometric walk covers a whole
     // taper chain, so its verdict is cached across that chain's slices.
     var neck_verdicts: std.AutoHashMapUnmanaged(usize, bool) = .empty;
     const neck_board = pad_neck.PowerNeckBoard{
@@ -3875,8 +3880,8 @@ test "track width accepts a solved narrow power branch but enforces its local re
     try testing.expectApproxEqAbs(@as(f64, 0.1524), violations.items[0].clearance, 1e-12);
 }
 
-// spec: placement/power-routing - an adaptive rail reports one warning at its worst electrical shortfall while the fabrication minimum remains a hard error
-test "adaptive power width shortfall is one non-blocking worst-neck finding" {
+// spec: placement/power-routing - an adaptive rail reports one error at its worst electrical shortfall while the fabrication minimum remains a hard error
+test "adaptive power width shortfall is one blocking worst-neck finding" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
@@ -3915,12 +3920,59 @@ test "adaptive power width shortfall is one non-blocking worst-neck finding" {
     });
     try testing.expectEqual(@as(usize, 1), violations.items.len);
     try testing.expectEqual(Kind.power_width, violations.items[0].kind);
-    try testing.expectEqual(Severity.warn, violations.items[0].severity);
+    try testing.expectEqual(Severity.err, violations.items[0].severity);
     try testing.expectApproxEqAbs(@as(f64, 0.2), violations.items[0].gap, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.8), violations.items[0].clearance, 1e-12);
 }
 
-// spec: placement/drc - the adaptive power-width warning skips a bounded neck forced by a same-net land narrower than the solved width, and returns the moment that land no longer explains the narrowing
+// spec: placement/power-routing - power-width comparison accepts the one-micrometre persistence quantum but rejects a material shortfall
+test "adaptive power width ignores sub-micrometre serialization noise" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const nets = [_]FlatNet{.{ .name = "VDD", .pins = &.{} }};
+    const net_rules = [_]optimizer.NetRule{.{ .width = 0.8 }};
+    const foils = [_]@import("impedance.zig").Foil{
+        .{ .index = 1, .thickness_mm = 0.035 },
+        .{ .index = 2, .thickness_mm = 0.035 },
+    };
+    const rails = [_]@import("../eval/power_budget.zig").Rail{.{
+        .net = "VDD",
+        .load_max_a = 1.2,
+        .any_max_load = true,
+        .status = .no_source,
+    }};
+    var placement = partsOnly(&.{});
+    placement.nets = &nets;
+    placement.rules = .{
+        .net = &net_rules,
+        .plane_nets = &.{},
+        .copper_layers = 2,
+        .physical = .{ .stack = .{ .layers = 2, .foils = &foils }, .rails = &rails },
+    };
+
+    for ([_]struct { width: f64, findings: usize }{
+        .{ .width = 0.7995, .findings = 0 },
+        .{ .width = 0.7989, .findings = 1 },
+    }) |case| {
+        const tracks = [_]router.Track{.{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .layer = 0, .width = case.width, .net = 0 }};
+        const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 1, .total = 1 };
+        var violations: std.ArrayList(Violation) = .empty;
+        try checkTrackWidth(arena, &violations, .{
+            .placement = placement,
+            .routed = routed,
+            .tracks = &tracks,
+            .min_width = 0.127,
+        });
+        try testing.expectEqual(case.findings, violations.items.len);
+        if (case.findings != 0) {
+            try testing.expectEqual(Kind.power_width, violations.items[0].kind);
+            try testing.expectEqual(Severity.err, violations.items[0].severity);
+        }
+    }
+}
+
+// spec: placement/drc - the adaptive power-width error skips a bounded neck forced by a same-net land narrower than the solved width, and returns the moment that land no longer explains the narrowing
 test "adaptive power width forgives a bounded pad-entry neck but not the same copper without its land" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -5115,10 +5167,7 @@ test "the severity table is what the checkers emit, for every warning kind" {
     defer arena_inst.deinit();
     const seen = try observedKindSeverities(arena_inst.allocator());
     try testing.expect(seen[@backingInt(Kind.redundant_via)]);
-    // The aggregated `power_width` producer is exercised directly above; it
-    // cannot share these whole-board fixtures without replacing its solved
-    // current graph with the conservative net-class fallback.
-    try testing.expectEqual(@as(?Kind, Kind.power_width), firstUncoveredWarningKind(seen));
+    try testing.expectEqual(@as(?Kind, null), firstUncoveredWarningKind(seen));
 }
 
 // spec: placement/drc - the fab-blocking error count drops warnings and an open net, which is already the completion term
