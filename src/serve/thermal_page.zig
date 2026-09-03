@@ -472,7 +472,7 @@ fn writeControls(w: *std.Io.Writer, alloc: std.mem.Allocator, v: View) RenderErr
                     if (v.scenario == .heatsink or v.scenario == .fan_heatsink) " checked" else "",
                 });
             }
-            try w.writeAll("</div><p>Simulation only — the saved fan and heatsink stay in the layout.</p></fieldset>");
+            try w.writeAll("</div><p>View and simulation only — the saved fan and heatsink stay in the layout.</p></fieldset>");
         }
         try w.writeAll("<div class=\"tp-seg\" id=\"tp-seg\" role=\"group\" aria-label=\"Cooling scenario\">");
         for (ladder.rows) |row| {
@@ -1565,7 +1565,7 @@ test "saved cooling assemblies render independent simulation toggles" {
         "<fieldset class=\"tp-cooling\">",
         "id=\"tp-use-fan\" type=\"checkbox\" checked",
         "id=\"tp-use-heatsink\" type=\"checkbox\" checked",
-        "Simulation only — the saved fan and heatsink stay in the layout.",
+        "View and simulation only — the saved fan and heatsink stay in the layout.",
     }));
 
     const natural = try serve(alloc, project, "cooled-heater", &.{});
@@ -1584,6 +1584,7 @@ test "thermal 3D cooling visibility controls drive the simulation scenario" {
     // and the page selects the already-rendered matching scenario.
     try testing.expect(containsAll(viewer, &.{
         "function notifyThermalCooling(",
+        "function syncThermalCooling(",
         "thermal.toggleCooling(kind, visible)",
         "thermal.coolingState()",
         "setCoolingVisibility: function",
@@ -1598,6 +1599,14 @@ test "thermal 3D cooling visibility controls drive the simulation scenario" {
         "d.t === \"thermal:cooling-toggle\"",
         "tpSelect(coolingScenario())",
     }));
+
+    // A scenario message can precede lazy WebGL initialization. Its two
+    // visibility values must be retained before the `built` guard, or the
+    // authored fan and heatsink appear until another scenario change occurs.
+    const setter = std.mem.indexOf(u8, viewer, "setCoolingVisibility: function") orelse return error.TestUnexpectedResult;
+    const fan_store = std.mem.indexOfPos(u8, viewer, setter, "layerVisible.fan = !!fan") orelse return error.TestUnexpectedResult;
+    const built_guard = std.mem.indexOfPos(u8, viewer, setter, "if (!built) return") orelse return error.TestUnexpectedResult;
+    try testing.expect(fan_store < built_guard);
 }
 
 // spec: serve/thermal-page - the page puts its panel beside a live board frame rather than a static heat image, embedding the read-only PCB viewer with the thermal overlay on

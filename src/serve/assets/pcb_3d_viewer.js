@@ -864,6 +864,7 @@
     rebuildBoard();
     rebuildHeatsink();
     rebuildFan();
+    syncThermalCooling();
     lastSig = sceneSig();
     requestRender();
   }
@@ -1017,6 +1018,18 @@
     if (thermal && typeof thermal.toggleCooling === "function") thermal.toggleCooling(kind, visible);
   }
 
+  // A thermal scenario can arrive before the lazy 3D stack has finished
+  // building, and a later layout/model refresh rebuilds both assembly groups.
+  // Reassert the scenario after either event so authored cooling never flashes
+  // or remains visible after its simulation switch was turned off.
+  function syncThermalCooling() {
+    var thermal = window.PCBThermal;
+    if (!thermal || typeof thermal.coolingState !== "function") return;
+    var cooling = thermal.coolingState();
+    setCoolingLayer("fan", cooling.fan);
+    setCoolingLayer("heatsink", cooling.heatsink);
+  }
+
   function wireControls() {
     var on = function (id, fn) { var e = document.getElementById(id); if (e) e.onclick = fn; };
     on("pcb3d-top", function () { frame(0, 0, 1); });
@@ -1042,12 +1055,7 @@
     chk("pcb3d-t-heatsink", function (v) { setCoolingLayer("heatsink", v); notifyThermalCooling("heatsink", v); });
     chk("pcb3d-t-fan", function (v) { setCoolingLayer("fan", v); notifyThermalCooling("fan", v); });
     chk("pcb3d-t-axes", function (v) { axes.visible = v; requestRender(); });
-    var thermal = window.PCBThermal;
-    if (thermal && typeof thermal.coolingState === "function") {
-      var cooling = thermal.coolingState();
-      setCoolingLayer("fan", cooling.fan);
-      setCoolingLayer("heatsink", cooling.heatsink);
-    }
+    syncThermalCooling();
   }
 
   function resize() {
@@ -1096,9 +1104,13 @@
     // user's relative orbit is preserved across loads.
     sync: function () { if (built) applyPoses(); },
     setCoolingVisibility: function (fan, heatsink) {
+      // Preserve an early thermal-page message while the WebGL stack is still
+      // loading. rebuildFan/rebuildHeatsink consume these values during init.
+      layerVisible.fan = !!fan;
+      layerVisible.heatsink = !!heatsink;
       if (!built) return;
-      setCoolingLayer("fan", !!fan);
-      setCoolingLayer("heatsink", !!heatsink);
+      setCoolingLayer("fan", layerVisible.fan);
+      setCoolingLayer("heatsink", layerVisible.heatsink);
     },
     modelAdded: function (fp, transform) { if (fp) refreshModel(fp, transform); },
     // Complete-design export uses the identical analytic board/component
@@ -1112,6 +1124,7 @@
       // Reflect any layout change made in 2D since 3D was last shown, but keep
       // the user's current camera (the "Iso" button re-fits on demand).
       if (sceneSig() !== lastSig) applyPoses();
+      syncThermalCooling();
       resize();
     }
   };
