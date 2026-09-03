@@ -84,6 +84,15 @@ pub const Rail = struct {
     consumers: []const RailConsumer = &.{},
 };
 
+/// Reference-designator prefix marking the synthetic consumer for a rail that
+/// LEAVES the board through the design's own `out` power port. It is a
+/// terminal, not a device: `power_integrity` resolves a consumer whose ref-des
+/// starts with it to the board's own connector pads, the same way
+/// `@external/NAME` resolves a boundary source. It is deliberately not a
+/// `source_terminals` entry — injecting a rail's current at its exit would
+/// invert the branch-current solve.
+pub const export_terminal_prefix = "@export/";
+
 const SourceInfo = struct {
     source_label: []const u8,
     display_rail: []const u8,
@@ -134,11 +143,12 @@ fn collectExternalSources(
 /// share its tail:
 ///
 ///   * an `in` port is where current ENTERS, so it also records an
-///     `@external/NAME` source TERMINAL, which `power_integrity` resolves to
+///     `@external/NAME` SOURCE terminal, which `power_integrity` resolves to
 ///     the connector pads it injects the rail's current at. An `out` port is
-///     where current LEAVES; listing one there would inject a rail's whole
-///     current at a sink and corrupt the branch-current solve. This collector
-///     therefore registers capacity only, never a terminal.
+///     where current LEAVES; listing one as a source would inject a rail's
+///     whole current at a sink and corrupt the branch-current solve. This
+///     collector therefore registers capacity only. `creditExportedRails`
+///     records the exit itself, as a LOAD at an `@export/NAME` terminal.
 ///   * a port with no `(current …)` contributes NOTHING here, where the `in`
 ///     collector still records its terminal. That keeps the pass inert for
 ///     every design that does not declare an output current — the only new
@@ -167,6 +177,65 @@ fn collectSelfOutputs(
             .current_typ = port.current_typ,
             .current_max = port.current_max,
         });
+    }
+}
+
+/// Credit a re-exported rail's declared output current as a LOAD.
+///
+/// On a board that generates a rail internally and hands it to a connector, the
+/// `(current …)` on `(port "V5_OUT" out power …)` is amperes that leave through
+/// that connector — a real draw on the regulator feeding it, and physically the
+/// only sink some of that copper has. Without it the rail's solve has loads it
+/// cannot place and reports `no-source-terminal`/`incomplete-load-terminals`,
+/// and every segment falls back to the whole-rail envelope.
+///
+/// It is credited only when the rail ALREADY has a physical source. On a
+/// standalone module page the same port is the page's only statement about the
+/// rail, and it rates the rail rather than loading it (`collectSelfOutputs`);
+/// crediting it there would have the module drawing its own output.
+fn creditExportedRails(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    net_parent: *std.StringHashMapUnmanaged([]const u8),
+    source_terminals: *const std.StringHashMapUnmanaged(std.ArrayList([]const u8)),
+    tally: *LoadTally,
+) std.mem.Allocator.Error!void {
+    for (block.ports) |port| {
+        if (!std.mem.eql(u8, port.direction, "out")) continue;
+        if (port.isDeclaredNonPower()) continue;
+        if (port.current_typ == null and port.current_max == null) continue;
+        const base = na.baseNetName(if (port.net.len > 0) port.net else port.name);
+        const root = na.findRoot(net_parent, base);
+        const injects = source_terminals.get(root);
+        if (injects == null or injects.?.items.len == 0) continue;
+        const path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ export_terminal_prefix, port.name });
+        var load = tally.loads.get(root) orelse RailLoad{ .first_name = base };
+        const key = try std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ path, root });
+        const gop = try tally.groups.getOrPut(allocator, key);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .{
+                .ref_des = path,
+                .component = "board output",
+                .label = "leaves the board through this port",
+                .net = base,
+                .root = root,
+            };
+            try load.group_keys.append(allocator, key);
+        }
+        try gop.value_ptr.pins.append(allocator, port.name);
+        if (port.current_typ) |v| {
+            load.sum_typ += v;
+            load.any_typ = true;
+            gop.value_ptr.sum_typ += v;
+            gop.value_ptr.any_typ = true;
+        }
+        if (port.current_max) |v| {
+            load.sum_max += v;
+            load.any_max = true;
+            gop.value_ptr.sum_max += v;
+            gop.value_ptr.any_max = true;
+        }
+        try tally.loads.put(allocator, root, load);
     }
 }
 
@@ -260,6 +329,11 @@ pub fn analyze(
     const top = try topScope(allocator, block, &net_parent);
     try creditLoads(allocator, block, top, &tally);
     try creditPortDeclarations(allocator, block, &net_parent, &tally);
+    // A rail this board re-exports draws current at its connector, but only
+    // once something else on the board actually sources it — see
+    // `creditExportedRails`. Runs after the source pass above has recorded
+    // every physical injection point.
+    try creditExportedRails(allocator, block, &net_parent, &source_terminals, &tally);
     const loads = &tally.loads;
     const consumer_groups = &tally.groups;
 
@@ -1071,6 +1145,13 @@ fn railNamed(rails: []const Rail, net: []const u8) ?Rail {
     return null;
 }
 
+fn consumerNamed(consumers: []const RailConsumer, ref_des: []const u8) ?RailConsumer {
+    for (consumers) |consumer| {
+        if (std.mem.eql(u8, consumer.ref_des, ref_des)) return consumer;
+    }
+    return null;
+}
+
 // spec: eval/power_budget - a sibling sub-block's annotated pins load the parent rail its port ties to, so a rail whose consumers are all sealed in modules is no longer empty
 test "a sub-block's annotated pins land on the parent rail its port ties to" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1360,9 +1441,11 @@ test "a top-level output power port rates its own rail" {
     try testing.expectEqual(@as(?f64, 0.5), vout.source_max_a);
     // Current LEAVES through this port, so it is NOT a synthetic injection
     // terminal — listing it would make the branch-current solve treat a sink as
-    // a source.
+    // a source. It is a physical EXIT terminal instead.
     try testing.expectEqual(@as(usize, 0), vout.source_terminals.len);
-    // Nothing on the page is annotated, so the rating stands alone.
+    try testing.expect(consumerNamed(vout.consumers, "@export/VOUT") == null);
+    // Nothing else on the page sources this rail, so the port rates it rather
+    // than loading it: a module must not be its own consumer.
     try testing.expect(!vout.any_typ_load);
     try testing.expect(!vout.any_max_load);
     try testing.expectEqual(RailStatus.no_consumers, vout.status);
@@ -1465,4 +1548,43 @@ test "a sub-block source outranks a smaller boundary rating on the same rail" {
     // The regulator's own physical terminal is still the injection point.
     try testing.expectEqual(@as(usize, 1), v3p3.source_terminals.len);
     try testing.expectEqualStrings("buck/VOUT", v3p3.source_terminals[0]);
+}
+
+// spec: eval/power_budget - a rail an internally sourced board re-exports draws its declared output current as a load at a physical exit terminal, never as a second injection point
+test "a re-exported rail draws its declared output current at a board exit terminal" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var block = try siblingChainBlock(alloc);
+    const before = railNamed(try analyze(alloc, &block), "V3P3").?;
+
+    // The board hands its 3.3 V rail to a connector and says how much leaves.
+    const ports = try alloc.alloc(env_mod.Port, block.ports.len + 1);
+    @memcpy(ports[0..block.ports.len], block.ports);
+    ports[block.ports.len] = .{
+        .name = "V3P3_OUT",
+        .net = "V3P3",
+        .direction = "out",
+        .kind = "power",
+        .current_typ = 0.4,
+        .current_max = 0.5,
+    };
+    block.ports = ports;
+    const after = railNamed(try analyze(alloc, &block), "V3P3").?;
+
+    // The buck remains the only injection point; the port is where the rail
+    // LEAVES, recorded as its own kind of terminal.
+    try testing.expectEqual(@as(usize, 1), after.source_terminals.len);
+    try testing.expectEqualStrings("buck/VOUT", after.source_terminals[0]);
+
+    // Those amperes are a real draw on the regulator feeding the connector,
+    // and a sink the post-route branch-current solve can physically place.
+    try testing.expectEqual(before.consumers.len + 1, after.consumers.len);
+    try testing.expectApproxEqAbs(before.load_typ_a + 0.4, after.load_typ_a, 1e-12);
+    try testing.expectApproxEqAbs(before.load_max_a + 0.5, after.load_max_a, 1e-12);
+    const exported = consumerNamed(after.consumers, "@export/V3P3_OUT").?;
+    try testing.expectEqual(@as(?f64, 0.4), exported.i_typ);
+    try testing.expectEqual(@as(?f64, 0.5), exported.i_max);
+    try testing.expectEqualStrings("V3P3", exported.net);
 }

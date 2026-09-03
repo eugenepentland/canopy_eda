@@ -814,6 +814,7 @@ src/eval/power_budget.zig::RailConsumer struct_
 src/eval/power_budget.zig::RailStatus enum_
 src/eval/power_budget.zig::analyze | fn analyze( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const Rail
 src/eval/power_budget.zig::branchLoads | fn branchLoads( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const BranchLoad
+src/eval/power_budget.zig::export_terminal_prefix value
 src/eval/power_budget.zig::railNameForSubPath | fn railNameForSubPath(block: *const DesignBlock, path: []const u8) ?[]const u8
 src/eval/power_budget.zig::resolveRailVoltage | fn resolveRailVoltage(allocator: std.mem.Allocator, block: *const DesignBlock, rail_name: []const u8) ?f64
 src/eval/power_sequencing.zig::SequenceRow struct_
@@ -2504,7 +2505,9 @@ src/placement/net_copper.zig::collect | fn collect( arena: std.mem.Allocator, co
 src/placement/net_identity.zig::Identity struct_
 src/placement/net_identity.zig::canonical | fn canonical(self: Identity, net: i32) i32
 src/placement/net_identity.zig::canonicalName | fn canonicalName(self: Identity, nets: []const optimizer.FlatNet, net: i32) []const u8
+src/placement/net_identity.zig::familyOf | fn familyOf( self: Identity, arena: std.mem.Allocator, net: usize, ) std.mem.Allocator.Error![]const usize
 src/placement/net_identity.zig::init | fn init(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!Identity
+src/placement/net_identity.zig::isRoot | fn isRoot(self: Identity, net: usize) bool
 src/placement/net_identity.zig::same | fn same(self: Identity, a: i32, b: i32) bool
 src/placement/net_open.zig::NetAnswer struct_
 src/placement/net_open.zig::Prepared struct_
@@ -2919,13 +2922,15 @@ src/placement/power_current.zig::Sheet struct_
 src/placement/power_current.zig::Status enum_
 src/placement/power_current.zig::name | fn name(self: Status) []const u8
 src/placement/power_current.zig::solve | fn solve(arena: std.mem.Allocator, input: Input) std.mem.Allocator.Error!Result
+src/placement/power_integrity.zig::LocalWidth struct_
 src/placement/power_integrity.zig::analyze | fn analyze( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, ) std.mem.Allocator.Error!Analysis
 src/placement/power_integrity.zig::analyzeCopper | fn analyzeCopper( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, zones: []const pour.UserZone, base_edge: ?pour.EdgeField, ) std.mem.Allocator.Error!Analysis
 src/placement/power_integrity.zig::name | fn name(self: SurfaceCapacityStatus) []const u8
 src/placement/power_integrity.zig::name | fn name(self: SurfaceKind) []const u8
-src/placement/power_integrity.zig::routedTrackRequiredWidths | fn routedTrackRequiredWidths( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, ) std.mem.Allocator.Error![]const ?f64
-src/placement/power_integrity.zig::routedTrackRequiredWidthsMemo | fn routedTrackRequiredWidthsMemo( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, memo: ?pour.FillMemo, ) std.mem.Allocator.Error![]const ?f64
-src/placement/power_integrity.zig::routedTrackRequiredWidthsPrepared | fn routedTrackRequiredWidthsPrepared( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, plane_fills: []const pour.NetFills, zones: []const pour.UserZone, zone_fills: []const pour.Fill, ) std.mem.Allocator.Error![]const ?f64
+src/placement/power_integrity.zig::routedTrackRequiredWidths | fn routedTrackRequiredWidths( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, ) std.mem.Allocator.Error![]const ?LocalWidth
+src/placement/power_integrity.zig::routedTrackRequiredWidthsMemo | fn routedTrackRequiredWidthsMemo( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, memo: ?pour.FillMemo, ) std.mem.Allocator.Error![]const ?LocalWidth
+src/placement/power_integrity.zig::routedTrackRequiredWidthsMemoZones | fn routedTrackRequiredWidthsMemoZones( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, memo: ?pour.FillMemo, zones: []const pour.UserZone, ) std.mem.Allocator.Error![]const ?LocalWidth
+src/placement/power_integrity.zig::routedTrackRequiredWidthsPrepared | fn routedTrackRequiredWidthsPrepared( alloc: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, plane_fills: []const pour.NetFills, zones: []const pour.UserZone, zone_fills: []const pour.Fill, ) std.mem.Allocator.Error![]const ?LocalWidth
 src/placement/power_integrity.zig::temperature_rise_c value
 src/placement/power_integrity.zig::via_plating_mm value
 src/placement/power_route_width.zig::adaptiveTargetWidth | fn adaptiveTargetWidth( zones: []const route_policy.ExistingZone, placement: optimizer.Placement, net_i: usize, authored: f64, ) ?f64
