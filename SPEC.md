@@ -6408,6 +6408,9 @@ from the active simulation without mutating their layout definitions. The two
 controls select still air, fan only, heatsink only, or the simultaneous
 fan-plus-heatsink scenario from the already-rendered ladder, so comparing their
 effects is instantaneous and neither assembly has to be deleted and recreated.
+Inside the embedded thermal 3D view, its Fan and Heatsink visibility controls
+select those same simulation scenarios as well as hiding or showing the models;
+the controls remain visibility-only in the standalone PCB 3D viewer.
 
 `?scale_min=NN&scale_max=NN` selects the heat-map colour range only. The two
 legend endpoints are editable number controls, default to 25–125 °C, require a
@@ -6439,6 +6442,7 @@ Read-only: nothing here writes to the project dir.
 - ?ambient=NN screens the whole page at that ambient clamped to the control's range, and ?fragment=1 answers the verdict and table regions alone
 - ?scenario=<tag> opens the page on that rung with its own part table shown and the board frame opened on it
 - saved fan and heatsink assemblies can be independently included in or excluded from the active simulation without mutating their layout definitions
+- thermal 3D fan and heatsink visibility controls also select the matching simulation scenario
 - the page's client swaps only the ambient-dependent regions, keeps scenario switching local, and broadcasts a picked ref on the shared cross-probe channel
 - the page puts its panel beside a live board frame rather than a static heat image, embedding the read-only PCB viewer with the thermal overlay on
 - the board's legend starts at 25 °C to 125 °C, lets the reader edit both endpoints without another solve, and preserves a valid manual range in the page URL

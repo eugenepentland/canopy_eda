@@ -378,6 +378,24 @@
   function tell(msg) {
     try { if (window.parent && window.parent !== window) window.parent.postMessage(msg, "*"); } catch (e) {}
   }
+  function coolingState() {
+    return {
+      fan: view.scenario === "fan" || view.scenario === "fan_heatsink",
+      heatsink: view.scenario === "heatsink" || view.scenario === "fan_heatsink"
+    };
+  }
+  function sync3dCooling() {
+    var three = window.PCB3D;
+    if (!three || typeof three.setCoolingVisibility !== "function") return;
+    var cooling = coolingState();
+    three.setCoolingVisibility(cooling.fan, cooling.heatsink);
+  }
+  function toggleCooling(kind, enabled) {
+    var cooling = coolingState();
+    if (kind === "fan") cooling.fan = !!enabled;
+    if (kind === "heatsink") cooling.heatsink = !!enabled;
+    tell({ t: "thermal:cooling-toggle", fan: cooling.fan, heatsink: cooling.heatsink });
+  }
   function load() {
     var mine = ++seq;
     tell({ t: "thermal:state", loading: true });
@@ -424,7 +442,13 @@
     if (!d || d.t !== "thermal:view") return;
     var refetch = false;
     var recolor = false;
-    if (d.scenario && d.scenario !== view.scenario) { view.scenario = d.scenario; refetch = true; }
+    if (d.scenario) {
+      if (d.scenario !== view.scenario) {
+        view.scenario = d.scenario;
+        refetch = true;
+      }
+      sync3dCooling();
+    }
     if (typeof d.ambient === "number" && isFinite(d.ambient) && d.ambient !== view.ambient) {
       view.ambient = d.ambient; refetch = true;
     }
@@ -449,6 +473,7 @@
   // exact absolute range behind its colours.
   window.PCBThermal = {
     ramp: rampCss, reload: load, setScale: setScale, view: view,
+    coolingState: coolingState, toggleCooling: toggleCooling,
     scale: function () { return { minC: view.scaleMinC, maxC: view.scaleMaxC }; },
     painted: function () {
       return {
@@ -461,5 +486,6 @@
       };
     }
   };
+  sync3dCooling();
   load();
 })();

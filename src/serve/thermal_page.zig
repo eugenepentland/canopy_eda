@@ -1573,6 +1573,33 @@ test "saved cooling assemblies render independent simulation toggles" {
     try testing.expect(std.mem.indexOf(u8, natural.body, "id=\"tp-use-heatsink\" type=\"checkbox\" checked") == null);
 }
 
+// spec: serve/thermal-page - thermal 3D fan and heatsink visibility controls also select the matching simulation scenario
+test "thermal 3D cooling visibility controls drive the simulation scenario" {
+    const client = @embedFile("assets/thermal_page.js");
+    const overlay = @embedFile("assets/pcb_thermal.js");
+    const viewer = @embedFile("assets/pcb_3d_viewer.js");
+
+    // The 3D viewer reports both cooling switches to the thermal overlay, the
+    // overlay forwards one complete cooling state across the frame boundary,
+    // and the page selects the already-rendered matching scenario.
+    try testing.expect(containsAll(viewer, &.{
+        "function notifyThermalCooling(",
+        "thermal.toggleCooling(kind, visible)",
+        "thermal.coolingState()",
+        "setCoolingVisibility: function",
+    }));
+    try testing.expect(containsAll(overlay, &.{
+        "function coolingState()",
+        "function toggleCooling(",
+        "thermal:cooling-toggle",
+        "three.setCoolingVisibility",
+    }));
+    try testing.expect(containsAll(client, &.{
+        "d.t === \"thermal:cooling-toggle\"",
+        "tpSelect(coolingScenario())",
+    }));
+}
+
 // spec: serve/thermal-page - the page puts its panel beside a live board frame rather than a static heat image, embedding the read-only PCB viewer with the thermal overlay on
 test "the page embeds the read-only board viewer instead of a heat image" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);

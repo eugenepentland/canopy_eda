@@ -183,6 +183,12 @@
       tell({ selectedRef: d.ref || "" });
       return;
     }
+    if (d && d.t === "thermal:cooling-toggle") {
+      if (fanToggle && typeof d.fan === "boolean") fanToggle.checked = d.fan;
+      if (heatsinkToggle && typeof d.heatsink === "boolean") heatsinkToggle.checked = d.heatsink;
+      tpSelect(coolingScenario());
+      return;
+    }
     if (!d || d.t !== "thermal:state") return;
     if (veil) {
       veil.hidden = !d.loading && !d.error && !d.unavailable;

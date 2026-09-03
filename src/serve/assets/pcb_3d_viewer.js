@@ -998,6 +998,25 @@
   }
   function viewIso() { frame(0.7, -0.9, 0.8); }
 
+  function setCoolingLayer(kind, visible) {
+    var fan = kind === "fan";
+    if (fan) {
+      layerVisible.fan = visible;
+      fanGroup.visible = visible;
+    } else {
+      layerVisible.heatsink = visible;
+      heatsinkGroup.visible = visible;
+    }
+    var input = document.getElementById(fan ? "pcb3d-t-fan" : "pcb3d-t-heatsink");
+    if (input) input.checked = visible;
+    requestRender();
+  }
+
+  function notifyThermalCooling(kind, visible) {
+    var thermal = window.PCBThermal;
+    if (thermal && typeof thermal.toggleCooling === "function") thermal.toggleCooling(kind, visible);
+  }
+
   function wireControls() {
     var on = function (id, fn) { var e = document.getElementById(id); if (e) e.onclick = fn; };
     on("pcb3d-top", function () { frame(0, 0, 1); });
@@ -1020,9 +1039,15 @@
       requestRender();
     });
     chk("pcb3d-t-board", function (v) { boardGroup.visible = v; requestRender(); });
-    chk("pcb3d-t-heatsink", function (v) { layerVisible.heatsink = v; heatsinkGroup.visible = v; requestRender(); });
-    chk("pcb3d-t-fan", function (v) { layerVisible.fan = v; fanGroup.visible = v; requestRender(); });
+    chk("pcb3d-t-heatsink", function (v) { setCoolingLayer("heatsink", v); notifyThermalCooling("heatsink", v); });
+    chk("pcb3d-t-fan", function (v) { setCoolingLayer("fan", v); notifyThermalCooling("fan", v); });
     chk("pcb3d-t-axes", function (v) { axes.visible = v; requestRender(); });
+    var thermal = window.PCBThermal;
+    if (thermal && typeof thermal.coolingState === "function") {
+      var cooling = thermal.coolingState();
+      setCoolingLayer("fan", cooling.fan);
+      setCoolingLayer("heatsink", cooling.heatsink);
+    }
   }
 
   function resize() {
@@ -1070,6 +1095,11 @@
     // edit moves the centered datum, the camera translates with it so the
     // user's relative orbit is preserved across loads.
     sync: function () { if (built) applyPoses(); },
+    setCoolingVisibility: function (fan, heatsink) {
+      if (!built) return;
+      setCoolingLayer("fan", !!fan);
+      setCoolingLayer("heatsink", !!heatsink);
+    },
     modelAdded: function (fp, transform) { if (fp) refreshModel(fp, transform); },
     // Complete-design export uses the identical analytic board/component
     // recipe as the standalone STEP button. Source model B-reps are still read
