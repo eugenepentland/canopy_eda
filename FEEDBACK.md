@@ -637,3 +637,8 @@ matters when the person re-recording is the author of the change.
 - **friction:** `prepare-release.sh` discarded an otherwise-green exact candidate after one Canvas zoom sample measured 47.3 ms against the 45 ms limit. The same stripped binary immediately passed at 39.6 ms, but recording it required repeating the whole roughly three-minute wrapper.
 - **idea:** Let the browser performance stage retry one marginal threshold breach with the same stripped candidate, failing only if the retry also breaches; preserve both measurements in the candidate log.
 - **status:** open
+
+## 2026-09-03 · claude · per-track power width A/B measurement
+- **friction:** The main checkout's `zig-out/bin/netlisp` was two days and several commits older than the branch base, with nothing in its output saying so (`netlisp version` prints the CHECKOUT's HEAD, not the build's). Using it as the "before" side of a route A/B produced a phantom regression — a net that stopped closing — and three rounds of investigation and code changes chasing a cause that did not exist. Building the base commit in its own worktree showed base and branch closing identically.
+- **idea:** Stamp the built commit into the binary and have `netlisp version` report THAT (falling back to the checkout HEAD only when unstamped), so an A/B run can assert `version(before) == merge-base` before it measures anything. Failing that, a one-line warning from any `tool`/`drc-dump` invocation when the running binary's build id differs from the checkout HEAD would have caught this in the first minute.
+- **status:** worked around by building the base commit in a dedicated worktree; the stamping idea is open

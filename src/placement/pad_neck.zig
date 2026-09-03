@@ -21,6 +21,7 @@ const pad_neck_profile = @import("../pad_neck_profile.zig");
 const copper_support = @import("copper_support.zig");
 const optimizer = @import("optimizer.zig");
 const pose_math = @import("pose_math.zig");
+const power_branch_width = @import("power_branch_width.zig");
 const power_capacity = @import("power_capacity.zig");
 const router = @import("router.zig");
 
@@ -969,18 +970,38 @@ fn equalizeJointWidths(arena: std.mem.Allocator, pass: JointPass) std.mem.Alloca
 /// oracle. Nets are committed one at a time so later rails see earlier widened
 /// copper as a foreign obstacle rather than both claiming the same free space.
 ///
+/// Each segment has its OWN target: `power_branch_width` sizes it for the
+/// current its own branch was solved to carry, so a test-point stub is not
+/// built at trunk width. The whole-rail target survives exactly where the solve
+/// cannot judge a branch. Every target is settled up front, before any copper
+/// moves, because the solve is per-board and index-aligned with the track list
+/// this loop is about to rewrite.
+///
 /// A net is shaped in full before any of it is emitted: width continuity across
 /// a bend is a property of two tracks at once, and `equalizeJointWidths` needs
-/// both sides in hand.
+/// both sides in hand — including where the two sides now want DIFFERENT
+/// widths, which is exactly the trunk-meets-branch joint.
 fn adaptPowerTracks(board: router.CleanupBoard) std.mem.Allocator.Error!bool {
     const arena = board.arena();
+    const limits = try power_branch_width.netLimits(board);
+    // Kept aligned with `board.tracks` across every net's emission: a run that
+    // becomes several fabrication slices gives each of them its own target.
+    // Empty when no rail in scope opted into branch sizing, which leaves every
+    // run on its net's whole-rail target and this pass on the exact code path
+    // it had before per-track targets existed.
+    var targets: std.ArrayList(f64) = .empty;
+    if (power_branch_width.wantsBranchSizing(limits))
+        try targets.appendSlice(arena, try power_branch_width.boardTargets(board, limits));
     var any_changed = false;
-    for (board.placement.nets, 0..) |_, net_i| {
-        if (!board.enabled(net_i)) continue;
-        const target = board.adaptivePowerWidth(net_i) orelse continue;
+    for (limits, 0..) |net_limits, net_i| {
+        // Every candidate rail configures the route context exactly as it did
+        // before per-track targets existed, even when nothing on it can grow:
+        // the passes after this one read the parameters and copper index this
+        // loop leaves behind.
+        if (!net_limits.candidate) continue;
         board.beginNet(net_i);
-        const floor = board.trackWidth();
-        if (target <= floor + eps) continue;
+        if (!net_limits.active) continue;
+        const floor = net_limits.limits.floor;
         const net: i32 = @intCast(net_i);
         const pads = try netPads(arena, board.placement, net);
         const probe = board.tautProbe(net);
@@ -992,7 +1013,10 @@ fn adaptPowerTracks(board: router.CleanupBoard) std.mem.Allocator.Error!bool {
         for (board.tracks.items, 0..) |track, index| {
             plan[index] = null;
             if (track.net != net) continue;
-            if (track.width > floor + router.clearance_eps) {
+            const target = if (targets.items.len > index)
+                targets.items[index]
+            else if (track.width > floor + router.clearance_eps) 0 else net_limits.limits.net_target;
+            if (target <= floor + eps) {
                 try fixed.append(arena, track);
                 continue;
             }
@@ -1024,17 +1048,24 @@ fn adaptPowerTracks(board: router.CleanupBoard) std.mem.Allocator.Error!bool {
             .net = net,
         });
         var out: std.ArrayList(router.Track) = .empty;
+        var out_targets: std.ArrayList(f64) = .empty;
         var changed = false;
         for (board.tracks.items, 0..) |track, index| {
-            const run = plan[index] orelse {
-                try out.append(arena, track);
-                continue;
-            };
-            if (try emitShapedRun(arena, &out, runs.items[run])) changed = true;
+            const before = out.items.len;
+            if (plan[index]) |run| {
+                if (try emitShapedRun(arena, &out, runs.items[run])) changed = true;
+            } else try out.append(arena, track);
+            if (targets.items.len > index) {
+                for (before..out.items.len) |_| try out_targets.append(arena, targets.items[index]);
+            }
         }
         if (!changed) continue;
         board.tracks.clearRetainingCapacity();
         try board.tracks.appendSlice(arena, out.items);
+        if (targets.items.len > 0) {
+            targets.clearRetainingCapacity();
+            try targets.appendSlice(arena, out_targets.items);
+        }
         router.copperCompacted(board.ctx);
         any_changed = true;
     }
@@ -1367,6 +1398,15 @@ fn flankProfile(run: ShapedRun, tail: u1) struct { step: f64, widest: f64, monot
     return .{ .step = step, .widest = widest, .monotonic = monotonic };
 }
 
+/// True when every cell of a run sits at one width: a leg that reached its own
+/// target and was pulled down nowhere along it.
+fn runHeldAt(run: ShapedRun, width: f64) bool {
+    for (run.cells) |cell| {
+        if (@abs(cell.width - width) > eps) return false;
+    }
+    return true;
+}
+
 /// The V_5VA elbow this pass was reported on: a widened straight butt-joining a
 /// leg a foreign obstacle held at the routing floor, meeting at 45 degrees.
 const bend_corner = [2]f64{ 180.39, 91.99 };
@@ -1409,6 +1449,59 @@ test "a clearance-necked power leg pulls its bend partner down to a taper" {
         if (at_corner) |width| try testing.expectEqual(width, slice.width) else at_corner = slice.width;
     }
     try testing.expectEqual(@as(f64, 0.127), at_corner.?);
+}
+
+// spec: placement/power-routing - a trunk and a branch sized for their own solved currents still meet at one width, the wider side tapering back to its own target rather than stepping at the joint
+test "a wide trunk meeting a narrower branch target tapers into the joint" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Both legs reached their OWN electrical target — 0.30 mm of trunk current
+    // meeting a 0.15 mm branch — rather than one being held down by clearance.
+    // Continuity is a property of the joint, not of why the widths differ.
+    var runs = [_]ShapedRun{
+        try uniformRun(arena, bend_trunk, 0.3),
+        try uniformRun(arena, bend_elbow, 0.15),
+    };
+    try equalizeJointWidths(arena, .{
+        .runs = &runs,
+        .fixed = &.{},
+        .vias = &.{},
+        .pads = &.{},
+        .net = 0,
+    });
+    // The joint is single-width, and the branch keeps its own target: this pass
+    // only ever gives width up.
+    try testing.expectEqual(@as(f64, 0.15), runs[0].cells[runs[0].cells.len - 1].width);
+    try testing.expect(runHeldAt(runs[1], 0.15));
+
+    // The trunk walks back up to 0.30 on a 45-degree flank. A step would show
+    // as one jump of 0.15 at the elbow; a taper cannot exceed the flank rate.
+    const flank = flankProfile(runs[0], 1);
+    try testing.expect(flank.monotonic);
+    try testing.expect(flank.step <= adaptive_width_per_length * adaptive_step_mm + eps);
+    try testing.expectApproxEqAbs(@as(f64, 0.3), flank.widest, eps);
+
+    // Emitted as fabrication slices, the transition is more than one span wide
+    // and no pair at the shared point disagrees.
+    var out: std.ArrayList(router.Track) = .empty;
+    _ = try emitShapedRun(arena, &out, runs[0]);
+    _ = try emitShapedRun(arena, &out, runs[1]);
+    var trunk_widths: usize = 0;
+    var prior: f64 = -1;
+    var at_corner: ?f64 = null;
+    for (out.items) |slice| {
+        if (slice.net == 0 and @abs(slice.y1 - 91.99) <= eps and @abs(slice.y2 - 91.99) <= eps and
+            @abs(slice.width - prior) > eps)
+        {
+            trunk_widths += 1;
+            prior = slice.width;
+        }
+        if (!samePoint(.{ slice.x1, slice.y1 }, bend_corner) and !samePoint(.{ slice.x2, slice.y2 }, bend_corner)) continue;
+        if (at_corner) |width| try testing.expectEqual(width, slice.width) else at_corner = slice.width;
+    }
+    try testing.expectEqual(@as(f64, 0.15), at_corner.?);
+    try testing.expect(trunk_widths > 2);
 }
 
 // spec: placement/power-routing - a three-track junction, a same-net barrel, or a pad land at the meeting point leaves every leg its own width, so only a bare two-track joint is equalized

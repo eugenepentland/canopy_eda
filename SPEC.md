@@ -3479,14 +3479,20 @@ Public functions: capacityForArea, traceCapacityA, requiredTraceWidthMm,
 viaCapacityA, requiredViaDrillMm, routingCurrentA, powerWidthForNet,
 powerViaDrillForNet, routedTrackRequiredWidths, routedTrackRequiredWidthsPrepared,
 routedViaRequirements, routedViaRequirementsPrepared, adaptiveTargetWidth, exactWidth
+adaptiveTargetWidth, exactWidth, adaptiveFloorWidth, targetFor, netLimits,
+trackLimits, wantsBranchSizing, boardTargets, solveLocalWidths
 
 Power routing derives conservative pre-route copper geometry from the rail's
 declared load envelope, the actual stack foil, the 10 °C IPC-2221 screening
 target, and the board's via-plating rule. Shared traces without plane or pour
 support first route a fabrication-legal centreline, then grow toward the full
-rail width wherever exact copper clearance permits; pad-sized and constrained
-necks receive automatic tapers, and every remaining electrical shortfall is
-reported together without turning connectivity into a DRC error.
+rail width wherever exact copper clearance permits. A class that opts in with
+`(power-branch-width MM)` instead grows each SEGMENT toward the width its own
+solved branch current needs, so a test-point stub is not built at trunk width;
+the whole-rail width is retained wherever that solve cannot judge a branch, and
+on every class that never opted in. Pad-sized and constrained necks receive
+automatic tapers, and every remaining electrical shortfall is reported together
+without turning connectivity into a DRC error.
 For a rail carried by an explicitly
 declared plane or copper zone, the fill reserves the neck its own solved
 current needs, and every segment of every current-rated rail is judged after
@@ -3528,6 +3534,8 @@ number of vias it needs.
 - the PCB DRC panel offers an undoable repair for every authoritative adaptive power-width finding that loads the exact geometry gate on demand, recuts only failing runs without moving their centre lines, removes generated stitching posts crossed by the wider copper, commits independently clean repairs when another run is constrained, and never expands one finding into more taper-slice findings
 - Two adaptive slices meeting at a bend or at a plain two-way splice with existing copper are emitted at one width, with the 45-degree transition moved onto the adjoining straight, while pad lands, via corners and T-junctions keep their free trunk/branch step
 - two adaptive power tracks that meet at a bend take the narrower of their two widths at that joint, including where one side is copper this pass left alone, and the wider side tapers back to its electrical target along its own straight
+- a routed power segment on a class that opted into branch sizing is widened for the current its own branch carries, not for the whole rail, while an unsolved branch, an uncovered segment, and every class that never opted in keep the whole-rail target
+- a trunk and a branch sized for their own solved currents still meet at one width, the wider side tapering back to its own target rather than stepping at the joint
 - a three-track junction, a same-net barrel, or a pad land at the meeting point leaves every leg its own width, so only a bare two-track joint is equalized
 - completeness-waiver: concurrent access (capacity functions are pure and routing reads one immutable placement snapshot while mutating only its caller-owned route)
 - completeness-waiver: empty inputs (a missing or empty stack and a rail without an unambiguous declared load produce no derived geometry)
