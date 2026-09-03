@@ -3464,8 +3464,8 @@ declared load envelope, the actual stack foil, the 10 °C IPC-2221 screening
 target, and the board's via-plating rule. Shared traces without plane or pour
 support first route a fabrication-legal centreline, then grow toward the full
 rail width wherever exact copper clearance permits; pad-sized and constrained
-necks receive automatic tapers, and one worst-neck warning reports any
-remaining electrical shortfall without turning connectivity into a DRC error.
+necks receive automatic tapers, and every remaining electrical shortfall is
+reported together without turning connectivity into a DRC error.
 For a rail carried by an explicitly
 declared plane or copper zone, the fill reserves the full-current neck while
 short pad fanouts may opt into `(power-branch-width MM)` and are judged after
@@ -3484,7 +3484,7 @@ is enlarged only as far as the derived drill and annular-ring rules require.
 - the hand router receives an electrical target for every unpoured current-rated rail, including an otherwise-unclassed net
 - the hand router steers an unpoured current-rated rail at ordinary fabrication width, then independently exact-DRC-fits each local interval up to its electrical target with 45-degree tapers from the pad's smaller dimension
 - adaptive routing retains the full maximum-current target while a pour-backed rail keeps its short authored fanout width
-- an adaptive rail reports one error at its worst electrical shortfall while the fabrication minimum remains a hard error
+- an adaptive rail reports every actionable electrical shortfall in one pass while the fabrication minimum remains a hard error
 - power-width comparison accepts the one-micrometre persistence quantum but rejects a material shortfall
 - a solved plane-aware rail exposes an index-aligned required width for each local-current branch, while an incomplete opted-in rail screens every segment at the whole-rail current
 - a port-keyed consumer whose module-side net reaches only passive parts resolves those pads as its load contacts

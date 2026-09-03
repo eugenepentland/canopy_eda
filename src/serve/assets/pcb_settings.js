@@ -235,7 +235,7 @@ var DRC_HELP={
  hole_hole:"Two drilled holes sit closer than the hole-to-hole rule; the drill can break out.",
  min_drill:"A hole is smaller than the smallest drill the fab rules permit.",
  track_width:"A track is narrower than the minimum width the fab rules permit.",
- power_width:"A power trace is fabrication-legal but narrower than its electrical current-capacity target at its most constrained neck.",
+ power_width:"A power trace segment is fabrication-legal but narrower than its electrical current-capacity target. Every actionable undersized segment is reported in the same DRC run.",
  board_edge:"Copper sits closer to the routed board outline than the edge rule.",
  component_edge:"A component courtyard sits closer to the finished board edge than the component-edge rule. The built-in fabrication minimum is 0.2 mm; assembly services may require a wider authored value.",
  courtyard:"Two component courtyards overlap — the parts collide on assembly.",

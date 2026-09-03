@@ -10009,8 +10009,8 @@ window.PCBApplyAdaptiveRewiden=applyAdaptiveRewiden;
 // touched are recut to the clearance they now have. It runs inside the gesture,
 // after the crumb cull and the move's own gate, so the healed copper lands in
 // the undo step the drag already recorded. A rejected or unavailable gate leaves
-// the rail exactly where the gesture put it — the aggregated power_width warning
-// still reports it as under target. Never on pointermove: every interval of a
+// the rail exactly where the gesture put it — power_width findings still report
+// each undersized segment. Never on pointermove: every interval of a
 // recut bisects against the exact engine.
 function rewidenHeal(ts){return ts&&ts.length?rewidenApply(ts):0;}
 var traceEmIdx=null,traceEmDirty=false,powerIntegrityIdx=null,powerIntegrityDirty=false;

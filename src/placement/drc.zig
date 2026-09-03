@@ -1958,8 +1958,6 @@ const WidthShortfall = struct {
 
 fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) std.mem.Allocator.Error!void {
     const nrules = in.placement.rules.net;
-    const power_shortfalls = try arena.alloc(?WidthShortfall, in.placement.nets.len);
-    @memset(power_shortfalls, null);
     // Effective width requirement per track, kept so the pad-entry neck walk
     // can judge whether NEIGHBOURING copper satisfies its own requirement.
     const requirements = try arena.alloc(f64, in.tracks.len);
@@ -1989,8 +1987,8 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
         const under_width = t.width < want - eps;
         const under_power_width = t.width < want - power_width_eps_mm;
         // Fabrication width and electrical power capacity are both hard rules.
-        // Power capacity is aggregated to one finding at the worst neck so a
-        // routed rail does not flood the report with every taper slice.
+        // Keep every electrical candidate so the DRC report exposes the full
+        // repair set in one pass instead of revealing one shortfall at a time.
         if (t.width < in.min_width - eps) {
             try out.append(arena, .{
                 .x = (t.x1 + t.x2) / 2,
@@ -2033,11 +2031,10 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
         try out.append(arena, .{ .x = (t.x1 + t.x2) / 2, .y = (t.y1 + t.y2) / 2, .gap = t.width, .clearance = want, .kind = .track_width, .who = .{ .net_a = t.net, .track_a = partyIndex(track_index) }, .layer = layerOf(t.layer) });
     }
     // A pad the neck serves can be narrower than the solved width: a short
-    // neck into wide copper is accepted practice, so it never becomes the
-    // rail's reported worst shortfall. Exempted silently, exactly like the
-    // own-land and port-frame-taper exemptions; everything else competes for
-    // the one worst-neck error as before. One geometric walk covers a whole
-    // taper chain, so its verdict is cached across that chain's slices.
+    // neck into wide copper is accepted practice, so it never becomes a
+    // reported shortfall. Exempt it silently, exactly like the own-land and
+    // port-frame-taper exemptions. One geometric walk covers a whole taper
+    // chain, so its verdict is cached across that chain's slices.
     var neck_verdicts: std.AutoHashMapUnmanaged(usize, bool) = .empty;
     const neck_board = pad_neck.PowerNeckBoard{
         .placement = in.placement,
@@ -2054,22 +2051,14 @@ fn checkTrackWidth(arena: std.mem.Allocator, out: *Viol, in: TrackWidthInput) st
         };
         if (exempt) continue;
         const t = in.tracks[candidate.track_index];
-        const ni: usize = @intCast(t.net);
-        const prior = power_shortfalls[ni];
-        if (prior == null or candidate.actual / candidate.required < prior.?.actual / prior.?.required)
-            power_shortfalls[ni] = candidate;
-    }
-    for (power_shortfalls) |maybe_shortfall| {
-        const shortfall = maybe_shortfall orelse continue;
-        const t = in.tracks[shortfall.track_index];
         try out.append(arena, .{
             .x = (t.x1 + t.x2) / 2,
             .y = (t.y1 + t.y2) / 2,
-            .gap = shortfall.actual,
-            .clearance = shortfall.required,
+            .gap = candidate.actual,
+            .clearance = candidate.required,
             .kind = .power_width,
             .severity = defaultSeverity(.power_width),
-            .who = .{ .net_a = t.net, .track_a = partyIndex(shortfall.track_index) },
+            .who = .{ .net_a = t.net, .track_a = partyIndex(candidate.track_index) },
             .layer = layerOf(t.layer),
         });
     }
@@ -3880,8 +3869,8 @@ test "track width accepts a solved narrow power branch but enforces its local re
     try testing.expectApproxEqAbs(@as(f64, 0.1524), violations.items[0].clearance, 1e-12);
 }
 
-// spec: placement/power-routing - an adaptive rail reports one error at its worst electrical shortfall while the fabrication minimum remains a hard error
-test "adaptive power width shortfall is one blocking worst-neck finding" {
+// spec: placement/power-routing - an adaptive rail reports every actionable electrical shortfall in one pass while the fabrication minimum remains a hard error
+test "adaptive power width reports every actionable shortfall in one pass" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
@@ -3918,11 +3907,13 @@ test "adaptive power width shortfall is one blocking worst-neck finding" {
         .tracks = &tracks,
         .min_width = 0.127,
     });
-    try testing.expectEqual(@as(usize, 1), violations.items.len);
-    try testing.expectEqual(Kind.power_width, violations.items[0].kind);
-    try testing.expectEqual(Severity.err, violations.items[0].severity);
-    try testing.expectApproxEqAbs(@as(f64, 0.2), violations.items[0].gap, 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 0.8), violations.items[0].clearance, 1e-12);
+    try testing.expectEqual(@as(usize, 3), violations.items.len);
+    for (violations.items, tracks) |violation, track| {
+        try testing.expectEqual(Kind.power_width, violation.kind);
+        try testing.expectEqual(Severity.err, violation.severity);
+        try testing.expectApproxEqAbs(track.width, violation.gap, 1e-12);
+        try testing.expectApproxEqAbs(@as(f64, 0.8), violation.clearance, 1e-12);
+    }
 }
 
 // spec: placement/power-routing - power-width comparison accepts the one-micrometre persistence quantum but rejects a material shortfall
