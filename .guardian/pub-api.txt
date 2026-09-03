@@ -1672,6 +1672,22 @@ src/main.zig::process_environ_map value
 src/main.zig::process_io value
 src/markdown_row.zig::max_cells value
 src/markdown_row.zig::split | fn split(line: []const u8, out: *[max_cells][]const u8) usize
+src/mechanical/enclosure.zig::Dimensions struct_
+src/mechanical/enclosure.zig::EnclosureError value
+src/mechanical/enclosure.zig::Model struct_
+src/mechanical/enclosure.zig::Parameters struct_
+src/mechanical/enclosure.zig::deinit | fn deinit(self: Model, allocator: std.mem.Allocator) void
+src/mechanical/enclosure.zig::dimensions | fn dimensions(parameters: Parameters) EnclosureError!Dimensions
+src/mechanical/enclosure.zig::generate | fn generate(allocator: std.mem.Allocator, parameters: Parameters) (EnclosureError || std.mem.Allocator.Error)!Model
+src/mechanical/prismatic.zig::KernelError value
+src/mechanical/prismatic.zig::Mesh struct_
+src/mechanical/prismatic.zig::Point2 value
+src/mechanical/prismatic.zig::Point3 value
+src/mechanical/prismatic.zig::Triangle value
+src/mechanical/prismatic.zig::box | fn box( allocator: std.mem.Allocator, width: f64, depth: f64, z_min: f64, z_max: f64, ) (KernelError || std.mem.Allocator.Error)!Mesh
+src/mechanical/prismatic.zig::deinit | fn deinit(self: Mesh, allocator: std.mem.Allocator) void
+src/mechanical/prismatic.zig::extrudeConvex | fn extrudeConvex( allocator: std.mem.Allocator, profile: []const Point2, z_min: f64, z_max: f64, ) (KernelError || std.mem.Allocator.Error)!Mesh
+src/mechanical/prismatic.zig::rectangularShell | fn rectangularShell( allocator: std.mem.Allocator, inner_width: f64, inner_depth: f64, wall: f64, floor: f64, height: f64, ) (KernelError || std.mem.Allocator.Error)!Mesh
 src/module_metadata.zig::Collection struct_
 src/module_metadata.zig::Definition struct_
 src/module_metadata.zig::Dependency struct_
@@ -4632,8 +4648,10 @@ src/serve/pcb_rules_json.zig::writeGroundNames | fn writeGroundNames(w: *std.Io.
 src/serve/pcb_rules_json.zig::writeMaskRelief | fn writeMaskRelief( w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, routed: ?router.RouteResult, ) std.Io.Writer.Error!void
 src/serve/pcb_rules_json.zig::writeNetClasses | fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!void
 src/serve/pcb_rules_json.zig::writePlaneNets | fn writePlaneNets(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!void
+src/serve/pcb_step_export.zig::Body struct_
 src/serve/pcb_step_export.zig::ExportError value
 src/serve/pcb_step_export.zig::HandlerError value
+src/serve/pcb_step_export.zig::buildBodies | fn buildBodies( allocator: std.mem.Allocator, design_name: []const u8, bodies: []const Body, ) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
 src/serve/pcb_step_export.zig::buildFromJson | fn buildFromJson( allocator: std.mem.Allocator, project_dir: []const u8, design_name: []const u8, body: []const u8, ) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
 src/serve/pcb_step_export.zig::pcbStepApi | fn pcbStepApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_subseeds.zig::pcbSubSeedsApi | fn pcbSubSeedsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb.HandlerError!void
@@ -4851,6 +4869,10 @@ src/serve/sync_kicad_sch.zig::mcpSyncKicadSch | fn mcpSyncKicadSch( alloc: std.m
 src/serve/sync_kicad_sch.zig::runPush | fn runPush( allocator: std.mem.Allocator, arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: push.Options, ) PushApiError!push.Result
 src/serve/sync_kicad_sch.zig::syncKicadSchApi | fn syncKicadSchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/sync_kicad_sch.zig::writeResultJson | fn writeResultJson( w: *std.Io.Writer, name: []const u8, result: push.Result, dry_run: bool, ) std.Io.Writer.Error!void
+src/serve/system_cad.zig::HandlerError value
+src/serve/system_cad.zig::exportFile | fn exportFile( allocator: std.mem.Allocator, system_name: []const u8, req: *httpz.Request, res: *httpz.Response, ) HandlerError!void
+src/serve/system_cad.zig::meshApi | fn meshApi(allocator: std.mem.Allocator, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_cad.zig::page | fn page( allocator: std.mem.Allocator, project_dir: []const u8, spec: system_review.SystemSpec, res: *httpz.Response, ) HandlerError!void
 src/serve/system_review_api.zig::AssemblyRenderContext struct_
 src/serve/system_review_api.zig::HandlerError value
 src/serve/system_review_api.zig::ListSystemsError value
@@ -4869,6 +4891,9 @@ src/serve/system_review_api.zig::readinessApi | fn readinessApi(ctx: *Server, re
 src/serve/system_review_api.zig::regenerateDossierApi | fn regenerateDossierApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::releaseApi | fn releaseApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::renderAssembly | fn renderAssembly( raw_context: *anyopaque, input: fab_release_service.AssemblyInput, ) pcb_layout_page.HandlerError![]const u8
+src/serve/system_review_api.zig::systemCadExportApi | fn systemCadExportApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::systemCadMeshApi | fn systemCadMeshApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::systemCadPage | fn systemCadPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::systemPage | fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::uploadAssetApi | fn uploadAssetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/templates/library.zig::Args value

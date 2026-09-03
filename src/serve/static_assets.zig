@@ -100,6 +100,8 @@ const pcb_3d_viewer_js = @embedFile("assets/pcb_3d_viewer.js");
 // PNGs first and invokes the STEP renderer only to populate a missing/stale
 // filesystem entry; there is no persistent WebGL scene or render loop.
 const pcb_model_sprites_js = @embedFile("assets/pcb_model_sprites.js");
+const system_cad_js = @embedFile("assets/system_cad.js");
+const system_cad_css = @embedFile("assets/system_cad.css");
 
 // Client-side WASM design-rule check — the same placement/drc.zig engine
 // compiled to wasm32-freestanding (see build.zig's `wasm-drc` step, embedded
@@ -180,6 +182,8 @@ const registry = [_]Asset{
     .{ .name = "pcb_step_worker.js", .body = pcb_step_worker_js, .content_type = .JS },
     .{ .name = "pcb_3d_viewer.js", .body = pcb_3d_viewer_js, .content_type = .JS },
     .{ .name = "pcb_model_sprites.js", .body = pcb_model_sprites_js, .content_type = .JS },
+    .{ .name = "system_cad.js", .body = system_cad_js, .content_type = .JS },
+    .{ .name = "system_cad.css", .body = system_cad_css, .content_type = .CSS },
     .{ .name = "drc.wasm", .body = drc_wasm, .content_type = .WASM },
     .{ .name = "drc_marshal.js", .body = drc_marshal_js, .content_type = .JS },
     .{ .name = "drc_worker.js", .body = drc_worker_js, .content_type = .JS },

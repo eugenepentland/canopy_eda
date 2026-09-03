@@ -32,7 +32,9 @@ const slot_half_segments: usize = 12;
 
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
-const Body = struct {
+/// Reusable faceted solid input. Mechanical CAD uses this seam so enclosure
+/// geometry generated in Zig reaches STEP without a browser JSON round trip.
+pub const Body = struct {
     name: []const u8,
     points: []const [3]f64,
     triangles: []const [3]usize,
@@ -1468,6 +1470,18 @@ pub fn buildFromJson(
     const request = std.json.parseFromSliceLeaky(Request, allocator, body, .{ .ignore_unknown_fields = true }) catch
         return error.BadRequest;
     return build(allocator, project_dir, design_name, request);
+}
+
+/// Compose already-validated, locally generated solid meshes into one AP242
+/// file. No project assets are consulted unless component instances are added
+/// through the browser-oriented path above.
+pub fn buildBodies(
+    allocator: std.mem.Allocator,
+    design_name: []const u8,
+    bodies: []const Body,
+) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
+    if (!safeDesignName(design_name)) return error.BadRequest;
+    return build(allocator, ".", design_name, .{ .bodies = bodies });
 }
 
 fn sendError(res: *httpz.Response, status: u16, message: []const u8) void {
