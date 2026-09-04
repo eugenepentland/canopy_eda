@@ -14,6 +14,7 @@ const router = @import("router.zig");
 const outline = @import("outline.zig");
 const pad_shape = @import("pad_shape.zig");
 const numeric = @import("../numeric.zig");
+const net_names = @import("../net_name.zig");
 
 /// Saved-route provenance reserved for board-derived perimeter sites.
 pub const provenance = "@perimeter";
@@ -39,10 +40,7 @@ fn declared(p: optimizer.Placement) bool {
         p.board_rect != null;
 }
 
-fn shortName(name: []const u8) []const u8 {
-    const slash = std.mem.lastIndexOfScalar(u8, name, '/') orelse return name;
-    return name[slash + 1 ..];
-}
+const shortName = net_names.leaf;
 
 /// Resolve the authored stitch-net name against flattened nets, accepting the
 /// same case-insensitive full-name or leaf-name spelling as other board rules.

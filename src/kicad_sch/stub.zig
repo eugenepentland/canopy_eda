@@ -39,6 +39,7 @@
 
 const std = @import("std");
 const export_kicad = @import("../export_kicad.zig");
+const net_name = @import("../net_name.zig");
 
 const FlatNet = export_kicad.FlatNet;
 
@@ -101,10 +102,7 @@ fn hostsPad(net: FlatNet, s: Split, known: *const std.StringHashMapUnmanaged(u32
 
 /// The module-local part of a flattened ref-des: `flash/U14` -> `U14`, which is
 /// the spelling the stub-net generator wrote before flattening prefixed it.
-fn leafOf(ref: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, ref, '/')) |i| return ref[i + 1 ..];
-    return ref;
-}
+const leafOf = net_name.leaf;
 
 // ── Tests ──────────────────────────────────────────────────────────────
 

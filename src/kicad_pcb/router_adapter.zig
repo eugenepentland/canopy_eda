@@ -14,6 +14,7 @@ const track_segment = @import("track_segment.zig");
 const router = @import("../placement/router.zig");
 const diff_pairs = @import("../placement/diff_pairs.zig");
 const export_kicad = @import("../export_kicad.zig");
+const net_name = @import("../net_name.zig");
 
 /// Fixed router input derived from one KiCad board plus optional project rules.
 pub const Adapted = struct {
@@ -552,10 +553,7 @@ fn applyDiffPairViaGaps(
     }
 }
 
-fn shortName(name: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, name, '/')) |i| return name[i + 1 ..];
-    return name;
-}
+const shortName = net_name.leaf;
 
 /// The routable index of a board layer NAME, through the shared layer model.
 fn signalLayerIndex(rules: optimizer.BoardRules, name: []const u8) ?u8 {

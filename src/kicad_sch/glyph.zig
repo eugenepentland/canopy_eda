@@ -38,6 +38,7 @@
 const std = @import("std");
 const kicad_sym = @import("../kicad_sym/reader.zig");
 const shape = @import("shape.zig");
+const net_name = @import("../net_name.zig");
 
 /// Ten-thousandths of a millimetre per hundredth — the two units this module
 /// straddles (body art in the former, pin endpoints in the latter).
@@ -153,7 +154,7 @@ fn family(name: []const u8, prefix: []const u8) bool {
 /// path. `FB` is a ferrite bead and `FID` a fiducial, so a bare `F` prefix only
 /// means a fuse when nothing else follows the letter but digits.
 fn byRef(ref: []const u8) Class {
-    const leaf = if (std.mem.lastIndexOfScalar(u8, ref, '/')) |i| ref[i + 1 ..] else ref;
+    const leaf = net_name.leaf(ref);
     if (leaf.len == 0) return .box;
     if (hasPrefix(leaf, "FB")) return .ferrite_bead;
     if (hasPrefix(leaf, "LED")) return .led;

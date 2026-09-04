@@ -25,6 +25,7 @@ const mask_relief = @import("placement/mask_relief.zig");
 const route_result = @import("placement/route_result.zig");
 const font = @import("font5x7.zig");
 const silk_font = @import("silk_font.zig");
+const net_name = @import("net_name.zig");
 
 /// Keep generated silk clear of the annotated parts' own courtyards.
 const courtyard_margin_mm: f64 = 0.5;
@@ -617,10 +618,7 @@ fn isDirectionalPart(part: optimizer.Part, has_authored_indicator: bool) bool {
 
     // Two-terminal diodes and LEDs are classified as passives, but their
     // reference designator still carries the polarity information.
-    const leaf = if (std.mem.lastIndexOfScalar(u8, part.ref_des, '/')) |slash|
-        part.ref_des[slash + 1 ..]
-    else
-        part.ref_des;
+    const leaf = net_name.leaf(part.ref_des);
     return part.pads.len == 2 and leaf.len > 0 and
         (std.ascii.toUpper(leaf[0]) == 'D' or std.ascii.toUpper(leaf[0]) == 'Q');
 }
@@ -1332,10 +1330,7 @@ fn groupName(ref: []const u8) ?[]const u8 {
     return ref[0..slash];
 }
 
-fn leafName(ref: []const u8) []const u8 {
-    const slash = std.mem.lastIndexOfScalar(u8, ref, '/') orelse return ref;
-    return ref[slash + 1 ..];
-}
+const leafName = net_name.leaf;
 
 /// Main-side preference: an IC-style U hub outranks another hub; passives are
 /// only the fallback for an unusual one-part/passive-only module.

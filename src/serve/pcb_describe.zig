@@ -63,6 +63,7 @@ const route_diagnose = @import("../placement/route_diagnose.zig");
 const stuck_json = @import("stuck_json.zig");
 const render_pcb_png = @import("../render_pcb_png.zig");
 const serve_root = @import("../serve.zig");
+const net_name = @import("../net_name.zig");
 const Server = serve_root.Server;
 
 /// Which side of the anchor (or of a loop's hub) something sits on, in board
@@ -1120,7 +1121,7 @@ fn oppositeSides(a: Side, b: Side) bool {
 /// Ground-family net check (leaf name): GND/AGND/PGND/…/VSS — the return is a
 /// plane, so ground pads never define a preferred side.
 fn groundish(name: []const u8) bool {
-    const leaf = if (std.mem.lastIndexOfScalar(u8, name, '/')) |i| name[i + 1 ..] else name;
+    const leaf = net_name.leaf(name);
     var buf: [32]u8 = undefined;
     if (leaf.len > buf.len) return false;
     const up = std.ascii.upperString(&buf, leaf);

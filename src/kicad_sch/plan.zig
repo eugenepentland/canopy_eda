@@ -12,6 +12,7 @@
 //!     every cap on the board shares them — they carry no locality at all.
 
 const std = @import("std");
+const net_name = @import("../net_name.zig");
 
 /// The most characters a slug contributes to a filename, so a long section
 /// title cannot produce an unwieldy sibling path.
@@ -22,7 +23,7 @@ pub const max_slug_len: usize = 40;
 /// negation. The leaf after the last `/` is what carries the prefix on a
 /// sub-block-qualified ref.
 pub fn isPassiveRef(ref: []const u8) bool {
-    const leaf = if (std.mem.lastIndexOfScalar(u8, ref, '/')) |i| ref[i + 1 ..] else ref;
+    const leaf = net_name.leaf(ref);
     if (leaf.len == 0) return false;
     return switch (std.ascii.toUpper(leaf[0])) {
         'R', 'C', 'L', 'D', 'F' => true,

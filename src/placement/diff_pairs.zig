@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const optimizer = @import("optimizer.zig");
+const net_name = @import("../net_name.zig");
 
 const FlatNet = optimizer.FlatNet;
 const NetRule = optimizer.NetRule;
@@ -39,10 +40,7 @@ pub const default_gap_mm: f64 = 0.127;
 
 /// Net name after the last '/' — mirrors `optimizer.shortName` so pair naming
 /// compares module-local leaves, not hierarchy paths.
-fn leaf(s: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];
-    return s;
-}
+const leaf = net_name.leaf;
 
 /// Which side of a differential pair a net name names.
 pub const Polarity = enum { p, n };

@@ -16,6 +16,7 @@ const net_rules = @import("net_rules.zig");
 const critical_paths = @import("critical_paths.zig");
 const route_score = @import("critical_route_score.zig");
 const rf_path_solver = @import("rf_path_solver.zig");
+const net_name = @import("../net_name.zig");
 
 /// Extracted critical topology retained by the placement preparation model.
 pub const Result = critical_paths.Result;
@@ -795,9 +796,7 @@ fn anyOverlap(comptime Part: type, parts: []const Part, opts: Options) bool {
 /// (`net_analysis.baseNetName`'s), so the stub `VDD.U1.3` reduced to the leaf
 /// `3` instead of naming a rail. Nothing else in the project reads a net name
 /// that way.
-fn leafNetName(name: []const u8) []const u8 {
-    return if (std.mem.lastIndexOfScalar(u8, name, '/')) |i| name[i + 1 ..] else name;
-}
+const leafNetName = net_name.leaf;
 
 /// True when a net is a ground return, judged by the project's one ground
 /// predicate. This kept a private GND/GROUND/VSS exact-match list, which is the

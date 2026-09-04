@@ -3,10 +3,10 @@
 const std = @import("std");
 const env = @import("../eval/env.zig");
 const identity = @import("../placement/rough_identity.zig");
+const net_name = @import("../net_name.zig");
 
 fn prefix(ref: []const u8) []const u8 {
-    const i = std.mem.lastIndexOfScalar(u8, ref, '/') orelse return "";
-    return ref[0..i];
+    return net_name.parent(ref) orelse "";
 }
 
 /// Bind one unambiguous legacy hub pose to one unbound explicit anchor. The

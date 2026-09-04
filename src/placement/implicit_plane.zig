@@ -36,6 +36,7 @@ const module_policy = @import("module_policy.zig");
 const optimizer = @import("optimizer.zig");
 const pin_roles = @import("pin_roles.zig");
 const rails = @import("../eval/rails.zig");
+const net_name = @import("../net_name.zig");
 
 const FlatNet = flat_netlist.FlatNet;
 
@@ -187,10 +188,7 @@ fn leafIsUnique(nets: []const FlatNet, leaf: []const u8) bool {
 }
 
 /// The net name's leaf after the last '/' (the sub-block flatten prefix).
-fn leafName(s: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];
-    return s;
-}
+const leafName = net_name.leaf;
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 

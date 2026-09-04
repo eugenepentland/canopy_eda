@@ -14,15 +14,14 @@ const flat_netlist = @import("../flat_netlist.zig");
 const impedance = @import("impedance.zig");
 const impedance_rules = @import("impedance_rules.zig");
 const match_group = @import("match_group.zig");
+const net_names = @import("../net_name.zig");
 const DesignBlock = env.DesignBlock;
 const FlatNet = flat_netlist.FlatNet;
 
 /// A net's leaf spelling — the segment after the last `/` of a hierarchical
 /// name. Mirrors `optimizer.shortName`, kept local so this module imports no
 /// placement code.
-fn shortName(s: []const u8) []const u8 {
-    return if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| s[i + 1 ..] else s;
-}
+const shortName = net_names.leaf;
 
 /// One flattened net's effective class identity and routing geometry in mm.
 /// Zero-valued geometry keeps the corresponding router default.

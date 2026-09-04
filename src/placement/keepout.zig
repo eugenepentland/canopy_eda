@@ -66,6 +66,7 @@
 
 const std = @import("std");
 const optimizer = @import("optimizer.zig");
+const net_name = @import("../net_name.zig");
 
 /// Does any net on this board resolve to a `(keepout MM)`? False ⇒ every
 /// keepout code path is skipped entirely, so a board that declares none pays
@@ -431,10 +432,7 @@ pub fn escapeAdmits(
 
 /// The net name's leaf after the last '/' (the sub-block flatten prefix), so a
 /// module-local `buck/GND` reads as ground exactly like a board-level `GND`.
-fn leaf(s: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];
-    return s;
-}
+const leaf = net_name.leaf;
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 

@@ -19,6 +19,7 @@ const export_gerber = @import("export_gerber.zig");
 const json_writer = @import("json_writer.zig");
 const raster = @import("raster.zig");
 const zipfile = @import("zipfile.zig");
+const net_names = @import("net_name.zig");
 
 const exporter_version = "1.0.0";
 /// The first simulation handoff's deliberately narrow net scope.
@@ -437,10 +438,7 @@ fn findNet(placement: optimizer.Placement, requested_name: []const u8) ?usize {
     return null;
 }
 
-fn leaf(name: []const u8) []const u8 {
-    const slash = std.mem.lastIndexOfScalar(u8, name, '/') orelse return name;
-    return name[slash + 1 ..];
-}
+const leaf = net_names.leaf;
 
 fn finitePoint(p: [2]f64) bool {
     return std.math.isFinite(p[0]) and std.math.isFinite(p[1]);

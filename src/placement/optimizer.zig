@@ -76,6 +76,7 @@ const power_capacity = @import("power_capacity.zig");
 const infra_fs = @import("../infra/fs.zig");
 const numeric = @import("../numeric.zig");
 const board_layers = @import("../board_layers.zig");
+const net_names = @import("../net_name.zig");
 const roughNameMatch = rough_identity.nameMatch;
 const isHub = rough_identity.isHub;
 const isHubForRough = rough_identity.isHubForRough;
@@ -3014,7 +3015,7 @@ fn membersBox(parts: []const Part, members: []const usize) [4]f64 {
 /// Uppercased ref-des prefix letter of a part's leaf ref (after the last `/`),
 /// e.g. `'C'` for "pwr/C3". 0 when empty. Distinguishes cap (C) from resistor (R).
 fn leafRefPrefix(ref: []const u8) u8 {
-    const leaf = if (std.mem.lastIndexOfScalar(u8, ref, '/')) |s| ref[s + 1 ..] else ref;
+    const leaf = net_names.leaf(ref);
     return if (leaf.len > 0) std.ascii.toUpper(leaf[0]) else 0;
 }
 
@@ -10250,10 +10251,7 @@ const capValueFarads = decouple_key.capFarads;
 pub const isGroundName = net_analysis.isGroundName;
 
 /// Last path segment of a `parent/child` ref-des or net name.
-fn shortName(s: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];
-    return s;
-}
+const shortName = net_names.leaf;
 
 // ── Tests ──────────────────────────────────────────────────────────────
 

@@ -26,6 +26,7 @@ const rails_mod = @import("../eval/rails.zig");
 const decouple_key = @import("../decouple_key.zig");
 const optimizer = @import("optimizer.zig");
 const pin_roles = @import("pin_roles.zig");
+const net_name = @import("../net_name.zig");
 
 const Allocator = std.mem.Allocator;
 const Part = optimizer.Part;
@@ -317,10 +318,7 @@ pub fn isInductor(ref: []const u8) bool {
 }
 
 /// Last `parent/child` segment of a ref-des or net name.
-fn leafName(s: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];
-    return s;
-}
+const leafName = net_name.leaf;
 
 /// Parse a capacitance string ("100nF", "4.7uF", "4.7µF") to farads; 0 if
 /// unrecognised. One shared rule with the ERC pass and the schematic bank

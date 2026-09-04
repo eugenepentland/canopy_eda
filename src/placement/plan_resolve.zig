@@ -31,6 +31,7 @@ const escape_assign = @import("escape_assign.zig");
 const pour = @import("pour.zig");
 const outline_mod = @import("outline.zig");
 const env = @import("../eval/env.zig");
+const net_name = @import("../net_name.zig");
 
 const Allocator = std.mem.Allocator;
 const NetClass = module_policy.NetClass;
@@ -1903,10 +1904,7 @@ fn hashId(arena: Allocator, kind: []const u8, key: []const u8) Allocator.Error![
 }
 
 /// The bare leaf of a slash-qualified name (`pwr/C1` → `C1`).
-fn leafOf(name: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, name, '/')) |i| return name[i + 1 ..];
-    return name;
-}
+const leafOf = net_name.leaf;
 
 /// True when `ref` carries `slug` as a leading path segment (`slug/…`).
 fn hasSlugPrefix(ref: []const u8, slug: []const u8) bool {
