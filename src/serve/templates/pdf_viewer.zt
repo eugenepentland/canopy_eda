@@ -3,6 +3,10 @@
 // template only carries the bare HTML skeleton and a `data-pdf="…"` hook the
 // script reads on load.
 
+const home_tmpl = @import("pages.zig");
+
+const navbar_style: []const u8 = "<style>" ++ @embedFile("../assets/navbar.css") ++ "</style>";
+
 pub templ Page(filename: []const u8) {
     <!DOCTYPE html>
     <html lang="en">
@@ -11,8 +15,10 @@ pub templ Page(filename: []const u8) {
             <meta name="viewport" content="width=device-width,initial-scale=1" />
             <title>{filename}</title>
             <link rel="stylesheet" href="/static/pdf_viewer.css" />
+            {!navbar_style}
         </head>
         <body data-pdf={filename}>
+            @home_tmpl.Navbar("")
             <div id="toolbar">
                 <a id="back" href="javascript:history.back()">← back</a>
                 <span class="filename" id="filenameLabel"></span>

@@ -463,6 +463,7 @@ test {
     _ = @import("serve/mcp_tools.zig");
     _ = @import("serve/mcp_fab_readiness.zig");
     _ = @import("serve/modules.zig");
+    _ = @import("serve/navbar.zig");
     _ = @import("serve/notes.zig");
     _ = @import("serve/page_cache.zig");
     _ = @import("serve/pages.zig");

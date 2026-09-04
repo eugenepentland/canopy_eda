@@ -539,6 +539,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.library_3d.test.",
         "serve.mcp_flatten.test.",
         "serve.modules.test.",
+        "serve.navbar.test.",
         "serve.pages.test.",
         "serve.pcb_fence.test.",
         "serve.pcb_layout_sync.test.",

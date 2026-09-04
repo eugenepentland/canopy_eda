@@ -333,15 +333,20 @@ pub const Navbar = struct {
     fn _render(active: []const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = &active;
         // pages.zt:329
-        try writer.writeAll("<div class=\"navbar\">");
+        try writer.writeAll("<nav class=\"navbar\" aria-label=\"Primary\">");
         // pages.zt:330
-        try writer.writeAll("<a href=\"/\" class=\"brand\">");
+        try writer.writeAll("<a");
+        try writer.writeAll(" href=\"/\"");
+        try zt.writeAttr(writer, "class", if (std.mem.eql(u8, active, "designs")) "brand active" else "brand");
+        try zt.writeAttr(writer, "aria-current", if (std.mem.eql(u8, active, "designs")) "page" else null);
+        try writer.writeAll(">");
         try writer.writeAll("Netlisp");
         try writer.writeAll("</a>");
         // pages.zt:331
         try writer.writeAll("<a");
         try writer.writeAll(" href=\"/library\"");
         try zt.writeAttr(writer, "class", if (std.mem.eql(u8, active, "library")) "active" else null);
+        try zt.writeAttr(writer, "aria-current", if (std.mem.eql(u8, active, "library")) "page" else null);
         try writer.writeAll(">");
         try writer.writeAll("Library");
         try writer.writeAll("</a>");
@@ -350,7 +355,7 @@ pub const Navbar = struct {
         try writer.writeAll("Account");
         try writer.writeAll("</a>");
         // pages.zt:333
-        try writer.writeAll("</div>");
+        try writer.writeAll("</nav>");
     }
 
     fn _signature(_: []const u8) void {}

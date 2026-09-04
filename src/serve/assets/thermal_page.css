@@ -32,10 +32,9 @@ button { color: inherit; }
   border-bottom: 1px solid var(--line);
   background: #101620;
   position: sticky;
-  top: 0;
+  top: 42px;
   z-index: 5;
 }
-.brand { color: var(--accent); font-weight: 800; text-decoration: none; letter-spacing: .08em; }
 .topbar strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar nav { display: flex; align-self: stretch; gap: 2px; margin-left: auto; overflow-x: auto; }
 .topbar nav a {
@@ -57,7 +56,7 @@ button { color: inherit; }
 .tp-workspace {
   display: grid;
   grid-template-columns: minmax(340px, 32vw) 1fr;
-  height: calc(100% - 48px);
+  height: calc(100% - 90px);
 }
 .tp-panel {
   min-width: 0;
@@ -308,6 +307,7 @@ button { color: inherit; }
 .tp-hot { color: var(--danger); }
 
 @media (max-width: 620px) {
+  .topbar { top:48px; }
   .topbar { height:92px;min-height:92px;flex-wrap:wrap;gap:4px 10px;padding:6px 10px 0; }
   .topbar .brand { height:36px;display:flex;align-items:center; }
   .topbar strong { flex:1;height:36px;display:flex;align-items:center; }

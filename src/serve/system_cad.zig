@@ -16,6 +16,7 @@ const system_review = @import("../system_review.zig");
 const system_review_assets = @import("../system_review_assets.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const pcb_step_export = @import("pcb_step_export.zig");
+const navbar = @import("navbar.zig");
 
 /// Allocation and response-write failures escaping CAD handlers.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -297,7 +298,11 @@ pub fn page(
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
             "<title>System Thermal</title>",
     );
+    try writer.writeAll("<style>");
+    try writer.writeAll(navbar.css);
+    try writer.writeAll("</style>");
     try writer.print("<link rel=\"stylesheet\" href=\"/static/system_cad.css?v={x}\"></head><body>", .{std.hash.Wyhash.hash(0, @embedFile("assets/system_cad.css"))});
+    try navbar.write(writer, .none);
     try writer.writeAll(
         "<header><a class=\"back\" id=\"back\">← System</a><div><h1 id=\"title\">System Thermal</h1><p id=\"identity\"></p></div>" ++
             "<span class=\"kernel\">Sketch + extrude · Zig</span><div class=\"view-switch\" role=\"group\" aria-label=\"Workspace view\"><button id=\"view-2d\" class=\"on\" aria-pressed=\"true\">2D thermal</button><button id=\"view-3d\" aria-pressed=\"false\">3D assembly</button></div><span id=\"save-status\"></span><button id=\"save\">Save design</button><button id=\"top\">Edit sketch</button><button id=\"fit\">Fit view</button>" ++
@@ -691,6 +696,7 @@ test "system CAD page starts from sketch tools without enclosure generators" {
     var request = httpz.testing.init(.{});
     defer request.deinit();
     try page(request.res.arena, ".", spec, true, request.res);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "<nav class=\"navbar\" aria-label=\"Primary\"><a href=\"/\" class=\"brand\">Netlisp</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"new-sketch\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"thermal-canvas\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"add-fan\"") != null);

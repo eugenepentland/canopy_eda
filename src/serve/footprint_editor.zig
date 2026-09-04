@@ -7,6 +7,7 @@ const parser = @import("../sexpr/parser.zig");
 const escape = @import("../escape.zig");
 const serve_root = @import("../serve.zig");
 const lib_limits = @import("../lib_limits.zig");
+const navbar = @import("navbar.zig");
 const Server = serve_root.Server;
 
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -89,12 +90,19 @@ pub fn editorPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     try escape.writeXml(w, name);
     try w.writeAll(
         \\ — Footprint editor</title>
-        \\<link rel="stylesheet" href="/static/footprint_editor.css"></head>
+        \\<style>
+    );
+    try w.writeAll(navbar.css);
+    try w.writeAll(
+        \\</style><link rel="stylesheet" href="/static/footprint_editor.css"></head>
         \\<body data-footprint="
     );
     try escape.writeXml(w, name);
     try w.writeAll(
         \\">
+    );
+    try navbar.write(w, .library);
+    try w.writeAll(
         \\<header class="topbar">
         \\  <a class="back" href="/library" title="Back to component library">‹ Library</a>
         \\  <div class="title"><strong>

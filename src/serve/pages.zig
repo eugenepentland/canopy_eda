@@ -10,6 +10,7 @@ const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const bom_html = @import("bom_html.zig");
 const assets_css = @import("assets_css.zig");
+const navbar = @import("navbar.zig");
 const library = @import("library.zig");
 const mcp_tools = @import("mcp_tools.zig");
 const modules_page = @import("modules.zig");
@@ -250,8 +251,13 @@ test "navbar keeps the user-facing destinations" {
     try home_template.Navbar.render(.{"designs"}, &aw.writer);
     const html = aw.written();
 
+    var shared: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer shared.deinit();
+    try navbar.write(&shared.writer, .home);
+    try std.testing.expectEqualStrings(shared.written(), html);
+
     // The brand IS the route home — it must be an anchor to `/`, not a label.
-    try std.testing.expect(std.mem.indexOf(u8, html, "<a href=\"/\" class=\"brand\">Netlisp</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<a href=\"/\" class=\"brand active\" aria-current=\"page\">Netlisp</a>") != null);
     // …and it is the ONLY link to `/`: the separate Designs tab is gone.
     try std.testing.expect(std.mem.indexOf(u8, html, ">Designs<") == null);
     // Library remains, while internal tool surfaces do not appear as tabs.

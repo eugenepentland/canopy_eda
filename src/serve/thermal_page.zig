@@ -38,6 +38,7 @@ const pcb_layout_page = @import("pcb_layout_page.zig");
 const review_thermal = @import("../review_thermal.zig");
 const serve_root = @import("../serve.zig");
 const handler_probe = @import("handler_probe.zig");
+const navbar = @import("navbar.zig");
 const thermal = @import("../eval/thermal.zig");
 const thermal_api = @import("thermal_api.zig");
 const thermal_scenarios = @import("../thermal_scenarios.zig");
@@ -366,8 +367,11 @@ fn writeDocHead(w: *std.Io.Writer, v: View, title: []const u8) std.Io.Writer.Err
     try w.writeAll("<title>");
     try escape.writeXml(w, v.name);
     try w.writeAll(" — Thermal</title>");
-    try w.writeAll("<link rel=\"stylesheet\" href=\"/static/thermal_page.css\"></head>");
-    try w.writeAll("<body><header class=\"topbar\"><a class=\"brand\" href=\"/\">netlisp</a><strong>");
+    try w.writeAll("<style>");
+    try w.writeAll(navbar.css);
+    try w.writeAll("</style><link rel=\"stylesheet\" href=\"/static/thermal_page.css\"></head><body>");
+    try navbar.write(w, .none);
+    try w.writeAll("<header class=\"topbar\"><strong>");
     try escape.writeXml(w, if (title.len > 0) title else v.name);
     try w.writeAll("</strong>");
     try writeNav(w, v);
@@ -1244,6 +1248,7 @@ test "the thermal page carries its verdict, controls, tables and exports" {
     try testing.expectEqual(@as(u16, 200), got.status);
     const html = got.body;
 
+    try testing.expect(std.mem.indexOf(u8, html, "<nav class=\"navbar\" aria-label=\"Primary\"><a href=\"/\" class=\"brand\">Netlisp</a>") != null);
     // The headline is review_thermal's own pill and sentence, never a second
     // opinion computed here.
     try testing.expect(std.mem.indexOf(u8, html, "id=\"tp-verdict\"") != null);

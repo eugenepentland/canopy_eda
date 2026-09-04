@@ -14,6 +14,7 @@ const parser_mod = @import("../sexpr/parser.zig");
 const ast = @import("../sexpr/ast.zig");
 const serve_root = @import("../serve.zig");
 const lib_limits = @import("../lib_limits.zig");
+const navbar = @import("navbar.zig");
 const Server = serve_root.Server;
 
 /// Percent-decode a URL path param. httpz returns params verbatim, so a
@@ -339,9 +340,13 @@ pub fn viewerPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     try escape.writeXml(w, footprint);
     try w.writeAll("</title>");
     try w.writeAll(page_css);
-    try w.writeAll("</head><body>");
+    try w.writeAll("<style>");
+    try w.writeAll(navbar.css);
+    try w.writeAll("</style></head><body>");
 
-    // Header / toolbar.
+    try navbar.write(w, .library);
+
+    // Page-specific toolbar.
     try w.writeAll("<div id=\"topbar\"><a id=\"back\" href=\"/library\">‹ Library</a>");
     try w.writeAll("<span id=\"fp-name\">");
     try escape.writeXml(w, footprint);

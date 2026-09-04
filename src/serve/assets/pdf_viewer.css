@@ -1,5 +1,6 @@
 html,body{margin:0;padding:0;background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;height:100%;}
-#toolbar{position:sticky;top:0;z-index:100;display:flex;gap:12px;align-items:center;padding:8px 16px;background:#161b22;border-bottom:1px solid #21262d;font-size:0.85rem;flex-wrap:wrap;}
+#toolbar{position:sticky;top:42px;z-index:100;display:flex;gap:12px;align-items:center;padding:8px 16px;background:#161b22;border-bottom:1px solid #21262d;font-size:0.85rem;flex-wrap:wrap;}
+@media(max-width:920px){#toolbar{top:48px}}
 #toolbar a{color:#58a6ff;text-decoration:none;}
 #toolbar a:hover{text-decoration:underline;}
 #toolbar .filename{color:#8b949e;font-family:"SF Mono",Consolas,monospace;font-size:0.8rem;}
