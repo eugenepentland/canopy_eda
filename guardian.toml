@@ -1211,10 +1211,12 @@ parity_test = "returns the same body as the fence endpoint"
 [[twin]]
 name = "pcb-describe"
 surfaces = ["http:/api/pcb-describe", "mcp:describe_pcb_layout"]
+parity_test = "returns the same facts document as the pcb-describe endpoint"
 
 [[twin]]
 name = "layout-progress"
 surfaces = ["http:/api/layout-progress", "mcp:get_layout_progress"]
+parity_test = "returns the same ladder as the layout-progress endpoint"
 
 [[twin]]
 name = "pcb-png"

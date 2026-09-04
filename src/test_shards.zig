@@ -546,6 +546,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.pcb_rules_json.test.",
         "serve.rough_best.test.",
         "serve.stuck_json.test.",
+        "serve.twin_parity.test.",
         "sexpr.ast.test.",
         "sexpr.tokenizer.test.",
         "target_unblock.test.",

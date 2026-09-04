@@ -7719,6 +7719,8 @@ is what makes the predicate exact rather than approximately right.
 - The session parse copies every string out of the payload buffer so a loaded board survives the buffer being reused
 - The WASM DRC session probe enforces an RF net's declared keepout halo, so the mid-drag gate refuses the copper the full check flags
 - The WASM DRC session probe reads each net's class identity, waiving the keepout halo between one class's own members and inside a pad-escape zone
+- The describe_pcb_layout MCP tool and the pcb-describe endpoint share one implementation, so a no-argument read returns the same spatial-facts document on both surfaces
+- The get_layout_progress MCP tool and the layout-progress endpoint share one implementation, so both report the same completion ladder
 - completeness-waiver: concurrent access (httpz owns request threading and each handler answers from its own response arena; the two pieces of state that really are shared — the live scene graph and a design's layout sidecar — are specified where they live, under the push and layout-backfill sections, rather than restated per endpoint)
 
 ## fab_readiness
