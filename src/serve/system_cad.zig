@@ -9,8 +9,8 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const cad_document = @import("../mechanical/cad_document.zig");
-const enclosure = @import("../mechanical/enclosure.zig");
 const prismatic = @import("../mechanical/prismatic.zig");
+const shape_sketch = @import("../shape_sketch.zig");
 const json_writer = @import("../json_writer.zig");
 const system_review = @import("../system_review.zig");
 const system_review_assets = @import("../system_review_assets.zig");
@@ -295,9 +295,9 @@ pub fn page(
     try writer.writeAll(
         "<!doctype html><html><head><meta charset=\"utf-8\">" ++
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
-            "<title>System Thermal</title><link rel=\"stylesheet\" href=\"/static/system_cad.css\"></head><body>" ++
-            "<header><a class=\"back\" id=\"back\">← System</a><div><h1 id=\"title\">System Thermal</h1><p id=\"identity\"></p></div>" ++
-            "<span class=\"kernel\">Coupled screening</span><span id=\"save-status\"></span><button id=\"save\">Save design</button><button id=\"fit\">Fit view</button>" ++
+            "<title>System 3D CAD</title><link rel=\"stylesheet\" href=\"/static/system_cad.css\"></head><body>" ++
+            "<header><a class=\"back\" id=\"back\">← System</a><div><h1 id=\"title\">System 3D CAD</h1><p id=\"identity\"></p></div>" ++
+            "<span class=\"kernel\">Sketch + extrude · Zig</span><span id=\"save-status\"></span><button id=\"save\">Save design</button><button id=\"top\">Top sketch</button><button id=\"fit\">Fit view</button>" ++
             "<button id=\"assembly-json\">Download assembly.json</button><button id=\"step\">Download STEP</button><button id=\"stl\">Download STL</button></header>" ++
             "<main><aside><section><h2>System screening</h2><div class=\"fields\">" ++
             "<label>Ambient <input id=\"ambient\" type=\"number\" min=\"-55\" max=\"125\" step=\"1\"><span>°C</span></label>" ++
@@ -306,18 +306,13 @@ pub fn page(
             "<div id=\"thermal-summary\" class=\"thermal-summary\">Loading board thermal models…</div>" ++
             "<p class=\"hint\">Drag a PCB in the viewport or enter its exact pose. Temperatures combine each saved board's placement-aware solve, projected fan coverage, and mixed-air rise. This is a system screening model, not CFD.</p></section>" ++
             "<section><h2>Board instances</h2><p class=\"hint\">The review manifest defines board types; assembly.json may repeat them as physical instances.</p><div id=\"boards\"></div></section>" ++
-            "<section><h2>Enclosure</h2><div class=\"fields\">" ++
-            "<label>PCB clearance <input id=\"clearance\" type=\"number\" min=\"0.2\" max=\"50\" step=\"0.1\"><span>mm</span></label>" ++
-            "<label>Wall <input id=\"wall\" type=\"number\" min=\"0.6\" max=\"30\" step=\"0.1\"><span>mm</span></label>" ++
-            "<label>Floor <input id=\"floor\" type=\"number\" min=\"0.6\" max=\"30\" step=\"0.1\"><span>mm</span></label>" ++
-            "<label>Base height <input id=\"height\" type=\"number\" min=\"3\" max=\"300\" step=\"0.5\"><span>mm</span></label>" ++
-            "<label>Lid thickness <input id=\"lid\" type=\"number\" min=\"0.6\" max=\"30\" step=\"0.1\"><span>mm</span></label>" ++
-            "<label>Lid explode <input id=\"explode\" type=\"range\" min=\"0\" max=\"80\" step=\"1\"></label>" ++
-            "</div><div class=\"dimensions\" id=\"dimensions\"></div><button id=\"reset\">Reset draft</button></section>" ++
-            "<section><div class=\"section-head\"><h2>PCB mounting bosses</h2><button id=\"auto-bosses\">From PCB holes</button></div><p class=\"hint\">Blind screw bosses rise from the case floor to support the board.</p><div id=\"bosses\"></div><button id=\"add-boss\">Add boss</button></section>" ++
-            "<section><div class=\"section-head\"><h2>Wall cutouts</h2><button id=\"add-cutout\">Add cutout</button></div><p class=\"hint\">Rectangular connector openings are cut through the selected wall by the Zig kernel.</p><div id=\"cutouts\"></div></section>" ++
-            "<section><h2>Model boundary</h2><ul><li>Exact saved PCB outlines, mounting holes and component heat ledgers</li><li>Attached saved fan and heatsink geometry</li><li>Persisted enclosure, bosses and wall cutouts through the Zig kernel</li><li>Fan-footprint coverage and enclosure bulk-air rise</li><li>No wake, recirculation, buoyant plume, or pressure-network CFD</li></ul></section></aside>" ++
-            "<div id=\"viewport\"><canvas id=\"canvas\"></canvas><div id=\"empty\"></div><div id=\"drag-help\">Drag boards · orbit empty space · scroll to zoom</div><div id=\"legend\"><span><i class=\"cool\"></i>Cool</span><span><i class=\"warm\"></i>Warm</span><span><i class=\"hot\"></i>Hot</span><span><i class=\"sink\"></i>Heatsink</span><span><i class=\"fan\"></i>Fan</span></div></div></main>" ++
+            "<section><div class=\"section-head\"><h2>Sketches</h2><button id=\"new-sketch\">New sketch</button></div>" ++
+            "<p class=\"hint\">Nothing is generated from the PCBs. Create an XY sketch, draw the profile yourself, then explicitly extrude it.</p>" ++
+            "<div id=\"sketch-tools\" class=\"sketch-tools\"><button data-tool=\"line\">Draw lines</button><button data-tool=\"rectangle\">Rectangle</button><button data-tool=\"close\">Close profile</button><button data-tool=\"cancel\">Cancel tool</button></div>" ++
+            "<div id=\"sketches\"></div></section>" ++
+            "<section><div class=\"section-head\"><h2>Extrusions</h2><button id=\"add-extrusion\">Extrude selected</button></div><div id=\"model-status\" class=\"dimensions\">Blank workspace · 0 solids</div><div id=\"extrusions\"></div><button id=\"reset\">Reset local draft</button></section>" ++
+            "<section><h2>Model boundary</h2><ul><li>PCBs, components, fans and heatsinks are reference geometry only</li><li>Only closed sketches with an explicit enabled extrusion become solids</li><li>Each extrusion remains a separate STEP/STL body</li><li>Current extrusion profiles must be convex; use separate bodies for floors and walls</li><li>No automatic enclosure, lid, boss, cutout, or boolean operation</li></ul></section></aside>" ++
+            "<div id=\"viewport\"><canvas id=\"canvas\"></canvas><div id=\"empty\"></div><div id=\"drag-help\">Orbit empty space · drag PCBs · select a sketch tool to draw on its XY plane</div><div id=\"legend\"><span><i class=\"solid\"></i>Authored solid</span><span><i class=\"sketch\"></i>Sketch</span><span><i class=\"cool\"></i>PCB reference</span></div></div></main>" ++
             "<script>window.CAD_DATA={\"system\":",
     );
     try json_writer.writeScriptString(writer, spec.name);
@@ -333,7 +328,7 @@ pub fn page(
     for (spec.boards, 0..) |board, index| try writeBoard(writer, allocator, project_dir, board, index);
     try writer.writeAll("],\"assembly\":");
     try writeAssembly(writer, if (parsed_assembly) |parsed| parsed.value else null);
-    try writer.writeAll("};</script><script src=\"/static/three.min.js\"></script><script src=\"/static/OrbitControls.js\"></script><script src=\"/static/system_cad.js\"></script></body></html>");
+    try writer.writeAll("};</script><script src=\"/static/three.min.js\"></script><script src=\"/static/OrbitControls.js\"></script><script src=\"/static/shape_sketch.js\"></script><script src=\"/static/system_cad.js\"></script></body></html>");
     res.content_type = .HTML;
     res.header("cache-control", "private, no-store");
     res.header("content-security-policy", "frame-ancestors 'none'");
@@ -346,50 +341,117 @@ fn queryValue(req: *httpz.Request, key: []const u8) ?[]const u8 {
     return query.get(key);
 }
 
-fn parameter(req: *httpz.Request, key: []const u8, minimum: f64, maximum: f64) ?f64 {
-    const raw = queryValue(req, key) orelse return null;
-    const value = std.fmt.parseFloat(f64, raw) catch return null;
-    if (!std.math.isFinite(value) or value < minimum or value > maximum) return null;
-    return value;
-}
-
 fn sendError(res: *httpz.Response, status: u16, message: []const u8) void {
     res.status = status;
     res.content_type = .TEXT;
     res.body = message;
 }
 
-fn parametersFromRequest(req: *httpz.Request) ?enclosure.Parameters {
-    return .{
-        .occupied_width = parameter(req, "width", 1, 2000) orelse return null,
-        .occupied_depth = parameter(req, "depth", 1, 2000) orelse return null,
-        .clearance = parameter(req, "clearance", 0.1, 100) orelse return null,
-        .wall = parameter(req, "wall", 0.2, 100) orelse return null,
-        .floor = parameter(req, "floor", 0.2, 100) orelse return null,
-        .height = parameter(req, "height", 0.5, 500) orelse return null,
-        .lid_thickness = parameter(req, "lid", 0.2, 100) orelse return null,
-    };
-}
-
 const ModelRequestError = std.mem.Allocator.Error || error{InvalidMechanicalDocument};
 
-fn modelFromRequest(allocator: std.mem.Allocator, req: *httpz.Request) ModelRequestError!enclosure.Model {
-    if (req.body()) |body| {
-        var parsed = cad_document.parse(allocator, body) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidDocument => return error.InvalidMechanicalDocument,
-        };
-        defer parsed.deinit();
-        return enclosure.generateWithFeatures(allocator, cad_document.parameters(parsed.value), cad_document.features(parsed.value)) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidMechanicalDocument,
-        };
+const SolidBody = struct {
+    id: []const u8,
+    name: []const u8,
+    mesh: prismatic.Mesh,
+};
+
+const SolidModel = struct {
+    bodies: []const SolidBody,
+
+    fn deinit(self: SolidModel, allocator: std.mem.Allocator) void {
+        for (self.bodies) |body| {
+            allocator.free(body.id);
+            allocator.free(body.name);
+            body.mesh.deinit(allocator);
+        }
+        allocator.free(self.bodies);
     }
-    const parameters = parametersFromRequest(req) orelse return error.InvalidMechanicalDocument;
-    return enclosure.generate(allocator, parameters) catch |err| switch (err) {
+};
+
+fn polygonArea(profile: []const [2]f64) f64 {
+    var area: f64 = 0;
+    for (profile, 0..) |point, index| {
+        const next = profile[(index + 1) % profile.len];
+        area += point[0] * next[1] - next[0] * point[1];
+    }
+    return area / 2;
+}
+
+fn convexCounterClockwise(profile: []const [2]f64) bool {
+    var has_corner = false;
+    for (profile, 0..) |point, index| {
+        const next = profile[(index + 1) % profile.len];
+        const after = profile[(index + 2) % profile.len];
+        const cross = (next[0] - point[0]) * (after[1] - next[1]) - (next[1] - point[1]) * (after[0] - next[0]);
+        if (cross < -1e-9) return false;
+        if (cross > 1e-9) has_corner = true;
+    }
+    return has_corner;
+}
+
+fn extrudeSketch(
+    allocator: std.mem.Allocator,
+    sketch: anytype,
+    plane_z: f64,
+    distance: f64,
+) ModelRequestError!prismatic.Mesh {
+    const compiled = shape_sketch.compile(allocator, sketch, shape_sketch.default_sagitta_mm) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidMechanicalDocument,
     };
+    defer allocator.free(compiled.pts);
+    defer allocator.free(compiled.poly);
+    defer allocator.free(compiled.arcs);
+    var profile = compiled.poly;
+    var reversed: ?[][2]f64 = null;
+    defer if (reversed) |points| allocator.free(points);
+    if (polygonArea(profile) < 0) {
+        const points = try allocator.alloc([2]f64, profile.len);
+        for (profile, 0..) |_, index| points[index] = profile[profile.len - index - 1];
+        reversed = points;
+        profile = points;
+    }
+    if (!convexCounterClockwise(profile)) return error.InvalidMechanicalDocument;
+    return prismatic.extrudeConvex(allocator, profile, plane_z, plane_z + distance) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidMechanicalDocument,
+    };
+}
+
+fn modelFromRequest(allocator: std.mem.Allocator, req: *httpz.Request) ModelRequestError!SolidModel {
+    const source = req.body() orelse return error.InvalidMechanicalDocument;
+    var parsed = cad_document.parse(allocator, source) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidMechanicalDocument,
+    };
+    defer parsed.deinit();
+    var bodies: std.ArrayList(SolidBody) = .empty;
+    errdefer {
+        for (bodies.items) |body| {
+            allocator.free(body.id);
+            allocator.free(body.name);
+            body.mesh.deinit(allocator);
+        }
+        bodies.deinit(allocator);
+    }
+    for (parsed.value.extrusions) |extrusion| {
+        if (!extrusion.enabled) continue;
+        const profile = for (parsed.value.sketches) |sketch| {
+            if (std.mem.eql(u8, sketch.id, extrusion.sketch)) break sketch;
+        } else return error.InvalidMechanicalDocument;
+        const mesh = try extrudeSketch(allocator, profile.geometry, profile.plane_z, extrusion.distance);
+        errdefer mesh.deinit(allocator);
+        const id = try allocator.dupe(u8, extrusion.id);
+        errdefer allocator.free(id);
+        const name = try allocator.dupe(u8, extrusion.name);
+        errdefer allocator.free(name);
+        try bodies.append(allocator, .{
+            .id = id,
+            .name = name,
+            .mesh = mesh,
+        });
+    }
+    return .{ .bodies = try bodies.toOwnedSlice(allocator) };
 }
 
 fn writeMeshJson(writer: *std.Io.Writer, mesh: prismatic.Mesh) HandlerError!void {
@@ -406,25 +468,24 @@ fn writeMeshJson(writer: *std.Io.Writer, mesh: prismatic.Mesh) HandlerError!void
     try writer.writeAll("]}");
 }
 
-/// Return the native Zig base and lid meshes for interactive browser display.
+/// Return only explicitly authored extrusion bodies for browser display.
 pub fn meshApi(allocator: std.mem.Allocator, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const model = modelFromRequest(allocator, req) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.InvalidMechanicalDocument => return sendError(res, 400, "invalid mechanical document or enclosure parameters"),
+        error.InvalidMechanicalDocument => return sendError(res, 400, "invalid mechanical sketch or extrusion document"),
     };
     defer model.deinit(allocator);
     var out: std.Io.Writer.Allocating = .init(allocator);
-    try out.writer.print(
-        "{{\"dimensions\":{{\"inner_width\":{d},\"inner_depth\":{d},\"outer_width\":{d},\"outer_depth\":{d}}},\"base\":",
-        .{ model.dimensions.inner_width, model.dimensions.inner_depth, model.dimensions.outer_width, model.dimensions.outer_depth },
-    );
-    try writeMeshJson(&out.writer, model.base);
-    try out.writer.writeAll(",\"lid\":");
-    try writeMeshJson(&out.writer, model.lid);
-    try out.writer.writeAll(",\"bosses\":[");
-    for (model.bosses, 0..) |boss, index| {
+    try out.writer.writeAll("{\"bodies\":[");
+    for (model.bodies, 0..) |body, index| {
         if (index > 0) try out.writer.writeByte(',');
-        try writeMeshJson(&out.writer, boss);
+        try out.writer.writeAll("{\"id\":");
+        try json_writer.writeString(&out.writer, body.id);
+        try out.writer.writeAll(",\"name\":");
+        try json_writer.writeString(&out.writer, body.name);
+        try out.writer.writeAll(",\"mesh\":");
+        try writeMeshJson(&out.writer, body.mesh);
+        try out.writer.writeByte('}');
     }
     try out.writer.writeAll("]}");
     res.content_type = .JSON;
@@ -462,7 +523,7 @@ fn writeStlMesh(writer: *std.Io.Writer, name: []const u8, mesh: prismatic.Mesh) 
     try writer.print("endsolid {s}\n", .{name});
 }
 
-/// Generate and download one enclosure base, lid, or combined assembly.
+/// Generate a STEP or STL containing only explicitly authored extrusions.
 pub fn exportFile(
     allocator: std.mem.Allocator,
     system_name: []const u8,
@@ -471,27 +532,16 @@ pub fn exportFile(
 ) HandlerError!void {
     const model = modelFromRequest(allocator, req) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.InvalidMechanicalDocument => return sendError(res, 400, "invalid mechanical document or enclosure parameters"),
+        error.InvalidMechanicalDocument => return sendError(res, 400, "invalid mechanical sketch or extrusion document"),
     };
     defer model.deinit(allocator);
-
-    const part = queryValue(req, "part") orelse "assembly";
-    const include_base = std.mem.eql(u8, part, "base") or std.mem.eql(u8, part, "assembly");
-    const include_lid = std.mem.eql(u8, part, "lid") or std.mem.eql(u8, part, "assembly");
-    if (!include_base and !include_lid) return sendError(res, 400, "part must be base, lid, or assembly");
+    if (model.bodies.len == 0) return sendError(res, 400, "there are no enabled extrusions to export");
     const format = queryValue(req, "format") orelse "step";
-    const filename_stem = try std.fmt.allocPrint(allocator, "{s}-enclosure-{s}", .{ system_name, part });
+    const filename_stem = try std.fmt.allocPrint(allocator, "{s}-mechanical", .{system_name});
 
     if (std.mem.eql(u8, format, "stl")) {
         var out: std.Io.Writer.Allocating = .init(allocator);
-        if (include_base) {
-            try writeStlMesh(&out.writer, "base", model.base);
-            for (model.bosses, 0..) |boss, index| {
-                const name = try std.fmt.allocPrint(allocator, "boss-{d}", .{index + 1});
-                try writeStlMesh(&out.writer, name, boss);
-            }
-        }
-        if (include_lid) try writeStlMesh(&out.writer, "lid", model.lid);
+        for (model.bodies) |body| try writeStlMesh(&out.writer, body.id, body.mesh);
         const disposition = try std.fmt.allocPrint(allocator, "attachment; filename=\"{s}.stl\"", .{filename_stem});
         res.header("content-type", "model/stl");
         res.header("content-disposition", disposition);
@@ -502,20 +552,16 @@ pub fn exportFile(
     if (!std.mem.eql(u8, format, "step")) return sendError(res, 400, "format must be step or stl");
     var bodies: std.ArrayList(pcb_step_export.Body) = .empty;
     defer bodies.deinit(allocator);
-    if (include_base) {
-        try bodies.append(allocator, .{ .name = "Base", .points = model.base.points, .triangles = model.base.triangles, .color = .{ 0.12, 0.35, 0.60 } });
-        for (model.bosses, 0..) |boss, index| {
-            const name = try std.fmt.allocPrint(allocator, "Mounting boss {d}", .{index + 1});
-            try bodies.append(allocator, .{ .name = name, .points = boss.points, .triangles = boss.triangles, .color = .{ 0.12, 0.35, 0.60 } });
-        }
-    }
-    if (include_lid) {
-        try bodies.append(allocator, .{ .name = "Lid", .points = model.lid.points, .triangles = model.lid.triangles, .color = .{ 0.24, 0.54, 0.78 } });
-    }
+    for (model.bodies) |body| try bodies.append(allocator, .{
+        .name = body.name,
+        .points = body.mesh.points,
+        .triangles = body.mesh.triangles,
+        .color = .{ 0.12, 0.35, 0.60 },
+    });
     const output = pcb_step_export.buildBodies(allocator, filename_stem, bodies.items) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.WriteFailed => return error.WriteFailed,
-        else => return sendError(res, 400, "cannot build enclosure STEP"),
+        else => return sendError(res, 400, "cannot build mechanical STEP"),
     };
     const disposition = try std.fmt.allocPrint(allocator, "attachment; filename=\"{s}.step\"", .{filename_stem});
     res.header("content-type", "model/step");
@@ -524,87 +570,82 @@ pub fn exportFile(
     res.body = output;
 }
 
-test "STL writer emits outward facets for native enclosure mesh" {
-    const model = try enclosure.generate(std.testing.allocator, .{ .occupied_width = 40, .occupied_depth = 30 });
-    defer model.deinit(std.testing.allocator);
+const extrusion_document =
+    "{\"schema\":\"netlisp-mechanical-v2\",\"boards\":[],\"sketches\":[{\"id\":\"floor-profile\",\"name\":\"Floor profile\",\"plane_z\":0,\"geometry\":{" ++
+    "\"version\":1,\"points\":[{\"id\":1,\"x\":-20,\"y\":-15},{\"id\":2,\"x\":20,\"y\":-15},{\"id\":3,\"x\":20,\"y\":15},{\"id\":4,\"x\":-20,\"y\":15}]," ++
+    "\"curves\":[{\"id\":11,\"kind\":\"line\",\"a\":1,\"b\":2},{\"id\":12,\"kind\":\"line\",\"a\":2,\"b\":3},{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4},{\"id\":14,\"kind\":\"line\",\"a\":4,\"b\":1}],\"constraints\":[]}}]," ++
+    "\"extrusions\":[{\"id\":\"floor\",\"name\":\"Authored floor\",\"sketch\":\"floor-profile\",\"distance\":2}]}";
+
+test "STL writer emits outward facets for an authored extrusion" {
+    const profile = [_][2]f64{ .{ -20, -15 }, .{ 20, -15 }, .{ 20, 15 }, .{ -20, 15 } };
+    const mesh = try prismatic.extrudeConvex(std.testing.allocator, &profile, 0, 2);
+    defer mesh.deinit(std.testing.allocator);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    try writeStlMesh(&out.writer, "base", model.base);
-    try std.testing.expect(std.mem.startsWith(u8, out.written(), "solid base\n"));
+    try writeStlMesh(&out.writer, "floor", mesh);
+    try std.testing.expect(std.mem.startsWith(u8, out.written(), "solid floor\n"));
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "facet normal") != null);
-    try std.testing.expect(std.mem.endsWith(u8, out.written(), "endsolid base\n"));
+    try std.testing.expect(std.mem.endsWith(u8, out.written(), "endsolid floor\n"));
 }
 
-test "CAD export endpoint returns native STEP and STL solids" {
+test "CAD export endpoint returns only explicitly authored extrusion solids" {
     var step_request = httpz.testing.init(.{});
     defer step_request.deinit();
-    step_request.query("width", "90");
-    step_request.query("depth", "55");
-    step_request.query("clearance", "2.5");
-    step_request.query("wall", "2.4");
-    step_request.query("floor", "2");
-    step_request.query("height", "28");
-    step_request.query("lid", "2.4");
-    step_request.query("part", "assembly");
+    step_request.body(extrusion_document);
     step_request.query("format", "step");
     try exportFile(step_request.res.arena, "barracuda", step_request.req, step_request.res);
     try std.testing.expect(std.mem.startsWith(u8, step_request.res.body, "ISO-10303-21;"));
-    try std.testing.expect(std.mem.indexOf(u8, step_request.res.body, "FACETED_BREP('Base'") != null);
-    try std.testing.expect(std.mem.indexOf(u8, step_request.res.body, "FACETED_BREP('Lid'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step_request.res.body, "FACETED_BREP('Authored floor'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, step_request.res.body, "FACETED_BREP('Base'") == null);
+    try std.testing.expect(std.mem.indexOf(u8, step_request.res.body, "FACETED_BREP('Lid'") == null);
 
     var stl_request = httpz.testing.init(.{});
     defer stl_request.deinit();
-    stl_request.query("width", "90");
-    stl_request.query("depth", "55");
-    stl_request.query("clearance", "2.5");
-    stl_request.query("wall", "2.4");
-    stl_request.query("floor", "2");
-    stl_request.query("height", "28");
-    stl_request.query("lid", "2.4");
-    stl_request.query("part", "base");
+    stl_request.body(extrusion_document);
     stl_request.query("format", "stl");
     try exportFile(stl_request.res.arena, "barracuda", stl_request.req, stl_request.res);
-    try std.testing.expect(std.mem.startsWith(u8, stl_request.res.body, "solid base\n"));
-    try std.testing.expect(std.mem.indexOf(u8, stl_request.res.body, "solid lid") == null);
+    try std.testing.expect(std.mem.startsWith(u8, stl_request.res.body, "solid floor\n"));
 }
 
-test "CAD mesh endpoint returns the Zig kernel topology" {
+// spec: Web Server - the system 3D CAD workspace opens with imported PCBs as reference geometry and no inferred enclosure; only an authored closed shape-sketch followed by an explicit enabled extrusion creates a preview or STEP/STL solid, while legacy generated-enclosure documents are ignored rather than regenerated
+test "CAD mesh endpoint is empty for a blank document and extrudes on request" {
+    const blank = "{\"schema\":\"netlisp-mechanical-v2\",\"boards\":[],\"sketches\":[],\"extrusions\":[]}";
     var request = httpz.testing.init(.{});
     defer request.deinit();
-    request.query("width", "90");
-    request.query("depth", "55");
-    request.query("clearance", "2.5");
-    request.query("wall", "2.4");
-    request.query("floor", "2");
-    request.query("height", "28");
-    request.query("lid", "2.4");
+    request.body(blank);
     try meshApi(request.res.arena, request.req, request.res);
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, request.res.arena, request.res.body, .{});
-    try std.testing.expectEqual(@as(usize, 16), parsed.object.get("base").?.object.get("points").?.array.items.len);
-    try std.testing.expectEqual(@as(usize, 28), parsed.object.get("base").?.object.get("triangles").?.array.items.len);
-    try std.testing.expectEqual(@as(usize, 12), parsed.object.get("lid").?.object.get("triangles").?.array.items.len);
+    try std.testing.expectEqual(@as(usize, 0), parsed.object.get("bodies").?.array.items.len);
+
+    var authored = httpz.testing.init(.{});
+    defer authored.deinit();
+    authored.body(extrusion_document);
+    try meshApi(authored.res.arena, authored.req, authored.res);
+    const generated = try std.json.parseFromSliceLeaky(std.json.Value, authored.res.arena, authored.res.body, .{});
+    const bodies = generated.object.get("bodies").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), bodies.len);
+    try std.testing.expectEqualStrings("floor", bodies[0].object.get("id").?.string);
+    try std.testing.expectEqual(@as(usize, 8), bodies[0].object.get("mesh").?.object.get("points").?.array.items.len);
 }
 
-test "CAD document drives cutout preview and boss exports through Zig" {
-    const document =
-        "{\"schema\":\"netlisp-mechanical-v1\",\"occupied\":{\"width\":90,\"depth\":55}," ++
-        "\"bosses\":[{\"x\":20,\"y\":10,\"outer_diameter\":6,\"hole_diameter\":2.8,\"height\":3}]," ++
-        "\"cutouts\":[{\"wall\":\"front\",\"center\":0,\"width\":12,\"bottom\":5,\"height\":8}]}";
-    var mesh_request = httpz.testing.init(.{});
-    defer mesh_request.deinit();
-    mesh_request.body(document);
-    try meshApi(mesh_request.res.arena, mesh_request.req, mesh_request.res);
-    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, mesh_request.res.arena, mesh_request.res.body, .{});
-    try std.testing.expect(parsed.object.get("base").?.object.get("triangles").?.array.items.len > 28);
-    try std.testing.expectEqual(@as(usize, 1), parsed.object.get("bosses").?.array.items.len);
-
-    var step_request = httpz.testing.init(.{});
-    defer step_request.deinit();
-    step_request.body(document);
-    step_request.query("part", "base");
-    step_request.query("format", "step");
-    try exportFile(step_request.res.arena, "barracuda", step_request.req, step_request.res);
-    try std.testing.expect(std.mem.indexOf(u8, step_request.res.body, "FACETED_BREP('Mounting boss 1'") != null);
+test "system CAD page starts from sketch tools without enclosure generators" {
+    const spec: system_review.SystemSpec = .{
+        .schema = system_review.schema_v1,
+        .name = "demo",
+        .title = "Demo",
+        .part_number = "SYS-1",
+        .revision = "A",
+        .boards = &.{},
+    };
+    var request = httpz.testing.init(.{});
+    defer request.deinit();
+    try page(request.res.arena, ".", spec, true, request.res);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"new-sketch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"top\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "Extrude selected") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "/static/shape_sketch.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "auto-bosses") == null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "PCB clearance") == null);
 }
 
 // spec: system-review - a strict assembly sidecar repeats reviewed board definitions as uniquely identified physical instances and preserves its authored pitch, while bounded wheel gestures prevent trackpad momentum from driving the 3D camera through the assembly

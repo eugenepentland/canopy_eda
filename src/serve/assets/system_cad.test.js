@@ -56,5 +56,7 @@ for (let i = 0; i < 100; i += 1) appliedWheel += thermal.boundedWheelStep(wheelG
 assert.equal(appliedWheel, -480);
 assert.equal(thermal.boundedWheelStep(wheelGesture, -120, 0, 1000, 900), -120);
 assert.equal(thermal.boundedWheelStep(wheelGesture, 3, 1, 1020, 900), 48);
+assert.equal(thermal.enabledExtrusionCount({ sketches: [], extrusions: [] }), 0);
+assert.equal(thermal.enabledExtrusionCount({ extrusions: [{ enabled: false }, { enabled: true }] }), 1);
 
-console.log("System thermal: RDS3 pitch, repeated instances, fan coverage, bounded wheel zoom, and coupled screen pass");
+console.log("System CAD: blank solid state, explicit extrusions, RDS3 assembly, bounded zoom, and coupled thermal screen pass");
