@@ -11,6 +11,7 @@ const lod = @import("lod.zig");
 const rb = @import("../render_block_types.zig");
 const env_mod = @import("../eval/env.zig");
 const numeric = @import("../numeric.zig");
+const escape = @import("../escape.zig");
 const Allocator = std.mem.Allocator;
 const Graph = types.Graph;
 const ClassId = types.ClassId;
@@ -523,12 +524,13 @@ fn writeStageBands(w: *Writer, lay: layout.Layout) Writer.Error!void {
             "<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-band-label\" fill=\"{s}\" text-anchor=\"middle\">",
             .{ col_x + layout.node_w / 2, band_label_y, band_label_color },
         );
-        for (label) |c| switch (c) {
-            '&' => try w.writeAll("&amp;"),
-            '<' => try w.writeAll("&lt;"),
-            '>' => try w.writeAll("&gt;"),
-            else => try w.writeByte(std.ascii.toUpper(c)),
-        };
+        // Band headers render upper-case; `toUpper` is a no-op on every byte
+        // `writeXml` turns into an entity, so casing first and escaping after
+        // is byte-identical to the reverse and keeps one escaper.
+        for (label) |c| {
+            const upper: [1]u8 = .{std.ascii.toUpper(c)};
+            try writeEscaped(w, &upper);
+        }
         try w.writeAll("</text>");
     }
 }
@@ -558,12 +560,7 @@ fn writeGroupBoxes(w: *Writer, lay: layout.Layout) Writer.Error!void {
             "<text x=\"{d:.1}\" y=\"{d:.1}\" class=\"dg-group-label\" fill=\"{s}\">",
             .{ g.x + 14, g.y + 21, color },
         );
-        for (g.label) |c| switch (c) {
-            '&' => try w.writeAll("&amp;"),
-            '<' => try w.writeAll("&lt;"),
-            '>' => try w.writeAll("&gt;"),
-            else => try w.writeByte(c),
-        };
+        try writeEscaped(w, g.label);
         try w.writeAll("</text>");
     }
 }
@@ -1227,15 +1224,7 @@ fn wrapText(arena: Allocator, s: []const u8, max: usize, max_lines: usize) Alloc
     return lines.toOwnedSlice(arena);
 }
 
-fn writeEscaped(w: *Writer, s: []const u8) Writer.Error!void {
-    for (s) |c| switch (c) {
-        '<' => try w.writeAll("&lt;"),
-        '>' => try w.writeAll("&gt;"),
-        '&' => try w.writeAll("&amp;"),
-        '"' => try w.writeAll("&quot;"),
-        else => try w.writeByte(c),
-    };
-}
+const writeEscaped = escape.writeXml;
 
 // ── CSS ────────────────────────────────────────────────────────────────
 
