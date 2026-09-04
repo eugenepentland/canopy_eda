@@ -311,6 +311,20 @@ fn writeCheckFindings(
 
 /// `netlisp check <name>` — run unified validation and print findings.
 pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
+    const report = try checkReport(allocator, args);
+    try std.Io.File.stdout().writeStreamingAll(infra_fs.currentIo(), report.text);
+    if (report.errors > 0) exit.failure();
+}
+
+/// What `netlisp check` printed, and whether it should have failed the process.
+pub const CheckReport = struct { text: []const u8, errors: usize, shown: usize };
+
+/// Build `netlisp check`'s findings report for `args` without touching stdout
+/// or exiting. Split out of `cmdCheck` so the twin-parity test can compare this
+/// surface's ERC set against `/api/erc` and the `run_checks` tool, which answer
+/// the same question through two more implementations; `args` is the real argv
+/// so the comparison covers this surface's own flag handling too.
+pub fn checkReport(allocator: std.mem.Allocator, args: []const []const u8) CommandError!CheckReport {
     const parsed = parseCheckArgs(args);
 
     const board_path = try paths.designSourcePath(allocator, parsed.project_dir, parsed.design);
@@ -331,7 +345,6 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
 
     const violations = try erc_mod.runErc(allocator, block, parsed.project_dir);
     var w_buf: std.Io.Writer.Allocating = .init(allocator);
-    defer w_buf.deinit();
     const w = &w_buf.writer;
     var counts = try writeCheckErc(w, violations, parsed.severity);
     counts.include(try writeCheckAssertions(w, &eval, parsed.severity));
@@ -339,9 +352,7 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     defer report.deinit(allocator);
     counts.include(try writeCheckFindings(w, report.findings, parsed.severity));
     try w.print("\n{d} violation(s)\n", .{counts.shown});
-    try std.Io.File.stdout().writeStreamingAll(infra_fs.currentIo(), w_buf.written());
-
-    if (counts.errors > 0) exit.failure();
+    return .{ .text = w_buf.written(), .errors = counts.errors, .shown = counts.shown };
 }
 
 /// `netlisp system-check <name>` — print the exact system-release readiness

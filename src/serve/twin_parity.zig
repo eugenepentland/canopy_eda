@@ -33,6 +33,8 @@ const design_diff = @import("design_diff.zig");
 const infra_fs = @import("../infra/fs.zig");
 const query_cli = @import("../query.zig");
 const api = @import("api.zig");
+const commands = @import("../commands.zig");
+const kicad_sch_export = @import("kicad_sch_export.zig");
 
 const Server = serve_root.Server;
 const testing = std.testing;
@@ -333,6 +335,99 @@ fn designTitles(alloc: std.mem.Allocator, listing: std.json.Value) !std.StringAr
     return out;
 }
 
+/// Every ERC violation in a JSON array, one `severity kind ref net message`
+/// line each — the comparable projection of a findings list, whatever document
+/// carried it. Order is preserved: two surfaces running one checker over one
+/// design have no licence to report the same set in a different order.
+fn ercLines(alloc: std.mem.Allocator, arr: []const std.json.Value) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    for (arr) |v| {
+        try out.writer.print("{s} {s} {s} {s} {s}\n", .{
+            v.object.get("severity").?.string,
+            v.object.get("kind").?.string,
+            strField(v.object, "ref"),
+            strField(v.object, "net"),
+            v.object.get("message").?.string,
+        });
+    }
+    return out.written();
+}
+
+/// `obj.key` as a string, or `-` when absent (both writers omit an empty ref
+/// or net rather than emitting `""`).
+fn strField(obj: std.json.ObjectMap, key: []const u8) []const u8 {
+    const v = obj.get(key) orelse return "-";
+    return if (v == .string) v.string else "-";
+}
+
+/// The first ERC finding a report does not mention, else `""`. The CLI renders
+/// a fixed-width text table rather than JSON, so it is compared by content:
+/// every violation the JSON surfaces name must appear there with its kind and
+/// its message.
+fn firstUnreported(alloc: std.mem.Allocator, arr: []const std.json.Value, report: []const u8) ![]const u8 {
+    for (arr) |v| {
+        for ([_][]const u8{ "kind", "message" }) |field| {
+            const text = v.object.get(field).?.string;
+            if (std.mem.indexOf(u8, report, text) == null)
+                return std.fmt.allocPrint(alloc, "{s} {s}", .{ field, text });
+        }
+    }
+    return "";
+}
+
+/// The regular files directly inside `dir_path`, sorted by name — what an
+/// export surface actually left on disk.
+fn dirFiles(alloc: std.mem.Allocator, dir_path: []const u8) ![]const []const u8 {
+    var dir = try infra_fs.cwd().openDir(dir_path, .{ .iterate = true });
+    defer dir.close();
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .file) continue;
+        try names.append(alloc, try alloc.dupe(u8, entry.name));
+    }
+    std.mem.sort([]const u8, names.items, {}, lessThanStr);
+    return names.items;
+}
+
+fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+/// `<dir>/<name>`, read whole.
+fn fileIn(alloc: std.mem.Allocator, dir_path: []const u8, name: []const u8) ![]const u8 {
+    const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_path, name });
+    return infra_fs.cwd().readFileAlloc(alloc, path, 4 << 20);
+}
+
+/// The first way two export directories differ — a file only one of them
+/// wrote, or one whose bytes disagree — else `""`.
+fn firstExportDifference(alloc: std.mem.Allocator, a_dir: []const u8, b_dir: []const u8) ![]const u8 {
+    const a = try dirFiles(alloc, a_dir);
+    const b = try dirFiles(alloc, b_dir);
+    if (a.len != b.len)
+        return std.fmt.allocPrint(alloc, "file count {d} vs {d}", .{ a.len, b.len });
+    for (a, b) |x, y| {
+        if (!std.mem.eql(u8, x, y))
+            return std.fmt.allocPrint(alloc, "name {s} vs {s}", .{ x, y });
+        if (!std.mem.eql(u8, try fileIn(alloc, a_dir, x), try fileIn(alloc, b_dir, y)))
+            return std.fmt.allocPrint(alloc, "bytes of {s}", .{x});
+    }
+    return "";
+}
+
+/// The first exported file whose name or bytes are missing from `zip`, else
+/// `""`. The archive is store-only, so every file's content is in it verbatim.
+fn firstMissingFromZip(alloc: std.mem.Allocator, dir_path: []const u8, zip: []const u8) ![]const u8 {
+    for (try dirFiles(alloc, dir_path)) |name| {
+        if (std.mem.indexOf(u8, zip, name) == null)
+            return std.fmt.allocPrint(alloc, "name {s}", .{name});
+        if (std.mem.indexOf(u8, zip, try fileIn(alloc, dir_path, name)) == null)
+            return std.fmt.allocPrint(alloc, "bytes of {s}", .{name});
+    }
+    return "";
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 // spec: Web Server - The describe_pcb_layout MCP tool and the pcb-describe endpoint share one implementation, so a no-argument read returns the same spatial-facts document on both surfaces
@@ -631,4 +726,80 @@ test "the instances CLI and list_instances emit the same payload at the same sco
     try testing.expectEqualStrings(top.written(), top_tool.body);
 
     try testing.expect(std.mem.indexOf(u8, flat.written(), "C1") != null);
+}
+
+// spec: Web Server - The check CLI subcommand, the erc endpoint and the run_checks MCP tool run one electrical-rule check over one design, so all three report the same violations in the same order
+test "the three check surfaces report the same ERC violations" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp, .routed);
+
+    // A design with something WRONG with it: a one-pin net on each side of a
+    // lone cap. Three surfaces agreeing on an empty finding list would prove
+    // nothing about how they render a finding.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/twinerc.sexp", .data =
+        \\(design-block "Twin ERC"
+        \\  (import cap)
+        \\  (instance "C1" (cap "10nF") (pin 1 "LONELY") (pin 2 "ALSOLONELY")))
+    });
+
+    const http = try httpCall(alloc, project, api.ercApi, "twinerc", &.{}, null);
+    try testing.expectEqual(@as(u16, 200), http.status);
+    const from_http = try std.json.parseFromSliceLeaky(std.json.Value, alloc, http.body, .{});
+
+    const tool = try mcpCall(alloc, project, "run_checks", "{\"name\":\"twinerc\"}");
+    try testing.expect(tool.ok);
+    const from_tool = (try asObject(alloc, tool.body)).get("erc").?;
+
+    // The endpoint and the tool serialize a violation through two hand-copied
+    // writers (`erc.writeViolationsJson` and `mcp_checks.writeErcViolationJson`),
+    // so this compares the rendered fields, not just the count.
+    try testing.expectEqualStrings(
+        try ercLines(alloc, from_http.array.items),
+        try ercLines(alloc, from_tool.array.items),
+    );
+
+    // The CLI is a third implementation with a text table instead of JSON; it
+    // must still name every finding the other two report.
+    const cli = try commands.checkReport(alloc, &.{ "--project-dir", project, "twinerc" });
+    try testing.expectEqualStrings("", try firstUnreported(alloc, from_http.array.items, cli.text));
+
+    // …over a real finding set, so the three-way agreement is not three empties.
+    try testing.expect(from_http.array.items.len > 0);
+}
+
+// spec: Web Server - The export-kicad-sch CLI subcommand, the kicad-sch endpoint and the export_kicad_sch MCP tool run one exporter, so all three produce the same sheet files byte for byte
+test "the three KiCad schematic exports produce the same files" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp, .routed);
+
+    // The tool refuses an `output_dir` inside the project (it is an export, not
+    // a design edit), so both writing surfaces aim at a separate tree.
+    var out_tmp = testing.tmpDir(.{});
+    defer out_tmp.cleanup();
+    const out_root = try out_tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    const from_cli = try std.fmt.allocPrint(alloc, "{s}/cli", .{out_root});
+    const from_tool = try std.fmt.allocPrint(alloc, "{s}/tool", .{out_root});
+
+    try commands.cmdExportKicadSch(alloc, &.{ "--project-dir", project, "--output-dir", from_cli, "twinfx" });
+    const args = try std.fmt.allocPrint(alloc, "{{\"name\":\"twinfx\",\"output_dir\":\"{s}\"}}", .{from_tool});
+    const tool = try mcpCall(alloc, project, "export_kicad_sch", args);
+    try testing.expect(tool.ok);
+    try testing.expectEqualStrings("", try firstExportDifference(alloc, from_cli, from_tool));
+
+    // The endpoint ships the same export as a store-only ZIP, so every file's
+    // name and its whole content sit in the archive verbatim.
+    const http = try httpCall(alloc, project, kicad_sch_export.kicadSchApi, "twinfx", &.{}, null);
+    try testing.expectEqual(@as(u16, 200), http.status);
+    try testing.expectEqualStrings("", try firstMissingFromZip(alloc, from_cli, http.body));
+    try testing.expect((try dirFiles(alloc, from_cli)).len > 1);
 }

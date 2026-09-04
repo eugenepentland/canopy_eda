@@ -1236,6 +1236,7 @@ parity_test = "returns the same score as the layout-match endpoint"
 [[twin]]
 name = "kicad-sch-export"
 surfaces = ["cli:export-kicad-sch", "http:/api/kicad-sch", "mcp:export_kicad_sch"]
+parity_test = "the three KiCad schematic exports produce the same files"
 
 [[twin]]
 name = "kicad-sch-sync"
@@ -1244,6 +1245,7 @@ surfaces = ["cli:sync-kicad-sch", "http:/api/sync-kicad-sch", "mcp:sync_kicad_sc
 [[twin]]
 name = "erc-checks"
 surfaces = ["cli:check", "http:/api/erc", "mcp:run_checks"]
+parity_test = "the three check surfaces report the same ERC violations"
 
 [[twin]]
 name = "build-push"

@@ -253,7 +253,9 @@ src/build_id.zig::load | fn load( io: std.Io, allocator: std.mem.Allocator, repo
 src/canonical_module_check.zig::Finding struct_
 src/canonical_module_check.zig::run | fn run( allocator: std.mem.Allocator, block: *const env.DesignBlock, project_dir: []const u8, ) std.mem.Allocator.Error![]Finding
 src/checks.zig::Severity enum_
+src/commands.zig::CheckReport struct_
 src/commands.zig::CommandError value
+src/commands.zig::checkReport | fn checkReport(allocator: std.mem.Allocator, args: []const []const u8) CommandError!CheckReport
 src/commands.zig::cmdBackfillLayouts | fn cmdBackfillLayouts( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdBuild | fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdCheck | fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
