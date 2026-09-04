@@ -325,6 +325,8 @@ pub fn page(
             "<div class=\"sp-group\"><span>Constrain</span><button data-action=\"horizontal\">H</button><button data-action=\"vertical\">V</button><button data-action=\"coincident\">Coincident</button><button data-action=\"collinear\">Co-linear</button><button data-action=\"parallel\">∥</button><button data-action=\"perpendicular\">⟂</button><button data-action=\"tangent\">Tangent</button><button data-action=\"equal\">Equal</button><button data-action=\"midpoint\">Midpoint</button><button data-action=\"symmetric\">Symmetry</button><button data-action=\"fixed\">Fix</button></div>" ++
             "<div class=\"sp-group\"><span>Modify</span><button data-action=\"arc\">Arc</button><button data-action=\"line\">Line</button><button data-action=\"fillet\">Fillet</button><button data-action=\"remove-fillet\">Remove fillet</button><button data-action=\"chamfer\">Chamfer</button><button data-action=\"offset\">Offset</button><button data-action=\"mirror-x\">Mirror X</button><button data-action=\"mirror-y\">Mirror Y</button><button data-action=\"delete\">Delete</button></div>" ++
             "<button class=\"sp-finish sp-repair\" data-action=\"close-profile\">Close profile</button><button class=\"sp-finish sp-extrude\" data-action=\"extrude\">Extrude sketch…</button><button class=\"sp-finish\" data-action=\"finish\">Finish sketch</button></div>" ++
+            "<div id=\"sketch-dimensions\" class=\"sketch-dimensions\" aria-live=\"polite\"></div>" ++
+            "<form id=\"sketch-dimension-popover\" class=\"sketch-dimension-popover\" role=\"dialog\" aria-labelledby=\"sketch-dimension-title\" hidden><strong id=\"sketch-dimension-title\">Dimension</strong><label><span>Value</span><span class=\"dimension-value-field\"><input id=\"sketch-dimension-value\" type=\"number\" min=\"0\" step=\"any\" required><i>mm</i></span></label><p id=\"sketch-dimension-error\" hidden></p><div><button type=\"button\" data-dimension-cancel>Cancel</button><button type=\"submit\" class=\"primary\">Apply</button></div></form>" ++
             "<div id=\"thermal-probe\" hidden></div><div id=\"empty\"></div><div id=\"drag-help\">Drag boards or fans · drag empty space to pan · scroll to zoom</div><div id=\"legend\"><span class=\"thermal-key\" id=\"legend-min\">25 °C</span><i class=\"thermal-key ramp\"></i><span class=\"thermal-key\" id=\"legend-max\">125 °C</span><span class=\"thermal-key\"><i class=\"sink\"></i>Bottom sink</span><span class=\"thermal-key\"><i class=\"fan\"></i>Fan outlet</span><span class=\"cad-key\" hidden><i class=\"solid\"></i>Authored solid</span><span class=\"cad-key\" hidden><i class=\"sketch\"></i>Sketch</span><span class=\"cad-key\" hidden><i class=\"cool\"></i>PCB reference</span></div></div></main>" ++
             "<script>window.CAD_DATA={\"system\":",
     );
@@ -699,6 +701,8 @@ test "system CAD page starts from sketch tools without enclosure generators" {
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "data-action=\"perpendicular\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "data-action=\"extrude\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "Dimension (D)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"sketch-dimension-popover\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"sketch-dimensions\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "Extrude selected") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "/static/system_cad.css?v=") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "/static/shape_sketch.js?v=") != null);
@@ -716,6 +720,9 @@ test "system CAD validates and serializes repeated assembly instances" {
     try std.testing.expect(std.mem.indexOf(u8, browser, "state.fans.map") != null);
     try std.testing.expect(std.mem.indexOf(u8, browser, "function drawSystemFan") != null);
     try std.testing.expect(std.mem.indexOf(u8, browser, "function extrudeActiveSketch()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, browser, "function renderSketchDimensions()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, browser, "OS.annotations(sketch.geometry)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, browser, "function applyPendingDimension()") != null);
     try std.testing.expect(std.mem.indexOf(u8, browser, "event.key.toLowerCase() === \"d\"") != null);
     const boards = [_]system_review.BoardMember{
         .{ .name = "barracuda", .role = "controller", .source = "src/boards/barracuda/barracuda.sexp", .part_number = "BAR", .revision = "2" },

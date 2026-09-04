@@ -89,5 +89,9 @@ assert.equal(thermal.enabledExtrusionCount({ extrusions: [{ enabled: false }, { 
 assert.deepEqual(thermal.sketchWorldPoint("xy", 4, 2, 3, 5), [2, 3, 9]);
 assert.deepEqual(thermal.sketchWorldPoint("xz", 4, 2, 3, 5), [2, -1, 3]);
 assert.deepEqual(thermal.sketchWorldPoint("yz", 4, 2, 3, 5), [9, 2, 3]);
+assert.equal(thermal.dimensionLabel("length", 12.3456), "12.346 mm");
+assert.equal(thermal.dimensionLabel("radius", 4), "R 4 mm");
+assert.equal(thermal.dimensionLabel("diameter", 8), "Ø 8 mm");
+assert.equal(thermal.dimensionLabel("angle", 45), "45°");
 
 console.log("System CAD: datum planes, explicit extrusions, repeated thermal fields, and bounded 2D/3D zoom pass");
