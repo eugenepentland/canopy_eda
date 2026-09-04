@@ -295,8 +295,11 @@ pub fn page(
     try writer.writeAll(
         "<!doctype html><html><head><meta charset=\"utf-8\">" ++
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
-            "<title>System Thermal</title><link rel=\"stylesheet\" href=\"/static/system_cad.css\"></head><body>" ++
-            "<header><a class=\"back\" id=\"back\">← System</a><div><h1 id=\"title\">System Thermal</h1><p id=\"identity\"></p></div>" ++
+            "<title>System Thermal</title>",
+    );
+    try writer.print("<link rel=\"stylesheet\" href=\"/static/system_cad.css?v={x}\"></head><body>", .{std.hash.Wyhash.hash(0, @embedFile("assets/system_cad.css"))});
+    try writer.writeAll(
+        "<header><a class=\"back\" id=\"back\">← System</a><div><h1 id=\"title\">System Thermal</h1><p id=\"identity\"></p></div>" ++
             "<span class=\"kernel\">Sketch + extrude · Zig</span><div class=\"view-switch\" role=\"group\" aria-label=\"Workspace view\"><button id=\"view-2d\" class=\"on\" aria-pressed=\"true\">2D thermal</button><button id=\"view-3d\" aria-pressed=\"false\">3D assembly</button></div><span id=\"save-status\"></span><button id=\"save\">Save design</button><button id=\"top\">Edit sketch</button><button id=\"fit\">Fit view</button>" ++
             "<button id=\"assembly-json\">Download assembly.json</button><button id=\"step\">Download STEP</button><button id=\"stl\">Download STL</button></header>" ++
             "<main><aside><section><h2>System screening</h2><div class=\"fields\">" ++
@@ -337,7 +340,9 @@ pub fn page(
     for (spec.boards, 0..) |board, index| try writeBoard(writer, allocator, project_dir, board, index);
     try writer.writeAll("],\"assembly\":");
     try writeAssembly(writer, if (parsed_assembly) |parsed| parsed.value else null);
-    try writer.writeAll("};</script><script src=\"/static/three.min.js\"></script><script src=\"/static/OrbitControls.js\"></script><script src=\"/static/shape_sketch.js\"></script><script src=\"/static/system_cad.js\"></script></body></html>");
+    try writer.writeAll("};</script><script src=\"/static/three.min.js\"></script><script src=\"/static/OrbitControls.js\"></script>");
+    try writer.print("<script src=\"/static/shape_sketch.js?v={x}\"></script>", .{std.hash.Wyhash.hash(0, @embedFile("assets/shape_sketch.js"))});
+    try writer.print("<script src=\"/static/system_cad.js?v={x}\"></script></body></html>", .{std.hash.Wyhash.hash(0, @embedFile("assets/system_cad.js"))});
     res.content_type = .HTML;
     res.header("cache-control", "private, no-store");
     res.header("content-security-policy", "frame-ancestors 'none'");
@@ -630,7 +635,7 @@ test "CAD export endpoint returns only explicitly authored extrusion solids" {
     try std.testing.expect(std.mem.startsWith(u8, stl_request.res.body, "solid floor\n"));
 }
 
-// spec: Web Server - the system CAD workspace opens as a solved 2D heat-field map with a separate 3D assembly/CAD view, shows imported PCBs as reference geometry without inferring an enclosure, provides clickable XY/XZ/YZ origin datum planes, locks active sketch editing to a flat orthographic plane with the PCB outline editor's selection/constraint/modify palette, and creates preview or STEP/STL solids only from explicit enabled extrusions while ignoring legacy generated-enclosure documents
+// spec: Web Server - the system CAD workspace opens as a solved 2D heat-field map with a separate 3D assembly/CAD view, shows imported PCBs as reference geometry without inferring an enclosure, provides clickable XY/XZ/YZ origin datum planes, locks active sketch editing to a flat orthographic plane with the PCB outline editor's selection/constraint/modify palette, creates preview or STEP/STL solids only from explicit enabled extrusions while ignoring legacy generated-enclosure documents, and content-hashes its first-party asset URLs so fresh HTML cannot execute a stale control schema
 test "CAD mesh endpoint is empty for a blank document and extrudes on request" {
     const blank = "{\"schema\":\"netlisp-mechanical-v2\",\"boards\":[],\"sketches\":[],\"extrusions\":[]}";
     var request = httpz.testing.init(.{});
@@ -691,7 +696,9 @@ test "system CAD page starts from sketch tools without enclosure generators" {
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "data-action=\"fillet\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "data-action=\"perpendicular\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "Extrude selected") != null);
-    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "/static/shape_sketch.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "/static/system_cad.css?v=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "/static/shape_sketch.js?v=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "/static/system_cad.js?v=") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "auto-bosses") == null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "PCB clearance") == null);
 }
