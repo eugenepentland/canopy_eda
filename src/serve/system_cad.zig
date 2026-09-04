@@ -250,7 +250,7 @@ fn writeBoard(
         placement.rules.physical.board_thickness
     else
         1.6;
-    try writer.print(",\"width\":{d},\"depth\":{d},\"thickness\":{d},\"outline\":", .{ rect.w, rect.h, thickness });
+    try writer.print(",\"width\":{d},\"depth\":{d},\"thickness\":{d},\"source_center\":[{d},{d}],\"outline\":", .{ rect.w, rect.h, thickness, cx, cy });
     try writeBoardOutline(writer, placement.board_poly, .{ rect.minx, rect.miny, rect.w, rect.h }, .{ cx, cy });
     try writer.writeAll(",\"parts\":[");
     for (placement.parts, 0..) |part, part_index| {
@@ -295,16 +295,18 @@ pub fn page(
     try writer.writeAll(
         "<!doctype html><html><head><meta charset=\"utf-8\">" ++
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
-            "<title>System 3D CAD</title><link rel=\"stylesheet\" href=\"/static/system_cad.css\"></head><body>" ++
-            "<header><a class=\"back\" id=\"back\">← System</a><div><h1 id=\"title\">System 3D CAD</h1><p id=\"identity\"></p></div>" ++
-            "<span class=\"kernel\">Sketch + extrude · Zig</span><span id=\"save-status\"></span><button id=\"save\">Save design</button><button id=\"top\">Top sketch</button><button id=\"fit\">Fit view</button>" ++
+            "<title>System Thermal</title><link rel=\"stylesheet\" href=\"/static/system_cad.css\"></head><body>" ++
+            "<header><a class=\"back\" id=\"back\">← System</a><div><h1 id=\"title\">System Thermal</h1><p id=\"identity\"></p></div>" ++
+            "<span class=\"kernel\">Sketch + extrude · Zig</span><div class=\"view-switch\" role=\"group\" aria-label=\"Workspace view\"><button id=\"view-2d\" class=\"on\" aria-pressed=\"true\">2D thermal</button><button id=\"view-3d\" aria-pressed=\"false\">3D assembly</button></div><span id=\"save-status\"></span><button id=\"save\">Save design</button><button id=\"top\">Top sketch</button><button id=\"fit\">Fit view</button>" ++
             "<button id=\"assembly-json\">Download assembly.json</button><button id=\"step\">Download STEP</button><button id=\"stl\">Download STL</button></header>" ++
             "<main><aside><section><h2>System screening</h2><div class=\"fields\">" ++
             "<label>Ambient <input id=\"ambient\" type=\"number\" min=\"-55\" max=\"125\" step=\"1\"><span>°C</span></label>" ++
-            "<label>Board pitch <input id=\"pitch\" type=\"number\" min=\"1\" max=\"200\" step=\"0.5\"><span>mm</span></label></div>" ++
+            "<label>Board pitch <input id=\"pitch\" type=\"number\" min=\"1\" max=\"200\" step=\"0.5\"><span>mm</span></label>" ++
+            "<label>Scale minimum <input id=\"scale-min\" type=\"number\" min=\"-55\" max=\"200\" step=\"1\"><span>°C</span></label>" ++
+            "<label>Scale maximum <input id=\"scale-max\" type=\"number\" min=\"-54\" max=\"300\" step=\"1\"><span>°C</span></label></div>" ++
             "<label class=\"check\"><input id=\"snap\" type=\"checkbox\" checked> Snap board centres to pitch while dragging</label>" ++
             "<div id=\"thermal-summary\" class=\"thermal-summary\">Loading board thermal models…</div>" ++
-            "<p class=\"hint\">Drag a PCB in the viewport or enter its exact pose. Temperatures combine each saved board's placement-aware solve, projected fan coverage, and mixed-air rise. This is a system screening model, not CFD.</p></section>" ++
+            "<p class=\"hint\">The 2D view paints the same solved board fields as Thermal, shifted by projected fan coverage and mixed-air rise. Drag a PCB or enter its exact pose. This is a system screening model, not CFD.</p></section>" ++
             "<section><h2>Board instances</h2><p class=\"hint\">The review manifest defines board types; assembly.json may repeat them as physical instances.</p><div id=\"boards\"></div></section>" ++
             "<section><div class=\"section-head\"><h2>Sketches</h2><button id=\"new-sketch\">New sketch</button></div>" ++
             "<p class=\"hint\">Nothing is generated from the PCBs. Create an XY sketch, draw the profile yourself, then explicitly extrude it.</p>" ++
@@ -312,7 +314,7 @@ pub fn page(
             "<div id=\"sketches\"></div></section>" ++
             "<section><div class=\"section-head\"><h2>Extrusions</h2><button id=\"add-extrusion\">Extrude selected</button></div><div id=\"model-status\" class=\"dimensions\">Blank workspace · 0 solids</div><div id=\"extrusions\"></div><button id=\"reset\">Reset local draft</button></section>" ++
             "<section><h2>Model boundary</h2><ul><li>PCBs, components, fans and heatsinks are reference geometry only</li><li>Only closed sketches with an explicit enabled extrusion become solids</li><li>Each extrusion remains a separate STEP/STL body</li><li>Current extrusion profiles must be convex; use separate bodies for floors and walls</li><li>No automatic enclosure, lid, boss, cutout, or boolean operation</li></ul></section></aside>" ++
-            "<div id=\"viewport\"><canvas id=\"canvas\"></canvas><div id=\"empty\"></div><div id=\"drag-help\">Orbit empty space · drag PCBs · select a sketch tool to draw on its XY plane</div><div id=\"legend\"><span><i class=\"solid\"></i>Authored solid</span><span><i class=\"sketch\"></i>Sketch</span><span><i class=\"cool\"></i>PCB reference</span></div></div></main>" ++
+            "<div id=\"viewport\"><canvas id=\"thermal-canvas\" aria-label=\"System thermal heatmap\"></canvas><canvas id=\"canvas\" hidden></canvas><div id=\"thermal-probe\" hidden></div><div id=\"empty\"></div><div id=\"drag-help\">Drag boards · drag empty space to pan · scroll to zoom</div><div id=\"legend\"><span class=\"thermal-key\" id=\"legend-min\">25 °C</span><i class=\"thermal-key ramp\"></i><span class=\"thermal-key\" id=\"legend-max\">125 °C</span><span class=\"thermal-key\"><i class=\"sink\"></i>Bottom sink</span><span class=\"thermal-key\"><i class=\"fan\"></i>Top fan</span><span class=\"cad-key\" hidden><i class=\"solid\"></i>Authored solid</span><span class=\"cad-key\" hidden><i class=\"sketch\"></i>Sketch</span><span class=\"cad-key\" hidden><i class=\"cool\"></i>PCB reference</span></div></div></main>" ++
             "<script>window.CAD_DATA={\"system\":",
     );
     try json_writer.writeScriptString(writer, spec.name);
@@ -607,7 +609,7 @@ test "CAD export endpoint returns only explicitly authored extrusion solids" {
     try std.testing.expect(std.mem.startsWith(u8, stl_request.res.body, "solid floor\n"));
 }
 
-// spec: Web Server - the system 3D CAD workspace opens with imported PCBs as reference geometry and no inferred enclosure; only an authored closed shape-sketch followed by an explicit enabled extrusion creates a preview or STEP/STL solid, while legacy generated-enclosure documents are ignored rather than regenerated
+// spec: Web Server - the system CAD workspace's separate 3D assembly view shows imported PCBs as reference geometry and no inferred enclosure; only an authored closed shape-sketch followed by an explicit enabled extrusion creates a preview or STEP/STL solid, while legacy generated-enclosure documents are ignored rather than regenerated
 test "CAD mesh endpoint is empty for a blank document and extrudes on request" {
     const blank = "{\"schema\":\"netlisp-mechanical-v2\",\"boards\":[],\"sketches\":[],\"extrusions\":[]}";
     var request = httpz.testing.init(.{});
@@ -641,6 +643,8 @@ test "system CAD page starts from sketch tools without enclosure generators" {
     defer request.deinit();
     try page(request.res.arena, ".", spec, true, request.res);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"new-sketch\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"thermal-canvas\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, ">2D thermal</button>") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"top\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "Extrude selected") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "/static/shape_sketch.js") != null);
@@ -648,8 +652,12 @@ test "system CAD page starts from sketch tools without enclosure generators" {
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "PCB clearance") == null);
 }
 
-// spec: system-review - a strict assembly sidecar repeats reviewed board definitions as uniquely identified physical instances and preserves its authored pitch, while bounded wheel gestures prevent trackpad momentum from driving the 3D camera through the assembly
+// spec: system-review - a strict assembly sidecar repeats reviewed board definitions as uniquely identified physical instances and preserves its authored pitch, and the system workspace opens as a 2D solved heat-field map with a separate 3D assembly view and bounded wheel gestures
 test "system CAD validates and serializes repeated assembly instances" {
+    const browser = @embedFile("assets/system_cad.js");
+    try std.testing.expect(std.mem.indexOf(u8, browser, "var viewMode = \"2d\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, browser, "/api/thermal-field/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, browser, "fieldTemperatureAt") != null);
     const boards = [_]system_review.BoardMember{
         .{ .name = "barracuda", .role = "controller", .source = "src/boards/barracuda/barracuda.sexp", .part_number = "BAR", .revision = "2" },
         .{ .name = "black-canyon", .role = "channel", .source = "src/boards/black-canyon/black-canyon.sexp", .part_number = "BC", .revision = "1" },
