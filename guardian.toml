@@ -203,6 +203,11 @@ command = ["node", "--check", "src/serve/assets/system_cad.js"]
 inputs = ["src/serve/assets/system_cad.js"]
 
 [[external]]
+name = "system-cad-js-test"
+command = ["node", "src/serve/assets/system_cad.test.js"]
+inputs = ["src/serve/assets/system_cad.js", "src/serve/assets/system_cad.test.js"]
+
+[[external]]
 name = "model-viewer-3d-js-syntax"
 command = ["node", "--check", "src/serve/assets/model_viewer_3d.js"]
 inputs = ["src/serve/assets/model_viewer_3d.js"]

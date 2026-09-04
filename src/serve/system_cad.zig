@@ -1,8 +1,10 @@
-//! System-level mechanical CAD page and enclosure exports.
+//! System-level thermal/mechanical workspace and enclosure exports.
 //!
-//! System manifests select the same saved PCB layouts used for fabrication.
-//! This page imports their exact outlines and component courtyards, then sends
-//! enclosure parameters through the native Zig prismatic kernel for STEP/STL.
+//! System manifests select the same saved PCB layouts used for fabrication;
+//! an optional assembly sidecar repeats their board definitions as physical
+//! instances. The page imports exact outlines, components and saved cooling,
+//! while the browser couples board thermal ladders and the native Zig
+//! prismatic kernel remains the authority for enclosure STEP/STL geometry.
 
 const std = @import("std");
 const httpz = @import("httpz");
@@ -11,11 +13,170 @@ const enclosure = @import("../mechanical/enclosure.zig");
 const prismatic = @import("../mechanical/prismatic.zig");
 const json_writer = @import("../json_writer.zig");
 const system_review = @import("../system_review.zig");
+const system_review_assets = @import("../system_review_assets.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const pcb_step_export = @import("pcb_step_export.zig");
 
 /// Allocation and response-write failures escaping CAD handlers.
 pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
+
+const max_assembly_bytes: usize = 256 * 1024;
+const max_assembly_instances: usize = 256;
+const assembly_schema = "netlisp-system-assembly-v1";
+
+/// One physical occurrence of a reviewed board. The review manifest keeps one
+/// immutable definition per board design; this sidecar is deliberately the
+/// repeatable mechanical layer above it, so a sixteen-channel product does not
+/// have to lie to the release manifest by cloning one PCB sixteen times.
+const AssemblyInstance = struct {
+    id: []const u8,
+    board: []const u8,
+    x: f64 = 0,
+    y: f64 = 0,
+    z: f64 = 5,
+    rotation: f64 = 0,
+    enabled: bool = true,
+};
+
+/// Optional `src/systems/<name>/assembly.json`. It supplies the authored seed
+/// for the browser workspace; browser drags remain a local draft until the
+/// user downloads or commits the sidecar, matching the existing CAD editor's
+/// local-draft contract.
+const AssemblySpec = struct {
+    schema: []const u8,
+    pitch_mm: f64 = 22,
+    ambient_c: f64 = 25,
+    instances: []const AssemblyInstance,
+};
+
+const ParsedAssembly = std.json.Parsed(AssemblySpec);
+
+fn safeInstanceId(value: []const u8) bool {
+    if (value.len == 0 or value.len > 128 or !std.ascii.isAlphanumeric(value[0])) return false;
+    for (value[1..]) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-') continue;
+        if (c != '_' and c != '.') return false;
+    }
+    return true;
+}
+
+fn hasBoard(spec: system_review.SystemSpec, name: []const u8) bool {
+    for (spec.boards) |board| if (std.mem.eql(u8, board.name, name)) return true;
+    return false;
+}
+
+fn validAssemblyHeader(assembly: AssemblySpec) bool {
+    if (!std.mem.eql(u8, assembly.schema, assembly_schema)) return false;
+    if (assembly.instances.len == 0 or assembly.instances.len > max_assembly_instances) return false;
+    if (!std.math.isFinite(assembly.pitch_mm) or assembly.pitch_mm <= 0 or assembly.pitch_mm > 1000) return false;
+    if (!std.math.isFinite(assembly.ambient_c) or assembly.ambient_c < -55 or assembly.ambient_c > 125) return false;
+    return true;
+}
+
+fn validInstance(spec: system_review.SystemSpec, instance: AssemblyInstance) bool {
+    if (!safeInstanceId(instance.id) or !hasBoard(spec, instance.board)) return false;
+    if (!std.math.isFinite(instance.x) or !std.math.isFinite(instance.y)) return false;
+    if (!std.math.isFinite(instance.z) or !std.math.isFinite(instance.rotation)) return false;
+    if (@abs(instance.x) > 10_000 or @abs(instance.y) > 10_000) return false;
+    if (@abs(instance.z) > 10_000) return false;
+    return true;
+}
+
+fn validAssembly(spec: system_review.SystemSpec, assembly: AssemblySpec) bool {
+    if (!validAssemblyHeader(assembly)) return false;
+    for (assembly.instances, 0..) |instance, index| {
+        if (!validInstance(spec, instance)) return false;
+        for (assembly.instances[0..index]) |earlier| if (std.mem.eql(u8, earlier.id, instance.id)) return false;
+    }
+    return true;
+}
+
+fn readAssembly(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    spec: system_review.SystemSpec,
+) ?ParsedAssembly {
+    const relative = std.fmt.allocPrint(allocator, "src/systems/{s}/assembly.json", .{spec.name}) catch return null;
+    defer allocator.free(relative);
+    const source = system_review_assets.readContainedFile(allocator, project_dir, relative, max_assembly_bytes) catch return null;
+    defer allocator.free(source);
+    var parsed = std.json.parseFromSlice(AssemblySpec, allocator, source, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = false,
+    }) catch return null;
+    if (!validAssembly(spec, parsed.value)) {
+        parsed.deinit();
+        return null;
+    }
+    return parsed;
+}
+
+fn selectedLayout(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    board: system_review.BoardMember,
+) ?pcb_layout_page.SavedLayout {
+    const layouts = pcb_layout_page.readLayouts(allocator, project_dir, board.name);
+    if (!std.mem.eql(u8, board.layout, "blessed")) {
+        for (layouts) |layout| if (std.mem.eql(u8, layout.name, board.layout)) return layout;
+        return null;
+    }
+    for (layouts) |layout| if (layout.default) return layout;
+    return if (layouts.len > 0) layouts[0] else null;
+}
+
+fn writeCooling(
+    writer: *std.Io.Writer,
+    layout: ?pcb_layout_page.SavedLayout,
+    center: [2]f64,
+) HandlerError!void {
+    try writer.writeAll(",\"cooling\":{");
+    if (layout) |saved| if (saved.heatsink) |sink| {
+        try writer.print("\"heatsink\":{{\"x\":{d},\"y\":{d},\"w\":{d},\"d\":{d},\"side\":", .{
+            sink.x + sink.w / 2 - center[0], sink.y + sink.h / 2 - center[1], sink.w, sink.h,
+        });
+        try json_writer.writeScriptString(writer, sink.side);
+        try writer.writeAll(",\"material\":");
+        try json_writer.writeScriptString(writer, sink.material);
+        try writer.print(",\"base_mm\":{d},\"pad_mm\":{d},\"pad_k\":{d}", .{ sink.base_mm, sink.pad_thickness_mm, sink.pad_k_w_mk });
+        switch (sink.profile) {
+            .finned => |fins| try writer.print(",\"shape\":\"finned\",\"fin_height_mm\":{d},\"fin_thickness_mm\":{d},\"fin_gap_mm\":{d}", .{ fins.height_mm, fins.thickness_mm, fins.gap_mm }),
+            .stepped => |lower| try writer.print(",\"shape\":\"stepped\",\"lower_w\":{d},\"lower_d\":{d},\"lower_h\":{d}", .{ lower.width_mm, lower.length_mm, lower.height_mm }),
+        }
+        try writer.writeByte('}');
+    } else try writer.writeAll("\"heatsink\":null") else try writer.writeAll("\"heatsink\":null");
+    try writer.writeByte(',');
+    if (layout) |saved| if (saved.fan) |fan| {
+        try writer.writeAll("\"fan\":{");
+        try writer.writeAll("\"model\":");
+        try json_writer.writeScriptString(writer, fan.model);
+        try writer.print(",\"x\":{d},\"y\":{d},\"w\":{d},\"d\":{d},\"side\":", .{
+            fan.rect.x + fan.rect.w / 2 - center[0], fan.rect.y + fan.rect.h / 2 - center[1], fan.rect.w, fan.rect.h,
+        });
+        try json_writer.writeScriptString(writer, fan.side);
+        try writer.print(",\"distance_mm\":{d},\"flow_m3_s\":{d},\"pressure_pa\":{d},\"operating_fraction\":{d}}}", .{
+            fan.distance_mm, fan.curve.free_air_flow_m3_s, fan.curve.max_static_pressure_pa, fan.operating_flow_fraction,
+        });
+    } else try writer.writeAll("\"fan\":null") else try writer.writeAll("\"fan\":null");
+    try writer.writeByte('}');
+}
+
+fn writeAssembly(writer: *std.Io.Writer, assembly: ?AssemblySpec) HandlerError!void {
+    if (assembly == null) return writer.writeAll("null");
+    const value = assembly.?;
+    try writer.print("{{\"pitch_mm\":{d},\"ambient_c\":{d},\"instances\":[", .{ value.pitch_mm, value.ambient_c });
+    for (value.instances, 0..) |instance, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"id\":");
+        try json_writer.writeScriptString(writer, instance.id);
+        try writer.writeAll(",\"board\":");
+        try json_writer.writeScriptString(writer, instance.board);
+        try writer.print(",\"x\":{d},\"y\":{d},\"z\":{d},\"rot\":{d},\"on\":{s}}}", .{
+            instance.x, instance.y, instance.z, instance.rotation, if (instance.enabled) "true" else "false",
+        });
+    }
+    try writer.writeAll("]}");
+}
 
 fn writeBoardOutline(
     writer: *std.Io.Writer,
@@ -114,7 +275,9 @@ fn writeBoard(
         try writer.print("{{\"x\":{d},\"y\":{d},\"diameter\":{d}}}", .{ point[0] - cx, point[1] - cy, pad.drill });
         hole_index += 1;
     };
-    try writer.writeAll("]}");
+    try writer.writeByte(']');
+    try writeCooling(writer, selectedLayout(allocator, project_dir, board), .{ cx, cy });
+    try writer.writeByte('}');
 }
 
 /// Render an interactive enclosure workspace from one parsed system manifest.
@@ -125,16 +288,24 @@ pub fn page(
     can_write: bool,
     res: *httpz.Response,
 ) HandlerError!void {
+    var parsed_assembly = readAssembly(allocator, project_dir, spec);
+    defer if (parsed_assembly) |*parsed| parsed.deinit();
     var out: std.Io.Writer.Allocating = .init(res.arena);
     const writer = &out.writer;
     try writer.writeAll(
         "<!doctype html><html><head><meta charset=\"utf-8\">" ++
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
-            "<title>3D CAD</title><link rel=\"stylesheet\" href=\"/static/system_cad.css\"></head><body>" ++
-            "<header><a class=\"back\" id=\"back\">← System</a><div><h1 id=\"title\">3D CAD</h1><p id=\"identity\"></p></div>" ++
-            "<span class=\"kernel\">Zig prismatic kernel</span><span id=\"save-status\"></span><button id=\"save\">Save design</button><button id=\"fit\">Fit view</button>" ++
-            "<button id=\"step\">Download STEP</button><button id=\"stl\">Download STL</button></header>" ++
-            "<main><aside><section><h2>Imported PCBs</h2><p class=\"hint\">Saved system layouts are loaded as the mechanical authority. Adjust each board's assembly pose here.</p><div id=\"boards\"></div></section>" ++
+            "<title>System Thermal</title><link rel=\"stylesheet\" href=\"/static/system_cad.css\"></head><body>" ++
+            "<header><a class=\"back\" id=\"back\">← System</a><div><h1 id=\"title\">System Thermal</h1><p id=\"identity\"></p></div>" ++
+            "<span class=\"kernel\">Coupled screening</span><span id=\"save-status\"></span><button id=\"save\">Save design</button><button id=\"fit\">Fit view</button>" ++
+            "<button id=\"assembly-json\">Download assembly.json</button><button id=\"step\">Download STEP</button><button id=\"stl\">Download STL</button></header>" ++
+            "<main><aside><section><h2>System screening</h2><div class=\"fields\">" ++
+            "<label>Ambient <input id=\"ambient\" type=\"number\" min=\"-55\" max=\"125\" step=\"1\"><span>°C</span></label>" ++
+            "<label>Board pitch <input id=\"pitch\" type=\"number\" min=\"1\" max=\"200\" step=\"0.5\"><span>mm</span></label></div>" ++
+            "<label class=\"check\"><input id=\"snap\" type=\"checkbox\" checked> Snap board centres to pitch while dragging</label>" ++
+            "<div id=\"thermal-summary\" class=\"thermal-summary\">Loading board thermal models…</div>" ++
+            "<p class=\"hint\">Drag a PCB in the viewport or enter its exact pose. Temperatures combine each saved board's placement-aware solve, projected fan coverage, and mixed-air rise. This is a system screening model, not CFD.</p></section>" ++
+            "<section><h2>Board instances</h2><p class=\"hint\">The review manifest defines board types; assembly.json may repeat them as physical instances.</p><div id=\"boards\"></div></section>" ++
             "<section><h2>Enclosure</h2><div class=\"fields\">" ++
             "<label>PCB clearance <input id=\"clearance\" type=\"number\" min=\"0.2\" max=\"50\" step=\"0.1\"><span>mm</span></label>" ++
             "<label>Wall <input id=\"wall\" type=\"number\" min=\"0.6\" max=\"30\" step=\"0.1\"><span>mm</span></label>" ++
@@ -145,8 +316,8 @@ pub fn page(
             "</div><div class=\"dimensions\" id=\"dimensions\"></div><button id=\"reset\">Reset draft</button></section>" ++
             "<section><div class=\"section-head\"><h2>PCB mounting bosses</h2><button id=\"auto-bosses\">From PCB holes</button></div><p class=\"hint\">Blind screw bosses rise from the case floor to support the board.</p><div id=\"bosses\"></div><button id=\"add-boss\">Add boss</button></section>" ++
             "<section><div class=\"section-head\"><h2>Wall cutouts</h2><button id=\"add-cutout\">Add cutout</button></div><p class=\"hint\">Rectangular connector openings are cut through the selected wall by the Zig kernel.</p><div id=\"cutouts\"></div></section>" ++
-            "<section><h2>Phase 3</h2><ul><li>Project-persisted mechanical document</li><li>PCB-hole mounting bosses</li><li>Watertight connector cutouts</li><li>Feature-complete STEP/STL export</li></ul><p class=\"hint\">Fillets and arbitrary sketches remain the next kernel layer.</p></section></aside>" ++
-            "<div id=\"viewport\"><canvas id=\"canvas\"></canvas><div id=\"empty\"></div><div id=\"legend\"><span><i class=\"pcb\"></i>PCB</span><span><i class=\"base\"></i>Base</span><span><i class=\"lid\"></i>Lid</span></div></div></main>" ++
+            "<section><h2>Model boundary</h2><ul><li>Exact saved PCB outlines, mounting holes and component heat ledgers</li><li>Attached saved fan and heatsink geometry</li><li>Persisted enclosure, bosses and wall cutouts through the Zig kernel</li><li>Fan-footprint coverage and enclosure bulk-air rise</li><li>No wake, recirculation, buoyant plume, or pressure-network CFD</li></ul></section></aside>" ++
+            "<div id=\"viewport\"><canvas id=\"canvas\"></canvas><div id=\"empty\"></div><div id=\"drag-help\">Drag boards · orbit empty space · scroll to zoom</div><div id=\"legend\"><span><i class=\"cool\"></i>Cool</span><span><i class=\"warm\"></i>Warm</span><span><i class=\"hot\"></i>Hot</span><span><i class=\"sink\"></i>Heatsink</span><span><i class=\"fan\"></i>Fan</span></div></div></main>" ++
             "<script>window.CAD_DATA={\"system\":",
     );
     try json_writer.writeScriptString(writer, spec.name);
@@ -160,7 +331,9 @@ pub fn page(
     try writer.writeAll(if (can_write) "true" else "false");
     try writer.writeAll(",\"boards\":[");
     for (spec.boards, 0..) |board, index| try writeBoard(writer, allocator, project_dir, board, index);
-    try writer.writeAll("]};</script><script src=\"/static/three.min.js\"></script><script src=\"/static/OrbitControls.js\"></script><script src=\"/static/system_cad.js\"></script></body></html>");
+    try writer.writeAll("],\"assembly\":");
+    try writeAssembly(writer, if (parsed_assembly) |parsed| parsed.value else null);
+    try writer.writeAll("};</script><script src=\"/static/three.min.js\"></script><script src=\"/static/OrbitControls.js\"></script><script src=\"/static/system_cad.js\"></script></body></html>");
     res.content_type = .HTML;
     res.header("cache-control", "private, no-store");
     res.header("content-security-policy", "frame-ancestors 'none'");
@@ -432,4 +605,74 @@ test "CAD document drives cutout preview and boss exports through Zig" {
     step_request.query("format", "step");
     try exportFile(step_request.res.arena, "barracuda", step_request.req, step_request.res);
     try std.testing.expect(std.mem.indexOf(u8, step_request.res.body, "FACETED_BREP('Mounting boss 1'") != null);
+}
+
+// spec: system-review - a strict assembly sidecar repeats reviewed board definitions as uniquely identified physical instances and preserves its authored pitch
+test "system CAD validates and serializes repeated assembly instances" {
+    const boards = [_]system_review.BoardMember{
+        .{ .name = "barracuda", .role = "controller", .source = "src/boards/barracuda/barracuda.sexp", .part_number = "BAR", .revision = "2" },
+        .{ .name = "black-canyon", .role = "channel", .source = "src/boards/black-canyon/black-canyon.sexp", .part_number = "BC", .revision = "1" },
+    };
+    const spec: system_review.SystemSpec = .{
+        .schema = system_review.schema_v1,
+        .name = "rds3",
+        .title = "RDS3",
+        .part_number = "RDS3",
+        .revision = "1",
+        .boards = &boards,
+    };
+    const instances = [_]AssemblyInstance{
+        .{ .id = "barracuda", .board = "barracuda", .z = 18.5 },
+        .{ .id = "black-canyon-left-1", .board = "black-canyon", .x = -73.95, .y = -77, .z = 18.5 },
+        .{ .id = "black-canyon-left-2", .board = "black-canyon", .x = -73.95, .y = -55, .z = 18.5 },
+    };
+    const assembly: AssemblySpec = .{ .schema = assembly_schema, .pitch_mm = 22, .instances = &instances };
+    try std.testing.expect(validAssembly(spec, assembly));
+
+    const duplicate = [_]AssemblyInstance{
+        .{ .id = "same", .board = "barracuda" },
+        .{ .id = "same", .board = "black-canyon" },
+    };
+    try std.testing.expect(!validAssembly(spec, .{ .schema = assembly_schema, .instances = &duplicate }));
+    try std.testing.expect(!validAssembly(spec, .{ .schema = assembly_schema, .instances = &.{.{ .id = "unknown", .board = "not-reviewed" }} }));
+
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try writeAssembly(&output.writer, assembly);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"pitch_mm\":22") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"black-canyon-left-2\"") != null);
+}
+
+test "system CAD serializes saved top fan and bottom stepped heatsink" {
+    const layout: pcb_layout_page.SavedLayout = .{
+        .name = "cooled",
+        .kind = "manual",
+        .ts = 1,
+        .score = null,
+        .parts = &.{},
+        .heatsink = .{
+            .x = 3,
+            .y = 4,
+            .w = 56.6,
+            .h = 26.1,
+            .side = "bottom",
+            .base_mm = 13,
+            .profile = .{ .stepped = .{ .width_mm = 250, .length_mm = 250, .height_mm = 2 } },
+        },
+        .fan = .{
+            .model = "RDS3-FAN",
+            .rect = .{ .x = 1, .y = 2, .w = 80, .h = 80 },
+            .side = "top",
+            .distance_mm = 17,
+            .curve = .{ .free_air_flow_m3_s = 0.025, .max_static_pressure_pa = 55 },
+        },
+    };
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try writeCooling(&output.writer, layout, .{ 10, 20 });
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"shape\":\"stepped\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"lower_w\":250") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"side\":\"bottom\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"model\":\"RDS3-FAN\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"side\":\"top\"") != null);
 }
