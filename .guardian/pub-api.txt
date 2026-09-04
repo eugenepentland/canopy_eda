@@ -1099,7 +1099,9 @@ src/fab_release.zig::deinit | fn deinit(self: InputPaths, allocator: std.mem.All
 src/fab_release.zig::inputPaths | fn inputPaths(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) InputPathError!?InputPaths
 src/fab_release.zig::invalidate | fn invalidate(lock: *Lock, reason: []const u8) void
 src/fab_release.zig::makeLock | fn makeLock( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, evidence: Evidence, ) LockError!Lock
+src/fab_release.zig::projectStatusBlocksRelease | fn projectStatusBlocksRelease(status: ProjectStatus) bool
 src/fab_release.zig::projectStatusFinding | fn projectStatusFinding(status: ProjectStatus) ?fab_readiness.Item
+src/fab_release.zig::projectStatusNeedsWaiver | fn projectStatusNeedsWaiver(status: ProjectStatus) bool
 src/fab_release.zig::reviewedInputDigest | fn reviewedInputDigest( allocator: std.mem.Allocator, project_dir: []const u8, block: *const env.DesignBlock, ) std.mem.Allocator.Error!ReviewedInputDigest
 src/fab_release.zig::safeRevision | fn safeRevision(allocator: std.mem.Allocator, revision: []const u8) std.mem.Allocator.Error![]const u8
 src/fab_release.zig::savedBomDigest | fn savedBomDigest( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) std.mem.Allocator.Error![64]u8

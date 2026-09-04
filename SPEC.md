@@ -7844,7 +7844,7 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 - MCP preserves the full release report and null authorization token for an ambiguous source bundle
 - an in-request A/B/A sidecar mutation invalidates HTTP readiness and export without granting an authorization token
 - release tokens bind finding counts, report statistics, and complete DRC bridge evidence
-- a fabrication package request whose project source revision already blocks the release is refused before the board is placed, checked or digested
+- only an unavailable project revision can refuse a fabrication package before the exact board inputs are evaluated and digested
 - the fast fabrication refusal cites the same source-revision finding as the full report and states that the rest of the report was not computed
 - the fast fabrication refusal declines every request the saved-layout selection still owes a 404
 - a collapsed sub-micron track crumb the parser culls is not dropped manufacturing copper, while any other missing track still fails release evidence

@@ -262,9 +262,9 @@ fn run(input: RunInput) ReleaseError!Result {
     fab_release.bindTracedInputs(&lock, traced, read_trace.verify());
 
     const blocked = !gate.drc.complete or !gate.internal_complete or
-        gate.evaluation.block == null or lock.project_status != .clean;
+        gate.evaluation.block == null or fab_release.projectStatusBlocksRelease(lock.project_status);
     const needs_waiver = gate.report.errors.len > 0 or gate.report.warnings.len > 0 or
-        gate.drc.raw.len > gate.drc.effective.len;
+        gate.drc.raw.len > gate.drc.effective.len or fab_release.projectStatusNeedsWaiver(lock.project_status);
     var readiness_out: std.Io.Writer.Allocating = .init(allocator);
     try fab_release.writeReadinessJson(allocator, &readiness_out.writer, evidence, lock);
 
@@ -353,7 +353,7 @@ fn run(input: RunInput) ReleaseError!Result {
     var final_lock = try fab_release.makeLock(allocator, project_dir, name, evidence);
     fab_release.bindBaseline(&final_lock, project_before, layout_before, bom_before);
     fab_release.bindTracedInputs(&final_lock, traced, read_trace.verify());
-    if (final_lock.project_status != .clean or !std.mem.eql(u8, &lock.token, &final_lock.token))
+    if (fab_release.projectStatusBlocksRelease(final_lock.project_status) or !std.mem.eql(u8, &lock.token, &final_lock.token))
         return error.InputsChanged;
     result.zip = zip_bytes;
     return result;

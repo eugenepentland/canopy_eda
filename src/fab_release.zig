@@ -243,7 +243,7 @@ pub fn projectStatusFinding(status: ProjectStatus) ?fab_readiness.Item {
         .clean => null,
         .dirty => .{
             .id = "source-worktree-dirty",
-            .message = "release inputs have tracked or untracked changes; commit the exact board/library state before release",
+            .message = "release inputs have uncommitted tracked or untracked changes; review and explicitly waive this warning before export",
         },
         .changed => .{
             .id = "source-snapshot-changed",
@@ -258,6 +258,21 @@ pub fn projectStatusFinding(status: ProjectStatus) ?fab_readiness.Item {
             .message = "a clean full Git revision and all reviewed inputs could not be proven; release is blocked",
         },
     };
+}
+
+/// Dirty inputs are still exactly digestible and token-bound, so they require
+/// an explicit waiver but do not make the release evidence incomplete. States
+/// that cannot identify one stable input snapshot remain hard blockers.
+pub fn projectStatusBlocksRelease(status: ProjectStatus) bool {
+    return switch (status) {
+        .clean, .dirty => false,
+        .changed, .ambiguous, .unavailable => true,
+    };
+}
+
+/// Whether a reproducible but uncommitted input snapshot needs user approval.
+pub fn projectStatusNeedsWaiver(status: ProjectStatus) bool {
+    return status == .dirty;
 }
 
 fn hashItems(hash: *Sha256, items: []const fab_readiness.Item) void {
@@ -639,9 +654,18 @@ pub fn writeReadinessJson(
     var source_errors: std.ArrayList(fab_readiness.Item) = .empty;
     defer source_errors.deinit(allocator);
     try source_errors.appendSlice(allocator, evidence.report.errors);
-    if (projectStatusFinding(lock.project_status)) |finding| try source_errors.append(allocator, finding);
+    var source_warnings: std.ArrayList(fab_readiness.Item) = .empty;
+    defer source_warnings.deinit(allocator);
+    try source_warnings.appendSlice(allocator, evidence.report.warnings);
+    if (projectStatusFinding(lock.project_status)) |finding| {
+        if (projectStatusNeedsWaiver(lock.project_status))
+            try source_warnings.append(allocator, finding)
+        else
+            try source_errors.append(allocator, finding);
+    }
     var release_report = evidence.report;
     release_report.errors = source_errors.items;
+    release_report.warnings = source_warnings.items;
     var base: std.Io.Writer.Allocating = .init(allocator);
     defer base.deinit();
     try fab_readiness.writeJson(&base.writer, release_report);
@@ -649,7 +673,7 @@ pub fn writeReadinessJson(
     if (bytes.len == 0 or bytes[bytes.len - 1] != '}') return error.InvalidReadinessJson;
     try writer.writeAll(bytes[0 .. bytes.len - 1]);
     try writer.writeAll(",\"release_token\":");
-    const authorizable = evidence.drc.complete and evidence.drc.internal_complete and lock.project_status == .clean;
+    const authorizable = evidence.drc.complete and evidence.drc.internal_complete and !projectStatusBlocksRelease(lock.project_status);
     if (authorizable)
         try json_writer.writeString(writer, &lock.token)
     else
@@ -692,7 +716,7 @@ pub fn writeReadinessJson(
         evidence.drc.raw.len,
         evidence.drc.effective.len,
         evidence.drc.raw.len -| evidence.drc.effective.len,
-        if (evidence.drc.complete and evidence.drc.internal_complete and lock.project_status == .clean) "true" else "false",
+        if (evidence.drc.complete and evidence.drc.internal_complete and !projectStatusBlocksRelease(lock.project_status)) "true" else "false",
         if (needs_waiver) "true" else "false",
     });
 }
@@ -822,17 +846,33 @@ pub fn writeMachineReport(
     try writer.print(",\"confirmed\":true,\"waiver\":{s},\"dnp_centroid\":\"{s}\",\"drc_complete\":{s}", .{
         if (waiver) "true" else "false",
         if (evidence.design.keep_dnp) "keep" else "drop",
-        if (evidence.drc.complete and evidence.drc.internal_complete and lock.project_status == .clean) "true" else "false",
+        if (evidence.drc.complete and evidence.drc.internal_complete and !projectStatusBlocksRelease(lock.project_status)) "true" else "false",
     });
     try writer.writeAll(",\"errors\":[");
-    for (evidence.report.errors, 0..) |item, index| {
-        if (index > 0) try writer.writeByte(',');
+    var item_index: usize = 0;
+    for (evidence.report.errors) |item| {
+        if (item_index > 0) try writer.writeByte(',');
         try writeItemJson(writer, item);
+        item_index += 1;
+    }
+    if (projectStatusBlocksRelease(lock.project_status)) {
+        if (projectStatusFinding(lock.project_status)) |finding| {
+            if (item_index > 0) try writer.writeByte(',');
+            try writeItemJson(writer, finding);
+        }
     }
     try writer.writeAll("],\"warnings\":[");
-    for (evidence.report.warnings, 0..) |item, index| {
-        if (index > 0) try writer.writeByte(',');
+    item_index = 0;
+    for (evidence.report.warnings) |item| {
+        if (item_index > 0) try writer.writeByte(',');
         try writeItemJson(writer, item);
+        item_index += 1;
+    }
+    if (projectStatusNeedsWaiver(lock.project_status)) {
+        if (projectStatusFinding(lock.project_status)) |finding| {
+            if (item_index > 0) try writer.writeByte(',');
+            try writeItemJson(writer, finding);
+        }
     }
     try writer.writeAll("],\"raw_drc\":[");
     for (evidence.drc.raw, 0..) |violation, index| {
@@ -982,10 +1022,25 @@ pub fn writeHumanReport(writer: *std.Io.Writer, evidence: Evidence, lock: Lock, 
         &lock.token,
         if (waiver) "yes" else "no",
     });
-    try writer.print("## Remaining errors ({d})\n\n", .{evidence.report.errors.len});
-    if (evidence.report.errors.len == 0) try writer.writeAll("None.\n") else for (evidence.report.errors) |item| try writer.print("- **{s}**: {s}\n", .{ item.id, item.message });
-    try writer.print("\n## Remaining warnings ({d})\n\n", .{evidence.report.warnings.len});
-    if (evidence.report.warnings.len == 0) try writer.writeAll("None.\n") else for (evidence.report.warnings) |item| try writer.print("- **{s}**: {s}\n", .{ item.id, item.message });
+    const status_finding = projectStatusFinding(lock.project_status);
+    const status_blocks = projectStatusBlocksRelease(lock.project_status);
+    const status_warns = projectStatusNeedsWaiver(lock.project_status);
+    const error_count = evidence.report.errors.len + @intFromBool(status_finding != null and status_blocks);
+    const warning_count = evidence.report.warnings.len + @intFromBool(status_finding != null and status_warns);
+    try writer.print("## Remaining errors ({d})\n\n", .{error_count});
+    if (error_count == 0) try writer.writeAll("None.\n") else {
+        for (evidence.report.errors) |item| try writer.print("- **{s}**: {s}\n", .{ item.id, item.message });
+        if (status_blocks) {
+            if (status_finding) |item| try writer.print("- **{s}**: {s}\n", .{ item.id, item.message });
+        }
+    }
+    try writer.print("\n## Remaining warnings ({d})\n\n", .{warning_count});
+    if (warning_count == 0) try writer.writeAll("None.\n") else {
+        for (evidence.report.warnings) |item| try writer.print("- **{s}**: {s}\n", .{ item.id, item.message });
+        if (status_warns) {
+            if (status_finding) |item| try writer.print("- **{s}**: {s}\n", .{ item.id, item.message });
+        }
+    }
     try writer.print("\n## DRC evidence\n\nFull composed DRC completed: {s}. Raw findings: {d}; effective findings after policy: {d}. Ignored findings remain in `release-report.json`.\n", .{
         if (evidence.drc.complete) "yes" else "no",
         evidence.drc.raw.len,

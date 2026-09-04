@@ -22,8 +22,9 @@
 //! Every millisecond after the first eleven was spent computing evidence for a
 //! certificate the request had already disqualified itself from. The Git reads
 //! `fab_release.captureProjectState` makes are the FIRST thing both release
-//! handlers do, and for a dirty or unrevisioned project they alone settle the
-//! verdict — see `sourceRevisionRefusal` for why that implication is exact.
+//! handlers do, and for an unrevisioned project they alone settle the verdict
+//! — see `sourceRevisionRefusal` for why that implication is exact. A dirty
+//! project continues through the full gate because it is waivable.
 //!
 //! ## What the refusal deliberately does NOT do
 //!
@@ -125,19 +126,19 @@ pub const Refusal = struct {
 /// ALREADY forces `releaseEvidenceBlocked`.
 ///
 /// The implication is exact, and it is `fab_release.bindBaseline` that makes it
-/// so: whatever status `makeLock` computes later, a `before` of `.dirty` or
-/// `.unavailable` is folded in, and the folded result is `.ambiguous`,
-/// `.unavailable` or `.dirty` — never `.clean`. A lock that is not clean fails
-/// `releaseEvidenceBlocked`, which is the 500. Nothing computed in between can
-/// rescue it, so nothing computed in between needs to run.
+/// so: whatever status `makeLock` computes later, a `before` of `.unavailable`
+/// remains unavailable. Nothing computed in between can rescue it, so nothing
+/// computed in between needs to run. Dirty state deliberately takes the slow
+/// path because its exact inputs must be evaluated, digested and shown for an
+/// explicit waiver.
 ///
 /// `.changed` and `.ambiguous` are deliberately NOT accepted here: neither is
 /// knowable before the request has read the inputs it would be comparing, so
 /// both keep the slow path they have always taken.
 pub fn sourceRevisionRefusal(before: fab_release.ProjectState) ?Refusal {
     switch (before.status) {
-        .dirty, .unavailable => {},
-        .clean, .changed, .ambiguous => return null,
+        .unavailable => {},
+        .clean, .dirty, .changed, .ambiguous => return null,
     }
     return .{
         .status = before.status,
@@ -413,19 +414,16 @@ test "panel package adds total BOM and repeated centroid beside single-board fil
     try std.testing.expect(std.mem.indexOf(u8, pkg.entries.items[3].data, "4,\"U1_R1C1, U1_R1C2, U1_R2C1, U1_R2C2\"") != null);
 }
 
-// spec: fabrication-release - a fabrication package request whose project source revision already blocks the release is refused before the board is placed, checked or digested
-test "a dirty or unrevisioned project is a provable refusal, a clean one is not" {
-    const dirty = sourceRevisionRefusal(.{ .commit = "abc", .status = .dirty }) orelse return error.TestExpectedRefusal;
-    try std.testing.expectEqualStrings("source-worktree-dirty", dirty.finding.id);
-    try std.testing.expectEqual(fab_release.ProjectStatus.dirty, dirty.status);
-
+// spec: fabrication-release - only an unavailable project revision can refuse a fabrication package before the exact board inputs are evaluated and digested
+test "an unrevisioned project is a provable early refusal but dirty and clean projects are not" {
     const unavailable = sourceRevisionRefusal(.{ .commit = "unavailable", .status = .unavailable }) orelse
         return error.TestExpectedRefusal;
     try std.testing.expectEqualStrings("source-revision-unavailable", unavailable.finding.id);
 
-    // The two statuses that are only knowable after the request has read the
-    // inputs it compares keep the authoritative slow path.
+    // Dirty projects now need a full input digest and explicit waiver. The
+    // statuses only knowable after input reads also keep the slow path.
     try std.testing.expect(sourceRevisionRefusal(.{ .commit = "abc", .status = .clean }) == null);
+    try std.testing.expect(sourceRevisionRefusal(.{ .commit = "abc", .status = .dirty }) == null);
     try std.testing.expect(sourceRevisionRefusal(.{ .commit = "abc", .status = .changed }) == null);
     try std.testing.expect(sourceRevisionRefusal(.{ .commit = "abc", .status = .ambiguous }) == null);
 }
@@ -436,7 +434,7 @@ test "the refusal body names the blocking finding and the report it did not comp
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
 
-    const refusal = sourceRevisionRefusal(.{ .commit = "abc", .status = .dirty }) orelse return error.TestExpectedRefusal;
+    const refusal = sourceRevisionRefusal(.{ .commit = "unavailable", .status = .unavailable }) orelse return error.TestExpectedRefusal;
     var aw: std.Io.Writer.Allocating = .init(alloc);
     try writeRefusalJson(&aw.writer, "barracuda", refusal);
     const body = aw.written();
@@ -447,13 +445,13 @@ test "the refusal body names the blocking finding and the report it did not comp
     try std.testing.expect(!parsed.object.get("ok").?.bool);
     try std.testing.expect(parsed.object.get("release_token").? == .null);
     try std.testing.expect(!parsed.object.get("internal_checks_complete").?.bool);
-    try std.testing.expectEqualStrings("dirty", parsed.object.get("project_status").?.string);
+    try std.testing.expectEqualStrings("unavailable", parsed.object.get("project_status").?.string);
     // The blocking reason is named with the SAME id/message the full report
     // would have used, not a paraphrase of it.
     const first = parsed.object.get("errors").?.array.items[0];
-    try std.testing.expectEqualStrings("source-worktree-dirty", first.object.get("id").?.string);
+    try std.testing.expectEqualStrings("source-revision-unavailable", first.object.get("id").?.string);
     try std.testing.expectEqualStrings(
-        fab_release.projectStatusFinding(.dirty).?.message,
+        fab_release.projectStatusFinding(.unavailable).?.message,
         first.object.get("message").?.string,
     );
     // …and it is explicit that the rest of the report was skipped, naming the
