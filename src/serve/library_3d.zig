@@ -6,6 +6,7 @@ const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const library = @import("library.zig");
 const httpz = @import("httpz");
+const atomic_write = @import("../infra/atomic_write.zig");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const export_kicad = @import("../export_kicad.zig");
@@ -681,7 +682,11 @@ fn writeModelConfig(
     const dir = std.fmt.allocPrint(arena, "{s}/lib/models", .{project_dir});
     try infra_fs.cwd().makePath(try dir);
     const path = try std.fmt.allocPrint(arena, "{s}/lib/models/model-config.json", .{project_dir});
-    try writeFileAtomic(arena, path, buf.written());
+    // The tree's one staged writer: sibling temporary, flush, fsync, rename.
+    // This config is read-modify-written on every model edit, so a torn write
+    // does not lose one field — it loses every stored transform and model
+    // override at once.
+    try atomic_write.writeFile(path, buf.written());
 }
 
 /// Emit one `"footprint":{"offset":[…],"rotation":[…][,"model":"…"]}` entry,
@@ -712,18 +717,6 @@ fn writeConfigEntry(
         try json_writer.writeScriptString(w, m);
     }
     try w.writeAll("}");
-}
-
-/// Write `content` to `path` via a temp-then-rename so a reader never sees a
-/// half-written config.
-fn writeFileAtomic(arena: std.mem.Allocator, path: []const u8, content: []const u8) !void {
-    const tmp = try std.fmt.allocPrint(arena, "{s}.tmp", .{path});
-    const f = try infra_fs.cwd().createFile(tmp, .{ .truncate = true });
-    {
-        defer f.close();
-        try f.writeAll(content);
-    }
-    try infra_fs.cwd().rename(tmp, path);
 }
 
 // ── helpers ────────────────────────────────────────────────────────

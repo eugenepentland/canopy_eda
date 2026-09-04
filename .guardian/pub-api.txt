@@ -1216,6 +1216,7 @@ src/import_kicad.zig::parseNetlist | fn parseNetlist(arena: std.mem.Allocator, p
 src/import_kicad.zig::sanitizeName | fn sanitizeName(arena: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]const u8
 src/import_kicad.zig::sanitizeNetName | fn sanitizeNetName(arena: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]const u8
 src/import_kicad.zig::unconnected_prefix value
+src/infra/atomic_write.zig::ChmodError value
 src/infra/atomic_write.zig::CommitError value
 src/infra/atomic_write.zig::Error value
 src/infra/atomic_write.zig::InitError value
@@ -1224,6 +1225,7 @@ src/infra/atomic_write.zig::Staged struct_
 src/infra/atomic_write.zig::WriteError value
 src/infra/atomic_write.zig::abandon | fn abandon(self: *Staged) void
 src/infra/atomic_write.zig::begin | fn begin(self: *Staged, path: []const u8) InitError!void
+src/infra/atomic_write.zig::chmod | fn chmod(self: *Staged, permissions: std.Io.File.Permissions) ChmodError!void
 src/infra/atomic_write.zig::commit | fn commit(self: *Staged) CommitError!void
 src/infra/atomic_write.zig::write | fn write(self: *Staged, bytes: []const u8) WriteError!void
 src/infra/atomic_write.zig::writeFile | fn writeFile(path: []const u8, bytes: []const u8) Error!void

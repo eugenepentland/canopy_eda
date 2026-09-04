@@ -6112,6 +6112,7 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - a stale board pad is cleared only when the design nets that signal on another pad the board footprint actually has
 - formatBackupStamp renders epoch seconds as a sortable filesystem-safe stamp
 - writeFileAtomic rolls a timestamped board backup and prunes beyond MAX_BOARD_BACKUPS
+- a board write leaves no staging sibling beside the board, so a concurrent sync cannot inherit a half-written file under a predictable name
 - placement guard reports moved, rotated, or side-flipped footprints and exempts adds/removes
 - placement guard passes when every existing footprint keeps its pose
 - computeGroupAnchors matches a group's anchor to the board through the same relink tiers the differ uses
@@ -6996,6 +6997,7 @@ and that ordering belongs to the caller.
 - an oversized body larger than the staging buffer lands whole
 - a staged write abandoned before commit, or stopped by a write error, leaves the previous file contents intact
 - neither a committed nor an abandoned write leaves a temporary file behind
+- a staged write's chmod applies to the file the commit publishes, so a read-only target is never visible at the default mode
 - write and commit on a Staged whose begin never succeeded return NotStaged with no panic
 - two concurrent writers staging one target use distinct temporaries and the later commit wins whole
 

@@ -48,6 +48,7 @@
 //! ERC — it must never drive "Update PCB from Schematic" on a synced board.
 
 const std = @import("std");
+const atomic_write = @import("infra/atomic_write.zig");
 const infra_fs = @import("infra/fs.zig");
 const log = @import("infra/log.zig");
 const parser_mod = @import("sexpr/parser.zig");
@@ -61,8 +62,6 @@ const DesignBlock = @import("eval/env.zig").DesignBlock;
 /// Extension of a KiCad board file, stripped from the basename to get the
 /// project stem.
 const pcb_ext = ".kicad_pcb";
-/// Suffix every file is staged under before the renames.
-const tmp_suffix = ".netlisp-push-tmp";
 /// Longest existing sheet the classifier reads. A netlisp root on a big board
 /// is a few hundred kilobytes; anything past this is certainly not a stub.
 const max_sheet_bytes: usize = 64 * 1024 * 1024;
@@ -484,8 +483,11 @@ fn planSymLibTable(arena: std.mem.Allocator, dir: []const u8, f: export_kicad_sc
 /// leaves the directory byte-identical.
 pub fn commit(arena: std.mem.Allocator, plan: Plan, out: export_kicad_sch.Output) PushError!void {
     if (plan.refusal != null) return;
-    var staged: std.ArrayList([]const u8) = .empty;
-    errdefer discardTemps(arena, plan.target.dir, staged.items);
+    var staged: std.ArrayList(StagedFile) = .empty;
+    // Every path out of here that has not committed a transaction unlinks its
+    // temporary; `abandon` is a no-op on one `promote` already published, so
+    // the same defer covers the success path.
+    defer for (staged.items) |f| f.writer.abandon();
 
     // The directory may not exist yet when the declared board has never been
     // written (a design pointed at a project folder still to be created).
@@ -494,10 +496,9 @@ pub fn commit(arena: std.mem.Allocator, plan: Plan, out: export_kicad_sch.Output
     for (plan.ops) |op| {
         if (!writes(op.action)) continue;
         const bytes = bytesFor(out, op.name) orelse continue;
-        try stage(arena, plan.target.dir, op.name, bytes);
-        try staged.append(arena, op.name);
+        try staged.append(arena, try stage(arena, plan.target.dir, op.name, bytes));
     }
-    for (staged.items) |name| try promote(arena, plan.target.dir, name);
+    for (staged.items) |f| try promote(arena, plan.target.dir, f);
 }
 
 /// The two actions that put bytes on disk.
@@ -516,39 +517,40 @@ fn bytesFor(out: export_kicad_sch.Output, name: []const u8) ?[]const u8 {
     return null;
 }
 
-fn tempPath(arena: std.mem.Allocator, dir: []const u8, name: []const u8) PushError![]const u8 {
-    const tmp_name = try std.fmt.allocPrint(arena, "{s}" ++ tmp_suffix, .{name});
-    return std.fs.path.join(arena, &.{ dir, tmp_name });
+/// One file's staged replacement, open from the staging phase until the promote
+/// phase publishes it.
+///
+/// The writer is heap-allocated rather than held by value: `Staged` owns the
+/// buffer its file writer points into, so it must not be moved once `begin` has
+/// succeeded, and an `ArrayList` of them relocates on growth.
+const StagedFile = struct { name: []const u8, writer: *atomic_write.Staged };
+
+/// Phase one: the bytes land in a sibling temporary of the target, held open
+/// (not yet published) until every file in the push has staged.
+///
+/// This is the tree's shared staged writer rather than a private
+/// `<name>.netlisp-push-tmp` + rename, so the temporary is randomly named — two
+/// pushes into one project directory can no longer write into each other's
+/// staging file — and an abandoned transaction unlinks it instead of relying on
+/// an unwind path to find it by name.
+fn stage(arena: std.mem.Allocator, dir: []const u8, name: []const u8, bytes: []const u8) PushError!StagedFile {
+    const path = try std.fs.path.join(arena, &.{ dir, name });
+    const writer = arena.create(atomic_write.Staged) catch return error.PushWriteFailed;
+    writer.* = .{};
+    errdefer writer.abandon();
+    writer.begin(path) catch return error.PushWriteFailed;
+    writer.write(bytes) catch return error.PushWriteFailed;
+    return .{ .name = name, .writer = writer };
 }
 
-/// Phase one: the bytes land under a temp name, fsynced.
-fn stage(arena: std.mem.Allocator, dir: []const u8, name: []const u8, bytes: []const u8) PushError!void {
-    const path = try tempPath(arena, dir, name);
-    var file = infra_fs.cwd().createFile(path, .{ .truncate = true }) catch return error.PushWriteFailed;
-    defer file.close();
-    file.writeAll(bytes) catch return error.PushWriteFailed;
-    // Best-effort durability, as in the board sync's atomic writer: a
-    // filesystem without fsync must not fail an otherwise-good push.
-    file.sync() catch |e| log.warn("kicad-sch push: fsync of {s} failed: {s}", .{ path, @errorName(e) });
-}
-
-/// Phase two: roll a backup of whatever is there, then rename the temp over it.
-fn promote(arena: std.mem.Allocator, dir: []const u8, name: []const u8) PushError!void {
-    const tmp = try tempPath(arena, dir, name);
-    const dest = try std.fs.path.join(arena, &.{ dir, name });
+/// Phase two: roll a backup of whatever is there, then publish the staged bytes
+/// over it (flush, fsync, rename). The fsync moved here from the staging phase,
+/// which is the order durability actually wants: the bytes reach the disk
+/// immediately before the rename that makes them visible.
+fn promote(arena: std.mem.Allocator, dir: []const u8, file: StagedFile) PushError!void {
+    const dest = try std.fs.path.join(arena, &.{ dir, file.name });
     board_backup.rollBackup(arena, dest) catch return error.PushWriteFailed;
-    infra_fs.cwd().rename(tmp, dest) catch return error.PushWriteFailed;
-}
-
-/// Unwind a failed staging phase. Best-effort: a temp left behind is inert
-/// (KiCad reads neither `.netlisp-push-tmp` nor anything but its own
-/// extensions), and failing the push twice helps nobody.
-fn discardTemps(arena: std.mem.Allocator, dir: []const u8, names: []const []const u8) void {
-    for (names) |name| {
-        const path = tempPath(arena, dir, name) catch continue;
-        infra_fs.cwd().deleteFile(path) catch |e|
-            log.warn("kicad-sch push: could not remove staging file {s}: {s}", .{ path, @errorName(e) });
-    }
+    file.writer.commit() catch return error.PushWriteFailed;
 }
 
 // ── The whole push ───────────────────────────────────────────────────
@@ -905,11 +907,19 @@ fn backupHoldsStub(a: std.mem.Allocator, dir: std.Io.Dir) !bool {
     return false;
 }
 
-/// (test helper) True when any `.netlisp-push-tmp` staging file survived.
+/// (test helper) True when a staging file survived the push.
+///
+/// `infra/atomic_write.zig` stages into `AtomicFile`'s temporary, whose
+/// basename is a random `u64` printed as 16 lowercase hex digits with no
+/// extension — a shape no file this push publishes can wear. A committed or
+/// abandoned transaction unlinks it; one that leaked is what this finds.
 fn anyTempLeftBehind(dir: std.Io.Dir) !bool {
     var it = dir.iterate();
     while (try it.next(std.testing.io)) |entry| {
-        if (std.mem.endsWith(u8, entry.name, tmp_suffix)) return true;
+        if (entry.name.len != 16) continue;
+        for (entry.name) |c| {
+            if (!std.ascii.isHex(c)) break;
+        } else return true;
     }
     return false;
 }

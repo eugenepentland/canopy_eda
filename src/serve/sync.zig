@@ -11,6 +11,7 @@ const json_writer = @import("../json_writer.zig");
 const httpz = @import("httpz");
 const board_state = @import("../kicad_pcb/board_state.zig");
 const id_insert = @import("../id_insert.zig");
+const atomic_write = @import("../infra/atomic_write.zig");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
@@ -1518,9 +1519,15 @@ fn copyOneReadOnly(
 }
 
 /// Atomically write `content` to `dest_path` read-only, creating parent dirs.
-/// Skips when an identical copy already exists (no NAS churn). Uses tmp-then-
-/// rename so a re-push replaces the existing read-only file (rename needs
-/// directory write permission, not file write permission).
+/// Skips when an identical copy already exists (no NAS churn).
+///
+/// Staged through `infra/atomic_write.zig` rather than a private
+/// `<dest>.tmp` + rename: the shared writer fsyncs before it publishes, and its
+/// temporary is randomly named, so two pushes copying the same source no longer
+/// share one staging path (the delete-stale-tmp dance this replaced narrowed
+/// that race without closing it). The publication is still a rename, which is
+/// what lets a re-push replace an existing READ-ONLY file — rename needs write
+/// permission on the directory, not on the file.
 fn writeReadOnlyFile(arena: std.mem.Allocator, dest_path: []const u8, content: []const u8) bool {
     const dir = std.fs.path.dirname(dest_path) orelse return false;
     infra_fs.cwd().makePath(dir) catch |e| {
@@ -1532,27 +1539,22 @@ fn writeReadOnlyFile(arena: std.mem.Allocator, dest_path: []const u8, content: [
         if (std.mem.eql(u8, existing, content)) return true;
     } else |_| {}
 
-    const tmp_path = std.fmt.allocPrint(arena, "{s}.tmp", .{dest_path}) catch return false;
-    // Clear any stale tmp from a prior crashed copy. Missing is the normal case
-    // (don't log it); anything else is worth a line but not worth aborting.
-    infra_fs.cwd().deleteFile(tmp_path) catch |e| switch (e) {
-        error.FileNotFound => {},
-        else => log.warn("source-copy: clear tmp {s} failed: {s}", .{ tmp_path, @errorName(e) }),
-    };
-    var f = infra_fs.cwd().createFile(tmp_path, .{ .truncate = true }) catch |e| {
-        log.warn("source-copy: create {s} failed: {s}", .{ tmp_path, @errorName(e) });
+    var staged: atomic_write.Staged = .{};
+    // Unlinks the temporary on every path that does not reach `commit`.
+    defer staged.abandon();
+    staged.begin(dest_path) catch |e| {
+        log.warn("source-copy: create {s} failed: {s}", .{ dest_path, @errorName(e) });
         return false;
     };
-    f.writeAll(content) catch |e| {
-        f.close();
-        log.warn("source-copy: write {s} failed: {s}", .{ tmp_path, @errorName(e) });
+    staged.write(content) catch |e| {
+        log.warn("source-copy: write {s} failed: {s}", .{ dest_path, @errorName(e) });
         return false;
     };
     // Read-only is best-effort: some NAS mounts ignore chmod, but the copy is
     // still worth keeping, so don't fail on it.
-    f.chmod(readonly_mode) catch |e| log.warn("source-copy: chmod {s} failed: {s}", .{ tmp_path, @errorName(e) });
-    f.close();
-    infra_fs.cwd().rename(tmp_path, dest_path) catch |e| {
+    staged.chmod(readonly_mode) catch |e|
+        log.warn("source-copy: chmod {s} failed: {s}", .{ dest_path, @errorName(e) });
+    staged.commit() catch |e| {
         log.warn("source-copy: rename {s} failed: {s}", .{ dest_path, @errorName(e) });
         return false;
     };

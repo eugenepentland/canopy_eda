@@ -7,6 +7,7 @@
 //! on the NAS outside git, so the rolled backup is the only undo.
 
 const std = @import("std");
+const atomic_write = @import("../infra/atomic_write.zig");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const sortable_stamp = @import("sortable_stamp.zig");
@@ -71,11 +72,10 @@ fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
 }
 
-/// Everything the backup roll + atomic write can fail with: allocation, the
-/// `backups/` mkdir, the pre-write copy, and the tmp-file create/write/rename.
-pub const WriteFileAtomicError = std.mem.Allocator.Error || infra_fs.Dir.MakeError ||
-    infra_fs.Dir.CopyFileError || infra_fs.File.OpenError || infra_fs.File.WriteError ||
-    infra_fs.Dir.RenameError;
+/// Everything the backup roll + atomic write can fail with: the roll's own
+/// allocation, `backups/` mkdir and pre-write copy, plus whatever the staged
+/// replacement in `infra/atomic_write.zig` reports.
+pub const WriteFileAtomicError = RollBackupError || atomic_write.Error;
 
 /// Everything the backup roll alone can fail with — the `backups/` mkdir and
 /// the pre-write copy. A subset of `WriteFileAtomicError`.
@@ -110,29 +110,20 @@ pub fn rollBackup(arena: std.mem.Allocator, path: []const u8) RollBackupError!vo
     pruneBackups(arena, path);
 }
 
-/// Write `contents` to `path` atomically via tmp file → fsync(file) →
-/// rename. NAS callers concerned about partial visibility through NFS
-/// caches can run `sync` post-hoc; for a human-driven button press the
-/// rename is durable enough in practice. The pre-write copy is rolled by
-/// `rollBackup` above — the board lives on the NAS, outside git, so it is the
-/// only undo.
+/// Roll a timestamped backup of `path`, then replace it with `contents`
+/// through the tree's one staged writer (`infra/atomic_write.zig`: sibling
+/// temporary → flush → fsync → rename).
+///
+/// This used to stage into a FIXED `<path>.tmp`, which two concurrent board
+/// syncs collide on — each would be writing into the file the other renames.
+/// `atomic_write` inherits `AtomicFile`'s randomly named temporary instead, so
+/// the collision is not representable, and it unlinks the temporary on every
+/// failure path rather than leaving a stray `<board>.kicad_pcb.tmp` next to the
+/// board. The pre-write copy is rolled by `rollBackup` above — the board lives
+/// on the NAS, outside git, so it is the only undo.
 pub fn writeFileAtomic(arena: std.mem.Allocator, path: []const u8, contents: []const u8) WriteFileAtomicError!void {
     try rollBackup(arena, path);
-
-    const tmp_path = try std.fmt.allocPrint(arena, "{s}.tmp", .{path});
-
-    var tmp = try infra_fs.cwd().createFile(tmp_path, .{ .truncate = true });
-    {
-        defer tmp.close();
-        try tmp.writeAll(contents);
-        // Best-effort durability before the rename. On systems where
-        // fsync isn't supported (in-memory FS in some test sandboxes)
-        // we still want the rename to proceed — surfacing the error
-        // would make the whole sync fail for a non-actionable reason.
-        tmp.sync() catch |e| log.warn("kicad-pcb tmp fsync failed: {s}", .{@errorName(e)});
-    }
-
-    try infra_fs.cwd().rename(tmp_path, path);
+    try atomic_write.writeFile(path, contents);
 }
 
 // ── tests ──────────────────────────────────────────────────────────
@@ -208,4 +199,36 @@ test "writeFileAtomic rolls a timestamped backup and prunes beyond the cap" {
     try std.testing.expectEqual(max_board_backups, scan.count);
     try std.testing.expect(scan.fresh_holds_old);
     try std.testing.expect(!scan.oldest_present);
+}
+
+// spec: serve/sync - a board write leaves no staging sibling beside the board, so a concurrent sync cannot inherit a half-written file under a predictable name
+test "a board write leaves no staging sibling beside the board" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena);
+    const board_path = try std.fmt.allocPrint(arena, "{s}/b.kicad_pcb", .{root});
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b.kicad_pcb", .data = "old-board" });
+
+    try writeFileAtomic(arena, board_path, "new-board");
+
+    // The board and its `backups/` folder, and nothing else. The private writer
+    // this replaced staged into a FIXED `b.kicad_pcb.tmp`, which is both a name
+    // a second concurrent sync would write into and a file a failed write could
+    // leave behind next to the board.
+    var names: usize = 0;
+    var it = tmp.dir.iterate();
+    while (try it.next(std.testing.io)) |entry| {
+        names += 1;
+        const is_board = std.mem.eql(u8, entry.name, "b.kicad_pcb");
+        const is_backups = std.mem.eql(u8, entry.name, backup_dir_name);
+        if (!is_board and !is_backups) {
+            std.debug.print("unexpected entry beside the board: {s}\n", .{entry.name});
+            return error.StagingResidue;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), names);
 }
