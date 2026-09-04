@@ -661,6 +661,9 @@ a.sub-name:hover,a.grp-name:hover{color:#6ba1e8;text-decoration:underline}
 .fab-panel-preview-legend .board:before{background:#173a32;border:1px solid #73d0ad}
 .fab-panel-preview-legend .rail:before{background:#344457}
 .fab-panel-preview-legend .feature:before{background:#d8ad35;border-radius:50%}
+.fab-rail-pairs{grid-column:1/-1;display:flex;gap:18px;padding:7px 8px;border:1px solid #344153;border-radius:4px;background:#151b22}
+.fab-rail-pairs label{display:flex;align-items:center;gap:6px;color:#d7e4f4}
+.fab-rail-pairs input[type=checkbox]{width:auto}
 .fab-rail-side{grid-column:1/-1;display:grid;grid-template-columns:minmax(72px,1fr) 112px 72px 82px;align-items:center;gap:7px;color:#aeb6c1}
 .fab-rail-side strong{font-weight:500}
 .fab-rail-side>span{white-space:nowrap}

@@ -12415,7 +12415,9 @@ function focusPart(want,keepPane){
 // exact revision/report just reviewed; remaining findings add an explicit
 // waiver. A stale token cannot download a changed board.
 var fabExportKind="fabrication";
-var fabPanel={enabled:false,rows:2,columns:2,method:"routed",gap:2,railTop:5,railRight:5,railBottom:5,railLeft:5,toolingTop:false,toolingRight:false,toolingBottom:false,toolingLeft:false,fiducialTop:false,fiducialRight:false,fiducialBottom:false,fiducialLeft:false,toolingDiameter:3,fiducialDiameter:1,fiducialMask:2,tab:3,bite:0.5};
+var fabPanel={enabled:false,rows:2,columns:2,method:"routed",gap:2,railsTB:true,railsLR:true,railTop:5,railRight:5,railBottom:5,railLeft:5,toolingTop:false,toolingRight:false,toolingBottom:false,toolingLeft:false,fiducialTop:false,fiducialRight:false,fiducialBottom:false,fiducialLeft:false,toolingDiameter:3,fiducialDiameter:1,fiducialMask:2,tab:3,bite:0.5};
+function fabPanelRailEnabled(side){return side==="Top"||side==="Bottom"?fabPanel.railsTB:fabPanel.railsLR;}
+function fabPanelRailWidth(side){return fabPanelRailEnabled(side)?fabPanel["rail"+side]:0;}
 function fabPanelShape(){
  var live=PCB.outline,authored=live?null:authoredOutlineSeed(),box=live||authored||PCB.board,points=null;
  if(!box||!(box.w>0)||!(box.h>0))return null;
@@ -12433,7 +12435,7 @@ function fabPanelPreview(){
  while(svg.firstChild)svg.removeChild(svg.firstChild);
  var rows=+fabPanel.rows,cols=+fabPanel.columns;if(!shape){status.textContent="No board outline available";return;}
  if(!Number.isInteger(rows)||!Number.isInteger(cols)||rows<1||cols<1||rows*cols>100){status.textContent="Choose 1–100 total boards";return;}
- var top=Math.max(0,+fabPanel.railTop||0),right=Math.max(0,+fabPanel.railRight||0),bottom=Math.max(0,+fabPanel.railBottom||0),left=Math.max(0,+fabPanel.railLeft||0);
+ var top=Math.max(0,+fabPanelRailWidth("Top")||0),right=Math.max(0,+fabPanelRailWidth("Right")||0),bottom=Math.max(0,+fabPanelRailWidth("Bottom")||0),left=Math.max(0,+fabPanelRailWidth("Left")||0);
  var gap=fabPanel.method==="v_score"?0:Math.max(0,+fabPanel.gap||0),pw=left+right+cols*shape.w+(cols-1)*gap,ph=top+bottom+rows*shape.h+(rows-1)*gap;
  if(!(pw>0)||!(ph>0)){status.textContent="Panel dimensions are invalid";return;}
  var pad=Math.max(pw,ph)*.035;svg.setAttribute("viewBox",[-pad,-pad,pw+2*pad,ph+2*pad].join(" "));
@@ -12444,7 +12446,7 @@ function fabPanelPreview(){
   for(var c=0;c<=cols;c++){var sx=left+c*shape.w;if(sx>0&&sx<pw)fabPanelPreviewNode(svg,"line",{x1:sx,y1:0,x2:sx,y2:ph,stroke:"#e3b341","stroke-width":Math.max(.12,pad*.05),"stroke-dasharray":Math.max(.5,pad*.3)+" "+Math.max(.35,pad*.2)});}
   for(var r=0;r<=rows;r++){var sy=top+r*shape.h;if(sy>0&&sy<ph)fabPanelPreviewNode(svg,"line",{x1:0,y1:sy,x2:pw,y2:sy,stroke:"#e3b341","stroke-width":Math.max(.12,pad*.05),"stroke-dasharray":Math.max(.5,pad*.3)+" "+Math.max(.35,pad*.2)});}}
  var sides={Top:[pw/3,top/2,2*pw/3,top/2],Right:[pw-right/2,2*ph/3,pw-right/2,ph/3],Bottom:[pw/3,ph-bottom/2,2*pw/3,ph-bottom/2],Left:[left/2,2*ph/3,left/2,ph/3]};
- Object.keys(sides).forEach(function(side){var p=sides[side];if(fabPanel["tooling"+side])fabPanelPreviewFeature(svg,p[0],p[1],Math.max(.01,+fabPanel.toolingDiameter||0),"hole");if(fabPanel["fiducial"+side])fabPanelPreviewFeature(svg,p[2],p[3],Math.max(.01,+fabPanel.fiducialDiameter||0),"fiducial");});
+ Object.keys(sides).forEach(function(side){var p=sides[side];if(fabPanelRailEnabled(side)&&fabPanel["tooling"+side])fabPanelPreviewFeature(svg,p[0],p[1],Math.max(.01,+fabPanel.toolingDiameter||0),"hole");if(fabPanelRailEnabled(side)&&fabPanel["fiducial"+side])fabPanelPreviewFeature(svg,p[2],p[3],Math.max(.01,+fabPanel.fiducialDiameter||0),"fiducial");});
  status.textContent=cols+" × "+rows+" boards · "+pw.toFixed(1)+" × "+ph.toFixed(1)+" mm · "+(fabPanel.method==="v_score"?"V-score":"routed");}
 function fabZipUrl(rep){
  var q=fabq();
@@ -12457,11 +12459,11 @@ function fabq(){var fields=[];
  if(fabExportKind==="fabrication"&&fabPanel.enabled){
   fields.push("panel=1","panel_rows="+fabPanel.rows,"panel_columns="+fabPanel.columns,
    "panel_method="+fabPanel.method,"panel_gap="+fabPanel.gap,
-   "panel_rail_top="+fabPanel.railTop,"panel_rail_right="+fabPanel.railRight,
-   "panel_rail_bottom="+fabPanel.railBottom,"panel_rail_left="+fabPanel.railLeft,
+   "panel_rail_top="+fabPanelRailWidth("Top"),"panel_rail_right="+fabPanelRailWidth("Right"),
+   "panel_rail_bottom="+fabPanelRailWidth("Bottom"),"panel_rail_left="+fabPanelRailWidth("Left"),
    "panel_tooling_diameter="+fabPanel.toolingDiameter,"panel_fiducial_diameter="+fabPanel.fiducialDiameter,
    "panel_fiducial_mask="+fabPanel.fiducialMask,"panel_tab="+fabPanel.tab,"panel_bite="+fabPanel.bite);
-  [["toolingTop","panel_tooling_top"],["toolingRight","panel_tooling_right"],["toolingBottom","panel_tooling_bottom"],["toolingLeft","panel_tooling_left"],["fiducialTop","panel_fiducial_top"],["fiducialRight","panel_fiducial_right"],["fiducialBottom","panel_fiducial_bottom"],["fiducialLeft","panel_fiducial_left"]].forEach(function(pair){if(fabPanel[pair[0]])fields.push(pair[1]+"=1");});}
+  [["toolingTop","panel_tooling_top","Top"],["toolingRight","panel_tooling_right","Right"],["toolingBottom","panel_tooling_bottom","Bottom"],["toolingLeft","panel_tooling_left","Left"],["fiducialTop","panel_fiducial_top","Top"],["fiducialRight","panel_fiducial_right","Right"],["fiducialBottom","panel_fiducial_bottom","Bottom"],["fiducialLeft","panel_fiducial_left","Left"]].forEach(function(pair){if(fabPanelRailEnabled(pair[2])&&fabPanel[pair[0]])fields.push(pair[1]+"=1");});}
  return fields.length?"?"+fields.join("&"):"";}
 function fabDownload(rep){
  var go=document.getElementById("fab-go"),refreshed=false;if(go)go.disabled=true;
@@ -12518,7 +12520,7 @@ function fabRenderReport(rep){
  if((!rep.errors||!rep.errors.length)&&(!rep.warnings||!rep.warnings.length))
  h+='<div class="fab-sec ok">Board is fab-ready.</div>';
  if(fabExportKind==="fabrication"){
-  var railRow=function(side,label){var cap=side.charAt(0).toUpperCase()+side.slice(1);return '<div class="fab-rail-side"><strong>'+label+'</strong><span><input id="fab-panel-rail-'+side+'" type="number" min="0" max="30" step="0.1" value="'+fabPanel['rail'+cap]+'"> mm</span><label><input id="fab-panel-tooling-'+side+'" type="checkbox"'+(fabPanel['tooling'+cap]?' checked':'')+'> Hole</label><label><input id="fab-panel-fiducial-'+side+'" type="checkbox"'+(fabPanel['fiducial'+cap]?' checked':'')+'> Fiducial</label></div>';};
+  var railRow=function(side,label){var cap=side.charAt(0).toUpperCase()+side.slice(1);return '<div class="fab-rail-side" id="fab-panel-rail-row-'+side+'"><strong>'+label+'</strong><span><input id="fab-panel-rail-'+side+'" type="number" min="0" max="30" step="0.1" value="'+fabPanel['rail'+cap]+'"> mm</span><label><input id="fab-panel-tooling-'+side+'" type="checkbox"'+(fabPanel['tooling'+cap]?' checked':'')+'> Hole</label><label><input id="fab-panel-fiducial-'+side+'" type="checkbox"'+(fabPanel['fiducial'+cap]?' checked':'')+'> Fiducial</label></div>';};
   h+='<fieldset class="fab-panel"><legend><label><input type="checkbox" id="fab-panel-enable"'+(fabPanel.enabled?' checked':'')+'> Panelize Gerbers and drills</label></legend>'+
    '<div class="fab-panel-grid" id="fab-panel-fields"'+(fabPanel.enabled?'':' hidden')+'>'+
    '<div class="fab-panel-preview"><div class="fab-panel-preview-head"><strong>Panel preview</strong><span id="fab-panel-preview-status"></span></div><svg id="fab-panel-preview-svg" role="img" aria-label="Live panel outline preview" preserveAspectRatio="xMidYMid meet"></svg><div class="fab-panel-preview-legend"><span class="board">Board outline</span><span class="rail">Rail / routing gap</span><span class="feature">Rail feature</span></div></div>'+
@@ -12526,6 +12528,7 @@ function fabRenderReport(rep){
    '<label>Rows <input id="fab-panel-rows" type="number" min="1" max="100" step="1" value="'+fabPanel.rows+'"></label>'+
    '<label>Separation <select id="fab-panel-method"><option value="routed"'+(fabPanel.method==='routed'?' selected':'')+'>Routed tabs + mouse bites</option><option value="v_score"'+(fabPanel.method==='v_score'?' selected':'')+'>V-score</option></select></label>'+
    '<label>Board gap <span><input id="fab-panel-gap" type="number" min="0" max="20" step="0.1" value="'+fabPanel.gap+'"> mm</span></label>'+
+   '<div class="fab-rail-pairs"><label><input id="fab-panel-rails-tb" type="checkbox"'+(fabPanel.railsTB?' checked':'')+'> Top + bottom rails</label><label><input id="fab-panel-rails-lr" type="checkbox"'+(fabPanel.railsLR?' checked':'')+'> Left + right rails</label></div>'+
    '<label class="fab-routed-field">Tab width <span><input id="fab-panel-tab" type="number" min="1" step="0.1" value="'+fabPanel.tab+'"> mm</span></label>'+
    '<label class="fab-routed-field">Mouse bites <span><input id="fab-panel-bite" type="number" min="0.2" max="1" step="0.05" value="'+fabPanel.bite+'"> mm</span></label>'+railRow('top','Top rail')+railRow('right','Right rail')+railRow('bottom','Bottom rail')+railRow('left','Left rail')+
    '<label>Hole diameter <span><input id="fab-panel-tooling-diameter" type="number" min="1" max="6" step="0.1" value="'+fabPanel.toolingDiameter+'"> mm</span></label>'+
@@ -12552,10 +12555,12 @@ function fabOpenModal(rep){
   body.querySelectorAll(".fab-routed-field").forEach(function(el){el.hidden=scored;});fabPanelPreview();}
  if(panelEnable)panelEnable.addEventListener("change",function(){fabPanel.enabled=panelEnable.checked;if(panelFields)panelFields.hidden=!fabPanel.enabled;fabPanelPreview();});
  var panelMethod=document.getElementById("fab-panel-method");if(panelMethod)panelMethod.addEventListener("change",panelSyncMethod);
+ function panelSyncRailPairs(){[["railsTB",["top","bottom"]],["railsLR",["left","right"]]].forEach(function(pair){pair[1].forEach(function(side){var row=document.getElementById("fab-panel-rail-row-"+side);if(row)row.querySelectorAll("input").forEach(function(input){input.disabled=!fabPanel[pair[0]];});});});fabPanelPreview();}
+ [["fab-panel-rails-tb","railsTB"],["fab-panel-rails-lr","railsLR"]].forEach(function(pair){var toggle=document.getElementById(pair[0]);if(toggle)toggle.addEventListener("change",function(){fabPanel[pair[1]]=toggle.checked;panelSyncRailPairs();});});
  [["fab-panel-rows","rows"],["fab-panel-columns","columns"],["fab-panel-gap","gap"],["fab-panel-rail-top","railTop"],["fab-panel-rail-right","railRight"],["fab-panel-rail-bottom","railBottom"],["fab-panel-rail-left","railLeft"],["fab-panel-tooling-diameter","toolingDiameter"],["fab-panel-fiducial-diameter","fiducialDiameter"],["fab-panel-fiducial-mask","fiducialMask"],["fab-panel-tab","tab"],["fab-panel-bite","bite"]].forEach(function(pair){
   var el=document.getElementById(pair[0]);if(el)el.addEventListener("input",function(){var n=Number(el.value);if(Number.isFinite(n))fabPanel[pair[1]]=n;fabPanelPreview();});});
  [["top","Top"],["right","Right"],["bottom","Bottom"],["left","Left"]].forEach(function(pair){var side=pair[0],cap=pair[1],hole=document.getElementById("fab-panel-tooling-"+side),fid=document.getElementById("fab-panel-fiducial-"+side);if(hole)hole.addEventListener("change",function(){fabPanel["tooling"+cap]=hole.checked;fabPanelPreview();});if(fid)fid.addEventListener("change",function(){fabPanel["fiducial"+cap]=fid.checked;fabPanelPreview();});});
- panelSyncMethod();
+ panelSyncMethod();panelSyncRailPairs();
  var hasErr=rep.errors&&rep.errors.length,hasWarn=rep.needs_waiver,drcAck=document.getElementById("fab-drc-ack");
  var what=fabExportKind==="archive"?"Complete design archive":"Fabrication release";
  title.textContent=hasErr?what+" — problems found":hasWarn?what+" — waiver required":what+" — ready to confirm";

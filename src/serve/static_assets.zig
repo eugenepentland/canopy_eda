@@ -2533,3 +2533,19 @@ test "panel export renders a live board-outline preview" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_layout_css, ".fab-panel-preview svg{") != null);
 }
+
+// spec: Web Server - The panel export groups rail presence into one top-and-bottom toggle and one left-and-right toggle while preserving each side's configured width and features
+test "panel export toggles top-bottom and left-right rail pairs" {
+    const markers = [_][]const u8{
+        "fab-panel-rails-tb",
+        "Top + bottom rails",
+        "fab-panel-rails-lr",
+        "Left + right rails",
+        "function fabPanelRailEnabled(side)",
+        "fabPanelRailWidth(\"Top\")",
+        "fabPanelRailWidth(\"Left\")",
+        "function panelSyncRailPairs()",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_layout_css, ".fab-rail-pairs{") != null);
+}
