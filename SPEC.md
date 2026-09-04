@@ -7004,6 +7004,7 @@ is what makes the predicate exact rather than approximately right.
 
 ## Web Server
 
+- The panel export shows a live dimensioned preview that repeats the actual board outline inside its configured rails and marks scores, tooling holes and fiducials
 - The panel export controls independently size every rail side and select its NPTH tooling hole and top-copper fiducial dimensions
 - The Full archive control runs the ordinary fab-readiness confirmation flow, posts the same analytic full-board STEP recipe as the 3D tab, and downloads the complete design archive
 - A failed Full archive download identifies the archive and displays the server's actual rejection reason

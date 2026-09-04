@@ -2517,3 +2517,19 @@ test "panel export controls expose per-side rails tooling holes and fiducials" {
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_layout_css, ".fab-rail-side{") != null);
 }
+
+// spec: Web Server - The panel export shows a live dimensioned preview that repeats the actual board outline inside its configured rails and marks scores, tooling holes and fiducials
+test "panel export renders a live board-outline preview" {
+    const markers = [_][]const u8{
+        "function fabPanelShape()",
+        "outlineFilletGeom(live||authored)",
+        "function fabPanelPreview()",
+        "fab-panel-preview-svg",
+        "Live panel outline preview",
+        "pw.toFixed(1)+\" × \"+ph.toFixed(1)+\" mm",
+        "fabPanelPreviewFeature(svg",
+        "fabPanelPreview();",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_layout_css, ".fab-panel-preview svg{") != null);
+}

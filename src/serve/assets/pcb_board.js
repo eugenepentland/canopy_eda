@@ -12371,6 +12371,36 @@ function focusPart(want,keepPane){
 // waiver. A stale token cannot download a changed board.
 var fabExportKind="fabrication";
 var fabPanel={enabled:false,rows:2,columns:2,method:"routed",gap:2,railTop:5,railRight:5,railBottom:5,railLeft:5,toolingTop:false,toolingRight:false,toolingBottom:false,toolingLeft:false,fiducialTop:false,fiducialRight:false,fiducialBottom:false,fiducialLeft:false,toolingDiameter:3,fiducialDiameter:1,fiducialMask:2,tab:3,bite:0.5};
+function fabPanelShape(){
+ var live=PCB.outline,authored=live?null:authoredOutlineSeed(),box=live||authored||PCB.board,points=null;
+ if(!box||!(box.w>0)||!(box.h>0))return null;
+ if(live||authored){var geom=outlineFilletGeom(live||authored);if(geom&&geom.points.length>=3)points=geom.points;}
+ if(!points&&PCB.board_poly&&PCB.board_poly.length>=3)points=PCB.board_poly;
+ if(!points)points=[[box.x,box.y],[box.x+box.w,box.y],[box.x+box.w,box.y+box.h],[box.x,box.y+box.h]];
+ return {w:box.w,h:box.h,points:points.map(function(p){return [p[0]-box.x,box.y+box.h-p[1]];})};}
+function fabPanelPreviewNode(svg,tag,attrs){
+ var node=document.createElementNS(NS,tag);Object.keys(attrs).forEach(function(k){node.setAttribute(k,attrs[k]);});svg.appendChild(node);return node;}
+function fabPanelPreviewFeature(svg,x,y,d,kind){
+ if(kind==="hole")fabPanelPreviewNode(svg,"circle",{cx:x,cy:y,r:d/2,fill:"#11151a",stroke:"#d6d7db","stroke-width":Math.max(.15,d*.09)});
+ else{fabPanelPreviewNode(svg,"circle",{cx:x,cy:y,r:fabPanel.fiducialMask/2,fill:"none",stroke:"#8b949e","stroke-width":Math.max(.12,d*.08),"stroke-dasharray":Math.max(.3,d*.3)+" "+Math.max(.2,d*.18)});fabPanelPreviewNode(svg,"circle",{cx:x,cy:y,r:d/2,fill:"#d8ad35",stroke:"#f5d76e","stroke-width":Math.max(.1,d*.08)});}}
+function fabPanelPreview(){
+ var svg=document.getElementById("fab-panel-preview-svg"),status=document.getElementById("fab-panel-preview-status"),shape=fabPanelShape();if(!svg||!status)return;
+ while(svg.firstChild)svg.removeChild(svg.firstChild);
+ var rows=+fabPanel.rows,cols=+fabPanel.columns;if(!shape){status.textContent="No board outline available";return;}
+ if(!Number.isInteger(rows)||!Number.isInteger(cols)||rows<1||cols<1||rows*cols>100){status.textContent="Choose 1–100 total boards";return;}
+ var top=Math.max(0,+fabPanel.railTop||0),right=Math.max(0,+fabPanel.railRight||0),bottom=Math.max(0,+fabPanel.railBottom||0),left=Math.max(0,+fabPanel.railLeft||0);
+ var gap=fabPanel.method==="v_score"?0:Math.max(0,+fabPanel.gap||0),pw=left+right+cols*shape.w+(cols-1)*gap,ph=top+bottom+rows*shape.h+(rows-1)*gap;
+ if(!(pw>0)||!(ph>0)){status.textContent="Panel dimensions are invalid";return;}
+ var pad=Math.max(pw,ph)*.035;svg.setAttribute("viewBox",[-pad,-pad,pw+2*pad,ph+2*pad].join(" "));
+ fabPanelPreviewNode(svg,"rect",{x:0,y:0,width:pw,height:ph,rx:Math.min(.6,pad/3),fill:"#222a34",stroke:"#8b949e","stroke-width":Math.max(.18,pad*.08)});
+ [[0,0,pw,top],[0,ph-bottom,pw,bottom],[0,0,left,ph],[pw-right,0,right,ph]].forEach(function(r){if(r[2]>0&&r[3]>0)fabPanelPreviewNode(svg,"rect",{x:r[0],y:r[1],width:r[2],height:r[3],fill:"#344457",opacity:.9});});
+ for(var row=0;row<rows;row++)for(var col=0;col<cols;col++){var ox=left+col*(shape.w+gap),oy=top+row*(shape.h+gap),pts=shape.points.map(function(p){return (ox+p[0])+","+(oy+p[1]);}).join(" ");fabPanelPreviewNode(svg,"polygon",{points:pts,fill:"#173a32",stroke:"#73d0ad","stroke-width":Math.max(.16,pad*.07)});}
+ if(fabPanel.method==="v_score"){
+  for(var c=0;c<=cols;c++){var sx=left+c*shape.w;if(sx>0&&sx<pw)fabPanelPreviewNode(svg,"line",{x1:sx,y1:0,x2:sx,y2:ph,stroke:"#e3b341","stroke-width":Math.max(.12,pad*.05),"stroke-dasharray":Math.max(.5,pad*.3)+" "+Math.max(.35,pad*.2)});}
+  for(var r=0;r<=rows;r++){var sy=top+r*shape.h;if(sy>0&&sy<ph)fabPanelPreviewNode(svg,"line",{x1:0,y1:sy,x2:pw,y2:sy,stroke:"#e3b341","stroke-width":Math.max(.12,pad*.05),"stroke-dasharray":Math.max(.5,pad*.3)+" "+Math.max(.35,pad*.2)});}}
+ var sides={Top:[pw/3,top/2,2*pw/3,top/2],Right:[pw-right/2,2*ph/3,pw-right/2,ph/3],Bottom:[pw/3,ph-bottom/2,2*pw/3,ph-bottom/2],Left:[left/2,2*ph/3,left/2,ph/3]};
+ Object.keys(sides).forEach(function(side){var p=sides[side];if(fabPanel["tooling"+side])fabPanelPreviewFeature(svg,p[0],p[1],Math.max(.01,+fabPanel.toolingDiameter||0),"hole");if(fabPanel["fiducial"+side])fabPanelPreviewFeature(svg,p[2],p[3],Math.max(.01,+fabPanel.fiducialDiameter||0),"fiducial");});
+ status.textContent=cols+" × "+rows+" boards · "+pw.toFixed(1)+" × "+ph.toFixed(1)+" mm · "+(fabPanel.method==="v_score"?"V-score":"routed");}
 function fabZipUrl(rep){
  var q=fabq();
  var add=function(k,v){q+=q?"&":"?";q+=k+"="+encodeURIComponent(v);};
@@ -12446,6 +12476,7 @@ function fabRenderReport(rep){
   var railRow=function(side,label){var cap=side.charAt(0).toUpperCase()+side.slice(1);return '<div class="fab-rail-side"><strong>'+label+'</strong><span><input id="fab-panel-rail-'+side+'" type="number" min="0" max="30" step="0.1" value="'+fabPanel['rail'+cap]+'"> mm</span><label><input id="fab-panel-tooling-'+side+'" type="checkbox"'+(fabPanel['tooling'+cap]?' checked':'')+'> Hole</label><label><input id="fab-panel-fiducial-'+side+'" type="checkbox"'+(fabPanel['fiducial'+cap]?' checked':'')+'> Fiducial</label></div>';};
   h+='<fieldset class="fab-panel"><legend><label><input type="checkbox" id="fab-panel-enable"'+(fabPanel.enabled?' checked':'')+'> Panelize Gerbers and drills</label></legend>'+
    '<div class="fab-panel-grid" id="fab-panel-fields"'+(fabPanel.enabled?'':' hidden')+'>'+
+   '<div class="fab-panel-preview"><div class="fab-panel-preview-head"><strong>Panel preview</strong><span id="fab-panel-preview-status"></span></div><svg id="fab-panel-preview-svg" role="img" aria-label="Live panel outline preview" preserveAspectRatio="xMidYMid meet"></svg><div class="fab-panel-preview-legend"><span class="board">Board outline</span><span class="rail">Rail / routing gap</span><span class="feature">Rail feature</span></div></div>'+
    '<label>Columns <input id="fab-panel-columns" type="number" min="1" max="100" step="1" value="'+fabPanel.columns+'"></label>'+
    '<label>Rows <input id="fab-panel-rows" type="number" min="1" max="100" step="1" value="'+fabPanel.rows+'"></label>'+
    '<label>Separation <select id="fab-panel-method"><option value="routed"'+(fabPanel.method==='routed'?' selected':'')+'>Routed tabs + mouse bites</option><option value="v_score"'+(fabPanel.method==='v_score'?' selected':'')+'>V-score</option></select></label>'+
@@ -12473,12 +12504,12 @@ function fabOpenModal(rep){
  function panelSyncMethod(){var method=document.getElementById("fab-panel-method"),gap=document.getElementById("fab-panel-gap");
   if(!method)return;fabPanel.method=method.value;var scored=method.value==="v_score";
   if(gap){gap.disabled=scored;if(scored){gap.value="0";fabPanel.gap=0;}else if(Number(gap.value)<1){gap.value="2";fabPanel.gap=2;}}
-  body.querySelectorAll(".fab-routed-field").forEach(function(el){el.hidden=scored;});}
- if(panelEnable)panelEnable.addEventListener("change",function(){fabPanel.enabled=panelEnable.checked;if(panelFields)panelFields.hidden=!fabPanel.enabled;});
+  body.querySelectorAll(".fab-routed-field").forEach(function(el){el.hidden=scored;});fabPanelPreview();}
+ if(panelEnable)panelEnable.addEventListener("change",function(){fabPanel.enabled=panelEnable.checked;if(panelFields)panelFields.hidden=!fabPanel.enabled;fabPanelPreview();});
  var panelMethod=document.getElementById("fab-panel-method");if(panelMethod)panelMethod.addEventListener("change",panelSyncMethod);
  [["fab-panel-rows","rows"],["fab-panel-columns","columns"],["fab-panel-gap","gap"],["fab-panel-rail-top","railTop"],["fab-panel-rail-right","railRight"],["fab-panel-rail-bottom","railBottom"],["fab-panel-rail-left","railLeft"],["fab-panel-tooling-diameter","toolingDiameter"],["fab-panel-fiducial-diameter","fiducialDiameter"],["fab-panel-fiducial-mask","fiducialMask"],["fab-panel-tab","tab"],["fab-panel-bite","bite"]].forEach(function(pair){
-  var el=document.getElementById(pair[0]);if(el)el.addEventListener("change",function(){var n=Number(el.value);if(Number.isFinite(n))fabPanel[pair[1]]=n;});});
- [["top","Top"],["right","Right"],["bottom","Bottom"],["left","Left"]].forEach(function(pair){var side=pair[0],cap=pair[1],hole=document.getElementById("fab-panel-tooling-"+side),fid=document.getElementById("fab-panel-fiducial-"+side);if(hole)hole.addEventListener("change",function(){fabPanel["tooling"+cap]=hole.checked;});if(fid)fid.addEventListener("change",function(){fabPanel["fiducial"+cap]=fid.checked;});});
+  var el=document.getElementById(pair[0]);if(el)el.addEventListener("input",function(){var n=Number(el.value);if(Number.isFinite(n))fabPanel[pair[1]]=n;fabPanelPreview();});});
+ [["top","Top"],["right","Right"],["bottom","Bottom"],["left","Left"]].forEach(function(pair){var side=pair[0],cap=pair[1],hole=document.getElementById("fab-panel-tooling-"+side),fid=document.getElementById("fab-panel-fiducial-"+side);if(hole)hole.addEventListener("change",function(){fabPanel["tooling"+cap]=hole.checked;fabPanelPreview();});if(fid)fid.addEventListener("change",function(){fabPanel["fiducial"+cap]=fid.checked;fabPanelPreview();});});
  panelSyncMethod();
  var hasErr=rep.errors&&rep.errors.length,hasWarn=rep.needs_waiver,drcAck=document.getElementById("fab-drc-ack");
  var what=fabExportKind==="archive"?"Complete design archive":"Fabrication release";
