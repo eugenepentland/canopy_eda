@@ -394,6 +394,7 @@ pub fn corpus(arena: std.mem.Allocator, project_dir: []const u8) std.mem.Allocat
         if (entry.kind != .file and entry.kind != .sym_link) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".sexp")) continue;
         const stem = entry.basename[0 .. entry.basename.len - ".sexp".len];
+        // Not a net name: a FILE-name stem, dropping `foo.checks.sexp` sidecars.
         if (std.mem.indexOfScalar(u8, stem, '.') != null) continue;
         const full = try std.fmt.allocPrint(arena, "{s}/{s}", .{ src_path, entry.path });
         const src = infra_fs.cwd().readFileAlloc(arena, full, max_design_bytes) catch continue;

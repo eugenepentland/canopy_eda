@@ -97,6 +97,7 @@ fn printFloat(writer: anytype, f: f64) !void {
     // Keep the float/int distinction: a whole-number float prints as "100",
     // so append ".0" when there's no decimal point (and no exponent, which
     // `{d}` never emits here but guard anyway).
+    // Not a net name: the decimal point of a formatted float.
     if (std.mem.indexOfScalar(u8, formatted, '.') == null and
         std.mem.indexOfScalar(u8, formatted, 'e') == null and
         std.mem.indexOfScalar(u8, formatted, 'n') == null) // nan/inf

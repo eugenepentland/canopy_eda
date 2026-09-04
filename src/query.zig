@@ -282,6 +282,7 @@ pub fn cmdDesigns(allocator: std.mem.Allocator, args: []const []const u8) QueryE
         if (entry.kind != .file and entry.kind != .sym_link) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".sexp")) continue;
         const stem = entry.basename[0 .. entry.basename.len - ".sexp".len];
+        // Not a net name: a FILE-name stem, dropping `foo.checks.sexp` sidecars.
         if (std.mem.indexOfScalar(u8, stem, '.') != null) continue; // skip `.checks.sexp` etc.
 
         const full = try std.fmt.allocPrint(a, "{s}/{s}", .{ src_path, entry.path });

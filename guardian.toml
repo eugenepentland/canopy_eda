@@ -1097,10 +1097,26 @@ fragments = ["lastIndexOfScalar", "'/'"]
 allow = ["src/net_name.zig"]
 reason = "hand-rolled sub-block leaf split - 29 named copies under 8 spellings (audit 2026-08-14); call the net_name helper"
 
+# The `allow` list carries two kinds of entry. The first two are the canonical
+# HOMES the copies were folded into. The five that follow are files where the
+# fragment is not a net name at all and the rule only matches its text: a
+# FILE-name stem (`foo.checks.sexp`), the decimal point of a formatted float, and
+# the decimal point of a resistor VALUE string. Each site carries a one-line
+# "Not a net name:" comment saying which. Every net-name collapse in those files
+# was routed to `net_analysis.baseNetName` first — `req_checks.netBase` is now an
+# alias of it — so nothing here is an unexamined exemption.
 [[idiom]]
 name = "first-dot-net-collapse"
 fragments = ["indexOfScalar", "'.'"]
-allow = ["src/eval/net_analysis.zig", "src/kicad_sch/stub.zig"]
+allow = [
+    "src/eval/net_analysis.zig",
+    "src/kicad_sch/stub.zig",
+    "src/bench_route.zig",
+    "src/query.zig",
+    "src/eval/fmt.zig",
+    "src/sexpr/printer.zig",
+    "src/req_checks.zig",
+]
 reason = "first-dot bypass-stub collapse - 11 naive copies of the +5.0V->+5 corruption class; the structural fold is kicad_sch/stub.zig, the display collapse is net_analysis.baseNetName"
 
 [[idiom]]
