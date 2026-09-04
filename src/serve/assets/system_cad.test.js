@@ -50,4 +50,11 @@ assert.ok(barracuda.coverage > 0.98 && barracuda.coverage < 1);
 assert.ok(barracuda.velocity > 2);
 assert.ok(barracuda.temperature_c < result.hottest.temperature_c);
 
-console.log("System thermal: RDS3 pitch, repeated instances, fan coverage, and coupled screen pass");
+const wheelGesture = { last: -Infinity, total: 0 };
+let appliedWheel = 0;
+for (let i = 0; i < 100; i += 1) appliedWheel += thermal.boundedWheelStep(wheelGesture, -24, 0, i * 8, 900);
+assert.equal(appliedWheel, -480);
+assert.equal(thermal.boundedWheelStep(wheelGesture, -120, 0, 1000, 900), -120);
+assert.equal(thermal.boundedWheelStep(wheelGesture, 3, 1, 1020, 900), 48);
+
+console.log("System thermal: RDS3 pitch, repeated instances, fan coverage, bounded wheel zoom, and coupled screen pass");

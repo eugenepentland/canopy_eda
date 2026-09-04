@@ -5905,7 +5905,7 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - the standalone draft dossier is the archive's own HTML member composed without the archive around it
 - a dossier request over a workspace that cannot compose answers the composer's diagnostic rather than a crash or a partial page
 - the system review page offers the dossier as a page action beside the draft download, pointing at the system's own dossier path
-- a strict assembly sidecar repeats reviewed board definitions as uniquely identified physical instances and preserves its authored pitch
+- a strict assembly sidecar repeats reviewed board definitions as uniquely identified physical instances and preserves its authored pitch, while bounded wheel gestures prevent trackpad momentum from driving the 3D camera through the assembly
 - a dossier request answers from the current or explicitly stale composed copy, or a loader when no copy exists, without ever composing inside the request
 - a completed dossier persists atomically below out and is rehydrated after restart for the same tool build, marked stale when its project tree changed and rejected when its bytes are damaged
 - one dossier composition per system is ever in flight, and a reload during one joins it rather than starting a second

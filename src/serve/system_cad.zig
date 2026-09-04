@@ -607,7 +607,7 @@ test "CAD document drives cutout preview and boss exports through Zig" {
     try std.testing.expect(std.mem.indexOf(u8, step_request.res.body, "FACETED_BREP('Mounting boss 1'") != null);
 }
 
-// spec: system-review - a strict assembly sidecar repeats reviewed board definitions as uniquely identified physical instances and preserves its authored pitch
+// spec: system-review - a strict assembly sidecar repeats reviewed board definitions as uniquely identified physical instances and preserves its authored pitch, while bounded wheel gestures prevent trackpad momentum from driving the 3D camera through the assembly
 test "system CAD validates and serializes repeated assembly instances" {
     const boards = [_]system_review.BoardMember{
         .{ .name = "barracuda", .role = "controller", .source = "src/boards/barracuda/barracuda.sexp", .part_number = "BAR", .revision = "2" },
