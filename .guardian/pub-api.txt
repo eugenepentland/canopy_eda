@@ -1325,6 +1325,7 @@ src/infra/log.zig::progress | fn progress(comptime fmt: []const u8, args: anytyp
 src/infra/log.zig::warn | fn warn(comptime fmt: []const u8, args: anytype) void
 src/infra/net.zig::HttpClient value
 src/infra/net.zig::initHttpClient | fn initHttpClient(allocator: std.mem.Allocator) HttpClient
+src/infra/process_alloc.zig::durable value
 src/infra/random.zig::bytes | fn bytes(buf: []u8) std.Io.RandomSecureError!void
 src/json_writer.zig::WriteError value
 src/json_writer.zig::writeEscaped | fn writeEscaped(w: anytype, s: []const u8) WriteError!void

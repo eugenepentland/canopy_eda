@@ -90,6 +90,7 @@
 const std = @import("std");
 const clock = @import("../infra/clock.zig");
 const infra_fs = @import("../infra/fs.zig");
+const process_alloc = @import("../infra/process_alloc.zig");
 const content_key = @import("content_key.zig");
 const drc = @import("drc.zig");
 const optimizer = @import("optimizer.zig");
@@ -426,7 +427,7 @@ pub const Store = struct {
     mutex: infra_fs.Mutex = .{},
     /// Long-lived backing for the entries — deliberately NOT any caller's
     /// allocator, every one of which is an arena freed with its request.
-    backing: std.mem.Allocator = std.heap.page_allocator,
+    backing: std.mem.Allocator = process_alloc.durable,
     /// Retained boards, oldest borrow first: the LRU order eviction reads.
     entries: std.ArrayList(*Entry) = .empty,
     /// Retained fills, oldest borrow first. Deliberately a flat list rather
@@ -671,7 +672,7 @@ pub const Store = struct {
 /// the last thing that should compete with the fills for their ceiling.
 const BaseStore = struct {
     mutex: infra_fs.Mutex = .{},
-    backing: std.mem.Allocator = std.heap.page_allocator,
+    backing: std.mem.Allocator = process_alloc.durable,
     /// Oldest borrow first: the recency order eviction reads.
     nodes: std.ArrayList(*BaseNode) = .empty,
     bytes: usize = 0,

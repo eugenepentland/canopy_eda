@@ -17,12 +17,13 @@
 
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
+const process_alloc = @import("../infra/process_alloc.zig");
 const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 
 /// All cross-request cache state is pinned to the process page allocator so it
 /// outlives the per-request arenas that produced it.
-const page = std.heap.page_allocator;
+const page = process_alloc.durable;
 
 /// Sibling extensions (next to the design `.sexp`) whose contents feed a
 /// rendered page or summary even though the evaluator itself doesn't parse

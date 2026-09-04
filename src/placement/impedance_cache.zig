@@ -52,6 +52,7 @@ const std = @import("std");
 const content_key = @import("content_key.zig");
 const impedance = @import("impedance.zig");
 const infra_fs = @import("../infra/fs.zig");
+const process_alloc = @import("../infra/process_alloc.zig");
 
 /// A 128-bit content fingerprint of one synthesis query, shared with the copper
 /// memos so there is one definition of what a fingerprint is.
@@ -108,7 +109,7 @@ pub const Store = struct {
     mutex: infra_fs.Mutex = .{},
     /// Long-lived backing, deliberately NOT any caller's allocator — every one
     /// of which is an arena freed with its request.
-    backing: std.mem.Allocator = std.heap.page_allocator,
+    backing: std.mem.Allocator = process_alloc.durable,
     /// Retained queries, oldest answered first: the LRU order eviction reads.
     entries: std.ArrayList(Entry) = .empty,
     limit: usize = max_entries,

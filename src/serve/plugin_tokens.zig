@@ -4,6 +4,7 @@ const clock = @import("../infra/clock.zig");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const infra_random = @import("../infra/random.zig");
+const process_alloc = @import("../infra/process_alloc.zig");
 const auth_store = @import("auth_store.zig");
 
 /// Stored record for a minted plugin token. Only the hash is persisted —
@@ -16,7 +17,7 @@ pub const Token = struct {
 
 // Tokens persist for the life of the process — callers pass a per-request
 // arena, so stored strings must come from the process allocator.
-const store_alloc = std.heap.page_allocator;
+const store_alloc = process_alloc.durable;
 
 fn tokensPath(allocator: std.mem.Allocator, auth_dir: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/plugin_tokens.json", .{auth_dir});

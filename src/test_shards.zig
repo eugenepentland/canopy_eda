@@ -81,6 +81,7 @@ pub const shards: []const []const []const u8 = &.{
         "deploy_unit.test.",
         "infra.atomic_write.test.",
         "infra.fs.test.",
+        "infra.process_alloc.test.",
         "layout_sidecar_store.test.",
         "main.test.",
         "panelize.test.",

@@ -13,6 +13,7 @@ const httpz = @import("httpz");
 const clock = @import("infra/clock.zig");
 const infra_fs = @import("infra/fs.zig");
 const log = @import("infra/log.zig");
+const process_alloc = @import("infra/process_alloc.zig");
 const deflate = @import("deflate.zig");
 const gzip_cache = @import("serve/gzip_cache.zig");
 
@@ -103,6 +104,11 @@ const warm_sched = @import("serve/warm_sched.zig");
 
 // ── Global live state ──────────────────────────────────────────────────
 
+/// Every store in this section outlives the request that wrote it, so none of
+/// them may hold a handler's arena; `infra/process_alloc.zig` owns that choice
+/// for the whole tree.
+const durable = process_alloc.durable;
+
 var live_mutex: infra_fs.Mutex = .{};
 
 /// The one live scene-graph slot: the JSON the last build/push produced, plus
@@ -124,7 +130,7 @@ var live_layout: ?LiveLayout = null;
 /// previous pair, if any, is freed — which is why readers must copy the bytes
 /// out under `live_mutex` (see `liveLayoutFor`) rather than borrow them.
 pub fn setLiveLayoutJson(name: []const u8, data: ?[]const u8) void {
-    const alloc = std.heap.page_allocator;
+    const alloc = durable;
     const next: ?LiveLayout = if (data) |d| blk: {
         const json = alloc.dupe(u8, d) catch break :blk null;
         const owned_name = alloc.dupe(u8, name) catch {
@@ -169,9 +175,9 @@ pub var live_versions: std.StringHashMapUnmanaged(u32) = .empty;
 pub fn bumpLiveVersion(name: []const u8) u32 {
     live_version_mutex.lock();
     defer live_version_mutex.unlock();
-    const gop = live_versions.getOrPut(std.heap.page_allocator, name) catch return 0;
+    const gop = live_versions.getOrPut(durable, name) catch return 0;
     if (!gop.found_existing) {
-        gop.key_ptr.* = std.heap.page_allocator.dupe(u8, name) catch {
+        gop.key_ptr.* = durable.dupe(u8, name) catch {
             _ = live_versions.remove(name);
             return 0;
         };
@@ -230,9 +236,9 @@ pub const PcbJobBegin = struct { gen: u32, fresh: bool };
 pub fn pcbJobBegin(name: []const u8) PcbJobBegin {
     pcb_jobs_mutex.lock();
     defer pcb_jobs_mutex.unlock();
-    const gop = pcb_jobs.getOrPut(std.heap.page_allocator, name) catch return .{ .gen = 0, .fresh = false };
+    const gop = pcb_jobs.getOrPut(durable, name) catch return .{ .gen = 0, .fresh = false };
     if (!gop.found_existing) {
-        gop.key_ptr.* = std.heap.page_allocator.dupe(u8, name) catch {
+        gop.key_ptr.* = durable.dupe(u8, name) catch {
             _ = pcb_jobs.remove(name);
             return .{ .gen = 0, .fresh = false };
         };
@@ -240,7 +246,7 @@ pub fn pcbJobBegin(name: []const u8) PcbJobBegin {
     }
     if (gop.value_ptr.running) return .{ .gen = gop.value_ptr.gen, .fresh = false };
     if (gop.value_ptr.frame) |old| {
-        std.heap.page_allocator.free(old);
+        durable.free(old);
         gop.value_ptr.frame = null;
     }
     gop.value_ptr.gen +%= 1;
@@ -255,18 +261,18 @@ pub fn pcbJobBegin(name: []const u8) PcbJobBegin {
 /// freed) if the job was superseded or already finished — so a stale solver's
 /// late write can't clobber a newer run.
 pub fn pcbJobFrame(name: []const u8, gen: u32, json: []const u8) void {
-    const dup = std.heap.page_allocator.dupe(u8, json) catch return;
+    const dup = durable.dupe(u8, json) catch return;
     pcb_jobs_mutex.lock();
     defer pcb_jobs_mutex.unlock();
     const e = pcb_jobs.getPtr(name) orelse {
-        std.heap.page_allocator.free(dup);
+        durable.free(dup);
         return;
     };
     if (e.gen != gen or !e.running) {
-        std.heap.page_allocator.free(dup);
+        durable.free(dup);
         return;
     }
-    if (e.frame) |old| std.heap.page_allocator.free(old);
+    if (e.frame) |old| durable.free(old);
     e.frame = dup;
     e.seq +%= 1;
 }

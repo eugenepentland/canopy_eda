@@ -17,6 +17,7 @@ const std = @import("std");
 const httpz = @import("httpz");
 const clock = @import("../infra/clock.zig");
 const infra_fs = @import("../infra/fs.zig");
+const process_alloc = @import("../infra/process_alloc.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const optimizer = @import("../placement/optimizer.zig");
@@ -35,7 +36,7 @@ const HandlerError = route_review.HandlerError;
 /// The durable allocator every job structure uses. Request arenas die with the
 /// response; job state must outlive both the request that started it and the
 /// thread that streams into it.
-const durable = std.heap.page_allocator;
+const durable = process_alloc.durable;
 
 /// Most events one poll response carries — a client that receives a full batch
 /// re-polls immediately, so a long timeline drains in a few round trips

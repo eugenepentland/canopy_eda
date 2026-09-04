@@ -18,6 +18,7 @@ const layer_table_json = @import("layer_table_json.zig");
 const infra_fs = @import("../infra/fs.zig");
 const clock = @import("../infra/clock.zig");
 const log = @import("../infra/log.zig");
+const process_alloc = @import("../infra/process_alloc.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const env_mod = @import("../eval/env.zig");
 const na = @import("../eval/net_analysis.zig");
@@ -3740,7 +3741,7 @@ const RegenProgress = struct { name: []const u8, gen: u32 };
 /// formatting/alloc failure just drops this frame (the next improvement retries).
 fn regenOnBest(ctx_ptr: *anyopaque, parts: []const optimizer.Part, score: f64, pass: optimizer.ProgressPass) void {
     const ctx: *RegenProgress = @ptrCast(@alignCast(ctx_ptr));
-    var aw: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
+    var aw: std.Io.Writer.Allocating = .init(process_alloc.durable);
     defer aw.deinit();
     const w = &aw.writer;
     w.print("{{\"pass\":\"{s}\",\"score\":{d:.2},\"parts\":[", .{ pass.label(), score }) catch return;
@@ -3758,7 +3759,7 @@ fn regenOnBest(ctx_ptr: *anyopaque, parts: []const optimizer.Part, score: f64, p
 /// with a progress sink streaming best-so-far frames, persist the result the same
 /// way the synchronous page does, then mark the job done so the browser reloads.
 fn regenThread(job: *RegenJob) void {
-    const base = std.heap.page_allocator;
+    const base = process_alloc.durable;
     defer {
         base.free(job.name);
         base.destroy(job);
@@ -3811,13 +3812,13 @@ pub fn pcbRegenStartApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     const tune = parseTuning(req);
     const begin = serve_root.pcbJobBegin(name);
     if (begin.fresh) spawn: {
-        const job = std.heap.page_allocator.create(RegenJob) catch {
+        const job = process_alloc.durable.create(RegenJob) catch {
             serve_root.pcbJobFinish(name, begin.gen, .failed);
             break :spawn;
         };
         job.* = .{
-            .name = std.heap.page_allocator.dupe(u8, name) catch {
-                std.heap.page_allocator.destroy(job);
+            .name = process_alloc.durable.dupe(u8, name) catch {
+                process_alloc.durable.destroy(job);
                 serve_root.pcbJobFinish(name, begin.gen, .failed);
                 break :spawn;
             },
@@ -3826,8 +3827,8 @@ pub fn pcbRegenStartApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
             .gen = begin.gen,
         };
         const t = std.Thread.spawn(.{}, regenThread, .{job}) catch {
-            std.heap.page_allocator.free(job.name);
-            std.heap.page_allocator.destroy(job);
+            process_alloc.durable.free(job.name);
+            process_alloc.durable.destroy(job);
             serve_root.pcbJobFinish(name, begin.gen, .failed);
             break :spawn;
         };

@@ -908,7 +908,7 @@ fn writeSectionRequirements(
                 try w.writeAll("</code> · ");
                 try writeHtmlEscaped(w, a.inst.component);
                 try w.writeAll("</h4>");
-                try writeHubRequirements(w, a, check_results);
+                try writeHubRequirements(w, allocator, a, check_results);
                 try w.writeAll("</div>");
             }
         }
@@ -995,7 +995,12 @@ fn statusSortKey(status: req_checks.Status, has_verification: bool) u8 {
     };
 }
 
-fn writeRequirementsDetails(w: anytype, requirements: []const env_mod.Requirement, results: []const req_checks.Result) !void {
+fn writeRequirementsDetails(
+    w: anytype,
+    allocator: Allocator,
+    requirements: []const env_mod.Requirement,
+    results: []const req_checks.Result,
+) !void {
     if (requirements.len == 0) return;
 
     var pass_ct: usize = 0;
@@ -1022,7 +1027,7 @@ fn writeRequirementsDetails(w: anytype, requirements: []const env_mod.Requiremen
     // reads worst → best regardless of the order entries appear in
     // `lib/components/<part>.sexp`.
     const SortItem = struct { idx: usize, key: u8 };
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var sorted = a.alloc(SortItem, requirements.len) catch return;
@@ -1130,9 +1135,9 @@ fn writeRequirementsDetails(w: anytype, requirements: []const env_mod.Requiremen
 
 /// Per-hub Requirements dropdown — looks up the hub's check results by
 /// ref_des and hands them to the shared `writeRequirementsDetails` renderer.
-fn writeHubRequirements(w: anytype, h: HubAnalysis, check_results: *const CheckResultMap) !void {
+fn writeHubRequirements(w: anytype, allocator: Allocator, h: HubAnalysis, check_results: *const CheckResultMap) !void {
     const results: []const req_checks.Result = check_results.get(h.inst.ref_des) orelse &.{};
-    try writeRequirementsDetails(w, h.inst.requirements, results);
+    try writeRequirementsDetails(w, allocator, h.inst.requirements, results);
 }
 
 /// Bucket a hub's pin-groups by `(group "label")` feature label and render
