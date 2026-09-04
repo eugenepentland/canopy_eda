@@ -387,6 +387,7 @@ test {
     _ = @import("system_review_package.zig");
     _ = @import("mechanical/prismatic.zig");
     _ = @import("mechanical/enclosure.zig");
+    _ = @import("mechanical/cad_document.zig");
     _ = @import("board_review_snapshot.zig");
     _ = @import("serve/fab_release_service.zig");
     _ = @import("serve/system_review_api.zig");

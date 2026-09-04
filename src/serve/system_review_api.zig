@@ -23,6 +23,7 @@ const dossier_jobs = @import("dossier_jobs.zig");
 const fab_release_service = @import("fab_release_service.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const system_cad = @import("system_cad.zig");
+const cad_document = @import("../mechanical/cad_document.zig");
 const vfs = @import("vfs.zig");
 
 const Server = serve_root.Server;
@@ -104,6 +105,10 @@ fn isSimpleName(name: []const u8) bool {
 
 fn manifestRelativePath(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "src/systems/{s}/system.json", .{name});
+}
+
+fn cadDocumentRelativePath(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "src/systems/{s}/mechanical.json", .{name});
 }
 
 fn allowedProjectReadPath(path: []const u8) bool {
@@ -1536,7 +1541,92 @@ pub fn systemCadPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
     var diagnostic: system_review.Diagnostic = .{};
     var loaded = (try loadSystemForRequest(ctx, req, res, &diagnostic)) orelse return;
     defer loaded.deinit(ctx.allocator);
-    try system_cad.page(res.arena, ctx.project_dir, loaded.parsed.value, res);
+    try system_cad.page(res.arena, ctx.project_dir, loaded.parsed.value, canWrite(ctx), res);
+}
+
+/// GET /api/systems/:name/cad/document — return the canonical persisted
+/// mechanical design, or null before the first save.
+pub fn systemCadDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    var diagnostic: system_review.Diagnostic = .{};
+    var loaded = (try loadSystemForRequest(ctx, req, res, &diagnostic)) orelse return;
+    defer loaded.deinit(ctx.allocator);
+    const relative = try cadDocumentRelativePath(res.arena, loaded.parsed.value.name);
+    const raw: ?[]const u8 = readProjectFile(ctx.allocator, ctx.project_dir, relative, cad_document.mechanical_document_byte_limit) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return sendJsonError(res, 500, "cannot read mechanical document"),
+    };
+    defer if (raw) |bytes| ctx.allocator.free(bytes);
+
+    var out: std.Io.Writer.Allocating = .init(res.arena);
+    try out.writer.writeAll("{\"document\":");
+    if (raw) |bytes| {
+        var parsed = cad_document.parse(res.arena, bytes) catch return sendJsonError(res, 422, "saved mechanical document is invalid");
+        defer parsed.deinit();
+        try cad_document.write(&out.writer, parsed.value);
+        try out.writer.writeAll(",\"sha256\":");
+        const digest = system_review.sha256Hex(bytes);
+        try json_writer.writeString(&out.writer, &digest);
+    } else {
+        try out.writer.writeAll("null,\"sha256\":null");
+    }
+    try out.writer.writeAll(",\"permissions\":{\"write\":");
+    try out.writer.writeAll(if (canWrite(ctx)) "true" else "false");
+    try out.writer.writeAll("}}");
+    res.content_type = .JSON;
+    res.header("cache-control", "private, no-store");
+    res.body = out.written();
+}
+
+/// PUT /api/systems/:name/cad/document — atomically replace the validated,
+/// source-controlled mechanical sidecar and autocommit it for the author.
+pub fn putSystemCadDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    if (!try requireMutationHeader(req, res)) return;
+    if (!canWrite(ctx)) return sendJsonError(res, 403, "writer role required");
+    const body = req.body() orelse return sendJsonError(res, 400, "missing mechanical document");
+    if (body.len > cad_document.mechanical_document_byte_limit) return sendJsonError(res, 413, "mechanical document too large");
+    var parsed = cad_document.parse(ctx.allocator, body) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidDocument => return sendJsonError(res, 422, "invalid mechanical document"),
+    };
+    defer parsed.deinit();
+    var canonical: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer canonical.deinit();
+    try cad_document.write(&canonical.writer, parsed.value);
+
+    var ac_session = autocommit.begin(ctx.allocator, ctx.project_dir);
+    defer if (ac_session) |*session| session.deinit();
+    var mutation = vfs.beginMutation();
+    defer mutation.deinit();
+    var diagnostic: system_review.Diagnostic = .{};
+    var loaded = (try loadSystemForRequest(ctx, req, res, &diagnostic)) orelse return;
+    defer loaded.deinit(ctx.allocator);
+    const relative = try cadDocumentRelativePath(ctx.allocator, loaded.parsed.value.name);
+    defer ctx.allocator.free(relative);
+    const current: ?[]const u8 = readProjectFile(ctx.allocator, ctx.project_dir, relative, cad_document.mechanical_document_byte_limit) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return sendJsonError(res, 500, "cannot read current mechanical document"),
+    };
+    defer if (current) |bytes| ctx.allocator.free(bytes);
+    const current_digest: ?[64]u8 = if (current) |bytes| system_review.sha256Hex(bytes) else null;
+    var vfs_response: std.ArrayList(u8) = .empty;
+    defer vfs_response.deinit(ctx.allocator);
+    const written = if (current_digest) |*digest|
+        try writeVfsFile(ctx.allocator, ctx.project_dir, relative, canonical.written(), digest, &vfs_response)
+    else
+        try createVfsFile(ctx.allocator, ctx.project_dir, relative, canonical.written(), &vfs_response);
+    if (!written) return sendVfsFailure(res, vfs_response.items);
+    commitMutation(ctx, ac_session, "system_mechanical_document", null, relative);
+
+    const digest = system_review.sha256Hex(canonical.written());
+    var out: std.Io.Writer.Allocating = .init(res.arena);
+    try out.writer.writeAll("{\"ok\":true,\"sha256\":");
+    try json_writer.writeString(&out.writer, &digest);
+    try out.writer.writeAll(",\"document\":");
+    try out.writer.writeAll(canonical.written());
+    try out.writer.writeByte('}');
+    res.content_type = .JSON;
+    res.header("cache-control", "private, no-store");
+    res.body = out.written();
 }
 
 /// GET /api/systems/:name/cad/export — emit base/lid solids from the same Zig
@@ -1569,6 +1659,53 @@ test "system review API path and asset policy rejects traversal and active conte
         "required release checklist is incomplete",
         packageConflictMessage(error.ChecklistIncomplete),
     );
+}
+
+test "system mechanical documents stay beside their manifest" {
+    const path = try cadDocumentRelativePath(std.testing.allocator, "barracuda");
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("src/systems/barracuda/mechanical.json", path);
+}
+
+test "system mechanical document API persists validated canonical JSON" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/demo");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/demo/system.json",
+        .data =
+        \\{"schema":"netlisp-system-review-v1","name":"demo","title":"Demo","part_number":"SYS-1","revision":"A","boards":[{"name":"board","role":"main","source":"src/board.sexp","part_number":"PCB-1","revision":"A"}],"documents":[{"id":"release-checklist","title":"Release checklist","path":"src/systems/demo/release.md","classification":"checklist","required":true}]}
+        ,
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", std.testing.allocator);
+    defer std.testing.allocator.free(project);
+    var state: serve_root.ServerState = .{};
+    var server = Server{
+        .allocator = std.testing.allocator,
+        .project_dir = project,
+        .auth_dir = project,
+        .request_auth = .{ .username = "writer@example.com", .role = .writer },
+        .state = &state,
+    };
+    const document = "{\"occupied\":{\"width\":90,\"depth\":55},\"cutouts\":[{\"wall\":\"front\",\"center\":0,\"width\":12,\"bottom\":5,\"height\":8}]}";
+    var put = httpz.testing.init(.{});
+    defer put.deinit();
+    server.allocator = put.res.arena;
+    put.param("name", "demo");
+    put.header(mutation_header_name, mutation_header_value);
+    put.body(document);
+    try putSystemCadDocumentApi(&server, put.req, put.res);
+    try std.testing.expectEqual(@as(u16, 200), put.res.status);
+    try std.testing.expect(std.mem.indexOf(u8, put.res.body, "netlisp-mechanical-v1") != null);
+
+    var get = httpz.testing.init(.{});
+    defer get.deinit();
+    server.allocator = get.res.arena;
+    get.param("name", "demo");
+    try systemCadDocumentApi(&server, get.req, get.res);
+    try std.testing.expectEqual(httpz.ContentType.JSON, get.res.content_type.?);
+    try std.testing.expect(std.mem.indexOf(u8, get.res.body, "\"document\":{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, get.res.body, "\"cutouts\":[{") != null);
 }
 
 // spec: system-review - system-review mutations require the custom review header, document replacement requires If-Match, and release JSON is size-bounded

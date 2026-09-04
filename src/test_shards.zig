@@ -58,6 +58,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.system_cad.test.",
         "mechanical.prismatic.test.",
         "mechanical.enclosure.test.",
+        "mechanical.cad_document.test.",
         "bench_page.test.",
         "placement.fill_cache.test.",
         "placement.content_key.test.",
