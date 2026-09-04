@@ -33,6 +33,19 @@
     }, 0);
   }
 
+  function boundedWheelStep(gesture, deltaY, deltaMode, now, pageHeight) {
+    var delta = finite(deltaY, 0);
+    if (deltaMode === 1) delta *= 16;
+    else if (deltaMode === 2) delta *= Math.max(1, finite(pageHeight, 800));
+    if (!delta) return 0;
+    var direction = Math.sign(delta);
+    if (!Number.isFinite(gesture.last) || now - gesture.last > 160 || direction !== Math.sign(gesture.total)) gesture.total = 0;
+    gesture.last = now;
+    var previous = gesture.total;
+    gesture.total = Math.max(-480, Math.min(480, previous + delta));
+    return gesture.total - previous;
+  }
+
   function scenario(thermal, name) {
     if (!thermal || !Array.isArray(thermal.scenarios)) return null;
     return thermal.scenarios.find(function (row) { return row.scenario === name && row.converged !== false; }) || null;
@@ -114,7 +127,7 @@
     return { total_watts: totalWatts, total_flow_m3_s: totalFlow, outlet_rise_c: outletRise, hottest: hottest, instances: results };
   }
 
-  var API = { rotatedBounds: rotatedBounds, overlapFraction: overlapFraction, totalBoardPower: totalBoardPower, solveSystem: solveSystem };
+  var API = { rotatedBounds: rotatedBounds, overlapFraction: overlapFraction, totalBoardPower: totalBoardPower, boundedWheelStep: boundedWheelStep, solveSystem: solveSystem };
   if (typeof module !== "undefined" && module.exports) module.exports = API;
   root.SystemThermal = API;
   if (!root.document || !root.CAD_DATA) return;
@@ -246,6 +259,7 @@
   var scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(38, 1, 0.1, 5000);
   camera.up.set(0, 0, 1); camera.position.set(180, -210, 150);
   var controls = new THREE.OrbitControls(camera, canvas); controls.enableDamping = true; controls.dampingFactor = 0.08; controls.target.set(0, 0, 10);
+  var wheelGesture = { last: -Infinity, total: 0 };
   scene.add(new THREE.HemisphereLight(0xd8e9ff, 0x182338, 1.25));
   var sun = new THREE.DirectionalLight(0xffffff, 0.85); sun.position.set(-80, -100, 160); scene.add(sun);
   var grid = new THREE.GridHelper(500, 50, 0x35506f, 0x23354d); grid.rotation.x = Math.PI / 2; grid.position.z = -0.02; scene.add(grid);
@@ -402,7 +416,9 @@
   }
   function fit() {
     var span = Math.max(lastBounds.width + 2 * state.clearance + 2 * state.wall, lastBounds.depth + 2 * state.clearance + 2 * state.wall, state.height + state.explode + state.lid, 30);
-    controls.target.set(0, 0, state.height / 2); camera.position.set(span * 0.95, -span * 1.15, span * 0.8); camera.near = Math.max(0.05, span / 1000); camera.far = span * 30; camera.updateProjectionMatrix(); controls.update();
+    controls.minDistance = Math.max(5, span * 0.18); controls.maxDistance = span * 8;
+    controls.target.set(0, 0, state.height / 2); camera.position.set(span * 0.95, -span * 1.15, span * 0.8); camera.near = Math.max(0.05, span / 1000); camera.far = span * 30; camera.updateProjectionMatrix();
+    wheelGesture.last = -Infinity; wheelGesture.total = 0; controls.update();
   }
   async function saveDesign() {
     if (!D.can_write) return;
@@ -505,6 +521,16 @@
     drag = null; controls.enabled = true; canvas.classList.remove("dragging"); setDirty(); rebuild(true);
   }
   canvas.addEventListener("pointerup", endDrag); canvas.addEventListener("pointercancel", endDrag);
+  canvas.addEventListener("wheel", function (event) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (!controls.enabled || drag) return;
+    var step = boundedWheelStep(wheelGesture, event.deltaY, event.deltaMode, performance.now(), canvas.clientHeight);
+    if (!step) return;
+    var offset = camera.position.clone().sub(controls.target), distance = offset.length();
+    if (!distance) return;
+    var next = Math.max(controls.minDistance, Math.min(controls.maxDistance, distance * Math.exp(step * 0.00043)));
+    camera.position.copy(controls.target).add(offset.multiplyScalar(next / distance)); controls.update();
+  }, { capture: true, passive: false });
 
   function resize() {
     var width = canvas.clientWidth, height = canvas.clientHeight, ratio = renderer.getPixelRatio();
