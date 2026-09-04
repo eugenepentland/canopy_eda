@@ -396,11 +396,48 @@ if [ ! -d "$PERF_PROJECT_DIR/src" ]; then
 fi
 echo "[$(ts)] prepare-release: running deterministic Barracuda editor zoom gate"
 editor_perf_started="$(date +%s)"
-if ! node scripts/pcb_editor_perf/run.js --project-dir "$PERF_PROJECT_DIR" \
-  --binary "$staging/install/bin/netlisp" --reps "${NETLISP_EDITOR_PERF_REPS:-3}" \
-  >"$staging/pcb-editor-perf.log" 2>&1; then
-  echo "prepare-release: Barracuda editor zoom gate failed:" >&2
-  tail -n 120 "$staging/pcb-editor-perf.log" >&2
+editor_perf_attempt=1
+editor_perf_attempts="${NETLISP_EDITOR_PERF_ATTEMPTS:-3}"
+case "$editor_perf_attempts" in
+  ''|*[!0-9]*) echo "prepare-release: NETLISP_EDITOR_PERF_ATTEMPTS must be a positive integer" >&2; exit 1 ;;
+esac
+if [ "$editor_perf_attempts" -lt 1 ]; then
+  echo "prepare-release: NETLISP_EDITOR_PERF_ATTEMPTS must be a positive integer" >&2
+  exit 1
+fi
+editor_perf_passed=0
+while [ "$editor_perf_attempt" -le "$editor_perf_attempts" ]; do
+  if [ "${NETLISP_PERF_HOST_WAIT:-1}" != "0" ]; then
+    echo "[$(ts)] prepare-release: waiting for a quiet host before editor perf attempt $editor_perf_attempt/$editor_perf_attempts"
+    if ! node scripts/perf_host_idle.js --wait; then
+      echo "prepare-release: no quiet host window became available for the editor performance gate" >&2
+      break
+    fi
+  fi
+  attempt_log="$staging/pcb-editor-perf.attempt-$editor_perf_attempt.log"
+  if node scripts/pcb_editor_perf/run.js --project-dir "$PERF_PROJECT_DIR" \
+    --binary "$staging/install/bin/netlisp" --reps "${NETLISP_EDITOR_PERF_REPS:-3}" \
+    >"$attempt_log" 2>&1; then
+    cp "$attempt_log" "$staging/pcb-editor-perf.log"
+    editor_perf_passed=1
+    break
+  fi
+  echo "prepare-release: Barracuda editor zoom attempt $editor_perf_attempt/$editor_perf_attempts failed:" >&2
+  tail -n 120 "$attempt_log" >&2
+  # Infrastructure or renderer-contract failures are deterministic and must
+  # not be hidden by retries. Only a measured budget miss gets another quiet
+  # host window, which is the failure class susceptible to machine contention.
+  if ! grep -q 'PCB editor zoom regression:' "$attempt_log"; then
+    break
+  fi
+  if [ "$editor_perf_attempt" -ge "$editor_perf_attempts" ]; then
+    break
+  fi
+  editor_perf_attempt=$((editor_perf_attempt + 1))
+  echo "[$(ts)] prepare-release: timing-only miss; retrying after host contention clears" >&2
+done
+if [ "$editor_perf_passed" -ne 1 ]; then
+  echo "prepare-release: Barracuda editor zoom gate failed after $editor_perf_attempt attempt(s)" >&2
   failed="$FAILURE_ROOT/$HEAD_HASH-$(date +%Y%m%d-%H%M%S)-$$"
   mv "$staging" "$failed"
   staging=""

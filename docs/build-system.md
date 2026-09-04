@@ -68,7 +68,13 @@ all pose checksums matched. The application, Guardian, Ward, httpz, zt,
 websocket, metrics, passcay, and zbor are now ported and pinned together.
 Use self-hosted Debug for development and internal performance work. Production
 performance is checked on the candidate that `prepare-release.sh` already
-builds; do not create a second ReleaseSafe binary just to benchmark it.
+builds; do not create a second ReleaseSafe binary just to benchmark it. Before
+the latency-sensitive PCB-editor measurement, release preparation waits for
+three quiet CPU/run-queue samples. A timing-budget miss gets up to three
+attempts, each after another quiet window; renderer, workload, and other
+infrastructure failures still fail immediately. The thresholds and timeout can
+be tuned with the `NETLISP_PERF_HOST_*` environment variables, and
+`NETLISP_EDITOR_PERF_ATTEMPTS` controls the bounded attempt count.
 
 The deployment ReleaseSafe executable alone is stripped. On the pinned Zig
 snapshot, a controlled clean direct build dropped from **293.66 s / 4.24 GB

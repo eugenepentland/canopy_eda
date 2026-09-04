@@ -882,6 +882,23 @@ test "release preparation starts test and build jobs before waiting" {
     ) != null);
 }
 
+// spec: Web Server - Release preparation waits for a stable quiet-host window before PCB-editor timing, retries timing-budget misses after contention clears, and never retries renderer or infrastructure failures
+test "release editor timing waits for a quiet host and retries only budget misses" {
+    const source = try readRepoFile(std.testing.allocator, ".githooks/prepare-release.sh");
+    defer std.testing.allocator.free(source);
+    const readiness = try readRepoFile(std.testing.allocator, "scripts/perf_host_idle.js");
+    defer std.testing.allocator.free(readiness);
+
+    const wait = std.mem.indexOf(u8, source, "node scripts/perf_host_idle.js --wait").?;
+    const measure = std.mem.indexOf(u8, source, "node scripts/pcb_editor_perf/run.js").?;
+    try std.testing.expect(wait < measure);
+    try std.testing.expect(std.mem.indexOf(u8, source, "NETLISP_EDITOR_PERF_ATTEMPTS:-3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "grep -q 'PCB editor zoom regression:'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, readiness, "stableSamples") != null);
+    try std.testing.expect(std.mem.indexOf(u8, readiness, "sample.busyPct > config.maxBusyPct") != null);
+    try std.testing.expect(std.mem.indexOf(u8, readiness, "sample.runnable > config.maxRunnable") != null);
+}
+
 // spec: Development pipeline - Cancels the complete concurrent ReleaseSafe process group as soon as full Debug tests fail
 
 test "failed release tests stop the complete build process group" {
