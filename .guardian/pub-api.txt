@@ -3074,6 +3074,7 @@ src/placement/rf_shadow.zig::via_mult value
 src/placement/rf_shadow.zig::widthAt | fn widthAt(table: []const f64, net: i32) f64
 src/placement/rf_shadow.zig::widthOf | fn widthOf(placement: optimizer.Placement, net_i: usize) f64
 src/placement/rf_shadow.zig::widths | fn widths(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error![]const f64
+src/placement/rf_taper_paths.zig::withExactFallbacks | fn withExactFallbacks( arena: std.mem.Allocator, placement: optimizer.Placement, tracks: []const router.Track, outcomes: []const rf_port_report.Outcome, ) std.mem.Allocator.Error![]const rf_port_report.Outcome
 src/placement/rough_critical.zig::cohere | fn cohere( comptime Part: type, arena: std.mem.Allocator, parts: []Part, instances: []const flat_netlist.FlatInstance, rough: env.RoughSpec, anchor_index: usize, placed: []bool, ) std.mem.Allocator.Error!void
 src/placement/rough_critical.zig::perimeter | fn perimeter(comptime Part: type, parts: []const Part, instances: []const flat_netlist.FlatInstance, rough: env.RoughSpec) f64
 src/placement/rough_identity.zig::isHub | fn isHub(ref: []const u8) bool

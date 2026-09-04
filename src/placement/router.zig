@@ -2486,7 +2486,8 @@ fn assembleRouteRun(run: RouteFinish) std.mem.Allocator.Error!RouteRun {
         try arcs.appendSlice(arena, s.arcs);
         try sharp.appendSlice(arena, s.sharp);
     }
-    const rf_outcomes = try rf_port_report.collectOrdered(arena, &run.ctx.rf.port_outcomes, run.placement.nets.len);
+    const rf_trials = try rf_port_report.collectOrdered(arena, &run.ctx.rf.port_outcomes, run.placement.nets.len);
+    const rf_outcomes = try @import("rf_taper_paths.zig").withExactFallbacks(arena, run.placement, run.tracks.items, rf_trials);
     try recordPostPass(.complete, run.progress, run.tracks.items, run.vias.items);
     if (timing) |t| t.end(.finish_total);
 

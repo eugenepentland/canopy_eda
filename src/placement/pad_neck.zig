@@ -7,13 +7,11 @@
 //! search with their nominal class geometry. Current-rated power nets instead
 //! search a fabrication-legal centreline, then this pass grows them toward
 //! their electrical target under exact clearance and adds pad/congestion
-//! tapers. At the final output boundary the pass subdivides only width-changing
-//! spans into fabrication-real constant-width slices.
-//!
-//! Constant-width slices are intentional. They are understood identically by
-//! the route viewer, DRC, Gerber writer, KiCad writer, and saved-layout schema;
-//! a 25 um slice pitch makes the union visually smooth without adding a second
-//! copper primitive whose clearance and persistence could drift.
+//! tapers. At the final output boundary the pass subdivides width-changing
+//! spans into conservative constant-width edit handles. For controlled-
+//! impedance nets, `rf_taper_paths` recovers their exact butt-ended swept
+//! profile before the finished route reaches rendering, DRC, persistence, or
+//! fabrication.
 
 const std = @import("std");
 const flat_netlist = @import("../flat_netlist.zig");

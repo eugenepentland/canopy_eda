@@ -2282,6 +2282,7 @@ the owning switch pad axis.
 - every single-ended controlled-impedance through-via launch tapers between the via's actual annulus diameter and nominal width independently on every connected signal layer
 - a named saved layout made before automatic tapers reconciles only uncovered nominal-width launch runs, accepts no new routing-class DRC errors, persists the approved RF paths through ordinary autosave, and exposes each rejected taper as a clickable DRC error at the blocking clearance
 - a trace taper remains one logical swept path with compact edit handles while DRC lowers conservative private width-profile chords and folded offset rings lower to overlapping simple fabrication regions
+- autorouter fallback tapers are exported as exact straight-sided swept copper instead of overlapping round-ended slices
 - solver RF geometry and taper proof survive saved-layout round trips
 - a solver-proven one-width pad taper may narrow below the controlled line width, but thin copper away from the land still fails DRC
 - a route removed by the final DRC gate is never rendered, saved, replayed, or fabricated as an RF polygon

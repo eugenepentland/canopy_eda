@@ -312,6 +312,7 @@ test {
     _ = @import("placement/rf_port_finish.zig");
     _ = @import("placement/rf_port_frames.zig");
     _ = @import("placement/rf_shadow.zig");
+    _ = @import("placement/rf_taper_paths.zig");
     _ = @import("placement/drc_return_path.zig");
     _ = @import("placement/rough_identity.zig");
     _ = @import("placement/rough_routability.zig");
