@@ -4831,11 +4831,13 @@ fn releaseLock(
 }
 
 fn releaseEvidenceBlocked(gate: fab_gate.Result, lock: fab_release.Lock) bool {
-    return !gate.drc.complete or !gate.internal_complete or gate.evaluation.block == null or lock.project_status != .clean;
+    return !gate.drc.complete or !gate.internal_complete or gate.evaluation.block == null or
+        fab_release.projectStatusBlocksRelease(lock.project_status);
 }
 
-fn releaseNeedsWaiver(gate: fab_gate.Result) bool {
-    return gate.report.errors.len > 0 or gate.report.warnings.len > 0 or gate.drc.raw.len > gate.drc.effective.len;
+fn releaseNeedsWaiver(gate: fab_gate.Result, lock: fab_release.Lock) bool {
+    return gate.report.errors.len > 0 or gate.report.warnings.len > 0 or gate.drc.raw.len > gate.drc.effective.len or
+        fab_release.projectStatusNeedsWaiver(lock.project_status);
 }
 
 /// The Assembly page's physical board over one already-bound fabrication view.
@@ -5137,7 +5139,7 @@ fn pcbGerbersApiHooked(
         return;
     }
     const confirmed = if (queryOpt(req, "confirm")) |token| std.mem.eql(u8, token, &lock.token) else false;
-    const needs_waiver = releaseNeedsWaiver(gate);
+    const needs_waiver = releaseNeedsWaiver(gate, lock);
     const waived = queryFlag(req, "waive");
     const waiver_missing = needs_waiver and !waived;
     if (!confirmed or waiver_missing) {
@@ -5184,7 +5186,7 @@ fn pcbGerbersApiHooked(
     var final_lock = (try releaseLock(ctx, req, res, name, evidence)) orelse return;
     fab_release.bindBaseline(&final_lock, project_before, layout_before, bom_before);
     fab_release.bindTracedInputs(&final_lock, traced_inputs, read_trace.verify());
-    if (final_lock.project_status != .clean or !std.mem.eql(u8, &lock.token, &final_lock.token)) {
+    if (fab_release.projectStatusBlocksRelease(final_lock.project_status) or !std.mem.eql(u8, &lock.token, &final_lock.token)) {
         res.status = 428;
         var changed: std.Io.Writer.Allocating = .init(req.arena);
         try fab_release.writeReadinessJson(req.arena, &changed.writer, evidence, final_lock);
@@ -14246,19 +14248,33 @@ test "fab release requires confirmation and waiver then emits a checksummed revi
 
     try writeFabReleaseLayout(tmp.dir, 3);
     const dirty = try callFabEndpoint(allocator, relative_project, false, null, false);
-    try std.testing.expectEqual(@as(u16, 500), dirty.status);
+    try std.testing.expectEqual(@as(u16, 200), dirty.status);
     const dirty_json = try std.json.parseFromSliceLeaky(std.json.Value, allocator, dirty.body, .{});
     try std.testing.expectEqualStrings("dirty", dirty_json.object.get("project_status").?.string);
-    try std.testing.expect(dirty_json.object.get("release_token").? == .null);
-    try std.testing.expect(!dirty_json.object.get("internal_checks_complete").?.bool);
+    try std.testing.expect(dirty_json.object.get("release_token").? == .string);
+    try std.testing.expect(dirty_json.object.get("internal_checks_complete").?.bool);
+    try std.testing.expect(dirty_json.object.get("needs_waiver").?.bool);
     try std.testing.expect(std.mem.indexOf(u8, dirty.body, "source-worktree-dirty") != null);
     try std.testing.expect(std.mem.indexOf(u8, dirty.body, "intentional fixture waiver") != null);
     try std.testing.expect(dirty_json.object.get("raw_drc_count").?.integer > 0);
-    const dirty_export = try callFabEndpoint(allocator, relative_project, true, token, true);
-    try std.testing.expectEqual(@as(u16, 500), dirty_export.status);
-    try std.testing.expect(!std.mem.startsWith(u8, dirty_export.body, "PK\x03\x04"));
-    const dirty_export_json = try std.json.parseFromSliceLeaky(std.json.Value, allocator, dirty_export.body, .{});
-    try std.testing.expect(dirty_export_json.object.get("release_token").? == .null);
+    const dirty_token = try allocator.dupe(u8, dirty_json.object.get("release_token").?.string);
+    const dirty_not_waived = try callFabEndpoint(allocator, relative_project, true, dirty_token, false);
+    try std.testing.expectEqual(@as(u16, 428), dirty_not_waived.status);
+    const stale_clean_token = try callFabEndpoint(allocator, relative_project, true, token, true);
+    try std.testing.expectEqual(@as(u16, 428), stale_clean_token.status);
+    const dirty_export = try callFabEndpoint(allocator, relative_project, true, dirty_token, true);
+    try std.testing.expectEqual(@as(u16, 200), dirty_export.status);
+    try std.testing.expect(std.mem.startsWith(u8, dirty_export.body, "PK\x03\x04"));
+    const dirty_entries = try storedZipEntries(allocator, dirty_export.body);
+    const dirty_report = try std.json.parseFromSliceLeaky(std.json.Value, allocator, storedZipEntry(dirty_entries, "fabok-release-report.json").?, .{});
+    try std.testing.expectEqualStrings("dirty", dirty_report.object.get("project_status").?.string);
+    try std.testing.expect(dirty_report.object.get("waiver").?.bool);
+    const dirty_warnings = dirty_report.object.get("warnings").?.array.items;
+    var found_dirty_warning = false;
+    for (dirty_warnings) |warning| {
+        if (std.mem.eql(u8, warning.object.get("id").?.string, "source-worktree-dirty")) found_dirty_warning = true;
+    }
+    try std.testing.expect(found_dirty_warning);
 }
 
 fn initializeFabReleaseGit(allocator: std.mem.Allocator, project: []const u8) !void {
