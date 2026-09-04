@@ -1727,8 +1727,8 @@ fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayList(PinNetDecl), net_tie
         var it = net_map.iterator();
         while (it.next()) |entry| {
             const key = entry.key_ptr.*;
-            if (std.mem.indexOfScalar(u8, key, '.')) |dot| {
-                const prefix = key[0..dot];
+            const prefix = net_analysis.baseNetName(key);
+            if (prefix.len != key.len) {
                 const root = ufFind(&uf, prefix);
                 if (!std.mem.eql(u8, root, prefix)) {
                     try rename_keys.append(self.allocator, key);
@@ -1736,9 +1736,8 @@ fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayList(PinNetDecl), net_tie
             }
         }
         for (rename_keys.items) |old_key| {
-            const dot = std.mem.indexOfScalar(u8, old_key, '.').?;
-            const prefix = old_key[0..dot];
-            const suffix = old_key[dot + 1 ..];
+            const prefix = net_analysis.baseNetName(old_key);
+            const suffix = old_key[prefix.len + 1 ..];
             const root = ufFind(&uf, prefix);
             const new_key = std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ root, suffix }) catch return EvalError.OutOfMemory;
             if (net_map.fetchRemove(old_key)) |kv| {

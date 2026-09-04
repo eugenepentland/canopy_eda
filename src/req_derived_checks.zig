@@ -5,6 +5,7 @@ const std = @import("std");
 const env = @import("eval/env.zig");
 const ids = @import("eval/ids.zig");
 const req_checks = @import("req_checks.zig");
+const na = @import("eval/net_analysis.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 
 const DesignBlock = env.DesignBlock;
@@ -485,10 +486,7 @@ fn netsAlias(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b) or std.mem.eql(u8, netBase(a), netBase(b));
 }
 
-fn netBase(name: []const u8) []const u8 {
-    const dot = std.mem.indexOfScalar(u8, name, '.') orelse return name;
-    return name[0..dot];
-}
+const netBase = na.baseNetName;
 
 fn resultFmt(allocator: std.mem.Allocator, passed: bool, comptime format: []const u8, args: anytype) Result {
     return .{

@@ -16,6 +16,7 @@
 const std = @import("std");
 const ik = @import("import_kicad.zig");
 const fold = @import("import_fold.zig");
+const na = @import("eval/net_analysis.zig");
 
 const FoldError = fold.FoldError;
 
@@ -191,7 +192,7 @@ const NetNaming = struct {
 /// the `<rail>.<ic>.<pad>` bypass-stub naming the evaluator canonicalizes,
 /// which silently breaks the port↔net bond (`+5.0V` read back as `+5`).
 fn portSafe(arena: std.mem.Allocator, name: []const u8) FoldError![]const u8 {
-    if (std.mem.indexOfScalar(u8, name, '.') == null) return name;
+    if (!na.isSubNetName(name)) return name;
     const out = try arena.dupe(u8, name);
     for (out) |*ch| {
         if (ch.* == '.') ch.* = '_';

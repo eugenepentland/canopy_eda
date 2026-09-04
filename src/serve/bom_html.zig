@@ -13,6 +13,8 @@ const escape = @import("../escape.zig");
 const numeric = @import("../numeric.zig");
 const lib_limits = @import("../lib_limits.zig");
 const log = @import("../infra/log.zig");
+const na = @import("../eval/net_analysis.zig");
+const net_name = @import("../net_name.zig");
 
 /// A datasheet href is safe to emit as a link only if it is a same-origin
 /// path or an http(s) URL. Anything else (`javascript:`, `data:`, …) is
@@ -693,10 +695,7 @@ pub fn writeComponentsJson(
 
 /// Extract the base net name (before first '.'), e.g. "VDD.U3.W6" → "VDD".
 fn baseNetName(name: []const u8) []const u8 {
-    // Strip scope prefix (after last '/')
-    const short = if (std.mem.lastIndexOfScalar(u8, name, '/')) |idx| name[idx + 1 ..] else name;
-    if (std.mem.indexOfScalar(u8, short, '.')) |idx| return short[0..idx];
-    return short;
+    return na.baseNetName(net_name.leaf(name));
 }
 
 /// Emit a `{ "<net>": [{ref_des, pin}, …], … }` object grouping every pin

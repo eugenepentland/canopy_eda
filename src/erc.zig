@@ -216,7 +216,7 @@ fn checkLayoutClasses(
         // Skip the auto-generated `<rail>.<ic>.<pad>` bypass-stub sub-nets — they
         // are an internal per-pad detail of a rail that is itself surfaced, and
         // their munged names trip the name heuristics (e.g. "V08CAP" → input_rail).
-        if (std.mem.indexOfScalar(u8, net.name, '.') != null) continue;
+        if (na.isSubNetName(net.name)) continue;
         // An author-pinned class is a decision, not a guess — nothing to report.
         if (module_policy.pinnedNetClass(block.net_class_pins, net.name) != null) continue;
         const cls = module_policy.classifyNetName(net.name);
@@ -1842,7 +1842,7 @@ fn checkBlockStrapTies(
     for (block.nets) |net| {
         // Skip auto-generated `<rail>.<ic>.<pad>` bypass-stub sub-nets — a strap
         // is always declared on a canonical rail name, never the dotted stub.
-        if (std.mem.indexOfScalar(u8, net.name, '.') != null) continue;
+        if (na.isSubNetName(net.name)) continue;
         const base = na.baseNetName(net.name);
         if (!isRailNet(base, &rail_set)) continue;
 

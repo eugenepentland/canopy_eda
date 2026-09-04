@@ -16,6 +16,8 @@ const classify = @import("classify.zig");
 const membership = @import("membership.zig");
 const layout_status = @import("../layout_status.zig");
 const numeric = @import("../numeric.zig");
+const net_name = @import("../net_name.zig");
+const na = @import("../eval/net_analysis.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
 const SubBlock = env_mod.SubBlock;
@@ -1055,17 +1057,11 @@ fn isDigit(c: u8) bool {
 // ── label helpers ──────────────────────────────────────────────────────
 
 /// Strip a per-pin micro-net suffix (`<base>.<ref>.<pin>` → `<base>`).
-fn cleanNetName(name: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, name, '.')) |dot| return name[0..dot];
-    return name;
-}
+const cleanNetName = na.baseNetName;
 
 /// Leaf ref-des — the part after the last sub-block `/` prefix
 /// (`rx1/U1` → `U1`, `C_KRX1_DCB` → `C_KRX1_DCB`).
-fn leafRef(r: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, r, '/')) |i| return r[i + 1 ..];
-    return r;
-}
+const leafRef = net_name.leaf;
 
 /// A hub (IC/connector) ref-des vs a 2-pin passive (R/C/L/F/D) — mirrors the
 /// hub/spoke split so antenna synthesis treats series matching passives as

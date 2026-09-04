@@ -55,6 +55,7 @@ const testpoint_silkscreen = @import("testpoint_silkscreen.zig");
 const mask_relief = @import("placement/mask_relief.zig");
 const path_copper = @import("placement/path_copper.zig");
 const variable_width_copper = @import("placement/variable_width_copper.zig");
+const na = @import("eval/net_analysis.zig");
 
 /// Replace an RF path's compact editor handles with conservative physical
 /// chords/collars for auxiliary capsule-based bounds. Actual pixels use the
@@ -513,9 +514,7 @@ fn findPartByName(alloc: std.mem.Allocator, p: optimizer.Placement, name: []cons
     defer alloc.free(want);
     for (p.parts, 0..) |part, pi| {
         if (eqUpper(part.ref_des, want)) return pi;
-        if (std.mem.lastIndexOfScalar(u8, part.ref_des, '/')) |i| {
-            if (eqUpper(part.ref_des[i + 1 ..], want)) return pi;
-        }
+        if (eqUpper(net_name.leaf(part.ref_des), want)) return pi;
         if (pi < p.instances.len and eqUpper(p.instances[pi].origin_key, want)) return pi;
     }
     return null;
@@ -858,9 +857,7 @@ const Ctx = struct {
         if (upperInSet(self.hot_refs, ref)) return true;
         // Parts inside a sub-block carry a "sub/REF" ref_des; also match the bare
         // leaf so an agent can spotlight "U2" without knowing the prefix.
-        if (std.mem.lastIndexOfScalar(u8, ref, '/')) |i| {
-            if (upperInSet(self.hot_refs, ref[i + 1 ..])) return true;
-        }
+        if (upperInSet(self.hot_refs, net_name.leaf(ref))) return true;
         return false;
     }
     /// True when `part`'s pads should carry net-name labels: its ref (or
@@ -869,9 +866,7 @@ const Ctx = struct {
         if (self.pin_set.count() == 0) return false;
         if (part.kind == .hub and self.pin_set.contains("HUBS")) return true;
         if (upperInSet(self.pin_set, part.ref_des)) return true;
-        if (std.mem.lastIndexOfScalar(u8, part.ref_des, '/')) |i| {
-            if (upperInSet(self.pin_set, part.ref_des[i + 1 ..])) return true;
-        }
+        if (upperInSet(self.pin_set, net_name.leaf(part.ref_des))) return true;
         // Also answer to the stable origin name — `?pins=U1` should work even
         // after the design renumbered the part to U13 (spec vocabulary).
         if (pi < self.p.instances.len and self.p.instances[pi].origin_key.len > 0) {
@@ -2008,14 +2003,8 @@ fn joinInto(b: *std.ArrayList(u8), alloc: std.mem.Allocator, items: []const []co
 }
 
 // ── Small net-name helpers (mirror serve/pcb_layout_page.zig) ───────────────
-fn shortName(s: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];
-    return s;
-}
-fn netKey(name: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, name, '.')) |i| return name[0..i];
-    return name;
-}
+const shortName = net_name.leaf;
+const netKey = na.baseNetName;
 /// True if the uppercased `s` is a member of `set` (whose keys are uppercased,
 /// inserted via `upper` with no length cap). The stack buffer covers realistic
 /// refs (incl. deep sub-block paths); a pathologically long `s` falls back to a

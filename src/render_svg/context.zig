@@ -11,6 +11,7 @@ const na = @import("../eval/net_analysis.zig");
 const DesignBlock = env_mod.DesignBlock;
 const PinRef = env_mod.PinRef;
 const draw = @import("draw.zig");
+const net_names = @import("../net_name.zig");
 const isHub = draw.isHub;
 const isGroundNet = draw.isGroundNet;
 const baseNetName = draw.baseNetName;
@@ -33,8 +34,7 @@ fn isStdRefDes(ref: []const u8) bool {
 /// (the path of the sub-block that contains the part), or "" for a top-level
 /// instance. Two parts with different origins live in different sub-blocks.
 fn originOf(ref: []const u8) []const u8 {
-    const idx = std.mem.lastIndexOfScalar(u8, ref, '/') orelse return "";
-    return ref[0..idx];
+    return net_names.parent(ref) orelse "";
 }
 
 const Allocator = std.mem.Allocator;
@@ -341,9 +341,10 @@ pub const RenderCtx = struct {
         // e.g., "ldo/VIN.U1.IN" → try "ldo/VIN" → "VDD" → "VDD.U1.IN"
         if (std.mem.indexOfScalar(u8, net_name, '/')) |slash_idx| {
             const after_slash = net_name[slash_idx + 1 ..];
-            if (std.mem.indexOfScalar(u8, after_slash, '.')) |dot_idx| {
-                const base = net_name[0 .. slash_idx + 1 + dot_idx];
-                const suffix = after_slash[dot_idx..];
+            const leaf_base = na.baseNetName(after_slash);
+            if (leaf_base.len != after_slash.len) {
+                const base = net_name[0 .. slash_idx + 1 + leaf_base.len];
+                const suffix = after_slash[leaf_base.len..];
                 var base_resolved = base;
                 for (rename_maps) |m| {
                     if (m.get(base_resolved)) |renamed| {
@@ -865,12 +866,7 @@ pub const RenderCtx = struct {
             if (isGroundNet(bn)) continue;
 
             const short = shortNetName(net.name);
-            const hub_target: ?[]const u8 = blk: {
-                const first_dot = std.mem.indexOfScalar(u8, short, '.') orelse break :blk null;
-                const rest = short[first_dot + 1 ..];
-                const second_dot = std.mem.indexOfScalar(u8, rest, '.') orelse break :blk null;
-                break :blk rest[0..second_dot];
-            };
+            const hub_target: ?[]const u8 = na.subNetHostRef(short);
 
             // Grow-as-needed rather than a fixed 64-slot buffer: a wide MCU
             // power rail can land on well over 64 pads or carry more than 64

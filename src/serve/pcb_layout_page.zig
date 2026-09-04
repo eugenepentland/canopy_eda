@@ -116,6 +116,7 @@ const sidecar_types = @import("../layout_sidecar_types.zig");
 const saved_zone = @import("saved_zone.zig");
 const layout_layers = @import("layout_layers.zig");
 const copper_ids = @import("copper_ids.zig");
+const net_names = @import("../net_name.zig");
 // JSON leaf parsers split into layout_sidecar_json.zig; aliased so the many
 // in-file callers (and the sidecar read/write paths) keep their spelling.
 const jsonNum = sidecar_json.jsonNum;
@@ -10177,16 +10178,10 @@ fn kindStr(k: optimizer.RatKind) []const u8 {
     };
 }
 
-fn shortName(s: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];
-    return s;
-}
+const shortName = net_names.leaf;
 
 /// Net grouping key — dot-collapsed to the rail, sub-block prefix kept.
-fn netKey(name: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, name, '.')) |i| return name[0..i];
-    return name;
-}
+const netKey = na.baseNetName;
 
 /// Shares the token set `placement/optimizer.isGroundName` judges a board by,
 /// so the page's HPWL net groups match the server-computed baseline exactly.
