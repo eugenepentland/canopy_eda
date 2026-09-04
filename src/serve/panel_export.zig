@@ -26,12 +26,37 @@ pub fn requested(arena: std.mem.Allocator, req: *httpz.Request, source: panelize
         .routed
     else
         return error.InvalidPanelDimension;
+    const legacy_rail = number(req, "panel_rail", 5) orelse return error.InvalidPanelDimension;
     const options = panelize.Options{
         .rows = count(req, "panel_rows", 2) orelse return error.InvalidPanelCount,
         .columns = count(req, "panel_columns", 2) orelse return error.InvalidPanelCount,
         .method = method,
         .gap_mm = number(req, "panel_gap", if (method == .v_score) 0 else 2) orelse return error.InvalidPanelDimension,
-        .rail_mm = number(req, "panel_rail", 5) orelse return error.InvalidPanelDimension,
+        .rails = .{
+            .top = .{
+                .width_mm = number(req, "panel_rail_top", legacy_rail) orelse return error.InvalidPanelDimension,
+                .tooling_hole = pcb_query.flag(req, "panel_tooling_top"),
+                .fiducial = pcb_query.flag(req, "panel_fiducial_top"),
+            },
+            .right = .{
+                .width_mm = number(req, "panel_rail_right", legacy_rail) orelse return error.InvalidPanelDimension,
+                .tooling_hole = pcb_query.flag(req, "panel_tooling_right"),
+                .fiducial = pcb_query.flag(req, "panel_fiducial_right"),
+            },
+            .bottom = .{
+                .width_mm = number(req, "panel_rail_bottom", legacy_rail) orelse return error.InvalidPanelDimension,
+                .tooling_hole = pcb_query.flag(req, "panel_tooling_bottom"),
+                .fiducial = pcb_query.flag(req, "panel_fiducial_bottom"),
+            },
+            .left = .{
+                .width_mm = number(req, "panel_rail_left", legacy_rail) orelse return error.InvalidPanelDimension,
+                .tooling_hole = pcb_query.flag(req, "panel_tooling_left"),
+                .fiducial = pcb_query.flag(req, "panel_fiducial_left"),
+            },
+            .tooling_diameter_mm = number(req, "panel_tooling_diameter", 3) orelse return error.InvalidRailFeature,
+            .fiducial_diameter_mm = number(req, "panel_fiducial_diameter", 1) orelse return error.InvalidRailFeature,
+            .fiducial_mask_diameter_mm = number(req, "panel_fiducial_mask", 2) orelse return error.InvalidRailFeature,
+        },
         .tab_mm = number(req, "panel_tab", 3) orelse return error.InvalidRoutingTab,
         .mouse_bites = .{ .diameter_mm = number(req, "panel_bite", 0.5) orelse return error.InvalidMouseBite },
     };
@@ -53,6 +78,37 @@ pub fn writeError(res: *httpz.Response, err: panelize.Error) void {
         error.RoutedGapTooSmall => "{\"ok\":false,\"error\":\"routed panels require at least a 1 mm board gap\"}",
         error.InvalidRoutingTab => "{\"ok\":false,\"error\":\"routing tabs must be at least 1 mm and fit the straight section of every board side\"}",
         error.InvalidMouseBite => "{\"ok\":false,\"error\":\"mouse-bite diameter must be 0.2-1.0 mm with a pitch at least as large as the hole\"}",
+        error.InvalidRailFeature => "{\"ok\":false,\"error\":\"rail holes and fiducials require a selected rail wide and long enough for their configured diameters and clearances\"}",
         error.OutOfMemory => "{\"ok\":false,\"error\":\"not enough memory to construct the requested panel\"}",
     };
+}
+
+test "panel query parses independent rail sides and their selected features" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var http = httpz.testing.init(.{});
+    defer http.deinit();
+    http.query("panel", "1");
+    http.query("panel_rows", "1");
+    http.query("panel_columns", "1");
+    http.query("panel_rail_top", "6");
+    http.query("panel_rail_right", "0");
+    http.query("panel_rail_bottom", "4");
+    http.query("panel_rail_left", "0");
+    http.query("panel_tooling_top", "1");
+    http.query("panel_fiducial_bottom", "1");
+    const source = panelize.Source{
+        .frame = .{ .ox = 0, .oy = 10 },
+        .width_mm = 20,
+        .height_mm = 10,
+        .rectangular = true,
+        .corner_radius_mm = 0,
+    };
+    const result = (try requested(arena_state.allocator(), http.req, source)) orelse return error.TestExpectedPanel;
+    try std.testing.expectApproxEqAbs(@as(f64, 6), result.options.rails.top.width_mm, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), result.options.rails.right.width_mm, 1e-9);
+    try std.testing.expect(result.options.rails.top.tooling_hole);
+    try std.testing.expect(result.options.rails.bottom.fiducial);
+    try std.testing.expectEqual(@as(usize, 1 + 4 * 5), result.features.npth_holes.len);
+    try std.testing.expectEqual(@as(usize, 1), result.features.fiducials.len);
 }

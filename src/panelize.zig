@@ -18,6 +18,25 @@ pub const MouseBites = struct {
     pitch_mm: f64 = 0.6,
 };
 
+/// One independently configurable panel rail. A zero width disables the rail;
+/// tooling holes and fiducials may be selected only on a positive-width rail.
+pub const RailSide = struct {
+    width_mm: f64 = 5.0,
+    tooling_hole: bool = false,
+    fiducial: bool = false,
+};
+
+/// Per-side rails and the shared dimensions of their generated features.
+pub const Rails = struct {
+    top: RailSide = .{},
+    right: RailSide = .{},
+    bottom: RailSide = .{},
+    left: RailSide = .{},
+    tooling_diameter_mm: f64 = 3.0,
+    fiducial_diameter_mm: f64 = 1.0,
+    fiducial_mask_diameter_mm: f64 = 2.0,
+};
+
 /// User-selectable panel layout and fabrication dimensions.
 pub const Options = struct {
     rows: u8 = 2,
@@ -25,8 +44,8 @@ pub const Options = struct {
     method: Method = .routed,
     /// Board-to-board routing channel. V-score panels require zero gap.
     gap_mm: f64 = 2.0,
-    /// Perimeter handling rail on all four sides.
-    rail_mm: f64 = 5.0,
+    /// Independently sized and populated perimeter handling rails.
+    rails: Rails = .{},
     /// Width of each un-routed break in a routed board profile.
     tab_mm: f64 = 3.0,
     mouse_bites: MouseBites = .{},
@@ -43,6 +62,14 @@ pub const Segment = struct {
 };
 /// One non-plated mouse-bite hit in panel coordinates.
 pub const Hole = struct { x: f64, y: f64, diameter: f64 };
+/// One bare-copper global fiducial centre in panel coordinates.
+pub const Fiducial = struct { x: f64, y: f64 };
+
+/// Panel-only geometry added outside the repeated source-board artwork.
+pub const Features = struct {
+    npth_holes: []const Hole,
+    fiducials: []const Fiducial,
+};
 
 /// Source-board facts needed by the export planner, detached from the solver.
 pub const Source = struct {
@@ -61,7 +88,7 @@ pub const Plan = struct {
     frames: []const export_fab.Frame,
     profile: []const Segment,
     scores: []const Segment,
-    mouse_bites: []const Hole,
+    features: Features,
     width_mm: f64,
     height_mm: f64,
 };
@@ -76,6 +103,7 @@ pub const Error = std.mem.Allocator.Error || error{
     RoutedGapTooSmall,
     InvalidRoutingTab,
     InvalidMouseBite,
+    InvalidRailFeature,
 };
 
 /// Capture the small source-board view consumed by `plan`.
@@ -95,8 +123,8 @@ pub fn sourceFor(placement: optimizer.Placement) Source {
 pub fn plan(arena: std.mem.Allocator, source: Source, options: Options) Error!Plan {
     if (options.rows == 0 or options.columns == 0) return error.InvalidPanelCount;
     if (@as(u16, options.rows) * @as(u16, options.columns) > 100) return error.InvalidPanelCount;
-    if (!finiteNonNegative(options.rail_mm) or !finiteNonNegative(options.gap_mm))
-        return error.InvalidPanelDimension;
+    if (!finiteNonNegative(options.gap_mm)) return error.InvalidPanelDimension;
+    try validateRails(options.rails);
     try validateSeparation(source, options);
     if (!std.math.isFinite(options.tab_mm) or options.tab_mm < 1.0)
         return error.InvalidRoutingTab;
@@ -112,19 +140,21 @@ pub fn plan(arena: std.mem.Allocator, source: Source, options: Options) Error!Pl
         return error.InvalidRoutingTab;
     const cols: f64 = @floatFromInt(options.columns);
     const rows: f64 = @floatFromInt(options.rows);
-    const width = 2 * options.rail_mm + cols * source.width_mm + (cols - 1) * options.gap_mm;
-    const height = 2 * options.rail_mm + rows * source.height_mm + (rows - 1) * options.gap_mm;
+    const rails = options.rails;
+    const width = rails.left.width_mm + rails.right.width_mm + cols * source.width_mm + (cols - 1) * options.gap_mm;
+    const height = rails.bottom.width_mm + rails.top.width_mm + rows * source.height_mm + (rows - 1) * options.gap_mm;
     if (!std.math.isFinite(width) or !std.math.isFinite(height)) return error.InvalidPanelDimension;
     if (width <= 0 or height <= 0) return error.InvalidPanelDimension;
     if (width > 1000 or height > 1000) return error.InvalidPanelDimension;
+    try validateRailFeatureSpan(rails, width, height);
 
     var frames: std.ArrayList(export_fab.Frame) = .empty;
     var row: u8 = 0;
     while (row < options.rows) : (row += 1) {
         var col: u8 = 0;
         while (col < options.columns) : (col += 1) {
-            const dx = options.rail_mm + @as(f64, @floatFromInt(col)) * (source.width_mm + options.gap_mm);
-            const dy = options.rail_mm + @as(f64, @floatFromInt(row)) * (source.height_mm + options.gap_mm);
+            const dx = rails.left.width_mm + @as(f64, @floatFromInt(col)) * (source.width_mm + options.gap_mm);
+            const dy = rails.bottom.width_mm + @as(f64, @floatFromInt(row)) * (source.height_mm + options.gap_mm);
             try frames.append(arena, .{ .ox = source.frame.ox - dx, .oy = source.frame.oy + dy });
         }
     }
@@ -132,17 +162,18 @@ pub fn plan(arena: std.mem.Allocator, source: Source, options: Options) Error!Pl
     var profile: std.ArrayList(Segment) = .empty;
     try appendRect(&profile, arena, 0, 0, width, height);
     var scores: std.ArrayList(Segment) = .empty;
-    var bites: std.ArrayList(Hole) = .empty;
+    var npth_holes: std.ArrayList(Hole) = .empty;
+    var fiducials: std.ArrayList(Fiducial) = .empty;
     if (options.method == .v_score) {
         // Score every board boundary, including the board/rail boundaries.
         var c: u8 = 0;
         while (c <= options.columns) : (c += 1) {
-            const x = options.rail_mm + @as(f64, @floatFromInt(c)) * source.width_mm;
+            const x = rails.left.width_mm + @as(f64, @floatFromInt(c)) * source.width_mm;
             if (x > 0 and x < width) try scores.append(arena, .{ .x1 = x, .y1 = 0, .x2 = x, .y2 = height });
         }
         var r: u8 = 0;
         while (r <= options.rows) : (r += 1) {
-            const y = options.rail_mm + @as(f64, @floatFromInt(r)) * source.height_mm;
+            const y = rails.bottom.width_mm + @as(f64, @floatFromInt(r)) * source.height_mm;
             if (y > 0 and y < height) try scores.append(arena, .{ .x1 = 0, .y1 = y, .x2 = width, .y2 = y });
         }
     } else {
@@ -150,19 +181,23 @@ pub fn plan(arena: std.mem.Allocator, source: Source, options: Options) Error!Pl
         while (row < options.rows) : (row += 1) {
             var col: u8 = 0;
             while (col < options.columns) : (col += 1) {
-                const x = options.rail_mm + @as(f64, @floatFromInt(col)) * (source.width_mm + options.gap_mm);
-                const y = options.rail_mm + @as(f64, @floatFromInt(row)) * (source.height_mm + options.gap_mm);
-                try appendTabbedRect(&profile, &bites, arena, .{ .x = x, .y = y, .w = source.width_mm, .h = source.height_mm }, source.corner_radius_mm, options);
+                const x = rails.left.width_mm + @as(f64, @floatFromInt(col)) * (source.width_mm + options.gap_mm);
+                const y = rails.bottom.width_mm + @as(f64, @floatFromInt(row)) * (source.height_mm + options.gap_mm);
+                try appendTabbedRect(&profile, &npth_holes, arena, .{ .x = x, .y = y, .w = source.width_mm, .h = source.height_mm }, source.corner_radius_mm, options);
             }
         }
     }
+    try appendRailFeatures(&npth_holes, &fiducials, arena, rails, width, height);
 
     return .{
         .options = options,
         .frames = try frames.toOwnedSlice(arena),
         .profile = try profile.toOwnedSlice(arena),
         .scores = try scores.toOwnedSlice(arena),
-        .mouse_bites = try bites.toOwnedSlice(arena),
+        .features = .{
+            .npth_holes = try npth_holes.toOwnedSlice(arena),
+            .fiducials = try fiducials.toOwnedSlice(arena),
+        },
         .width_mm = width,
         .height_mm = height,
     };
@@ -170,6 +205,44 @@ pub fn plan(arena: std.mem.Allocator, source: Source, options: Options) Error!Pl
 
 fn finiteNonNegative(value: f64) bool {
     return std.math.isFinite(value) and value >= 0;
+}
+
+const rail_feature_edge_clearance_mm = 0.5;
+const rail_feature_spacing_mm = 1.0;
+
+fn validateRails(rails: Rails) Error!void {
+    const sides = [_]RailSide{ rails.top, rails.right, rails.bottom, rails.left };
+    for (sides) |side| {
+        if (!finiteNonNegative(side.width_mm)) return error.InvalidPanelDimension;
+        if ((side.tooling_hole or side.fiducial) and !(side.width_mm > 0)) return error.InvalidRailFeature;
+        if (side.tooling_hole and side.width_mm < rails.tooling_diameter_mm + 2 * rail_feature_edge_clearance_mm)
+            return error.InvalidRailFeature;
+        if (side.fiducial and side.width_mm < rails.fiducial_mask_diameter_mm + 2 * rail_feature_edge_clearance_mm)
+            return error.InvalidRailFeature;
+    }
+    if (!std.math.isFinite(rails.tooling_diameter_mm) or rails.tooling_diameter_mm < 1 or rails.tooling_diameter_mm > 6)
+        return error.InvalidRailFeature;
+    if (!std.math.isFinite(rails.fiducial_diameter_mm) or rails.fiducial_diameter_mm < 0.5 or rails.fiducial_diameter_mm > 3)
+        return error.InvalidRailFeature;
+    if (!std.math.isFinite(rails.fiducial_mask_diameter_mm) or rails.fiducial_mask_diameter_mm < rails.fiducial_diameter_mm or rails.fiducial_mask_diameter_mm > 5)
+        return error.InvalidRailFeature;
+}
+
+fn validateRailFeatureSpan(rails: Rails, width: f64, height: f64) Error!void {
+    try validateSideSpan(rails.top, width, rails);
+    try validateSideSpan(rails.bottom, width, rails);
+    try validateSideSpan(rails.left, height, rails);
+    try validateSideSpan(rails.right, height, rails);
+}
+
+fn validateSideSpan(side: RailSide, span: f64, rails: Rails) Error!void {
+    const nearest_end = span / 3;
+    if (side.tooling_hole and nearest_end < rails.tooling_diameter_mm / 2 + rail_feature_edge_clearance_mm)
+        return error.InvalidRailFeature;
+    if (side.fiducial and nearest_end < rails.fiducial_mask_diameter_mm / 2 + rail_feature_edge_clearance_mm)
+        return error.InvalidRailFeature;
+    if (side.tooling_hole and side.fiducial and nearest_end < (rails.tooling_diameter_mm + rails.fiducial_mask_diameter_mm) / 2 + rail_feature_spacing_mm)
+        return error.InvalidRailFeature;
 }
 
 fn validateSeparation(source: Source, options: Options) Error!void {
@@ -276,6 +349,56 @@ fn appendRoundedCorners(out: *std.ArrayList(Segment), arena: std.mem.Allocator, 
     });
 }
 
+const RailAnchors = struct {
+    tooling: [2]f64,
+    fiducial: [2]f64,
+};
+
+fn appendRailFeatures(
+    holes: *std.ArrayList(Hole),
+    fiducials: *std.ArrayList(Fiducial),
+    arena: std.mem.Allocator,
+    rails: Rails,
+    width: f64,
+    height: f64,
+) !void {
+    try appendRailSide(holes, fiducials, arena, rails.bottom, rails.tooling_diameter_mm, .{
+        .tooling = .{ width / 3, rails.bottom.width_mm / 2 },
+        .fiducial = .{ 2 * width / 3, rails.bottom.width_mm / 2 },
+    });
+    try appendRailSide(holes, fiducials, arena, rails.top, rails.tooling_diameter_mm, .{
+        .tooling = .{ width / 3, height - rails.top.width_mm / 2 },
+        .fiducial = .{ 2 * width / 3, height - rails.top.width_mm / 2 },
+    });
+    try appendRailSide(holes, fiducials, arena, rails.left, rails.tooling_diameter_mm, .{
+        .tooling = .{ rails.left.width_mm / 2, height / 3 },
+        .fiducial = .{ rails.left.width_mm / 2, 2 * height / 3 },
+    });
+    try appendRailSide(holes, fiducials, arena, rails.right, rails.tooling_diameter_mm, .{
+        .tooling = .{ width - rails.right.width_mm / 2, height / 3 },
+        .fiducial = .{ width - rails.right.width_mm / 2, 2 * height / 3 },
+    });
+}
+
+fn appendRailSide(
+    holes: *std.ArrayList(Hole),
+    fiducials: *std.ArrayList(Fiducial),
+    arena: std.mem.Allocator,
+    side: RailSide,
+    tooling_diameter_mm: f64,
+    anchors: RailAnchors,
+) !void {
+    if (side.tooling_hole) try holes.append(arena, .{
+        .x = anchors.tooling[0],
+        .y = anchors.tooling[1],
+        .diameter = tooling_diameter_mm,
+    });
+    if (side.fiducial) try fiducials.append(arena, .{
+        .x = anchors.fiducial[0],
+        .y = anchors.fiducial[1],
+    });
+}
+
 const Rect = struct { x: f64, y: f64, w: f64, h: f64 };
 
 fn appendBites(out: *std.ArrayList(Hole), arena: std.mem.Allocator, cx: f64, cy: f64, horizontal: bool, options: MouseBites) !void {
@@ -326,7 +449,7 @@ test "a routed panel repeats frames inside rails and creates tab mouse-bites" {
     try std.testing.expectApproxEqAbs(@as(f64, 74), p.width_mm, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 32), p.height_mm, 1e-9);
     try std.testing.expect(p.profile.len > 4);
-    try std.testing.expectEqual(@as(usize, 6 * 4 * 5), p.mouse_bites.len);
+    try std.testing.expectEqual(@as(usize, 6 * 4 * 5), p.features.npth_holes.len);
 }
 
 test "a V-score panel has zero board gaps and full-span score guides" {
@@ -336,7 +459,31 @@ test "a V-score panel has zero board gaps and full-span score guides" {
     try std.testing.expectApproxEqAbs(@as(f64, 50), p.width_mm, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 30), p.height_mm, 1e-9);
     try std.testing.expectEqual(@as(usize, 6), p.scores.len);
-    try std.testing.expectEqual(@as(usize, 0), p.mouse_bites.len);
+    try std.testing.expectEqual(@as(usize, 0), p.features.npth_holes.len);
+}
+
+test "asymmetric rails place tooling holes and fiducials only on selected sides" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const p = try plan(arena_state.allocator(), sourceFor(testPlacement()), .{
+        .rows = 1,
+        .columns = 2,
+        .method = .v_score,
+        .gap_mm = 0,
+        .rails = .{
+            .top = .{ .width_mm = 4, .fiducial = true },
+            .right = .{ .width_mm = 0 },
+            .bottom = .{ .width_mm = 6, .tooling_hole = true },
+            .left = .{ .width_mm = 0 },
+        },
+    });
+    try std.testing.expectApproxEqAbs(@as(f64, 40), p.width_mm, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 20), p.height_mm, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 16), p.frames[0].oy, 1e-9);
+    try std.testing.expectEqual(@as(usize, 1), p.features.npth_holes.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 3), p.features.npth_holes[0].y, 1e-9);
+    try std.testing.expectEqual(@as(usize, 1), p.features.fiducials.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 18), p.features.fiducials[0].y, 1e-9);
 }
 
 test "a routed rounded-rectangle panel retains native corner arcs" {
@@ -367,4 +514,5 @@ test "separation rejects a non-rectangular board and unsafe routing settings" {
     try std.testing.expectError(error.SeparationRequiresRectangularBoard, plan(arena_state.allocator(), sourceFor(placement), .{}));
     try std.testing.expectError(error.RoutedGapTooSmall, plan(arena_state.allocator(), sourceFor(testPlacement()), .{ .gap_mm = 0.5 }));
     try std.testing.expectError(error.VScoreRequiresZeroGap, plan(arena_state.allocator(), sourceFor(testPlacement()), .{ .method = .v_score }));
+    try std.testing.expectError(error.InvalidRailFeature, plan(arena_state.allocator(), sourceFor(testPlacement()), .{ .rails = .{ .top = .{ .width_mm = 2, .tooling_hole = true } } }));
 }

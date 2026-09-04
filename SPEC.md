@@ -4979,7 +4979,7 @@ Public functions: Package.add, Package.addNamed, assemblyBomCsv, centroidCsv, pa
 - each Excellon file declares its X2 file function, naming its plating and the copper span it drills through
 - every hole is drilled by exactly one Excellon tool, even when its diameter sits inside two tool buckets
 - the Excellon tool lookup partitions diameters, giving each hole exactly one owning tool
-- panel Excellon repeats board drills in every panel frame and adds routed-tab mouse-bites only to NPTH
+- panel Excellon repeats board drills in every panel frame and adds panel-only holes only to NPTH
 
 ## export_gerber
 
@@ -5024,6 +5024,7 @@ Public functions: planLayers, writeLayer
 - the edge layer closes the board outline; silk exports authored footprint artwork without synthesizing component ref-des text
 - panel export repeats every fabrication layer in one shared array frame and replaces the source outline with the panel profile
 - routed panels preserve rounded board corners as native profile arcs while tabs interrupt only straight edges
+- selected rail fiducials emit global top-copper pads with larger top-mask openings and stay absent from bottom layers
 - a V-score panel ships its score centre lines as an explicit fabrication drawing
 - Four L corners bound each isolated flattened sub-circuit, and its fixed-size horizontal label first tries a corner-near slot on the top or bottom edge
 - overlapping same-face sub-circuit bounds each keep their own four-corner envelope instead of merging
@@ -7003,6 +7004,7 @@ is what makes the predicate exact rather than approximately right.
 
 ## Web Server
 
+- The panel export controls independently size every rail side and select its NPTH tooling hole and top-copper fiducial dimensions
 - The Full archive control runs the ordinary fab-readiness confirmation flow, posts the same analytic full-board STEP recipe as the 3D tab, and downloads the complete design archive
 - A failed Full archive download identifies the archive and displays the server's actual rejection reason
 - The DRC reconcile session answers only for a board whose non-copper inputs are unchanged

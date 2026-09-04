@@ -84,6 +84,7 @@ pub const shards: []const []const []const u8 = &.{
         "layout_sidecar_store.test.",
         "main.test.",
         "panelize.test.",
+        "serve.panel_export.test.",
     },
     // shard 1
     &.{

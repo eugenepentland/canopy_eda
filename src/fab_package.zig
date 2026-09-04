@@ -268,8 +268,8 @@ pub fn compose(
     const drill_frames = if (board.panel) |panel| panel.frames else &.{board.frame};
     var panel_holes: []const export_fab.DrillHole = &.{};
     if (board.panel) |panel| {
-        const allocated = try arena.alloc(export_fab.DrillHole, panel.mouse_bites.len);
-        for (panel.mouse_bites, allocated) |source, *dest| dest.* = .{
+        const allocated = try arena.alloc(export_fab.DrillHole, panel.features.npth_holes.len);
+        for (panel.features.npth_holes, allocated) |source, *dest| dest.* = .{
             .x = source.x,
             .y = source.y,
             .diameter = source.diameter,
@@ -284,8 +284,8 @@ pub fn compose(
     if (board.panel) |panel| {
         var pw: std.Io.Writer.Allocating = .init(arena);
         try pw.writer.print(
-            "{{\n  \"rows\": {d},\n  \"columns\": {d},\n  \"method\": \"{s}\",\n  \"board_gap_mm\": {d:.3},\n  \"rail_mm\": {d:.3},\n  \"tab_width_mm\": {d:.3},\n  \"mouse_bite_diameter_mm\": {d:.3},\n  \"mouse_bite_pitch_mm\": {d:.3},\n  \"panel_width_mm\": {d:.3},\n  \"panel_height_mm\": {d:.3},\n  \"board_count\": {d},\n  \"assembly_outputs\": {{\n    \"single_board_bom\": \"{s}-bom.csv\",\n    \"single_board_centroid\": \"{s}-centroid.csv\",\n    \"panel_bom\": \"{s}-panel-bom.csv\",\n    \"panel_centroid\": \"{s}-panel-centroid.csv\"\n  }}\n}}\n",
-            .{ panel.options.rows, panel.options.columns, @tagName(panel.options.method), panel.options.gap_mm, panel.options.rail_mm, panel.options.tab_mm, panel.options.mouse_bites.diameter_mm, panel.options.mouse_bites.pitch_mm, panel.width_mm, panel.height_mm, panel.frames.len, pkg.prefix, pkg.prefix, pkg.prefix, pkg.prefix },
+            "{{\n  \"rows\": {d},\n  \"columns\": {d},\n  \"method\": \"{s}\",\n  \"board_gap_mm\": {d:.3},\n  \"rails_mm\": {{\"top\": {d:.3}, \"right\": {d:.3}, \"bottom\": {d:.3}, \"left\": {d:.3}}},\n  \"tab_width_mm\": {d:.3},\n  \"mouse_bite_diameter_mm\": {d:.3},\n  \"mouse_bite_pitch_mm\": {d:.3},\n  \"tooling_hole_diameter_mm\": {d:.3},\n  \"tooling_hole_sides\": {{\"top\": {}, \"right\": {}, \"bottom\": {}, \"left\": {}}},\n  \"fiducial_diameter_mm\": {d:.3},\n  \"fiducial_mask_diameter_mm\": {d:.3},\n  \"fiducial_sides\": {{\"top\": {}, \"right\": {}, \"bottom\": {}, \"left\": {}}},\n  \"panel_width_mm\": {d:.3},\n  \"panel_height_mm\": {d:.3},\n  \"board_count\": {d},\n  \"assembly_outputs\": {{\n    \"single_board_bom\": \"{s}-bom.csv\",\n    \"single_board_centroid\": \"{s}-centroid.csv\",\n    \"panel_bom\": \"{s}-panel-bom.csv\",\n    \"panel_centroid\": \"{s}-panel-centroid.csv\"\n  }}\n}}\n",
+            .{ panel.options.rows, panel.options.columns, @tagName(panel.options.method), panel.options.gap_mm, panel.options.rails.top.width_mm, panel.options.rails.right.width_mm, panel.options.rails.bottom.width_mm, panel.options.rails.left.width_mm, panel.options.tab_mm, panel.options.mouse_bites.diameter_mm, panel.options.mouse_bites.pitch_mm, panel.options.rails.tooling_diameter_mm, panel.options.rails.top.tooling_hole, panel.options.rails.right.tooling_hole, panel.options.rails.bottom.tooling_hole, panel.options.rails.left.tooling_hole, panel.options.rails.fiducial_diameter_mm, panel.options.rails.fiducial_mask_diameter_mm, panel.options.rails.top.fiducial, panel.options.rails.right.fiducial, panel.options.rails.bottom.fiducial, panel.options.rails.left.fiducial, panel.width_mm, panel.height_mm, panel.frames.len, pkg.prefix, pkg.prefix, pkg.prefix, pkg.prefix },
         );
         try pkg.add("panelization.json", pw.written());
     }

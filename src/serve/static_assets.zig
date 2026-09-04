@@ -2499,3 +2499,21 @@ test "PCB frame benchmark carries human-readable dwell points outside movement p
     // browser A/B gate showed that rebuilding its 2.56x buffer regresses p95.
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "if(PHYSICAL_REVIEW)return false;       // measured A/B") != null);
 }
+
+// spec: Web Server - The panel export controls independently size every rail side and select its NPTH tooling hole and top-copper fiducial dimensions
+test "panel export controls expose per-side rails tooling holes and fiducials" {
+    const markers = [_][]const u8{
+        "panel_rail_top=",
+        "panel_rail_right=",
+        "panel_rail_bottom=",
+        "panel_rail_left=",
+        "panel_tooling_diameter=",
+        "panel_fiducial_diameter=",
+        "panel_fiducial_mask=",
+        "fab-panel-tooling-",
+        "fab-panel-fiducial-",
+        "Set any rail width to 0 to omit that side.",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_layout_css, ".fab-rail-side{") != null);
+}

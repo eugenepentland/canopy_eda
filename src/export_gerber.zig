@@ -452,9 +452,12 @@ pub fn writeLayer(
     if (meta.panel) |panel| {
         switch (layer) {
             .edge => try writePanelProfile(&g, panel),
-            else => for (panel.frames) |copy_frame| {
-                g.frame = copy_frame;
-                try writeLayerContent(&g, placement, copper, texts, layer, meta.silk);
+            else => {
+                for (panel.frames) |copy_frame| {
+                    g.frame = copy_frame;
+                    try writeLayerContent(&g, placement, copper, texts, layer, meta.silk);
+                }
+                try writePanelFiducials(&g, panel, layer);
             },
         }
     } else {
@@ -1407,6 +1410,18 @@ fn writePanelScores(g: *Gx, panel: *const panelize.Plan) Error!void {
     for (panel.scores) |segment| try g.lineFab(segment.x1, segment.y1, segment.x2, segment.y2);
 }
 
+fn writePanelFiducials(g: *Gx, panel: *const panelize.Plan, layer: Layer) Error!void {
+    if (panel.features.fiducials.len == 0) return;
+    const rails = panel.options.rails;
+    const diameter: f64 = switch (layer) {
+        .copper => |side| if (side == .top) rails.fiducial_diameter_mm else return,
+        .mask => |side| if (side == .top) rails.fiducial_mask_diameter_mm else return,
+        else => return,
+    };
+    try g.useAs(.c, diameter, 0, if (layer == .copper) .fiducial else .none);
+    for (panel.features.fiducials) |fiducial| try g.flashFab(fiducial.x, fiducial.y);
+}
+
 fn writeBoardRegion(g: *Gx, placement: optimizer.Placement) Error!void {
     if (placement.board_poly) |poly| {
         if (poly.len >= 3) return regionFilletedPoly(g, poly, placement.board_arcs);
@@ -1882,6 +1897,8 @@ const ApFunc = enum {
     conductor,
     /// The board profile.
     profile,
+    /// A global panel fiducial, emitted only on top copper.
+    fiducial,
 
     /// The attribute value, or null when this function carries no attribute.
     fn attr(self: ApFunc) ?[]const u8 {
@@ -1895,6 +1912,7 @@ const ApFunc = enum {
             .via_pad => "ViaPad",
             .conductor => "Conductor",
             .profile => "Profile",
+            .fiducial => "FiducialPad,Global",
         };
     }
 };
@@ -1977,6 +1995,11 @@ const Gx = struct {
     fn flash(g: *Gx, x: f64, y: f64) Error!void {
         const c = g.xy(x, y);
         try g.w.print("X{d}Y{d}D03*\n", .{ c[0], c[1] });
+    }
+
+    /// Flash in already-framed panel coordinates (millimetres, y-up).
+    fn flashFab(g: *Gx, x: f64, y: f64) Error!void {
+        try g.w.print("X{d}Y{d}D03*\n", .{ mmToUm(x), mmToUm(y) });
     }
 
     fn line(g: *Gx, x1: f64, y1: f64, x2: f64, y2: f64) Error!void {
@@ -3823,6 +3846,33 @@ test "routed panel Gerber preserves rounded corners as native arcs" {
     try writeLayer(&edge.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .edge, .{ .function = "Profile,NP", .panel = &panel });
     try testing.expectEqual(@as(usize, 8), std.mem.count(u8, edge.written(), "G75*"));
     try testing.expectEqual(@as(usize, 8), std.mem.count(u8, edge.written(), "G02"));
+}
+
+// spec: export_gerber - selected rail fiducials emit global top-copper pads with larger top-mask openings and stay absent from bottom layers
+test "panel rail fiducials emit top copper and mask flashes only" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const placement = testPlacement(&.{}, &.{});
+    const panel = try panelize.plan(arena, panelize.sourceFor(placement), .{
+        .rows = 1,
+        .columns = 1,
+        .rails = .{ .top = .{ .fiducial = true } },
+    });
+
+    var top_copper: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&top_copper.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, .{ .function = "Copper,L1,Top", .panel = &panel });
+    try testing.expect(std.mem.indexOf(u8, top_copper.written(), "%TA.AperFunction,FiducialPad,Global*%") != null);
+    try testing.expect(std.mem.indexOf(u8, top_copper.written(), "X20000000Y17500000D03*") != null);
+
+    var top_mask: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&top_mask.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top", .panel = &panel });
+    try testing.expect(std.mem.indexOf(u8, top_mask.written(), "%ADD10C,2.000000*%") != null);
+    try testing.expect(std.mem.indexOf(u8, top_mask.written(), "X20000000Y17500000D03*") != null);
+
+    var bottom_copper: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&bottom_copper.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .bottom }, .{ .function = "Copper,L4,Bot", .panel = &panel });
+    try testing.expect(std.mem.indexOf(u8, bottom_copper.written(), "X20000000Y17500000D03*") == null);
 }
 
 // spec: export_gerber - a V-score panel ships its score centre lines as an explicit fabrication drawing

@@ -689,8 +689,8 @@ test "frameFor puts the origin at the outline's bottom-left corner" {
     try testing.expectApproxEqAbs(@as(f64, 10 + 2 * auto_outline_margin_mm), auto.w, 1e-9);
 }
 
-// spec: export_fab - panel Excellon repeats board drills in every panel frame and adds routed-tab mouse-bites only to NPTH
-test "panel Excellon repeats board holes and adds NPTH mouse-bites" {
+// spec: export_fab - panel Excellon repeats board drills in every panel frame and adds panel-only holes only to NPTH
+test "panel Excellon repeats board holes and adds panel-only NPTH" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const alloc = arena_inst.allocator();

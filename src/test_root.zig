@@ -466,6 +466,7 @@ test {
     _ = @import("serve/notes.zig");
     _ = @import("serve/page_cache.zig");
     _ = @import("serve/pages.zig");
+    _ = @import("serve/panel_export.zig");
     _ = @import("serve/pcb_describe.zig");
     _ = @import("serve/pcb_fence.zig");
     _ = @import("serve/pcb_keepout_json.zig");

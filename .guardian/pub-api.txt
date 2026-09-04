@@ -1741,11 +1741,15 @@ src/pad_neck_profile.zig::Profile struct_
 src/pad_neck_shape.zig::finishExactRfTapers | fn finishExactRfTapers( arena: std.mem.Allocator, placement: optimizer.Placement, selected: []const bool, routed: router.RouteResult, ) std.mem.Allocator.Error!router.RouteResult
 src/pad_neck_shape.zig::restoreGeneratedTracks | fn restoreGeneratedTracks( arena: std.mem.Allocator, placement: optimizer.Placement, selected: []const bool, routed: router.RouteResult, ) std.mem.Allocator.Error!router.RouteResult
 src/panelize.zig::Error value
+src/panelize.zig::Features struct_
+src/panelize.zig::Fiducial struct_
 src/panelize.zig::Hole struct_
 src/panelize.zig::Method enum_
 src/panelize.zig::MouseBites struct_
 src/panelize.zig::Options struct_
 src/panelize.zig::Plan struct_
+src/panelize.zig::RailSide struct_
+src/panelize.zig::Rails struct_
 src/panelize.zig::Segment struct_
 src/panelize.zig::Source struct_
 src/panelize.zig::plan | fn plan(arena: std.mem.Allocator, source: Source, options: Options) Error!Plan

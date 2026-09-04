@@ -12370,7 +12370,7 @@ function focusPart(want,keepPane){
 // exact revision/report just reviewed; remaining findings add an explicit
 // waiver. A stale token cannot download a changed board.
 var fabExportKind="fabrication";
-var fabPanel={enabled:false,rows:2,columns:2,method:"routed",gap:2,rail:5,tab:3,bite:0.5};
+var fabPanel={enabled:false,rows:2,columns:2,method:"routed",gap:2,railTop:5,railRight:5,railBottom:5,railLeft:5,toolingTop:false,toolingRight:false,toolingBottom:false,toolingLeft:false,fiducialTop:false,fiducialRight:false,fiducialBottom:false,fiducialLeft:false,toolingDiameter:3,fiducialDiameter:1,fiducialMask:2,tab:3,bite:0.5};
 function fabZipUrl(rep){
  var q=fabq();
  var add=function(k,v){q+=q?"&":"?";q+=k+"="+encodeURIComponent(v);};
@@ -12381,8 +12381,12 @@ function fabq(){var fields=[];
  var layout=curLayout||PCB.shown_layout;if(layout)fields.push("layout="+encodeURIComponent(layout));
  if(fabExportKind==="fabrication"&&fabPanel.enabled){
   fields.push("panel=1","panel_rows="+fabPanel.rows,"panel_columns="+fabPanel.columns,
-   "panel_method="+fabPanel.method,"panel_gap="+fabPanel.gap,"panel_rail="+fabPanel.rail,
-   "panel_tab="+fabPanel.tab,"panel_bite="+fabPanel.bite);}
+   "panel_method="+fabPanel.method,"panel_gap="+fabPanel.gap,
+   "panel_rail_top="+fabPanel.railTop,"panel_rail_right="+fabPanel.railRight,
+   "panel_rail_bottom="+fabPanel.railBottom,"panel_rail_left="+fabPanel.railLeft,
+   "panel_tooling_diameter="+fabPanel.toolingDiameter,"panel_fiducial_diameter="+fabPanel.fiducialDiameter,
+   "panel_fiducial_mask="+fabPanel.fiducialMask,"panel_tab="+fabPanel.tab,"panel_bite="+fabPanel.bite);
+  [["toolingTop","panel_tooling_top"],["toolingRight","panel_tooling_right"],["toolingBottom","panel_tooling_bottom"],["toolingLeft","panel_tooling_left"],["fiducialTop","panel_fiducial_top"],["fiducialRight","panel_fiducial_right"],["fiducialBottom","panel_fiducial_bottom"],["fiducialLeft","panel_fiducial_left"]].forEach(function(pair){if(fabPanel[pair[0]])fields.push(pair[1]+"=1");});}
  return fields.length?"?"+fields.join("&"):"";}
 function fabDownload(rep){
  var go=document.getElementById("fab-go"),refreshed=false;if(go)go.disabled=true;
@@ -12439,16 +12443,19 @@ function fabRenderReport(rep){
  if((!rep.errors||!rep.errors.length)&&(!rep.warnings||!rep.warnings.length))
  h+='<div class="fab-sec ok">Board is fab-ready.</div>';
  if(fabExportKind==="fabrication"){
+  var railRow=function(side,label){var cap=side.charAt(0).toUpperCase()+side.slice(1);return '<div class="fab-rail-side"><strong>'+label+'</strong><span><input id="fab-panel-rail-'+side+'" type="number" min="0" max="30" step="0.1" value="'+fabPanel['rail'+cap]+'"> mm</span><label><input id="fab-panel-tooling-'+side+'" type="checkbox"'+(fabPanel['tooling'+cap]?' checked':'')+'> Hole</label><label><input id="fab-panel-fiducial-'+side+'" type="checkbox"'+(fabPanel['fiducial'+cap]?' checked':'')+'> Fiducial</label></div>';};
   h+='<fieldset class="fab-panel"><legend><label><input type="checkbox" id="fab-panel-enable"'+(fabPanel.enabled?' checked':'')+'> Panelize Gerbers and drills</label></legend>'+
    '<div class="fab-panel-grid" id="fab-panel-fields"'+(fabPanel.enabled?'':' hidden')+'>'+
    '<label>Columns <input id="fab-panel-columns" type="number" min="1" max="100" step="1" value="'+fabPanel.columns+'"></label>'+
    '<label>Rows <input id="fab-panel-rows" type="number" min="1" max="100" step="1" value="'+fabPanel.rows+'"></label>'+
    '<label>Separation <select id="fab-panel-method"><option value="routed"'+(fabPanel.method==='routed'?' selected':'')+'>Routed tabs + mouse bites</option><option value="v_score"'+(fabPanel.method==='v_score'?' selected':'')+'>V-score</option></select></label>'+
    '<label>Board gap <span><input id="fab-panel-gap" type="number" min="0" max="20" step="0.1" value="'+fabPanel.gap+'"> mm</span></label>'+
-   '<label>Rails <span><input id="fab-panel-rail" type="number" min="0" max="30" step="0.1" value="'+fabPanel.rail+'"> mm</span></label>'+
    '<label class="fab-routed-field">Tab width <span><input id="fab-panel-tab" type="number" min="1" step="0.1" value="'+fabPanel.tab+'"> mm</span></label>'+
-   '<label class="fab-routed-field">Mouse bites <span><input id="fab-panel-bite" type="number" min="0.2" max="1" step="0.05" value="'+fabPanel.bite+'"> mm</span></label></div>'+
-   '<div class="fab-panel-note">Routed panels support square or rounded rectangular outlines and emit tabbed profiles with NPTH mouse-bites. V-score requires square corners and forces zero gap. Panel-specific BOM and centroid CSVs are included. Confirm the generated panel drawing with your fabricator.</div></fieldset>';}
+   '<label class="fab-routed-field">Mouse bites <span><input id="fab-panel-bite" type="number" min="0.2" max="1" step="0.05" value="'+fabPanel.bite+'"> mm</span></label>'+railRow('top','Top rail')+railRow('right','Right rail')+railRow('bottom','Bottom rail')+railRow('left','Left rail')+
+   '<label>Hole diameter <span><input id="fab-panel-tooling-diameter" type="number" min="1" max="6" step="0.1" value="'+fabPanel.toolingDiameter+'"> mm</span></label>'+
+   '<label>Fiducial copper <span><input id="fab-panel-fiducial-diameter" type="number" min="0.5" max="3" step="0.1" value="'+fabPanel.fiducialDiameter+'"> mm</span></label>'+
+   '<label>Fiducial mask <span><input id="fab-panel-fiducial-mask" type="number" min="0.5" max="5" step="0.1" value="'+fabPanel.fiducialMask+'"> mm</span></label></div>'+
+   '<div class="fab-panel-note">Set any rail width to 0 to omit that side. Selected holes are NPTH; fiducials are bare top-copper pads with mask openings. Routed panels support rounded corners; V-score requires square corners and zero gap. Panel-specific BOM and centroid CSVs are included. Confirm the generated panel drawing with your fabricator.</div></fieldset>';}
  var s=rep.stats||{};
  h+='<div class="fab-stats">'+(s.parts||0)+' parts · '+
   (s.connected_nets||0)+'/'+(s.routable_nets||0)+' routable nets connected · '+
@@ -12469,8 +12476,9 @@ function fabOpenModal(rep){
   body.querySelectorAll(".fab-routed-field").forEach(function(el){el.hidden=scored;});}
  if(panelEnable)panelEnable.addEventListener("change",function(){fabPanel.enabled=panelEnable.checked;if(panelFields)panelFields.hidden=!fabPanel.enabled;});
  var panelMethod=document.getElementById("fab-panel-method");if(panelMethod)panelMethod.addEventListener("change",panelSyncMethod);
- [["fab-panel-rows","rows"],["fab-panel-columns","columns"],["fab-panel-gap","gap"],["fab-panel-rail","rail"],["fab-panel-tab","tab"],["fab-panel-bite","bite"]].forEach(function(pair){
+ [["fab-panel-rows","rows"],["fab-panel-columns","columns"],["fab-panel-gap","gap"],["fab-panel-rail-top","railTop"],["fab-panel-rail-right","railRight"],["fab-panel-rail-bottom","railBottom"],["fab-panel-rail-left","railLeft"],["fab-panel-tooling-diameter","toolingDiameter"],["fab-panel-fiducial-diameter","fiducialDiameter"],["fab-panel-fiducial-mask","fiducialMask"],["fab-panel-tab","tab"],["fab-panel-bite","bite"]].forEach(function(pair){
   var el=document.getElementById(pair[0]);if(el)el.addEventListener("change",function(){var n=Number(el.value);if(Number.isFinite(n))fabPanel[pair[1]]=n;});});
+ [["top","Top"],["right","Right"],["bottom","Bottom"],["left","Left"]].forEach(function(pair){var side=pair[0],cap=pair[1],hole=document.getElementById("fab-panel-tooling-"+side),fid=document.getElementById("fab-panel-fiducial-"+side);if(hole)hole.addEventListener("change",function(){fabPanel["tooling"+cap]=hole.checked;});if(fid)fid.addEventListener("change",function(){fabPanel["fiducial"+cap]=fid.checked;});});
  panelSyncMethod();
  var hasErr=rep.errors&&rep.errors.length,hasWarn=rep.needs_waiver,drcAck=document.getElementById("fab-drc-ack");
  var what=fabExportKind==="archive"?"Complete design archive":"Fabrication release";
