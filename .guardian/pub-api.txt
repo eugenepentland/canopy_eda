@@ -1673,22 +1673,40 @@ src/main.zig::process_environ_map value
 src/main.zig::process_io value
 src/markdown_row.zig::max_cells value
 src/markdown_row.zig::split | fn split(line: []const u8, out: *[max_cells][]const u8) usize
+src/mechanical/cad_document.zig::Document struct_
+src/mechanical/cad_document.zig::DocumentError value
+src/mechanical/cad_document.zig::ParseError value
+src/mechanical/cad_document.zig::features | fn features(document: Document) enclosure.Features
+src/mechanical/cad_document.zig::mechanical_document_byte_limit value
+src/mechanical/cad_document.zig::parameters | fn parameters(document: Document) enclosure.Parameters
+src/mechanical/cad_document.zig::parse | fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!std.json.Parsed(Document)
+src/mechanical/cad_document.zig::validate | fn validate(document: Document) DocumentError!void
+src/mechanical/cad_document.zig::write | fn write(writer: *std.Io.Writer, document: Document) json_writer.WriteError!void
+src/mechanical/enclosure.zig::Boss struct_
 src/mechanical/enclosure.zig::Dimensions struct_
 src/mechanical/enclosure.zig::EnclosureError value
+src/mechanical/enclosure.zig::Features struct_
 src/mechanical/enclosure.zig::Model struct_
 src/mechanical/enclosure.zig::Parameters struct_
 src/mechanical/enclosure.zig::deinit | fn deinit(self: Model, allocator: std.mem.Allocator) void
 src/mechanical/enclosure.zig::dimensions | fn dimensions(parameters: Parameters) EnclosureError!Dimensions
 src/mechanical/enclosure.zig::generate | fn generate(allocator: std.mem.Allocator, parameters: Parameters) (EnclosureError || std.mem.Allocator.Error)!Model
+src/mechanical/enclosure.zig::generateWithFeatures | fn generateWithFeatures(allocator: std.mem.Allocator, parameters: Parameters, features: Features) (EnclosureError || std.mem.Allocator.Error)!Model
+src/mechanical/enclosure.zig::validateParameters | fn validateParameters(parameters: Parameters, features: Features) EnclosureError!Dimensions
 src/mechanical/prismatic.zig::KernelError value
 src/mechanical/prismatic.zig::Mesh struct_
 src/mechanical/prismatic.zig::Point2 value
 src/mechanical/prismatic.zig::Point3 value
+src/mechanical/prismatic.zig::ShellSpec struct_
 src/mechanical/prismatic.zig::Triangle value
+src/mechanical/prismatic.zig::Wall enum_
+src/mechanical/prismatic.zig::WallCutout struct_
+src/mechanical/prismatic.zig::annularCylinder | fn annularCylinder( allocator: std.mem.Allocator, outer_diameter: f64, hole_diameter: f64, z_min: f64, z_max: f64, segments: usize, ) (KernelError || std.mem.Allocator.Error)!Mesh
 src/mechanical/prismatic.zig::box | fn box( allocator: std.mem.Allocator, width: f64, depth: f64, z_min: f64, z_max: f64, ) (KernelError || std.mem.Allocator.Error)!Mesh
 src/mechanical/prismatic.zig::deinit | fn deinit(self: Mesh, allocator: std.mem.Allocator) void
 src/mechanical/prismatic.zig::extrudeConvex | fn extrudeConvex( allocator: std.mem.Allocator, profile: []const Point2, z_min: f64, z_max: f64, ) (KernelError || std.mem.Allocator.Error)!Mesh
 src/mechanical/prismatic.zig::rectangularShell | fn rectangularShell( allocator: std.mem.Allocator, inner_width: f64, inner_depth: f64, wall: f64, floor: f64, height: f64, ) (KernelError || std.mem.Allocator.Error)!Mesh
+src/mechanical/prismatic.zig::rectangularShellWithCutouts | fn rectangularShellWithCutouts( allocator: std.mem.Allocator, spec: ShellSpec, cutouts: []const WallCutout, ) (KernelError || std.mem.Allocator.Error)!Mesh
 src/module_metadata.zig::Collection struct_
 src/module_metadata.zig::Definition struct_
 src/module_metadata.zig::Dependency struct_
@@ -4933,7 +4951,7 @@ src/serve/sync_kicad_sch.zig::writeResultJson | fn writeResultJson( w: *std.Io.W
 src/serve/system_cad.zig::HandlerError value
 src/serve/system_cad.zig::exportFile | fn exportFile( allocator: std.mem.Allocator, system_name: []const u8, req: *httpz.Request, res: *httpz.Response, ) HandlerError!void
 src/serve/system_cad.zig::meshApi | fn meshApi(allocator: std.mem.Allocator, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/system_cad.zig::page | fn page( allocator: std.mem.Allocator, project_dir: []const u8, spec: system_review.SystemSpec, res: *httpz.Response, ) HandlerError!void
+src/serve/system_cad.zig::page | fn page( allocator: std.mem.Allocator, project_dir: []const u8, spec: system_review.SystemSpec, can_write: bool, res: *httpz.Response, ) HandlerError!void
 src/serve/system_review_api.zig::AssemblyRenderContext struct_
 src/serve/system_review_api.zig::HandlerError value
 src/serve/system_review_api.zig::ListSystemsError value
@@ -4948,10 +4966,12 @@ src/serve/system_review_api.zig::getDocumentApi | fn getDocumentApi(ctx: *Server
 src/serve/system_review_api.zig::getSystemApi | fn getSystemApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::listSystemsApi | fn listSystemsApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::putDocumentApi | fn putDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/system_review_api.zig::putSystemCadDocumentApi | fn putSystemCadDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::readinessApi | fn readinessApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::regenerateDossierApi | fn regenerateDossierApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::releaseApi | fn releaseApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::renderAssembly | fn renderAssembly( raw_context: *anyopaque, input: fab_release_service.AssemblyInput, ) pcb_layout_page.HandlerError![]const u8
+src/serve/system_review_api.zig::systemCadDocumentApi | fn systemCadDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::systemCadExportApi | fn systemCadExportApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::systemCadMeshApi | fn systemCadMeshApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::systemCadPage | fn systemCadPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void

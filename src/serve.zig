@@ -970,7 +970,11 @@ pub fn serve(
     router.get("/api/systems", system_review_api.listSystemsApi, .{});
     router.get("/api/systems/:name", system_review_api.getSystemApi, .{});
     router.get("/api/systems/:name/cad/mesh", system_review_api.systemCadMeshApi, .{});
+    router.post("/api/systems/:name/cad/mesh", system_review_api.systemCadMeshApi, .{});
     router.get("/api/systems/:name/cad/export", system_review_api.systemCadExportApi, .{});
+    router.post("/api/systems/:name/cad/export", system_review_api.systemCadExportApi, .{});
+    router.get("/api/systems/:name/cad/document", system_review_api.systemCadDocumentApi, .{});
+    router.put("/api/systems/:name/cad/document", system_review_api.putSystemCadDocumentApi, .{});
     router.get("/api/systems/:name/docs/:doc", system_review_api.getDocumentApi, .{});
     router.put("/api/systems/:name/docs/:doc", system_review_api.putDocumentApi, .{});
     router.post("/api/systems/:name/attest", system_review_api.attestSystemApi, .{});

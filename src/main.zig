@@ -859,6 +859,10 @@ test {
     _ = @import("placement/return_path.zig");
     _ = @import("placement/shove.zig");
     _ = @import("serve/pcb_layout_page.zig");
+    _ = @import("mechanical/prismatic.zig");
+    _ = @import("mechanical/enclosure.zig");
+    _ = @import("mechanical/cad_document.zig");
+    _ = @import("serve/system_cad.zig");
     _ = @import("serve/layout_sidecar_json.zig");
     _ = @import("serve/placement_outline.zig");
     _ = @import("serve/shape_sketch_json.zig");
