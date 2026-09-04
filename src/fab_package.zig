@@ -381,7 +381,7 @@ test "panel package adds total BOM and repeated centroid beside single-board fil
         .origin_key = "",
         .properties = &.{},
     }};
-    const placement = optimizer.Placement{
+    var placement = optimizer.Placement{
         .parts = &board_parts,
         .links = &.{},
         .loops = &.{},
@@ -396,6 +396,7 @@ test "panel package adds total BOM and repeated centroid beside single-board fil
         .generated = false,
         .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 },
     };
+    placement.rules.design.edge.copper = 0.4;
     const frame = export_fab.frameFor(placement);
     const panel = try panelize.plan(arena, panelize.sourceFor(placement), .{ .rows = 2, .columns = 2 });
     var pkg = export_fab.Package{ .arena = arena, .prefix = "demo" };

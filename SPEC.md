@@ -5026,6 +5026,7 @@ Public functions: planLayers, writeLayer
 - routed panels preserve rounded board corners as native profile arcs while tabs interrupt only straight edges
 - each selected rail side emits two global top-copper fiducials near its ends with larger top-mask openings and no bottom-layer flashes
 - a V-score panel ships its score centre lines as an explicit fabrication drawing
+- JLCPCB-safe panel planning enforces rigid-FR4 board and panel sizes, routed copper/gap/tab/mouse-bite limits, V-score size/thickness/copper/line limits, 5 mm rails, 2 mm tooling holes, and 1 mm fiducials with 2 mm mask openings 3.85 mm from the panel edge
 - Four L corners bound each isolated flattened sub-circuit, and its fixed-size horizontal label first tries a corner-near slot on the top or bottom edge
 - overlapping same-face sub-circuit bounds each keep their own four-corner envelope instead of merging
 - chained overlapping sub-circuits keep one independent corner envelope per member instead of merging transitively
@@ -7009,6 +7010,7 @@ is what makes the predicate exact rather than approximately right.
 - The panel export groups rail presence into one top-and-bottom toggle and one left-and-right toggle while preserving each side's configured width and features
 - The panel export shows a live dimensioned preview that repeats the actual board outline inside its configured rails and marks scores, tooling holes and fiducials
 - The panel export controls independently size every rail side and selects pairs of NPTH tooling holes and top-copper fiducials near both ends of each enabled side
+- The fabrication panel uses JLCPCB-safe defaults and input limits for 5 mm rails, 2 mm tooling holes, 1 mm fiducials with 2 mm mask openings, 5 mm routed tabs, 0.6 mm mouse bites, 0.35 mm bite-edge gaps, and 3.85 mm rail-feature offsets
 - The Full archive control runs the ordinary fab-readiness confirmation flow, posts the same analytic full-board STEP recipe as the 3D tab, and downloads the complete design archive
 - A failed Full archive download identifies the archive and displays the server's actual rejection reason
 - The DRC reconcile session answers only for a board whose non-copper inputs are unchanged

@@ -27,6 +27,8 @@ pub fn requested(arena: std.mem.Allocator, req: *httpz.Request, source: panelize
     else
         return error.InvalidPanelDimension;
     const legacy_rail = number(req, "panel_rail", 5) orelse return error.InvalidPanelDimension;
+    const bite_diameter = number(req, "panel_bite", 0.6) orelse return error.InvalidMouseBite;
+    const bite_edge_gap = number(req, "panel_bite_gap", 0.35) orelse return error.InvalidMouseBite;
     const options = panelize.Options{
         .rows = count(req, "panel_rows", 2) orelse return error.InvalidPanelCount,
         .columns = count(req, "panel_columns", 2) orelse return error.InvalidPanelCount,
@@ -53,12 +55,12 @@ pub fn requested(arena: std.mem.Allocator, req: *httpz.Request, source: panelize
                 .tooling_hole = pcb_query.flag(req, "panel_tooling_left"),
                 .fiducial = pcb_query.flag(req, "panel_fiducial_left"),
             },
-            .tooling_diameter_mm = number(req, "panel_tooling_diameter", 3) orelse return error.InvalidRailFeature,
+            .tooling_diameter_mm = number(req, "panel_tooling_diameter", 2) orelse return error.InvalidRailFeature,
             .fiducial_diameter_mm = number(req, "panel_fiducial_diameter", 1) orelse return error.InvalidRailFeature,
             .fiducial_mask_diameter_mm = number(req, "panel_fiducial_mask", 2) orelse return error.InvalidRailFeature,
         },
-        .tab_mm = number(req, "panel_tab", 3) orelse return error.InvalidRoutingTab,
-        .mouse_bites = .{ .diameter_mm = number(req, "panel_bite", 0.5) orelse return error.InvalidMouseBite },
+        .tab_mm = number(req, "panel_tab", 5) orelse return error.InvalidRoutingTab,
+        .mouse_bites = .{ .diameter_mm = bite_diameter, .pitch_mm = bite_diameter + bite_edge_gap },
     };
     const result = try arena.create(panelize.Plan);
     result.* = try panelize.plan(arena, source, options);
@@ -71,14 +73,21 @@ pub fn writeError(res: *httpz.Response, err: panelize.Error) void {
     res.content_type = .JSON;
     res.body = switch (err) {
         error.InvalidPanelCount => "{\"ok\":false,\"error\":\"panel rows and columns must be positive, with at most 100 boards\"}",
-        error.InvalidPanelDimension => "{\"ok\":false,\"error\":\"panel dimensions must be finite, non-negative, and no larger than 1000 mm\"}",
+        error.InvalidPanelDimension => "{\"ok\":false,\"error\":\"panel dimensions, board thickness, and copper-edge clearance must be finite and valid\"}",
+        error.BoardTooSmall => "{\"ok\":false,\"error\":\"JLCPCB FR-4 boards must be at least 3 x 3 mm, or 5 x 5 mm below 0.8 mm thickness\"}",
+        error.PanelTooLarge => "{\"ok\":false,\"error\":\"this JLCPCB-safe panel profile limits finished panels to 475 x 475 mm\"}",
         error.VScoreRequiresZeroGap => "{\"ok\":false,\"error\":\"V-score panels require a 0 mm board gap\"}",
         error.VScoreRequiresSquareCorners => "{\"ok\":false,\"error\":\"V-score panels require a rectangular board with square corners; use routed tabs for rounded corners\"}",
+        error.VScorePanelTooSmall => "{\"ok\":false,\"error\":\"JLCPCB V-score panels must be at least 70 x 70 mm; add rows, columns, or rails\"}",
+        error.VScoreLineLimit => "{\"ok\":false,\"error\":\"JLCPCB permits at most 25 V-score lines in either panel direction\"}",
+        error.VScoreBoardTooThin => "{\"ok\":false,\"error\":\"JLCPCB V-score requires a finished board thickness of at least 0.6 mm\"}",
+        error.VScoreCopperClearanceTooSmall => "{\"ok\":false,\"error\":\"JLCPCB V-score requires the board copper-edge rule to be at least 0.4 mm\"}",
         error.SeparationRequiresRectangularBoard => "{\"ok\":false,\"error\":\"panelization currently requires a rectangular or rounded-rectangle board outline\"}",
-        error.RoutedGapTooSmall => "{\"ok\":false,\"error\":\"routed panels require at least a 1 mm board gap\"}",
-        error.InvalidRoutingTab => "{\"ok\":false,\"error\":\"routing tabs must be at least 1 mm and fit the straight section of every board side\"}",
-        error.InvalidMouseBite => "{\"ok\":false,\"error\":\"mouse-bite diameter must be 0.2-1.0 mm with a pitch at least as large as the hole\"}",
-        error.InvalidRailFeature => "{\"ok\":false,\"error\":\"rail holes and fiducials require a selected rail wide and long enough for their configured diameters and clearances\"}",
+        error.RoutedGapTooSmall => "{\"ok\":false,\"error\":\"JLCPCB routed panels require at least a 1.2 mm board gap; 1.6 or 2 mm is recommended\"}",
+        error.RoutedCopperClearanceTooSmall => "{\"ok\":false,\"error\":\"JLCPCB routed edges require the board copper-edge rule to be at least 0.2 mm\"}",
+        error.InvalidRoutingTab => "{\"ok\":false,\"error\":\"JLCPCB mouse-bite tabs must be at least 5 mm and fit the straight section of every board side\"}",
+        error.InvalidMouseBite => "{\"ok\":false,\"error\":\"JLCPCB mouse bites require 0.5-0.8 mm holes, 0.3-0.4 mm edge spacing, five holes per set, and a tab wide enough for the set\"}",
+        error.InvalidRailFeature => "{\"ok\":false,\"error\":\"JLCPCB standard-assembly rails must be at least 5 mm and use 2 mm tooling holes plus 1 mm fiducials with 2 mm mask openings; every selected feature must fit\"}",
         error.OutOfMemory => "{\"ok\":false,\"error\":\"not enough memory to construct the requested panel\"}",
     };
 }
@@ -93,13 +102,13 @@ test "panel query parses independent rail sides and their selected features" {
     http.query("panel_columns", "1");
     http.query("panel_rail_top", "6");
     http.query("panel_rail_right", "0");
-    http.query("panel_rail_bottom", "4");
+    http.query("panel_rail_bottom", "5");
     http.query("panel_rail_left", "0");
     http.query("panel_tooling_top", "1");
     http.query("panel_fiducial_bottom", "1");
     const source = panelize.Source{
         .frame = .{ .ox = 0, .oy = 10 },
-        .width_mm = 20,
+        .width_mm = 32,
         .height_mm = 10,
         .rectangular = true,
         .corner_radius_mm = 0,

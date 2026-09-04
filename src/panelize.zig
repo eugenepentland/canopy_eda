@@ -14,8 +14,9 @@ pub const Method = enum { v_score, routed };
 
 /// Mouse-bite drill geometry for routed tabs.
 pub const MouseBites = struct {
-    diameter_mm: f64 = 0.5,
-    pitch_mm: f64 = 0.6,
+    diameter_mm: f64 = 0.6,
+    /// Centre pitch: JLCPCB's 0.35 mm recommended edge gap plus the hole.
+    pitch_mm: f64 = 0.95,
 };
 
 /// One independently configurable panel rail. A zero width disables the rail;
@@ -32,7 +33,7 @@ pub const Rails = struct {
     right: RailSide = .{},
     bottom: RailSide = .{},
     left: RailSide = .{},
-    tooling_diameter_mm: f64 = 3.0,
+    tooling_diameter_mm: f64 = 2.0,
     fiducial_diameter_mm: f64 = 1.0,
     fiducial_mask_diameter_mm: f64 = 2.0,
 };
@@ -47,7 +48,7 @@ pub const Options = struct {
     /// Independently sized and populated perimeter handling rails.
     rails: Rails = .{},
     /// Width of each un-routed break in a routed board profile.
-    tab_mm: f64 = 3.0,
+    tab_mm: f64 = 5.0,
     mouse_bites: MouseBites = .{},
 };
 
@@ -80,6 +81,9 @@ pub const Source = struct {
     rectangular: bool,
     /// Exact common corner radius; zero means square corners.
     corner_radius_mm: f64,
+    /// Effective finished thickness and copper-edge rule used for JLCPCB DFM.
+    board_thickness_mm: f64 = 1.6,
+    copper_edge_clearance_mm: f64 = 0.4,
 };
 
 /// Fully validated, arena-owned geometry consumed by CAM writers.
@@ -97,10 +101,17 @@ pub const Plan = struct {
 pub const Error = std.mem.Allocator.Error || error{
     InvalidPanelCount,
     InvalidPanelDimension,
+    BoardTooSmall,
+    PanelTooLarge,
     VScoreRequiresZeroGap,
     VScoreRequiresSquareCorners,
+    VScorePanelTooSmall,
+    VScoreLineLimit,
+    VScoreBoardTooThin,
+    VScoreCopperClearanceTooSmall,
     SeparationRequiresRectangularBoard,
     RoutedGapTooSmall,
+    RoutedCopperClearanceTooSmall,
     InvalidRoutingTab,
     InvalidMouseBite,
     InvalidRailFeature,
@@ -116,7 +127,15 @@ pub fn sourceFor(placement: optimizer.Placement) Source {
         .height_mm = rect.h,
         .rectangular = corner_radius != null,
         .corner_radius_mm = corner_radius orelse 0,
+        .board_thickness_mm = boardThicknessMm(placement),
+        .copper_edge_clearance_mm = placement.rules.design.edgeClearance(),
     };
+}
+
+fn boardThicknessMm(placement: optimizer.Placement) f64 {
+    if (placement.rules.physical.board_thickness > 0) return placement.rules.physical.board_thickness;
+    if (placement.rules.physical.stack.board_mm > 0) return placement.rules.physical.stack.board_mm;
+    return 1.6;
 }
 
 /// Validate options and derive repeated frames plus separation artwork.
@@ -126,15 +145,13 @@ pub fn plan(arena: std.mem.Allocator, source: Source, options: Options) Error!Pl
     if (!finiteNonNegative(options.gap_mm)) return error.InvalidPanelDimension;
     try validateRails(options.rails);
     try validateSeparation(source, options);
-    if (!std.math.isFinite(options.tab_mm) or options.tab_mm < 1.0)
-        return error.InvalidRoutingTab;
-    const bite = options.mouse_bites;
-    if (!std.math.isFinite(bite.diameter_mm) or !std.math.isFinite(bite.pitch_mm)) return error.InvalidMouseBite;
-    if (bite.diameter_mm < 0.2 or bite.diameter_mm > 1.0) return error.InvalidMouseBite;
-    if (bite.pitch_mm < bite.diameter_mm) return error.InvalidMouseBite;
-    if (bite.pitch_mm * 4 > options.tab_mm) return error.InvalidMouseBite;
+    try validateRoutedFeatures(options);
 
     if (!(source.width_mm > 0 and source.height_mm > 0)) return error.InvalidPanelDimension;
+    if (!std.math.isFinite(source.board_thickness_mm) or !(source.board_thickness_mm > 0)) return error.InvalidPanelDimension;
+    if (!std.math.isFinite(source.copper_edge_clearance_mm) or source.copper_edge_clearance_mm < 0) return error.InvalidPanelDimension;
+    const minimum_board_mm: f64 = if (source.board_thickness_mm < 0.8) 5 else 3;
+    if (source.width_mm < minimum_board_mm or source.height_mm < minimum_board_mm) return error.BoardTooSmall;
     const shortest_straight = @min(source.width_mm, source.height_mm) - 2 * source.corner_radius_mm;
     if (options.method == .routed and options.tab_mm >= shortest_straight)
         return error.InvalidRoutingTab;
@@ -145,7 +162,8 @@ pub fn plan(arena: std.mem.Allocator, source: Source, options: Options) Error!Pl
     const height = rails.bottom.width_mm + rails.top.width_mm + rows * source.height_mm + (rows - 1) * options.gap_mm;
     if (!std.math.isFinite(width) or !std.math.isFinite(height)) return error.InvalidPanelDimension;
     if (width <= 0 or height <= 0) return error.InvalidPanelDimension;
-    if (width > 1000 or height > 1000) return error.InvalidPanelDimension;
+    if (width > 475 or height > 475) return error.PanelTooLarge;
+    try validateJlcpcbProcess(source, options, width, height);
     try validateRailFeatureSpan(rails, width, height);
 
     var frames: std.ArrayList(export_fab.Frame) = .empty;
@@ -207,14 +225,32 @@ fn finiteNonNegative(value: f64) bool {
     return std.math.isFinite(value) and value >= 0;
 }
 
+fn validateRoutedFeatures(options: Options) Error!void {
+    if (options.method != .routed) return;
+    if (!std.math.isFinite(options.tab_mm) or options.tab_mm < 5.0) return error.InvalidRoutingTab;
+    const bite = options.mouse_bites;
+    if (!std.math.isFinite(bite.diameter_mm) or !std.math.isFinite(bite.pitch_mm)) return error.InvalidMouseBite;
+    if (bite.diameter_mm < 0.5 or bite.diameter_mm > 0.8) return error.InvalidMouseBite;
+    const bite_edge_gap = bite.pitch_mm - bite.diameter_mm;
+    if (bite_edge_gap < 0.3 or bite_edge_gap > 0.4) return error.InvalidMouseBite;
+    if (bite.pitch_mm * 4 + bite.diameter_mm > options.tab_mm) return error.InvalidMouseBite;
+}
+
 const rail_feature_edge_clearance_mm = 0.5;
 const rail_feature_spacing_mm = 1.0;
+const jlcpcb_rail_width_mm = 5.0;
+const jlcpcb_feature_edge_offset_mm = 3.85;
 
 fn validateRails(rails: Rails) Error!void {
     const sides = [_]RailSide{ rails.top, rails.right, rails.bottom, rails.left };
+    var has_tooling = false;
+    var has_fiducial = false;
     for (sides) |side| {
         if (!finiteNonNegative(side.width_mm)) return error.InvalidPanelDimension;
+        if (side.width_mm > 0 and side.width_mm < jlcpcb_rail_width_mm) return error.InvalidRailFeature;
         if ((side.tooling_hole or side.fiducial) and !(side.width_mm > 0)) return error.InvalidRailFeature;
+        has_tooling = has_tooling or side.tooling_hole;
+        has_fiducial = has_fiducial or side.fiducial;
         if (side.tooling_hole and side.width_mm < rails.tooling_diameter_mm + 2 * rail_feature_edge_clearance_mm)
             return error.InvalidRailFeature;
         if (side.fiducial and side.width_mm < rails.fiducial_mask_diameter_mm + 2 * rail_feature_edge_clearance_mm)
@@ -224,8 +260,10 @@ fn validateRails(rails: Rails) Error!void {
         return error.InvalidRailFeature;
     if (!std.math.isFinite(rails.fiducial_diameter_mm) or rails.fiducial_diameter_mm < 0.5 or rails.fiducial_diameter_mm > 3)
         return error.InvalidRailFeature;
-    if (!std.math.isFinite(rails.fiducial_mask_diameter_mm) or rails.fiducial_mask_diameter_mm < rails.fiducial_diameter_mm or rails.fiducial_mask_diameter_mm > 5)
+    if (!std.math.isFinite(rails.fiducial_mask_diameter_mm) or rails.fiducial_mask_diameter_mm < 2 * rails.fiducial_diameter_mm or rails.fiducial_mask_diameter_mm > 5)
         return error.InvalidRailFeature;
+    if (has_tooling and rails.tooling_diameter_mm != 2) return error.InvalidRailFeature;
+    if (has_fiducial and (rails.fiducial_diameter_mm != 1 or rails.fiducial_mask_diameter_mm != 2)) return error.InvalidRailFeature;
 }
 
 fn validateRailFeatureSpan(rails: Rails, width: f64, height: f64) Error!void {
@@ -237,9 +275,9 @@ fn validateRailFeatureSpan(rails: Rails, width: f64, height: f64) Error!void {
 
 fn validateSideSpan(side: RailSide, span: f64, rails: Rails) Error!void {
     const slot = span / 8;
-    if (side.tooling_hole and slot < rails.tooling_diameter_mm / 2 + rail_feature_edge_clearance_mm)
+    if (side.tooling_hole and slot < @max(jlcpcb_feature_edge_offset_mm, rails.tooling_diameter_mm / 2 + rail_feature_edge_clearance_mm))
         return error.InvalidRailFeature;
-    if (side.fiducial and 2 * slot < rails.fiducial_mask_diameter_mm / 2 + rail_feature_edge_clearance_mm)
+    if (side.fiducial and 2 * slot < @max(jlcpcb_feature_edge_offset_mm, rails.fiducial_mask_diameter_mm / 2 + rail_feature_edge_clearance_mm))
         return error.InvalidRailFeature;
     if (side.tooling_hole and side.fiducial and slot < (rails.tooling_diameter_mm + rails.fiducial_mask_diameter_mm) / 2 + rail_feature_spacing_mm)
         return error.InvalidRailFeature;
@@ -249,7 +287,21 @@ fn validateSeparation(source: Source, options: Options) Error!void {
     if (!source.rectangular) return error.SeparationRequiresRectangularBoard;
     if (options.method == .v_score and options.gap_mm != 0) return error.VScoreRequiresZeroGap;
     if (options.method == .v_score and source.corner_radius_mm > 0) return error.VScoreRequiresSquareCorners;
-    if (options.method == .routed and options.gap_mm < 1.0) return error.RoutedGapTooSmall;
+    if (options.method == .routed and options.gap_mm < 1.2) return error.RoutedGapTooSmall;
+}
+
+fn validateJlcpcbProcess(source: Source, options: Options, width: f64, height: f64) Error!void {
+    switch (options.method) {
+        .v_score => {
+            if (width < 70 or height < 70) return error.VScorePanelTooSmall;
+            if (source.board_thickness_mm < 0.6) return error.VScoreBoardTooThin;
+            if (source.copper_edge_clearance_mm < 0.4) return error.VScoreCopperClearanceTooSmall;
+            const vertical_lines = @as(u16, options.columns - 1) + @intFromBool(options.rails.left.width_mm > 0) + @intFromBool(options.rails.right.width_mm > 0);
+            const horizontal_lines = @as(u16, options.rows - 1) + @intFromBool(options.rails.bottom.width_mm > 0) + @intFromBool(options.rails.top.width_mm > 0);
+            if (vertical_lines > 25 or horizontal_lines > 25) return error.VScoreLineLimit;
+        },
+        .routed => if (source.copper_edge_clearance_mm < 0.2) return error.RoutedCopperClearanceTooSmall,
+    }
 }
 
 /// Return the common radius for a square/rounded axis-aligned rectangle, or
@@ -363,20 +415,20 @@ fn appendRailFeatures(
     height: f64,
 ) !void {
     try appendRailSide(holes, fiducials, arena, rails.bottom, rails.tooling_diameter_mm, .{
-        .tooling = .{ .{ width / 8, rails.bottom.width_mm / 2 }, .{ 7 * width / 8, rails.bottom.width_mm / 2 } },
-        .fiducial = .{ .{ width / 4, rails.bottom.width_mm / 2 }, .{ 3 * width / 4, rails.bottom.width_mm / 2 } },
+        .tooling = .{ .{ width / 8, jlcpcb_feature_edge_offset_mm }, .{ 7 * width / 8, jlcpcb_feature_edge_offset_mm } },
+        .fiducial = .{ .{ width / 4, jlcpcb_feature_edge_offset_mm }, .{ 3 * width / 4, jlcpcb_feature_edge_offset_mm } },
     });
     try appendRailSide(holes, fiducials, arena, rails.top, rails.tooling_diameter_mm, .{
-        .tooling = .{ .{ width / 8, height - rails.top.width_mm / 2 }, .{ 7 * width / 8, height - rails.top.width_mm / 2 } },
-        .fiducial = .{ .{ width / 4, height - rails.top.width_mm / 2 }, .{ 3 * width / 4, height - rails.top.width_mm / 2 } },
+        .tooling = .{ .{ width / 8, height - jlcpcb_feature_edge_offset_mm }, .{ 7 * width / 8, height - jlcpcb_feature_edge_offset_mm } },
+        .fiducial = .{ .{ width / 4, height - jlcpcb_feature_edge_offset_mm }, .{ 3 * width / 4, height - jlcpcb_feature_edge_offset_mm } },
     });
     try appendRailSide(holes, fiducials, arena, rails.left, rails.tooling_diameter_mm, .{
-        .tooling = .{ .{ rails.left.width_mm / 2, height / 8 }, .{ rails.left.width_mm / 2, 7 * height / 8 } },
-        .fiducial = .{ .{ rails.left.width_mm / 2, height / 4 }, .{ rails.left.width_mm / 2, 3 * height / 4 } },
+        .tooling = .{ .{ jlcpcb_feature_edge_offset_mm, height / 8 }, .{ jlcpcb_feature_edge_offset_mm, 7 * height / 8 } },
+        .fiducial = .{ .{ jlcpcb_feature_edge_offset_mm, height / 4 }, .{ jlcpcb_feature_edge_offset_mm, 3 * height / 4 } },
     });
     try appendRailSide(holes, fiducials, arena, rails.right, rails.tooling_diameter_mm, .{
-        .tooling = .{ .{ width - rails.right.width_mm / 2, height / 8 }, .{ width - rails.right.width_mm / 2, 7 * height / 8 } },
-        .fiducial = .{ .{ width - rails.right.width_mm / 2, height / 4 }, .{ width - rails.right.width_mm / 2, 3 * height / 4 } },
+        .tooling = .{ .{ width - jlcpcb_feature_edge_offset_mm, height / 8 }, .{ width - jlcpcb_feature_edge_offset_mm, 7 * height / 8 } },
+        .fiducial = .{ .{ width - jlcpcb_feature_edge_offset_mm, height / 4 }, .{ width - jlcpcb_feature_edge_offset_mm, 3 * height / 4 } },
     });
 }
 
@@ -423,6 +475,14 @@ fn arcCount(profile: []const Segment) usize {
     return count;
 }
 
+fn holeCountOfDiameter(holes: []const Hole, diameter: f64) usize {
+    var count: usize = 0;
+    for (holes) |hole| if (hole.diameter == diameter) {
+        count += 1;
+    };
+    return count;
+}
+
 fn testPlacement() optimizer.Placement {
     return .{
         .parts = &.{},
@@ -438,6 +498,7 @@ fn testPlacement() optimizer.Placement {
         .maxy = 10,
         .generated = false,
         .board_rect = .{ .minx = 0, .miny = 0, .w = 20, .h = 10 },
+        .rules = .{ .design = .{ .edge = .{ .copper = 0.4, .component = 0.2 } } },
     };
 }
 
@@ -455,10 +516,10 @@ test "a routed panel repeats frames inside rails and creates tab mouse-bites" {
 test "a V-score panel has zero board gaps and full-span score guides" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
-    const p = try plan(arena_state.allocator(), sourceFor(testPlacement()), .{ .rows = 2, .columns = 2, .method = .v_score, .gap_mm = 0 });
-    try std.testing.expectApproxEqAbs(@as(f64, 50), p.width_mm, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 30), p.height_mm, 1e-9);
-    try std.testing.expectEqual(@as(usize, 6), p.scores.len);
+    const p = try plan(arena_state.allocator(), sourceFor(testPlacement()), .{ .rows = 6, .columns = 3, .method = .v_score, .gap_mm = 0 });
+    try std.testing.expectApproxEqAbs(@as(f64, 70), p.width_mm, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 70), p.height_mm, 1e-9);
+    try std.testing.expectEqual(@as(usize, 11), p.scores.len);
     try std.testing.expectEqual(@as(usize, 0), p.features.npth_holes.len);
 }
 
@@ -468,26 +529,28 @@ test "asymmetric rails place paired tooling holes and fiducials only on selected
     const p = try plan(arena_state.allocator(), sourceFor(testPlacement()), .{
         .rows = 1,
         .columns = 2,
-        .method = .v_score,
-        .gap_mm = 0,
+        .method = .routed,
+        .gap_mm = 2,
         .rails = .{
-            .top = .{ .width_mm = 4, .fiducial = true },
+            .top = .{ .width_mm = 5, .fiducial = true },
             .right = .{ .width_mm = 0 },
-            .bottom = .{ .width_mm = 6, .tooling_hole = true },
+            .bottom = .{ .width_mm = 5, .tooling_hole = true },
             .left = .{ .width_mm = 0 },
         },
     });
-    try std.testing.expectApproxEqAbs(@as(f64, 40), p.width_mm, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 42), p.width_mm, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 20), p.height_mm, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 16), p.frames[0].oy, 1e-9);
-    try std.testing.expectEqual(@as(usize, 2), p.features.npth_holes.len);
-    try std.testing.expectApproxEqAbs(@as(f64, 3), p.features.npth_holes[0].y, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 5), p.features.npth_holes[0].x, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 35), p.features.npth_holes[1].x, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 15), p.frames[0].oy, 1e-9);
+    try std.testing.expectEqual(@as(usize, 2), holeCountOfDiameter(p.features.npth_holes, 2));
+    const first_tooling = p.features.npth_holes[p.features.npth_holes.len - 2];
+    const second_tooling = p.features.npth_holes[p.features.npth_holes.len - 1];
+    try std.testing.expectApproxEqAbs(@as(f64, 3.85), first_tooling.y, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 5.25), first_tooling.x, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 36.75), second_tooling.x, 1e-9);
     try std.testing.expectEqual(@as(usize, 2), p.features.fiducials.len);
-    try std.testing.expectApproxEqAbs(@as(f64, 18), p.features.fiducials[0].y, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 10), p.features.fiducials[0].x, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 30), p.features.fiducials[1].x, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 16.15), p.features.fiducials[0].y, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 10.5), p.features.fiducials[0].x, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 31.5), p.features.fiducials[1].x, 1e-9);
 }
 
 test "opposite rail selections create four or eight tooling holes and fiducials" {
@@ -497,8 +560,8 @@ test "opposite rail selections create four or eight tooling holes and fiducials"
     const horizontal = try plan(arena, sourceFor(testPlacement()), .{
         .rows = 1,
         .columns = 2,
-        .method = .v_score,
-        .gap_mm = 0,
+        .method = .routed,
+        .gap_mm = 2,
         .rails = .{
             .top = .{ .tooling_hole = true, .fiducial = true },
             .right = .{ .width_mm = 0 },
@@ -506,18 +569,18 @@ test "opposite rail selections create four or eight tooling holes and fiducials"
             .left = .{ .width_mm = 0 },
         },
     });
-    try std.testing.expectEqual(@as(usize, 4), horizontal.features.npth_holes.len);
+    try std.testing.expectEqual(@as(usize, 4), holeCountOfDiameter(horizontal.features.npth_holes, 2));
     try std.testing.expectEqual(@as(usize, 4), horizontal.features.fiducials.len);
 
     const all_sides = RailSide{ .tooling_hole = true, .fiducial = true };
     const all = try plan(arena, sourceFor(testPlacement()), .{
         .rows = 2,
         .columns = 2,
-        .method = .v_score,
-        .gap_mm = 0,
+        .method = .routed,
+        .gap_mm = 2,
         .rails = .{ .top = all_sides, .right = all_sides, .bottom = all_sides, .left = all_sides },
     });
-    try std.testing.expectEqual(@as(usize, 8), all.features.npth_holes.len);
+    try std.testing.expectEqual(@as(usize, 8), holeCountOfDiameter(all.features.npth_holes, 2));
     try std.testing.expectEqual(@as(usize, 8), all.features.fiducials.len);
 }
 
@@ -550,4 +613,43 @@ test "separation rejects a non-rectangular board and unsafe routing settings" {
     try std.testing.expectError(error.RoutedGapTooSmall, plan(arena_state.allocator(), sourceFor(testPlacement()), .{ .gap_mm = 0.5 }));
     try std.testing.expectError(error.VScoreRequiresZeroGap, plan(arena_state.allocator(), sourceFor(testPlacement()), .{ .method = .v_score }));
     try std.testing.expectError(error.InvalidRailFeature, plan(arena_state.allocator(), sourceFor(testPlacement()), .{ .rails = .{ .top = .{ .width_mm = 2, .tooling_hole = true } } }));
+}
+
+// spec: export_gerber - JLCPCB-safe panel planning enforces rigid-FR4 board and panel sizes, routed copper/gap/tab/mouse-bite limits, V-score size/thickness/copper/line limits, 5 mm rails, 2 mm tooling holes, and 1 mm fiducials with 2 mm mask openings 3.85 mm from the panel edge
+test "JLCPCB panel constraints reject out-of-capability fabrication geometry" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const base = Source{ .frame = .{ .ox = 0, .oy = 30 }, .width_mm = 30, .height_mm = 30, .rectangular = true, .corner_radius_mm = 0 };
+
+    const compliant = try plan(arena, base, .{ .rows = 2, .columns = 2, .method = .v_score, .gap_mm = 0 });
+    try std.testing.expectApproxEqAbs(@as(f64, 70), compliant.width_mm, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 70), compliant.height_mm, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), compliant.options.rails.tooling_diameter_mm, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), compliant.options.rails.fiducial_diameter_mm, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), compliant.options.rails.fiducial_mask_diameter_mm, 1e-9);
+
+    var changed = base;
+    changed.width_mm = 2.9;
+    try std.testing.expectError(error.BoardTooSmall, plan(arena, changed, .{}));
+    changed = base;
+    changed.board_thickness_mm = 0.4;
+    try std.testing.expectError(error.VScoreBoardTooThin, plan(arena, changed, .{ .rows = 2, .columns = 2, .method = .v_score, .gap_mm = 0 }));
+    changed = base;
+    changed.copper_edge_clearance_mm = 0.39;
+    try std.testing.expectError(error.VScoreCopperClearanceTooSmall, plan(arena, changed, .{ .rows = 2, .columns = 2, .method = .v_score, .gap_mm = 0 }));
+    changed.copper_edge_clearance_mm = 0.19;
+    try std.testing.expectError(error.RoutedCopperClearanceTooSmall, plan(arena, changed, .{}));
+    try std.testing.expectError(error.RoutedGapTooSmall, plan(arena, base, .{ .gap_mm = 1.19 }));
+    try std.testing.expectError(error.InvalidRoutingTab, plan(arena, base, .{ .tab_mm = 4.9 }));
+    try std.testing.expectError(error.InvalidMouseBite, plan(arena, base, .{ .mouse_bites = .{ .diameter_mm = 0.6, .pitch_mm = 0.89 } }));
+    try std.testing.expectError(error.InvalidRailFeature, plan(arena, base, .{ .rails = .{ .top = .{ .width_mm = 4.9 } } }));
+    try std.testing.expectError(error.InvalidRailFeature, plan(arena, base, .{ .rails = .{ .top = .{ .tooling_hole = true }, .tooling_diameter_mm = 3 } }));
+    try std.testing.expectError(error.InvalidRailFeature, plan(arena, base, .{ .rails = .{ .top = .{ .fiducial = true }, .fiducial_diameter_mm = 1.2, .fiducial_mask_diameter_mm = 2.4 } }));
+    try std.testing.expectError(error.VScorePanelTooSmall, plan(arena, base, .{ .rows = 1, .columns = 1, .method = .v_score, .gap_mm = 0 }));
+
+    const tall = Source{ .frame = .{ .ox = 0, .oy = 70 }, .width_mm = 3, .height_mm = 70, .rectangular = true, .corner_radius_mm = 0 };
+    const no_rails = Rails{ .top = .{ .width_mm = 0 }, .right = .{ .width_mm = 0 }, .bottom = .{ .width_mm = 0 }, .left = .{ .width_mm = 0 } };
+    try std.testing.expectError(error.VScoreLineLimit, plan(arena, tall, .{ .rows = 1, .columns = 27, .method = .v_score, .gap_mm = 0, .rails = no_rails }));
+    try std.testing.expectError(error.PanelTooLarge, plan(arena, base, .{ .rows = 1, .columns = 16 }));
 }

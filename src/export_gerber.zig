@@ -3815,7 +3815,8 @@ test "panel Gerber repeats copper and emits the rail-framed profile" {
 
     const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1, .h = 1 }};
     var parts = [_]optimizer.Part{.{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 5, .y = 5 }};
-    const placement = testPlacement(&parts, &.{});
+    var placement = testPlacement(&parts, &.{});
+    placement.rules.design.edge.copper = 0.4;
     const panel = try panelize.plan(arena, panelize.sourceFor(placement), .{ .rows = 1, .columns = 2 });
 
     var copper: std.Io.Writer.Allocating = .init(arena);
@@ -3835,6 +3836,7 @@ test "routed panel Gerber preserves rounded corners as native arcs" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
     var placement = testPlacement(&.{}, &.{});
+    placement.rules.design.edge.copper = 0.4;
     const square = [_][2]f64{ .{ 0, 0 }, .{ 20, 0 }, .{ 20, 10 }, .{ 0, 10 } };
     const radii = [_]f64{ 2, 2, 2, 2 };
     const fillet = try outline.filletPath(arena, &square, &radii, 0.01);
@@ -3853,7 +3855,8 @@ test "panel rail fiducial pairs emit top copper and mask flashes only" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
-    const placement = testPlacement(&.{}, &.{});
+    var placement = testPlacement(&.{}, &.{});
+    placement.rules.design.edge.copper = 0.4;
     const panel = try panelize.plan(arena, panelize.sourceFor(placement), .{
         .rows = 1,
         .columns = 1,
@@ -3863,20 +3866,20 @@ test "panel rail fiducial pairs emit top copper and mask flashes only" {
     var top_copper: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&top_copper.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, .{ .function = "Copper,L1,Top", .panel = &panel });
     try testing.expect(std.mem.indexOf(u8, top_copper.written(), "%TA.AperFunction,FiducialPad,Global*%") != null);
-    try testing.expect(std.mem.indexOf(u8, top_copper.written(), "X7500000Y17500000D03*") != null);
-    try testing.expect(std.mem.indexOf(u8, top_copper.written(), "X22500000Y17500000D03*") != null);
+    try testing.expect(std.mem.indexOf(u8, top_copper.written(), "X7500000Y16150000D03*") != null);
+    try testing.expect(std.mem.indexOf(u8, top_copper.written(), "X22500000Y16150000D03*") != null);
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, top_copper.written(), "D03*"));
 
     var top_mask: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&top_mask.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top", .panel = &panel });
     try testing.expect(std.mem.indexOf(u8, top_mask.written(), "%ADD10C,2.000000*%") != null);
-    try testing.expect(std.mem.indexOf(u8, top_mask.written(), "X7500000Y17500000D03*") != null);
-    try testing.expect(std.mem.indexOf(u8, top_mask.written(), "X22500000Y17500000D03*") != null);
+    try testing.expect(std.mem.indexOf(u8, top_mask.written(), "X7500000Y16150000D03*") != null);
+    try testing.expect(std.mem.indexOf(u8, top_mask.written(), "X22500000Y16150000D03*") != null);
 
     var bottom_copper: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&bottom_copper.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .bottom }, .{ .function = "Copper,L4,Bot", .panel = &panel });
-    try testing.expect(std.mem.indexOf(u8, bottom_copper.written(), "X7500000Y17500000D03*") == null);
-    try testing.expect(std.mem.indexOf(u8, bottom_copper.written(), "X22500000Y17500000D03*") == null);
+    try testing.expect(std.mem.indexOf(u8, bottom_copper.written(), "X7500000Y16150000D03*") == null);
+    try testing.expect(std.mem.indexOf(u8, bottom_copper.written(), "X22500000Y16150000D03*") == null);
 }
 
 // spec: export_gerber - a V-score panel ships its score centre lines as an explicit fabrication drawing
@@ -3884,12 +3887,13 @@ test "V-score fabrication drawing carries full-span score lines" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
-    const placement = testPlacement(&.{}, &.{});
-    const panel = try panelize.plan(arena, panelize.sourceFor(placement), .{ .rows = 1, .columns = 2, .method = .v_score, .gap_mm = 0 });
+    var placement = testPlacement(&.{}, &.{});
+    placement.rules.design.edge.copper = 0.4;
+    const panel = try panelize.plan(arena, panelize.sourceFor(placement), .{ .rows = 6, .columns = 3, .method = .v_score, .gap_mm = 0 });
     var out: std.Io.Writer.Allocating = .init(arena);
     try writePanelVscore(&out.writer, arena, &panel, .{ .function = "Other,Drawing" });
     try testing.expect(std.mem.indexOf(u8, out.written(), "G04 V-SCORE CENTER LINES") != null);
-    try testing.expect(std.mem.indexOf(u8, out.written(), "X25000000Y0D02*\nX25000000Y20000000D01*") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "X25000000Y0D02*\nX25000000Y70000000D01*") != null);
 
     const layers = try planLayers(arena, placement);
     var job: std.Io.Writer.Allocating = .init(arena);
@@ -3898,7 +3902,7 @@ test "V-score fabrication drawing carries full-span score lines" {
         .height_mm = panel.height_mm,
         .extras = &.{.{ .suffix = "V-CUT.gbr", .function = "Other,Drawing" }},
     });
-    try testing.expect(std.mem.indexOf(u8, job.written(), "\"X\": 50.000, \"Y\": 20.000") != null);
+    try testing.expect(std.mem.indexOf(u8, job.written(), "\"X\": 70.000, \"Y\": 70.000") != null);
     try testing.expect(std.mem.indexOf(u8, job.written(), "\"Path\": \"demo-V-CUT.gbr\"") != null);
 }
 

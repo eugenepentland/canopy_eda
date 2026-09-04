@@ -2514,13 +2514,41 @@ test "panel export controls expose paired per-side rail tooling holes and fiduci
         "fab-panel-fiducial-",
         "> 2 holes</label>",
         "> 2 fiducials</label>",
-        "tooling:[[pw/8,top/2],[7*pw/8,top/2]]",
-        "fiducial:[[pw/4,top/2],[3*pw/4,top/2]]",
-        "toolingCount+\" tooling holes · \"+fiducialCount+\" fiducials\"",
-        "Set any rail width to 0 to omit that side.",
+        "tooling:[[pw/8,jo],[7*pw/8,jo]]",
+        "fiducial:[[pw/4,jo],[3*pw/4,jo]]",
+        "toolingCount+\" tooling holes · \"+fiducialCount+\" fiducials · \"",
+        "JLCPCB-safe panel profile.",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_layout_css, ".fab-rail-side{") != null);
+}
+
+// spec: Web Server - The fabrication panel uses JLCPCB-safe defaults and input limits for 5 mm rails, 2 mm tooling holes, 1 mm fiducials with 2 mm mask openings, 5 mm routed tabs, 0.6 mm mouse bites, 0.35 mm bite-edge gaps, and 3.85 mm rail-feature offsets
+test "panel export exposes JLCPCB-safe fabrication defaults" {
+    const markers = [_][]const u8{
+        "toolingDiameter:2",
+        "fiducialDiameter:1",
+        "fiducialMask:2",
+        "tab:5",
+        "bite:0.6",
+        "biteGap:0.35",
+        "var jo=3.85",
+        "panel_bite_gap=",
+        "min=\"5\" max=\"30\"",
+        "min=\"0.5\" max=\"0.8\"",
+        "min=\"0.3\" max=\"0.4\"",
+        "JLCPCB geometry-ready",
+        "V-score is limited to 25 lines per axis",
+        "routed edges need copper-edge clearance ≥0.2 mm",
+        "railsTB:true,railsLR:false",
+        "toolingTop:true,toolingRight:true,toolingBottom:true,toolingLeft:true",
+        "fiducialTop:true,fiducialRight:true,fiducialBottom:true,fiducialLeft:true",
+        "V-score (Standard Assembly only)",
+        "board is below the ",
+        "panel span is too short for corner rail features",
+        "mouse-bite set does not fit its tab",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
 }
 
 // spec: Web Server - The panel export shows a live dimensioned preview that repeats the actual board outline inside its configured rails and marks scores, tooling holes and fiducials
