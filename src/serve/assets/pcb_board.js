@@ -12418,13 +12418,21 @@ var fabExportKind="fabrication";
 var fabPanel={enabled:false,rows:2,columns:2,method:"routed",gap:2,railsTB:true,railsLR:true,railTop:5,railRight:5,railBottom:5,railLeft:5,toolingTop:false,toolingRight:false,toolingBottom:false,toolingLeft:false,fiducialTop:false,fiducialRight:false,fiducialBottom:false,fiducialLeft:false,toolingDiameter:3,fiducialDiameter:1,fiducialMask:2,tab:3,bite:0.5};
 function fabPanelRailEnabled(side){return side==="Top"||side==="Bottom"?fabPanel.railsTB:fabPanel.railsLR;}
 function fabPanelRailWidth(side){return fabPanelRailEnabled(side)?fabPanel["rail"+side]:0;}
+function fabPanelSquareRectangle(points,box){
+ if(!points)return true;if(points.length!==4)return false;
+ var eps=.000001,mask=0;
+ for(var i=0;i<points.length;i++){var p=points[i],left=Math.abs(p[0]-box.x)<eps,right=Math.abs(p[0]-(box.x+box.w))<eps,top=Math.abs(p[1]-box.y)<eps,bottom=Math.abs(p[1]-(box.y+box.h))<eps;
+  var bit=left&&top?1:right&&top?2:right&&bottom?4:left&&bottom?8:0;if(!bit||(mask&bit))return false;mask|=bit;}
+ return mask===15;}
 function fabPanelShape(){
- var live=PCB.outline,authored=live?null:authoredOutlineSeed(),box=live||authored||PCB.board,points=null;
+ var live=PCB.outline,authored=live?null:authoredOutlineSeed(),source=live||authored,box=source||PCB.board,points=null,vscore=true;
  if(!box||!(box.w>0)||!(box.h>0))return null;
- if(live||authored){var geom=outlineFilletGeom(live||authored);if(geom&&geom.points.length>=3)points=geom.points;}
- if(!points&&PCB.board_poly&&PCB.board_poly.length>=3)points=PCB.board_poly;
+ if(source){var geom=outlineFilletGeom(source);if(geom&&geom.points.length>=3)points=geom.points;
+  var nativePoints=geom&&geom.nominal&&geom.nominal.length?geom.nominal:outlinePtsOf(source),hasCurves=!!(geom&&geom.arcs&&geom.arcs.length);
+  vscore=!hasCurves&&fabPanelSquareRectangle(nativePoints||points,box);}
+ if(!points&&PCB.board_poly&&PCB.board_poly.length>=3){points=PCB.board_poly;vscore=fabPanelSquareRectangle(points,box);}
  if(!points)points=[[box.x,box.y],[box.x+box.w,box.y],[box.x+box.w,box.y+box.h],[box.x,box.y+box.h]];
- return {w:box.w,h:box.h,points:points.map(function(p){return [p[0]-box.x,box.y+box.h-p[1]];})};}
+ return {w:box.w,h:box.h,vscore:vscore,points:points.map(function(p){return [p[0]-box.x,box.y+box.h-p[1]];})};}
 function fabPanelPreviewNode(svg,tag,attrs){
  var node=document.createElementNS(NS,tag);Object.keys(attrs).forEach(function(k){node.setAttribute(k,attrs[k]);});svg.appendChild(node);return node;}
 function fabPanelPreviewFeature(svg,x,y,d,kind){
@@ -12528,6 +12536,7 @@ function fabRenderReport(rep){
    '<label>Rows <input id="fab-panel-rows" type="number" min="1" max="100" step="1" value="'+fabPanel.rows+'"></label>'+
    '<label>Separation <select id="fab-panel-method"><option value="routed"'+(fabPanel.method==='routed'?' selected':'')+'>Routed tabs + mouse bites</option><option value="v_score"'+(fabPanel.method==='v_score'?' selected':'')+'>V-score</option></select></label>'+
    '<label>Board gap <span><input id="fab-panel-gap" type="number" min="0" max="20" step="0.1" value="'+fabPanel.gap+'"> mm</span></label>'+
+   '<div class="fab-panel-constraint" id="fab-panel-vscore-constraint" role="status" hidden>V-score is unavailable for this rounded or non-rectangular outline. Routed tabs are required so the router can follow the board edge.</div>'+
    '<div class="fab-rail-pairs"><label><input id="fab-panel-rails-tb" type="checkbox"'+(fabPanel.railsTB?' checked':'')+'> Top + bottom rails</label><label><input id="fab-panel-rails-lr" type="checkbox"'+(fabPanel.railsLR?' checked':'')+'> Left + right rails</label></div>'+
    '<label class="fab-routed-field">Tab width <span><input id="fab-panel-tab" type="number" min="1" step="0.1" value="'+fabPanel.tab+'"> mm</span></label>'+
    '<label class="fab-routed-field">Mouse bites <span><input id="fab-panel-bite" type="number" min="0.2" max="1" step="0.05" value="'+fabPanel.bite+'"> mm</span></label>'+railRow('top','Top rail')+railRow('right','Right rail')+railRow('bottom','Bottom rail')+railRow('left','Left rail')+
@@ -12550,7 +12559,11 @@ function fabOpenModal(rep){
  body.innerHTML=fabRenderReport(rep);
  var panelEnable=document.getElementById("fab-panel-enable"),panelFields=document.getElementById("fab-panel-fields");
  function panelSyncMethod(){var method=document.getElementById("fab-panel-method"),gap=document.getElementById("fab-panel-gap");
-  if(!method)return;fabPanel.method=method.value;var scored=method.value==="v_score";
+  if(!method)return;var shape=fabPanelShape(),allowed=!!(shape&&shape.vscore),option=method.querySelector('option[value="v_score"]'),notice=document.getElementById("fab-panel-vscore-constraint");
+  if(option){option.disabled=!allowed;option.title=allowed?"":"Rounded and non-rectangular boards require routed tabs";}
+  if(notice)notice.hidden=allowed;
+  if(!allowed&&method.value==="v_score")method.value="routed";
+  fabPanel.method=method.value;var scored=method.value==="v_score";
   if(gap){gap.disabled=scored;if(scored){gap.value="0";fabPanel.gap=0;}else if(Number(gap.value)<1){gap.value="2";fabPanel.gap=2;}}
   body.querySelectorAll(".fab-routed-field").forEach(function(el){el.hidden=scored;});fabPanelPreview();}
  if(panelEnable)panelEnable.addEventListener("change",function(){fabPanel.enabled=panelEnable.checked;if(panelFields)panelFields.hidden=!fabPanel.enabled;fabPanelPreview();});

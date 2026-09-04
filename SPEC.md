@@ -7004,6 +7004,7 @@ is what makes the predicate exact rather than approximately right.
 
 ## Web Server
 
+- The panel export disables V-score for rounded, curved, or non-rectangular outlines, selects routed tabs instead, and explains the constraint before export
 - The panel export groups rail presence into one top-and-bottom toggle and one left-and-right toggle while preserving each side's configured width and features
 - The panel export shows a live dimensioned preview that repeats the actual board outline inside its configured rails and marks scores, tooling holes and fiducials
 - The panel export controls independently size every rail side and select its NPTH tooling hole and top-copper fiducial dimensions

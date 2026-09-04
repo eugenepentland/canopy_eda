@@ -2522,7 +2522,7 @@ test "panel export controls expose per-side rails tooling holes and fiducials" {
 test "panel export renders a live board-outline preview" {
     const markers = [_][]const u8{
         "function fabPanelShape()",
-        "outlineFilletGeom(live||authored)",
+        "outlineFilletGeom(source)",
         "function fabPanelPreview()",
         "fab-panel-preview-svg",
         "Live panel outline preview",
@@ -2532,6 +2532,21 @@ test "panel export renders a live board-outline preview" {
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
     try std.testing.expect(std.mem.indexOf(u8, pcb_layout_css, ".fab-panel-preview svg{") != null);
+}
+
+// spec: Web Server - The panel export disables V-score for rounded, curved, or non-rectangular outlines, selects routed tabs instead, and explains the constraint before export
+test "panel export prevents incompatible V-score downloads" {
+    const markers = [_][]const u8{
+        "function fabPanelSquareRectangle(points,box)",
+        "vscore:vscore",
+        "option[value=\"v_score\"]",
+        "option.disabled=!allowed",
+        "if(!allowed&&method.value===\"v_score\")method.value=\"routed\"",
+        "V-score is unavailable for this rounded or non-rectangular outline.",
+        "fab-panel-vscore-constraint",
+    };
+    for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pcb_layout_css, ".fab-panel-constraint{") != null);
 }
 
 // spec: Web Server - The panel export groups rail presence into one top-and-bottom toggle and one left-and-right toggle while preserving each side's configured width and features
