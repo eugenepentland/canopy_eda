@@ -15,6 +15,7 @@ const ids = @import("../eval/ids.zig");
 const json_writer = @import("../json_writer.zig");
 const export_kicad = @import("../export_kicad.zig");
 const netlist_mod = @import("../export_kicad_netlist.zig");
+const net_names = @import("../net_name.zig");
 
 const FlatInstance = export_kicad.FlatInstance;
 const FlatNet = export_kicad.FlatNet;
@@ -122,10 +123,7 @@ pub fn instancePinCount(
 // ── Flattened ref helpers ───────────────────────────────────────────────
 
 /// The sub-block-relative leaf of a flattened ref-des ("ldo/U2" → "U2").
-fn leafOf(ref: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, ref, '/')) |i| return ref[i + 1 ..];
-    return ref;
-}
+const leafOf = net_names.leaf;
 
 /// ASCII case-insensitive slice equality (the ref-matching convention the
 /// PCB tools use).
@@ -303,8 +301,8 @@ fn resolveMergedNet(
     var leaf_hits: std.ArrayList(usize) = .empty;
     defer leaf_hits.deinit(allocator);
     for (raw.items, 0..) |rn, ri| {
-        const slash = std.mem.lastIndexOfScalar(u8, rn.name, '/') orelse continue;
-        if (!std.mem.eql(u8, rn.name[slash + 1 ..], query)) continue;
+        if (net_names.parent(rn.name) == null) continue;
+        if (!std.mem.eql(u8, net_names.leaf(rn.name), query)) continue;
         try leaf_hits.append(allocator, ri);
     }
     if (leaf_hits.items.len == 1) {

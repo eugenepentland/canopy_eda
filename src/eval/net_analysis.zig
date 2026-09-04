@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const env_mod = @import("env.zig");
+const net_name = @import("../net_name.zig");
 const DesignBlock = env_mod.DesignBlock;
 
 // ── Ground-net name vocabulary ───────────────────────────────────────────
@@ -162,17 +163,39 @@ pub fn baseNetName(name: []const u8) []const u8 {
     return name;
 }
 
+/// True when `name` carries a `.subnet` suffix at all — the predicate half of
+/// `baseNetName`, for the callers that SKIP a per-pin bypass stub rather than
+/// collapse it. Shares the collapse's first-`.` rule by construction, so a
+/// caller cannot skip a name the collapse would have kept (or vice versa).
+pub fn isSubNetName(name: []const u8) bool {
+    return baseNetName(name).len != name.len;
+}
+
+/// The `<REF>` field of a per-pin bypass-stub name (`VDD.U1.IN` → `U1`), or
+/// null when the name carries no such field. Reads the SAME first-`.` boundary
+/// `baseNetName` collapses at, applied twice.
+///
+/// This is the DISPLAY-side reading, and it deliberately disagrees with
+/// `kicad_sch/stub.split`, which anchors on the LAST two dots: on a rail whose
+/// own name contains a dot the structural fold reads `3.3V.U1.5` as host `U1`
+/// while this reads `3V`. The structural fold is the authority for renaming a
+/// net; this only hints which hub the schematic should draw a stub against, and
+/// matches the first-dot rule the rest of the display path already uses.
+pub fn subNetHostRef(name: []const u8) ?[]const u8 {
+    const rail = baseNetName(name);
+    if (rail.len == name.len) return null;
+    const rest = name[rail.len + 1 ..];
+    const host = baseNetName(rest);
+    return if (host.len == rest.len) null else host;
+}
+
 /// Return the leading character of a ref-des with any `sub-block/` namespace
 /// prefix stripped (`ldo/C136` → 'C'). Sub-block parts get namespaced after
 /// ref-des renaming, so a naive `ref_des[0]` would see `l`/`a`/etc. instead
 /// of the local component class.
 pub fn refDesLocalPrefix(ref_des: []const u8) u8 {
-    if (ref_des.len == 0) return 0;
-    if (std.mem.lastIndexOfScalar(u8, ref_des, '/')) |i| {
-        if (i + 1 < ref_des.len) return ref_des[i + 1];
-        return 0;
-    }
-    return ref_des[0];
+    const local = net_name.leaf(ref_des);
+    return if (local.len == 0) 0 else local[0];
 }
 
 /// Walk a sub-block path like `ldo/VOUT` or `adc1/VLOGIC` into the block

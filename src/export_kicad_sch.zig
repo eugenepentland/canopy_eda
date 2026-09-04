@@ -56,6 +56,7 @@ const vendor = @import("kicad_sch/vendor.zig");
 const verify = @import("kicad_sch/verify.zig");
 const sym_library = @import("kicad_sym/library.zig");
 const lib_limits = @import("lib_limits.zig");
+const net_name = @import("net_name.zig");
 
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
@@ -1095,8 +1096,8 @@ const decouplePinFromOrigin = decouple_key.pinFromOrigin;
 /// `(decouples "U1" …)` resolves to the `U1` in its own module.
 fn qualify(a: std.mem.Allocator, ref: []const u8, local: []const u8) std.mem.Allocator.Error![]const u8 {
     if (local.len == 0) return "";
-    const cut = std.mem.lastIndexOfScalar(u8, ref, '/') orelse return local;
-    return std.fmt.allocPrint(a, "{s}/{s}", .{ ref[0..cut], local });
+    const path = net_name.parent(ref) orelse return local;
+    return std.fmt.allocPrint(a, "{s}/{s}", .{ path, local });
 }
 
 /// Record which top-level sub-block owns each flattened instance and which

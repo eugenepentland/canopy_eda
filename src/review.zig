@@ -13,6 +13,7 @@ const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const thermal = @import("eval/thermal.zig");
 const thermal_scenarios = @import("thermal_scenarios.zig");
+const net_name = @import("net_name.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Section = env_mod.Section;
 const Instance = env_mod.Instance;
@@ -706,10 +707,7 @@ fn appendInstances(
 
 fn prefixOf(allocator: std.mem.Allocator, ref_des: []const u8) ![]const u8 {
     // Strip any "sub/" namespace prefix, then take leading alphabetic chars.
-    var s = ref_des;
-    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| if (i + 1 < s.len) {
-        s = s[i + 1 ..];
-    };
+    const s = net_name.leaf(ref_des);
     var end: usize = 0;
     while (end < s.len and std.ascii.isAlphabetic(s[end])) end += 1;
     if (end == 0) return try allocator.dupe(u8, "?");
@@ -1188,4 +1186,18 @@ test "buildSummary status fail" {
     };
     const summary = try buildSummary(alloc, &block, 0, &violations, &.{}, null);
     try std.testing.expectEqual(Status.fail, summary.status);
+}
+
+// spec: review - prefixOf groups a ref-des with an empty leaf under "?"
+test "prefixOf empty leaf" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    try std.testing.expectEqualStrings("C", try prefixOf(alloc, "buck_3v3/C17"));
+    try std.testing.expectEqualStrings("U", try prefixOf(alloc, "U2"));
+    // A ref-des that ends in the hierarchy separator has no local designator at
+    // all. Grouping it under the SUB-BLOCK's leading letters would file the part
+    // beside real `B…` designators; "?" is the same answer any other
+    // unclassifiable ref-des gets.
+    try std.testing.expectEqualStrings("?", try prefixOf(alloc, "buck_3v3/"));
 }

@@ -29,6 +29,7 @@ const sheet_mod = @import("sheet.zig");
 const shape_mod = @import("shape.zig");
 const verify = @import("verify.zig");
 const wire = @import("wire.zig");
+const net_name = @import("../net_name.zig");
 
 const Shape = shape_mod.Shape;
 
@@ -1116,7 +1117,7 @@ fn clusterIc(items: []const Placeable) []const u8 {
 /// netlisp's own `decoupling_unbound` ERC keys its bypass-cap rule on, read off
 /// the leaf of a sub-block path.
 fn isBypassRef(ref: []const u8) bool {
-    const leaf = if (std.mem.lastIndexOfScalar(u8, ref, '/')) |i| ref[i + 1 ..] else ref;
+    const leaf = net_name.leaf(ref);
     if (leaf.len == 0) return false;
     return std.ascii.toUpper(leaf[0]) == 'C';
 }

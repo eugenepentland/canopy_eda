@@ -11,6 +11,7 @@ const env_mod = @import("eval/env.zig");
 const ids = @import("eval/ids.zig");
 const derived_checks = @import("req_derived_checks.zig");
 const physical_checks = @import("req_physical_checks.zig");
+const na = @import("eval/net_analysis.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
@@ -916,10 +917,7 @@ pub fn netsAlias(a: []const u8, b: []const u8) bool {
 }
 
 /// The logical net behind a per-pin stub alias (`VBUS.U11.VDD_1` -> `VBUS`).
-pub fn netBase(name: []const u8) []const u8 {
-    const idx = std.mem.indexOfScalar(u8, name, '.') orelse return name;
-    return name[0..idx];
-}
+pub const netBase = na.baseNetName;
 
 fn collectUnusedCapsBetween(
     block: *const DesignBlock,
@@ -1023,6 +1021,7 @@ pub fn parseOhms(s: []const u8) ?f64 {
     if (s.len == 0) return null;
     // R-notation: `4R7`/`0R05`/`4R` — split on the first 'R'/'r' and treat it as
     // the decimal point. Only when no '.' is present, so "4.7" stays numeric.
+    // Not a net name: the decimal point of a resistor VALUE string.
     if (std.mem.indexOfScalar(u8, s, '.') == null) {
         if (std.mem.indexOfAny(u8, s, "Rr")) |r| {
             const int_part = s[0..r];

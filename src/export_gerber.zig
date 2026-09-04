@@ -42,6 +42,7 @@ const numeric = @import("numeric.zig");
 const board_layers = @import("board_layers.zig");
 const env = @import("eval/env.zig");
 const panelize = @import("panelize.zig");
+const net_name = @import("net_name.zig");
 // Solder-mask margin and copper-pour isolation are no longer hard-coded here —
 // they live in `optimizer.DesignRules` (`mask_margin` / `pour_clearance` /
 // `copper_edge`), resolved from the design's `(design-rules …)` form with the
@@ -1694,10 +1695,7 @@ fn planeCarries(net: PlaneNet, name: []const u8) bool {
 }
 
 /// The net name's leaf after the last `/` (sub-block flatten prefix).
-fn leafName(s: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];
-    return s;
-}
+const leafName = net_name.leaf;
 
 /// One implicit inner plane as this writer's `PlaneNet`. A ground plane keeps
 /// the `.ground` predicate (every ground-named net); a rail plane becomes an

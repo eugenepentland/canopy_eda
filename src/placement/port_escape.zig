@@ -73,6 +73,7 @@ const power_route_width = @import("power_route_width.zig");
 const env = @import("../eval/env.zig");
 const flat_netlist = @import("../flat_netlist.zig");
 const numeric = @import("../numeric.zig");
+const net_name = @import("../net_name.zig");
 
 const Allocator = std.mem.Allocator;
 const Placement = optimizer.Placement;
@@ -154,10 +155,7 @@ pub fn portNets(
     return out;
 }
 
-fn leafName(s: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];
-    return s;
-}
+const leafName = net_name.leaf;
 
 /// Prove every masked port net can leave the block; return one `Blocked` per net
 /// that cannot, in net order. `ports` is index-aligned with `p.nets`; a shorter

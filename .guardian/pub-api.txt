@@ -800,10 +800,12 @@ src/eval/net_analysis.zig::ground_stem_prefixes value
 src/eval/net_analysis.zig::ground_tokens value
 src/eval/net_analysis.zig::isGroundName | fn isGroundName(name: []const u8) bool
 src/eval/net_analysis.zig::isRatingZeroVolts | fn isRatingZeroVolts(name: []const u8) bool
+src/eval/net_analysis.zig::isSubNetName | fn isSubNetName(name: []const u8) bool
 src/eval/net_analysis.zig::power_ground value
 src/eval/net_analysis.zig::refDesLocalPrefix | fn refDesLocalPrefix(ref_des: []const u8) u8
 src/eval/net_analysis.zig::schematic_ground_names value
 src/eval/net_analysis.zig::subBlockNetHasCap | fn subBlockNetHasCap(block: *const DesignBlock, net_path: []const u8) bool
+src/eval/net_analysis.zig::subNetHostRef | fn subNetHostRef(name: []const u8) ?[]const u8
 src/eval/net_envelopes.zig::Contradiction struct_
 src/eval/net_envelopes.zig::Declaration struct_
 src/eval/net_envelopes.zig::Result struct_
@@ -3448,7 +3450,7 @@ src/placement/router.zig::seg | fn seg(self: OctiJoin, a: [2]f64, b: [2]f64) std
 src/placement/router.zig::setNetParams | fn setNetParams(ctx: *Ctx, placement: optimizer.Placement, net_i: usize) void
 src/placement/router.zig::setNetRoutePolicy | fn setNetRoutePolicy(ctx: *Ctx, net_i: usize, pts: []const NetPt) void
 src/placement/router.zig::shapeInput | fn shapeInput(run: DirectRun, ask: ShapeAsk) std.mem.Allocator.Error!?cdt_layers.Input
-src/placement/router.zig::shortName | fn shortName(s: []const u8) []const u8
+src/placement/router.zig::shortName value
 src/placement/router.zig::shrinkCopper | fn shrinkCopper(t: *std.ArrayList(Track), v: *std.ArrayList(Via), tm: usize, vm: usize) void
 src/placement/router.zig::tautProbe | fn tautProbe(self: CleanupBoard, net: i32) TautProbe
 src/placement/router.zig::trackWidth | fn trackWidth(self: CleanupBoard) f64
@@ -3827,7 +3829,7 @@ src/render_svg/context.zig::setup | fn setup(self: *RenderCtx, block: *const Des
 src/render_svg/context.zig::synthesizeSpokeConnections | fn synthesizeSpokeConnections(self: *RenderCtx) !void
 src/render_svg/context.zig::validateNetConsistency | fn validateNetConsistency(self: *RenderCtx) !void
 src/render_svg/draw.zig::RenderError value
-src/render_svg/draw.zig::baseNetName | fn baseNetName(name: []const u8) []const u8
+src/render_svg/draw.zig::baseNetName value
 src/render_svg/draw.zig::branch_spacing value
 src/render_svg/draw.zig::bus_gap value
 src/render_svg/draw.zig::classifyComponent | fn classifyComponent(inst: FlatInst) ?[]const u8
@@ -3851,8 +3853,8 @@ src/render_svg/draw.zig::passive_bw value
 src/render_svg/draw.zig::per_conn_spacing value
 src/render_svg/draw.zig::pinOrder | fn pinOrder(a: []const u8, b: []const u8) bool
 src/render_svg/draw.zig::pin_stub value
-src/render_svg/draw.zig::shortNetName | fn shortNetName(name: []const u8) []const u8
-src/render_svg/draw.zig::shortRef | fn shortRef(ref_des: []const u8) []const u8
+src/render_svg/draw.zig::shortNetName value
+src/render_svg/draw.zig::shortRef value
 src/render_svg/draw.zig::spoke_len value
 src/render_svg/draw.zig::top_margin value
 src/render_svg/draw.zig::writeDebugPin | fn writeDebugPin(w: anytype, x: f64, y: f64) RenderError!void
@@ -3883,7 +3885,7 @@ src/req_checks.zig::applyVerifications | fn applyVerifications( map: *std.String
 src/req_checks.zig::deinit | fn deinit( allocator: std.mem.Allocator, m: *std.StringHashMapUnmanaged([]Result), ) void
 src/req_checks.zig::fail | fn fail(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) Result
 src/req_checks.zig::instancePinOnNet | fn instancePinOnNet(block: *const DesignBlock, inst: Instance, net_name: []const u8) bool
-src/req_checks.zig::netBase | fn netBase(name: []const u8) []const u8
+src/req_checks.zig::netBase value
 src/req_checks.zig::netForPinFn | fn netForPinFn( eval: *Evaluator, block: *const DesignBlock, inst: Instance, pin_fn: []const u8, ) ?[]const u8
 src/req_checks.zig::netsAlias | fn netsAlias(a: []const u8, b: []const u8) bool
 src/req_checks.zig::padAndNetForPin | fn padAndNetForPin( eval: *Evaluator, block: *const DesignBlock, inst: Instance, pin_fn: []const u8, ) ?PinLocation

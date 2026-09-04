@@ -20,6 +20,7 @@
 const std = @import("std");
 const env_mod = @import("eval/env.zig");
 const uuid = @import("uuid.zig");
+const na = @import("eval/net_analysis.zig");
 const Property = env_mod.Property;
 const DesignBlock = env_mod.DesignBlock;
 
@@ -413,9 +414,9 @@ pub fn applyNetTiesMapped(
     var per_pin_renames: std.StringHashMapUnmanaged([]const u8) = .empty;
     defer per_pin_renames.deinit(allocator);
     for (nets.items) |net| {
-        const dot = std.mem.indexOfScalar(u8, net.name, '.') orelse continue;
-        const base = net.name[0..dot];
-        const suffix = net.name[dot..];
+        const base = na.baseNetName(net.name);
+        if (base.len == net.name.len) continue;
+        const suffix = net.name[base.len..];
         const canon_base = rename_map.get(base) orelse continue;
         const new_name = try std.fmt.allocPrint(allocator, "{s}{s}", .{ canon_base, suffix });
         try per_pin_renames.put(allocator, net.name, new_name);

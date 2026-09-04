@@ -2,11 +2,9 @@
 
 const std = @import("std");
 const env = @import("../eval/env.zig");
+const net_name = @import("../net_name.zig");
 
-fn leaf(name: []const u8) []const u8 {
-    const slash = std.mem.lastIndexOfScalar(u8, name, '/');
-    return if (slash) |i| name[i + 1 ..] else name;
-}
+const leaf = net_name.leaf;
 
 /// Match an authored token against a flattened ref or stable origin key.
 pub fn nameMatch(ref: []const u8, origin: []const u8, want: []const u8) bool {

@@ -61,6 +61,7 @@ const export_kicad = @import("../export_kicad.zig");
 const serve_root = @import("../serve.zig");
 const log = @import("../infra/log.zig");
 const clock = @import("../infra/clock.zig");
+const net_names = @import("../net_name.zig");
 
 const SavedTrack = pcb_layout_page.SavedTrack;
 const SavedVia = pcb_layout_page.SavedVia;
@@ -2954,10 +2955,7 @@ fn planRanks(
 }
 
 /// Net name after the last '/', so a sub-block's `pll/GND` reads as ground.
-fn leafName(s: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];
-    return s;
-}
+const leafName = net_names.leaf;
 
 /// Is `name` in `names`?
 /// Distance from (px,py) to the segment (x1,y1)-(x2,y2).

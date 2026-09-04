@@ -94,6 +94,7 @@ const via_antipad = @import("via_antipad.zig");
 const rf_port_report = @import("rf_port_report.zig");
 const variable_width_copper = @import("variable_width_copper.zig");
 const numeric = @import("../numeric.zig");
+const net_name = @import("../net_name.zig");
 
 const NetRule = optimizer.NetRule;
 const DesignRules = optimizer.DesignRules;
@@ -497,10 +498,7 @@ pub const err_no_ground: []const u8 =
 
 /// Last path segment of a `parent/child` net name — the leaf a ground-name
 /// predicate is applied to, so `pwr/GND` reads as ground.
-fn leafName(s: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];
-    return s;
-}
+const leafName = net_name.leaf;
 
 /// The board's default fence stitch net: the first DECLARED `(plane …)` whose
 /// net is a ground rail, else the first ground-named net in the flattened

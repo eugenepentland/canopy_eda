@@ -59,6 +59,7 @@ const geometry = @import("../placement/geometry.zig");
 const export_gerber = @import("../export_gerber.zig");
 const log = @import("../infra/log.zig");
 const clock = @import("../infra/clock.zig");
+const net_name = @import("../net_name.zig");
 
 const HandlerError = pcb_layout_page.HandlerError;
 
@@ -518,9 +519,7 @@ fn eqNoCase(a: []const u8, b: []const u8) bool {
 fn findPart(placement: optimizer.Placement, want: []const u8) ?usize {
     for (placement.parts, 0..) |part, pi| {
         if (eqNoCase(part.ref_des, want)) return pi;
-        if (std.mem.lastIndexOfScalar(u8, part.ref_des, '/')) |i| {
-            if (eqNoCase(part.ref_des[i + 1 ..], want)) return pi;
-        }
+        if (eqNoCase(net_name.leaf(part.ref_des), want)) return pi;
         if (pi < placement.instances.len and eqNoCase(placement.instances[pi].origin_key, want)) return pi;
     }
     return null;

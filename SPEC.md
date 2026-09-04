@@ -5700,6 +5700,7 @@ Public functions: computeInstanceCoverage, computeSectionCoverage, computeOveral
 - buildSummary marks status=fail on error-level violations
 - buildTestPoints collects testpoint instances with pin 1 net
 - buildTestPoints ignores non-testpoints
+- prefixOf groups a ref-des with an empty leaf under "?"
 
 ## review_json
 

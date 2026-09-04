@@ -35,6 +35,8 @@ const outline_mod = @import("../placement/outline.zig");
 const perimeter_fence = @import("../placement/perimeter_fence.zig");
 const font5x7 = @import("../font5x7.zig");
 const lib_limits = @import("../lib_limits.zig");
+const net_name = @import("../net_name.zig");
+const na = @import("../eval/net_analysis.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const http_not_found: u16 = 404;
@@ -230,19 +232,13 @@ fn stripLibPrefix(s: []const u8) []const u8 {
 /// Return the last `/`-delimited segment of a net name. Used to ask
 /// "what would this net be called if I dropped the sub-block prefix?"
 /// before deciding whether the bare form is safe to use.
-fn bareNetName(name: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, name, '/')) |i| return name[i + 1 ..];
-    return name;
-}
+const bareNetName = net_name.leaf;
 
 /// Collapse a `(decouple …)`-generated per-pin sub-net (`VDD.U18.IN`) to
 /// its rail (`VDD`). Sub-nets are an EDA routing-organisation aid and the
 /// design author's intent is that they share the rail's electrical net.
 /// Names without a `.` pass through unchanged.
-fn collapseDotSubNet(name: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, name, '.')) |i| return name[0..i];
-    return name;
-}
+const collapseDotSubNet = na.baseNetName;
 
 /// Dot-collapse a net name unless the caller opted to keep per-pin sub-nets.
 /// Normal sync folds `VDD.U18.IN` → `VDD`; dot-net mode (`?dot_nets=1`) passes
@@ -1806,8 +1802,8 @@ fn canonicalFootprintNameImpl(d: *DiffContext, short: []const u8) !?[]const u8 {
 /// empty string for a top-level ref. e.g. `"adc1/C146"` → `"adc1/"`,
 /// `"C18"` → `""`.
 fn parentPathOf(ref: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, ref, '/')) |i| return ref[0 .. i + 1];
-    return "";
+    const path = net_name.parent(ref) orelse return "";
+    return ref[0 .. path.len + 1];
 }
 
 /// Build the (parent_path, value) key used for migration-mode heuristic
@@ -2410,10 +2406,7 @@ fn canonicalFieldName(key: []const u8) []const u8 {
 }
 
 /// Strip a "subblock/" path prefix from a ref-des — "ldo/U1" → "U1".
-fn shortRefLocal(ref: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, ref, '/')) |i| return ref[i + 1 ..];
-    return ref;
-}
+const shortRefLocal = net_name.leaf;
 
 /// A passive spoke — R/C/L/F/D prefix. Mirrors render_svg `isHub`: only
 /// these carry a meaningful `canopy_net` field (it names the hub pin the
@@ -2903,7 +2896,7 @@ const GroupAnchor = struct {
 /// passive or other part. Classifies the leaf after the last `/` so a sub-block
 /// part (`mcu/U12`) is judged on `U12`, not the sub-block name.
 fn anchorRank(ref_des: []const u8) u8 {
-    const leaf = if (std.mem.lastIndexOfScalar(u8, ref_des, '/')) |i| ref_des[i + 1 ..] else ref_des;
+    const leaf = net_name.leaf(ref_des);
     if (leaf.len == 0) return 0;
     return switch (leaf[0]) {
         'U' => 3,

@@ -82,6 +82,7 @@ const route_grid = @import("route_grid.zig");
 const via_rules = @import("router_via_rules.zig");
 const flat_netlist = @import("../flat_netlist.zig");
 const numeric = @import("../numeric.zig");
+const net_name = @import("../net_name.zig");
 const Part = optimizer.Part;
 const FlatNet = flat_netlist.FlatNet;
 
@@ -12176,10 +12177,7 @@ const isGndVia = return_path.isGndVia;
 const isGroundName = optimizer.isGroundName;
 
 /// Net name after the last '/' — the leaf of a `sub-block/NET` flattened name.
-pub fn shortName(s: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];
-    return s;
-}
+pub const shortName = net_name.leaf;
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 

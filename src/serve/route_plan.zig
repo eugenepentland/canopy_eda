@@ -49,6 +49,7 @@ const drc_rules = @import("drc_rules.zig");
 const fab_readiness = @import("../fab_readiness.zig");
 const topo_lower = @import("../placement/topo_lower.zig");
 const pad_neck_shape = @import("../pad_neck_shape.zig");
+const net_name = @import("../net_name.zig");
 
 /// A lowered plan: the router options plus whether an authored plan applied
 /// and how many selector warnings resolution produced (for result reporting).
@@ -1308,9 +1309,7 @@ fn firstEscapeFieldCluster(
     return null;
 }
 
-fn fieldClusterLeafName(name: []const u8) []const u8 {
-    return if (std.mem.lastIndexOfScalar(u8, name, '/')) |i| name[i + 1 ..] else name;
-}
+const fieldClusterLeafName = net_name.leaf;
 
 fn fieldClusterInDiffPair(placement: optimizer.Placement, net_i: usize) bool {
     for (placement.diff_pairs) |pair| if (pair.p == net_i or pair.n == net_i) return true;

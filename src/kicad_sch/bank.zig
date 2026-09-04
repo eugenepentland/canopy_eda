@@ -40,6 +40,7 @@ const emit = @import("emit.zig");
 const sheet_mod = @import("sheet.zig");
 const shape_mod = @import("shape.zig");
 const wire = @import("wire.zig");
+const net_name = @import("../net_name.zig");
 
 const grid = shape_mod.grid;
 
@@ -305,10 +306,7 @@ pub fn caption(
 }
 
 /// The part of a sub-block-qualified reference after its last slash.
-fn leaf(ref: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, ref, '/')) |i| return ref[i + 1 ..];
-    return ref;
-}
+const leaf = net_name.leaf;
 
 // ── Tests ──────────────────────────────────────────────────────────────
 

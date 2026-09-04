@@ -13,6 +13,7 @@ const raster = @import("raster.zig");
 const font = @import("font5x7.zig");
 const png = @import("png.zig");
 const review = @import("review.zig");
+const net_name = @import("net_name.zig");
 
 /// Schematic pin ordering / connection-routing presentation.
 pub const View = enum { sequential, functional };
@@ -150,10 +151,7 @@ fn uniqueHubRef(hubs: []const []const u8, query: []const u8) ?[]const u8 {
     var match: ?[]const u8 = null;
     for (hubs) |ref| {
         const exact = std.ascii.eqlIgnoreCase(ref, query);
-        const leaf = if (std.mem.lastIndexOfScalar(u8, ref, '/')) |at|
-            std.ascii.eqlIgnoreCase(ref[at + 1 ..], query)
-        else
-            false;
+        const leaf = std.ascii.eqlIgnoreCase(net_name.leaf(ref), query);
         if (!exact and !leaf) continue;
         if (exact) return ref;
         if (match != null) return null; // ambiguous leaf — require full ref

@@ -186,6 +186,7 @@ fn formatNumber(writer: *std.Io.Writer, v: f64) FmtError!void {
             return;
         };
         var end: usize = formatted.len;
+        // Not a net name: the decimal point of a formatted float.
         if (std.mem.indexOfScalar(u8, formatted, '.') != null) {
             while (end > 1 and formatted[end - 1] == '0') : (end -= 1) {}
             if (end > 0 and formatted[end - 1] == '.') end -= 1;

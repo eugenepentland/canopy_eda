@@ -40,6 +40,7 @@ const router = @import("router.zig");
 const optimizer = @import("optimizer.zig");
 const fine_window = @import("fine_window.zig");
 const cdt_route = @import("cdt_route.zig");
+const net_name = @import("../net_name.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -1237,10 +1238,7 @@ fn shortNetName(placement: optimizer.Placement, id: i32) []const u8 {
 
 /// The module-local leaf of a possibly sub-block-prefixed net name (drops a
 /// leading `slug/` path), so remedies name the net the way the source does.
-fn leaf(name: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, name, '/')) |k| return name[k + 1 ..];
-    return name;
-}
+const leaf = net_name.leaf;
 
 /// KiCad copper-layer name for a routed track's SIGNAL index, for the
 /// human-readable remedies — resolved through THIS board's stackup

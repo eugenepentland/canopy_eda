@@ -55,6 +55,7 @@ const pad_exit = @import("pad_exit.zig");
 const pad_shape = @import("pad_shape.zig");
 const pin_roles = @import("pin_roles.zig");
 const implicit_plane = @import("implicit_plane.zig");
+const net_name = @import("../net_name.zig");
 
 /// How far apart two pads may be for ONE via to serve both — the whole
 /// definition of "local" here. It gates the bond twice, and BOTH gates measure
@@ -234,9 +235,7 @@ pub fn padInPour(pour: [2]bool, c: pad_exit.NetPt) bool {
 
 /// The leaf of a hierarchical net name (`amp1/VCC` → `VCC`), which is the other
 /// spelling a declared plane may name its net by.
-fn shortName(s: []const u8) []const u8 {
-    return if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| s[i + 1 ..] else s;
-}
+const shortName = net_name.leaf;
 
 /// Two pads of one plane-carried net that the placement's decoupling model
 /// binds together, as indices into that net's terminal list. `cap` is the

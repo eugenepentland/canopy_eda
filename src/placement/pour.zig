@@ -44,6 +44,7 @@ const variable_width_copper = @import("variable_width_copper.zig");
 const path_copper = @import("path_copper.zig");
 const content_key = @import("content_key.zig");
 const numeric = @import("../numeric.zig");
+const net_names = @import("../net_name.zig");
 
 /// Which net a poured/plane layer carries: a declared `(plane IDX "NET")` name,
 /// or the legacy implicit model's "every ground-named net".
@@ -533,10 +534,7 @@ fn planeCarries(net: PlaneNet, name: []const u8) bool {
 }
 
 /// The net name's leaf after the last `/` (sub-block flatten prefix).
-fn leafName(s: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, s, '/')) |i| return s[i + 1 ..];
-    return s;
-}
+const leafName = net_names.leaf;
 
 /// The outline rectangle the fill rasterizes over: the authored/drawn
 /// `board_rect`, else the parts' bounding box (matching `export_fab.outlineRect`
