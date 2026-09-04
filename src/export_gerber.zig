@@ -1393,7 +1393,12 @@ fn writePanelProfile(g: *Gx, panel: *const panelize.Plan) Error!void {
     try g.w.print("G04 panel profile; {d}x{d} boards; {s} separation*\n", .{
         panel.options.columns, panel.options.rows, @tagName(panel.options.method),
     });
-    for (panel.profile) |segment| try g.lineFab(segment.x1, segment.y1, segment.x2, segment.y2);
+    for (panel.profile) |segment| {
+        if (segment.midpoint) |midpoint|
+            try g.arcFab(.{ segment.x1, segment.y1 }, midpoint, .{ segment.x2, segment.y2 })
+        else
+            try g.lineFab(segment.x1, segment.y1, segment.x2, segment.y2);
+    }
 }
 
 fn writePanelScores(g: *Gx, panel: *const panelize.Plan) Error!void {
@@ -2001,6 +2006,27 @@ const Gx = struct {
         try g.w.writeAll("G75*\n");
         try g.w.print("X{d}Y{d}D02*\n{s}X{d}Y{d}I{d}J{d}D01*\nG01*\n", .{
             a[0], a[1], dir.code, b[0], b[1], dir.i, dir.j,
+        });
+    }
+
+    /// Native circular interpolation in already-framed panel coordinates.
+    fn arcFab(g: *Gx, p1: [2]f64, pm: [2]f64, p2: [2]f64) Error!void {
+        // Mirror the y-up panel points into a temporary y-down model frame;
+        // Frame.pt mirrors them straight back. This deliberately reuses the
+        // native board-arc quantization and sweep safeguards above.
+        const frame: export_fab.Frame = .{};
+        const model = optimizer.BoardArc{
+            .p1 = .{ p1[0], -p1[1] },
+            .pm = .{ pm[0], -pm[1] },
+            .p2 = .{ p2[0], -p2[1] },
+        };
+        const dir = arcDirection(frame, model) orelse {
+            try g.lineFab(p1[0], p1[1], p2[0], p2[1]);
+            return;
+        };
+        try g.w.writeAll("G75*\n");
+        try g.w.print("X{d}Y{d}D02*\n{s}X{d}Y{d}I{d}J{d}D01*\nG01*\n", .{
+            mmToUm(p1[0]), mmToUm(p1[1]), dir.code, mmToUm(p2[0]), mmToUm(p2[1]), dir.i, dir.j,
         });
     }
 };
@@ -3778,6 +3804,25 @@ test "panel Gerber repeats copper and emits the rail-framed profile" {
     try writeLayer(&edge.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .edge, .{ .function = "Profile,NP", .panel = &panel });
     try testing.expect(std.mem.indexOf(u8, edge.written(), "G04 panel profile; 2x1 boards; routed separation*") != null);
     try testing.expect(std.mem.indexOf(u8, edge.written(), "X52000000Y0D01*") != null);
+}
+
+// spec: export_gerber - routed panels preserve rounded board corners as native profile arcs while tabs interrupt only straight edges
+test "routed panel Gerber preserves rounded corners as native arcs" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var placement = testPlacement(&.{}, &.{});
+    const square = [_][2]f64{ .{ 0, 0 }, .{ 20, 0 }, .{ 20, 10 }, .{ 0, 10 } };
+    const radii = [_]f64{ 2, 2, 2, 2 };
+    const fillet = try outline.filletPath(arena, &square, &radii, 0.01);
+    placement.board_poly = fillet.poly;
+    placement.board_arcs = fillet.arcs;
+    const panel = try panelize.plan(arena, panelize.sourceFor(placement), .{ .rows = 1, .columns = 2 });
+
+    var edge: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&edge.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .edge, .{ .function = "Profile,NP", .panel = &panel });
+    try testing.expectEqual(@as(usize, 8), std.mem.count(u8, edge.written(), "G75*"));
+    try testing.expectEqual(@as(usize, 8), std.mem.count(u8, edge.written(), "G02"));
 }
 
 // spec: export_gerber - a V-score panel ships its score centre lines as an explicit fabrication drawing

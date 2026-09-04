@@ -5022,6 +5022,7 @@ Public functions: planLayers, writeLayer
 - copper apertures carry their X2 %TA.AperFunction (SMD pad, component pad, via land, conductor) and the profile is classified, while openings and clearances stay unclassified
 - the edge layer closes the board outline; silk exports authored footprint artwork without synthesizing component ref-des text
 - panel export repeats every fabrication layer in one shared array frame and replaces the source outline with the panel profile
+- routed panels preserve rounded board corners as native profile arcs while tabs interrupt only straight edges
 - a V-score panel ships its score centre lines as an explicit fabrication drawing
 - Four L corners bound each isolated flattened sub-circuit, and its fixed-size horizontal label first tries a corner-near slot on the top or bottom edge
 - overlapping same-face sub-circuit bounds each keep their own four-corner envelope instead of merging

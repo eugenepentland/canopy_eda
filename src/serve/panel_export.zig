@@ -48,9 +48,10 @@ pub fn writeError(res: *httpz.Response, err: panelize.Error) void {
         error.InvalidPanelCount => "{\"ok\":false,\"error\":\"panel rows and columns must be positive, with at most 100 boards\"}",
         error.InvalidPanelDimension => "{\"ok\":false,\"error\":\"panel dimensions must be finite, non-negative, and no larger than 1000 mm\"}",
         error.VScoreRequiresZeroGap => "{\"ok\":false,\"error\":\"V-score panels require a 0 mm board gap\"}",
-        error.SeparationRequiresRectangularBoard => "{\"ok\":false,\"error\":\"V-score and tab-route panelization currently require a rectangular board outline without rounded corners\"}",
+        error.VScoreRequiresSquareCorners => "{\"ok\":false,\"error\":\"V-score panels require a rectangular board with square corners; use routed tabs for rounded corners\"}",
+        error.SeparationRequiresRectangularBoard => "{\"ok\":false,\"error\":\"panelization currently requires a rectangular or rounded-rectangle board outline\"}",
         error.RoutedGapTooSmall => "{\"ok\":false,\"error\":\"routed panels require at least a 1 mm board gap\"}",
-        error.InvalidRoutingTab => "{\"ok\":false,\"error\":\"routing tabs must be at least 1 mm and smaller than the board's short side\"}",
+        error.InvalidRoutingTab => "{\"ok\":false,\"error\":\"routing tabs must be at least 1 mm and fit the straight section of every board side\"}",
         error.InvalidMouseBite => "{\"ok\":false,\"error\":\"mouse-bite diameter must be 0.2-1.0 mm with a pitch at least as large as the hole\"}",
         error.OutOfMemory => "{\"ok\":false,\"error\":\"not enough memory to construct the requested panel\"}",
     };

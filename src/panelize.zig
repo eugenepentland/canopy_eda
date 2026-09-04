@@ -7,6 +7,7 @@
 const std = @import("std");
 const export_fab = @import("export_fab.zig");
 const optimizer = @import("placement/optimizer.zig");
+const outline = @import("placement/outline.zig");
 
 /// Fabrication process used to separate boards from the panel.
 pub const Method = enum { v_score, routed };
@@ -31,8 +32,15 @@ pub const Options = struct {
     mouse_bites: MouseBites = .{},
 };
 
-/// One straight fabrication drawing stroke in panel coordinates.
-pub const Segment = struct { x1: f64, y1: f64, x2: f64, y2: f64 };
+/// One fabrication drawing stroke in panel coordinates. A midpoint makes the
+/// stroke a native circular arc; null keeps the usual straight segment.
+pub const Segment = struct {
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    midpoint: ?[2]f64 = null,
+};
 /// One non-plated mouse-bite hit in panel coordinates.
 pub const Hole = struct { x: f64, y: f64, diameter: f64 };
 
@@ -41,7 +49,10 @@ pub const Source = struct {
     frame: export_fab.Frame,
     width_mm: f64,
     height_mm: f64,
+    /// True for a square- or rounded-corner axis-aligned rectangle.
     rectangular: bool,
+    /// Exact common corner radius; zero means square corners.
+    corner_radius_mm: f64,
 };
 
 /// Fully validated, arena-owned geometry consumed by CAM writers.
@@ -60,6 +71,7 @@ pub const Error = std.mem.Allocator.Error || error{
     InvalidPanelCount,
     InvalidPanelDimension,
     VScoreRequiresZeroGap,
+    VScoreRequiresSquareCorners,
     SeparationRequiresRectangularBoard,
     RoutedGapTooSmall,
     InvalidRoutingTab,
@@ -69,11 +81,13 @@ pub const Error = std.mem.Allocator.Error || error{
 /// Capture the small source-board view consumed by `plan`.
 pub fn sourceFor(placement: optimizer.Placement) Source {
     const rect = export_fab.outlineRect(placement);
+    const corner_radius = rectangleCornerRadius(placement);
     return .{
         .frame = export_fab.frameFor(placement),
         .width_mm = rect.w,
         .height_mm = rect.h,
-        .rectangular = rectangular(placement),
+        .rectangular = corner_radius != null,
+        .corner_radius_mm = corner_radius orelse 0,
     };
 }
 
@@ -83,9 +97,7 @@ pub fn plan(arena: std.mem.Allocator, source: Source, options: Options) Error!Pl
     if (@as(u16, options.rows) * @as(u16, options.columns) > 100) return error.InvalidPanelCount;
     if (!finiteNonNegative(options.rail_mm) or !finiteNonNegative(options.gap_mm))
         return error.InvalidPanelDimension;
-    if (!source.rectangular) return error.SeparationRequiresRectangularBoard;
-    if (options.method == .v_score and options.gap_mm != 0) return error.VScoreRequiresZeroGap;
-    if (options.method == .routed and options.gap_mm < 1.0) return error.RoutedGapTooSmall;
+    try validateSeparation(source, options);
     if (!std.math.isFinite(options.tab_mm) or options.tab_mm < 1.0)
         return error.InvalidRoutingTab;
     const bite = options.mouse_bites;
@@ -95,7 +107,8 @@ pub fn plan(arena: std.mem.Allocator, source: Source, options: Options) Error!Pl
     if (bite.pitch_mm * 4 > options.tab_mm) return error.InvalidMouseBite;
 
     if (!(source.width_mm > 0 and source.height_mm > 0)) return error.InvalidPanelDimension;
-    if (options.method == .routed and options.tab_mm >= @min(source.width_mm, source.height_mm))
+    const shortest_straight = @min(source.width_mm, source.height_mm) - 2 * source.corner_radius_mm;
+    if (options.method == .routed and options.tab_mm >= shortest_straight)
         return error.InvalidRoutingTab;
     const cols: f64 = @floatFromInt(options.columns);
     const rows: f64 = @floatFromInt(options.rows);
@@ -139,7 +152,7 @@ pub fn plan(arena: std.mem.Allocator, source: Source, options: Options) Error!Pl
             while (col < options.columns) : (col += 1) {
                 const x = options.rail_mm + @as(f64, @floatFromInt(col)) * (source.width_mm + options.gap_mm);
                 const y = options.rail_mm + @as(f64, @floatFromInt(row)) * (source.height_mm + options.gap_mm);
-                try appendTabbedRect(&profile, &bites, arena, .{ .x = x, .y = y, .w = source.width_mm, .h = source.height_mm }, options);
+                try appendTabbedRect(&profile, &bites, arena, .{ .x = x, .y = y, .w = source.width_mm, .h = source.height_mm }, source.corner_radius_mm, options);
             }
         }
     }
@@ -159,8 +172,44 @@ fn finiteNonNegative(value: f64) bool {
     return std.math.isFinite(value) and value >= 0;
 }
 
-fn rectangular(placement: optimizer.Placement) bool {
-    if (placement.board_arcs.len != 0) return false;
+fn validateSeparation(source: Source, options: Options) Error!void {
+    if (!source.rectangular) return error.SeparationRequiresRectangularBoard;
+    if (options.method == .v_score and options.gap_mm != 0) return error.VScoreRequiresZeroGap;
+    if (options.method == .v_score and source.corner_radius_mm > 0) return error.VScoreRequiresSquareCorners;
+    if (options.method == .routed and options.gap_mm < 1.0) return error.RoutedGapTooSmall;
+}
+
+/// Return the common radius for a square/rounded axis-aligned rectangle, or
+/// null for every other outline. Rounded rectangles are recognized from their
+/// exact native quarter arcs rather than the tessellated fallback polygon.
+fn rectangleCornerRadius(placement: optimizer.Placement) ?f64 {
+    if (placement.board_arcs.len == 0) return if (squareRectangle(placement)) 0 else null;
+    if (placement.board_arcs.len != 4 or placement.board_poly == null) return null;
+    const r = export_fab.outlineRect(placement);
+    const eps_mm = 0.000001;
+    const angle_eps = 0.000001;
+    var radius: ?f64 = null;
+    var mask: u4 = 0;
+    for (placement.board_arcs) |arc| {
+        const circle = outline.arcCircle(arc) orelse return null;
+        if (!(circle.radius > eps_mm) or @abs(@abs(circle.sweep) - std.math.pi / 2.0) > angle_eps) return null;
+        if (radius) |expected| {
+            if (@abs(circle.radius - expected) > eps_mm) return null;
+        } else {
+            radius = circle.radius;
+        }
+        const left = @abs(circle.cx - (r.minx + circle.radius)) < eps_mm;
+        const right = @abs(circle.cx - (r.minx + r.w - circle.radius)) < eps_mm;
+        const top = @abs(circle.cy - (r.miny + circle.radius)) < eps_mm;
+        const bottom = @abs(circle.cy - (r.miny + r.h - circle.radius)) < eps_mm;
+        const bit: u4 = if (left and top) 1 else if (right and top) 2 else if (right and bottom) 4 else if (left and bottom) 8 else return null;
+        if (mask & bit != 0) return null;
+        mask |= bit;
+    }
+    return if (mask == 15) radius else null;
+}
+
+fn squareRectangle(placement: optimizer.Placement) bool {
     const poly = placement.board_poly orelse return true;
     if (poly.len != 4) return false;
     const r = export_fab.outlineRect(placement);
@@ -192,6 +241,7 @@ fn appendTabbedRect(
     bites: *std.ArrayList(Hole),
     arena: std.mem.Allocator,
     rect: Rect,
+    radius: f64,
     options: Options,
 ) !void {
     // One centred bridge per side works for small boards as well as large
@@ -200,19 +250,30 @@ fn appendTabbedRect(
     const cy = rect.y + rect.h / 2;
     const half = options.tab_mm / 2;
     try out.appendSlice(arena, &.{
-        .{ .x1 = rect.x, .y1 = rect.y, .x2 = cx - half, .y2 = rect.y },
-        .{ .x1 = cx + half, .y1 = rect.y, .x2 = rect.x + rect.w, .y2 = rect.y },
-        .{ .x1 = rect.x, .y1 = rect.y + rect.h, .x2 = cx - half, .y2 = rect.y + rect.h },
-        .{ .x1 = cx + half, .y1 = rect.y + rect.h, .x2 = rect.x + rect.w, .y2 = rect.y + rect.h },
-        .{ .x1 = rect.x, .y1 = rect.y, .x2 = rect.x, .y2 = cy - half },
-        .{ .x1 = rect.x, .y1 = cy + half, .x2 = rect.x, .y2 = rect.y + rect.h },
-        .{ .x1 = rect.x + rect.w, .y1 = rect.y, .x2 = rect.x + rect.w, .y2 = cy - half },
-        .{ .x1 = rect.x + rect.w, .y1 = cy + half, .x2 = rect.x + rect.w, .y2 = rect.y + rect.h },
+        .{ .x1 = rect.x + radius, .y1 = rect.y, .x2 = cx - half, .y2 = rect.y },
+        .{ .x1 = cx + half, .y1 = rect.y, .x2 = rect.x + rect.w - radius, .y2 = rect.y },
+        .{ .x1 = rect.x + radius, .y1 = rect.y + rect.h, .x2 = cx - half, .y2 = rect.y + rect.h },
+        .{ .x1 = cx + half, .y1 = rect.y + rect.h, .x2 = rect.x + rect.w - radius, .y2 = rect.y + rect.h },
+        .{ .x1 = rect.x, .y1 = rect.y + radius, .x2 = rect.x, .y2 = cy - half },
+        .{ .x1 = rect.x, .y1 = cy + half, .x2 = rect.x, .y2 = rect.y + rect.h - radius },
+        .{ .x1 = rect.x + rect.w, .y1 = rect.y + radius, .x2 = rect.x + rect.w, .y2 = cy - half },
+        .{ .x1 = rect.x + rect.w, .y1 = cy + half, .x2 = rect.x + rect.w, .y2 = rect.y + rect.h - radius },
     });
+    if (radius > 0) try appendRoundedCorners(out, arena, rect, radius);
     try appendBites(bites, arena, cx, rect.y, true, options.mouse_bites);
     try appendBites(bites, arena, cx, rect.y + rect.h, true, options.mouse_bites);
     try appendBites(bites, arena, rect.x, cy, false, options.mouse_bites);
     try appendBites(bites, arena, rect.x + rect.w, cy, false, options.mouse_bites);
+}
+
+fn appendRoundedCorners(out: *std.ArrayList(Segment), arena: std.mem.Allocator, rect: Rect, radius: f64) !void {
+    const diagonal = radius / std.math.sqrt(2.0);
+    try out.appendSlice(arena, &.{
+        .{ .x1 = rect.x + radius, .y1 = rect.y, .x2 = rect.x, .y2 = rect.y + radius, .midpoint = .{ rect.x + radius - diagonal, rect.y + radius - diagonal } },
+        .{ .x1 = rect.x + rect.w, .y1 = rect.y + radius, .x2 = rect.x + rect.w - radius, .y2 = rect.y, .midpoint = .{ rect.x + rect.w - radius + diagonal, rect.y + radius - diagonal } },
+        .{ .x1 = rect.x + rect.w - radius, .y1 = rect.y + rect.h, .x2 = rect.x + rect.w, .y2 = rect.y + rect.h - radius, .midpoint = .{ rect.x + rect.w - radius + diagonal, rect.y + rect.h - radius + diagonal } },
+        .{ .x1 = rect.x, .y1 = rect.y + rect.h - radius, .x2 = rect.x + radius, .y2 = rect.y + rect.h, .midpoint = .{ rect.x + radius - diagonal, rect.y + rect.h - radius + diagonal } },
+    });
 }
 
 const Rect = struct { x: f64, y: f64, w: f64, h: f64 };
@@ -229,6 +290,14 @@ fn appendBites(out: *std.ArrayList(Hole), arena: std.mem.Allocator, cx: f64, cy:
             .diameter = options.diameter_mm,
         });
     }
+}
+
+fn arcCount(profile: []const Segment) usize {
+    var count: usize = 0;
+    for (profile) |stroke| {
+        if (stroke.midpoint != null) count += 1;
+    }
+    return count;
 }
 
 fn testPlacement() optimizer.Placement {
@@ -268,6 +337,25 @@ test "a V-score panel has zero board gaps and full-span score guides" {
     try std.testing.expectApproxEqAbs(@as(f64, 30), p.height_mm, 1e-9);
     try std.testing.expectEqual(@as(usize, 6), p.scores.len);
     try std.testing.expectEqual(@as(usize, 0), p.mouse_bites.len);
+}
+
+test "a routed rounded-rectangle panel retains native corner arcs" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var placement = testPlacement();
+    const square = [_][2]f64{ .{ 0, 0 }, .{ 20, 0 }, .{ 20, 10 }, .{ 0, 10 } };
+    const radii = [_]f64{ 2, 2, 2, 2 };
+    const fillet = try outline.filletPath(arena, &square, &radii, 0.01);
+    placement.board_poly = fillet.poly;
+    placement.board_arcs = fillet.arcs;
+
+    const source = sourceFor(placement);
+    try std.testing.expect(source.rectangular);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), source.corner_radius_mm, 1e-9);
+    const p = try plan(arena, source, .{ .rows = 1, .columns = 2 });
+    try std.testing.expectEqual(@as(usize, 8), arcCount(p.profile));
+    try std.testing.expectError(error.VScoreRequiresSquareCorners, plan(arena, source, .{ .method = .v_score, .gap_mm = 0 }));
 }
 
 test "separation rejects a non-rectangular board and unsafe routing settings" {
