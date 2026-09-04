@@ -49,6 +49,18 @@ const barracuda = result.instances.find((row) => row.id === "barracuda");
 assert.ok(barracuda.coverage > 0.98 && barracuda.coverage < 1);
 assert.ok(barracuda.velocity > 2);
 assert.ok(barracuda.temperature_c < result.hottest.temperature_c);
+assert.equal(barracuda.field_scenario, "fan_heatsink");
+assert.equal(result.hottest.field_scenario, "natural");
+
+assert.deepEqual(thermal.rampColor(25, 25, 125).map(Math.round), [7, 20, 56]);
+assert.deepEqual(thermal.rampColor(125, 25, 125).map(Math.round), [232, 64, 42]);
+const field = {
+  ambient_c: 25, hotspot: { c: 29 },
+  grid: { cols: 2, rows: 2, cell_mm: 1, origin_x_mm: 10, origin_y_mm: 20, rise_c: [1, 2, 3, 4], active: [1, 1, 1, 1] }
+};
+const fieldBoard = { source_center: [10, 20] };
+assert.equal(thermal.fieldTemperatureAt(field, fieldBoard, { temperature_c: 39 }, 0.5, 0.5), 36);
+assert.equal(thermal.fieldTemperatureAt(field, fieldBoard, { temperature_c: 39 }, 1, 1), 37.5);
 
 const wheelGesture = { last: -Infinity, total: 0 };
 let appliedWheel = 0;
@@ -59,4 +71,4 @@ assert.equal(thermal.boundedWheelStep(wheelGesture, 3, 1, 1020, 900), 48);
 assert.equal(thermal.enabledExtrusionCount({ sketches: [], extrusions: [] }), 0);
 assert.equal(thermal.enabledExtrusionCount({ extrusions: [{ enabled: false }, { enabled: true }] }), 1);
 
-console.log("System CAD: blank solid state, explicit extrusions, RDS3 assembly, bounded zoom, and coupled thermal screen pass");
+console.log("System CAD: blank sketch extrusions, RDS3 repeated fields, bounded 2D/3D zoom, and coupled thermal screen pass");

@@ -46,6 +46,51 @@
     return gesture.total - previous;
   }
 
+  var THERMAL_RAMP = [
+    [0.00, 0x07, 0x14, 0x38], [0.28, 0x1a, 0x5f, 0xc8],
+    [0.52, 0x2f, 0xc4, 0xd6], [0.76, 0xf2, 0xdc, 0x5a], [1.00, 0xe8, 0x40, 0x2a]
+  ];
+
+  function rampColor(tempC, minimumC, maximumC) {
+    var t = (tempC - minimumC) / Math.max(1e-9, maximumC - minimumC);
+    t = Math.max(0, Math.min(1, t));
+    for (var i = 1; i < THERMAL_RAMP.length; i += 1) {
+      if (t > THERMAL_RAMP[i][0]) continue;
+      var a = THERMAL_RAMP[i - 1], b = THERMAL_RAMP[i], f = (t - a[0]) / (b[0] - a[0]);
+      return [a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f, a[3] + (b[3] - a[3]) * f];
+    }
+    return THERMAL_RAMP[THERMAL_RAMP.length - 1].slice(1);
+  }
+
+  function fieldScenario(board, coverage, velocity) {
+    var cooling = board.cooling || {};
+    if (cooling.heatsink) return cooling.fan && coverage >= 0.25 ? "fan_heatsink" : "heatsink";
+    if (velocity >= 1.5) return "airflow_2ms";
+    if (velocity >= 0.25) return "airflow_1ms";
+    return "natural";
+  }
+
+  function fieldTemperatureAt(field, board, row, localX, localY) {
+    var grid = field && field.grid;
+    if (!grid || !grid.cols || !grid.rows || !(grid.cell_mm > 0)) return null;
+    var center = board.source_center || [0, 0];
+    var gx = (localX + center[0] - grid.origin_x_mm) / grid.cell_mm - 0.5;
+    var gy = (localY + center[1] - grid.origin_y_mm) / grid.cell_mm - 0.5;
+    if (gx < -0.5 || gy < -0.5 || gx > grid.cols - 0.5 || gy > grid.rows - 0.5) return null;
+    gx = Math.max(0, Math.min(grid.cols - 1, gx)); gy = Math.max(0, Math.min(grid.rows - 1, gy));
+    var x0 = Math.floor(gx), y0 = Math.floor(gy), x1 = Math.min(x0 + 1, grid.cols - 1), y1 = Math.min(y0 + 1, grid.rows - 1);
+    var fx = gx - x0, fy = gy - y0, weighted = 0, total = 0;
+    [[x0, y0, (1 - fx) * (1 - fy)], [x1, y0, fx * (1 - fy)], [x0, y1, (1 - fx) * fy], [x1, y1, fx * fy]].forEach(function (sample) {
+      var index = sample[1] * grid.cols + sample[0], rise = Number(grid.rise_c[index]);
+      if ((grid.active && !grid.active[index]) || !Number.isFinite(rise)) return;
+      weighted += rise * sample[2]; total += sample[2];
+    });
+    if (!total) return null;
+    var peak = field.hotspot && finite(field.hotspot.c, NaN);
+    var shift = row && row.temperature_c != null && Number.isFinite(peak) ? row.temperature_c - peak : 0;
+    return finite(field.ambient_c, 25) + weighted / total + shift;
+  }
+
   function scenario(thermal, name) {
     if (!thermal || !Array.isArray(thermal.scenarios)) return null;
     return thermal.scenarios.find(function (row) { return row.scenario === name && row.converged !== false; }) || null;
@@ -110,6 +155,7 @@
       var rise = boardRise(board, coverage, velocity);
       return {
         id: instance.id, board: instance.board, watts: totalBoardPower(board.thermal), coverage: coverage, velocity: velocity,
+        field_scenario: fieldScenario(board, coverage, velocity),
         temperature_c: rise == null ? null : ambientC + rise + (outletRise == null ? 0 : outletRise / 2)
       };
     });
@@ -124,7 +170,7 @@
     return value && Array.isArray(value.extrusions) ? value.extrusions.filter(function (extrusion) { return extrusion && extrusion.enabled !== false; }).length : 0;
   }
 
-  var API = { rotatedBounds: rotatedBounds, overlapFraction: overlapFraction, totalBoardPower: totalBoardPower, boundedWheelStep: boundedWheelStep, solveSystem: solveSystem, enabledExtrusionCount: enabledExtrusionCount };
+  var API = { rotatedBounds: rotatedBounds, overlapFraction: overlapFraction, totalBoardPower: totalBoardPower, boundedWheelStep: boundedWheelStep, rampColor: rampColor, fieldScenario: fieldScenario, fieldTemperatureAt: fieldTemperatureAt, solveSystem: solveSystem, enabledExtrusionCount: enabledExtrusionCount };
   if (typeof module !== "undefined" && module.exports) module.exports = API;
   root.SystemThermal = API;
   if (!root.document || !root.CAD_DATA) return;
@@ -137,7 +183,7 @@
   var boardByName = {};
   usable.forEach(function (board) { boardByName[board.name] = board; });
 
-  $("#title").textContent = D.title + " · 3D CAD";
+  $("#title").textContent = D.title + " · System Thermal";
   $("#identity").textContent = D.part_number + " · revision " + D.revision;
   $("#back").href = "/systems/" + encodeURIComponent(D.system);
 
@@ -151,7 +197,11 @@
   }
 
   var defaults = {
-    version: 2, ambient: finite(D.assembly && D.assembly.ambient_c, 25), pitch: finite(D.assembly && D.assembly.pitch_mm, 22), snap: true,
+    version: 2,
+    ambient: finite(D.assembly && D.assembly.ambient_c, 25),
+    pitch: finite(D.assembly && D.assembly.pitch_mm, 22),
+    scaleMin: 25, scaleMax: 125,
+    snap: true,
     instances: defaultInstances(), sketches: [], extrusions: []
   };
   var saved = null;
@@ -238,7 +288,7 @@
   });
   if (!usable.length) { $("#empty").style.display = "block"; $("#empty").textContent = "No saved PCB layouts could be imported; the CAD work plane is still available."; }
 
-  var canvas = $("#canvas");
+  var canvas = $("#canvas"), thermalCanvas = $("#thermal-canvas"), thermalContext = thermalCanvas.getContext("2d");
   var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2)); renderer.outputEncoding = THREE.sRGBEncoding;
   var scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(38, 1, 0.1, 5000);
@@ -251,6 +301,8 @@
   var boardsModel = new THREE.Group(), solidModel = new THREE.Group(), sketchModel = new THREE.Group();
   scene.add(boardsModel); scene.add(solidModel); scene.add(sketchModel);
   var lastBounds = { width: 80, depth: 60 }, thermalResult = null, thermalLoading = true, groupsById = {}, meshSequence = 0;
+  var viewMode = "2d", twoView = { centerX: 0, centerY: 0, scale: 1 }, twoDirty = true;
+  var thermalFields = {}, fieldPromises = {}, fieldRasters = {}, selected2d = null;
 
   function material(color, opacity) { return new THREE.MeshStandardMaterial({ color: color, roughness: 0.72, metalness: 0.04, transparent: opacity < 1, opacity: opacity, side: THREE.DoubleSide, depthWrite: opacity > 0.7 }); }
   function box(group, width, depth, height, x, y, z, mat) { var mesh = new THREE.Mesh(new THREE.BoxGeometry(width, depth, height), mat); mesh.position.set(x, y, z); group.add(mesh); return mesh; }
@@ -289,6 +341,138 @@
     var compMat = material(0xbec6cf, 1);
     board.parts.forEach(function (part) { var height = part.bottom ? 1.2 : 2.2, z = part.bottom ? -height / 2 : board.thickness + height / 2; var mesh = box(group, part.w, part.d, height, part.x, part.y, z, compMat); mesh.rotation.z = part.rot * Math.PI / 180; });
     attachCooling(group, board); group.position.set(pose.x, pose.y, pose.z); group.rotation.z = pose.rot * Math.PI / 180; boardsModel.add(group); groupsById[pose.id] = group;
+  }
+
+  function fieldKey(board, scenarioName) { return board.name + "\n" + scenarioName; }
+  function requestField(board, scenarioName) {
+    var key = fieldKey(board, scenarioName);
+    if (Object.prototype.hasOwnProperty.call(thermalFields, key) || fieldPromises[key]) return;
+    var query = new URLSearchParams({ ambient: "25", scenario: scenarioName });
+    if (board.layout !== "blessed") query.set("layout", board.layout);
+    fieldPromises[key] = fetch("/api/thermal-field/" + encodeURIComponent(board.name) + "?" + query).then(function (response) {
+      if (!response.ok) throw new Error("thermal field " + response.status);
+      return response.json();
+    }).then(function (field) {
+      thermalFields[key] = field && field.available ? field : null;
+    }).catch(function () { thermalFields[key] = null; }).finally(function () {
+      delete fieldPromises[key]; twoDirty = true;
+    });
+  }
+  function requestVisibleFields() {
+    if (!thermalResult) return;
+    thermalResult.instances.forEach(function (row) {
+      var board = boardByName[row.board]; if (board) requestField(board, row.field_scenario);
+    });
+  }
+  function rasterFor(board, row) {
+    var key = fieldKey(board, row.field_scenario), field = thermalFields[key];
+    if (!field || !field.grid) return null;
+    var cacheKey = key + "\n" + Number(row.temperature_c).toFixed(3) + "\n" + state.scaleMin + "\n" + state.scaleMax;
+    if (fieldRasters[cacheKey]) return { canvas: fieldRasters[cacheKey], field: field };
+    var grid = field.grid, output = document.createElement("canvas"); output.width = grid.cols; output.height = grid.rows;
+    var context = output.getContext("2d"), image = context.createImageData(grid.cols, grid.rows);
+    var peak = field.hotspot && finite(field.hotspot.c, NaN);
+    var shift = row.temperature_c != null && Number.isFinite(peak) ? row.temperature_c - peak : 0;
+    for (var i = 0; i < grid.cols * grid.rows; i += 1) {
+      var active = !grid.active || grid.active[i], rise = Number(grid.rise_c[i]);
+      if (!active || !Number.isFinite(rise)) { image.data[i * 4 + 3] = 0; continue; }
+      var color = rampColor(finite(field.ambient_c, 25) + rise + shift, state.scaleMin, state.scaleMax);
+      image.data[i * 4] = color[0]; image.data[i * 4 + 1] = color[1]; image.data[i * 4 + 2] = color[2]; image.data[i * 4 + 3] = 245;
+    }
+    context.putImageData(image, 0, 0); fieldRasters[cacheKey] = output; return { canvas: output, field: field };
+  }
+  function localPoint(pose, x, y) {
+    var angle = pose.rot * Math.PI / 180, c = Math.cos(angle), s = Math.sin(angle), dx = x - pose.x, dy = y - pose.y;
+    return { x: dx * c + dy * s, y: -dx * s + dy * c };
+  }
+  function pointInOutline(points, x, y) {
+    var inside = false;
+    for (var i = 0, j = points.length - 1; i < points.length; j = i++) {
+      var a = points[i], b = points[j];
+      if ((a[1] > y) !== (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) inside = !inside;
+    }
+    return inside;
+  }
+  function instanceAt(x, y) {
+    for (var i = state.instances.length - 1; i >= 0; i -= 1) {
+      var pose = state.instances[i], board = boardByName[pose.board]; if (!pose.on || !board) continue;
+      var local = localPoint(pose, x, y); if (pointInOutline(board.outline, local.x, local.y)) return { pose: pose, board: board, local: local };
+    }
+    return null;
+  }
+  function worldTransform(pose) {
+    var angle = pose.rot * Math.PI / 180, c = Math.cos(angle), s = Math.sin(angle), scale = twoView.scale;
+    thermalContext.setTransform(scale * c, scale * s, -scale * s, scale * c,
+      thermalCanvas.width / 2 + (pose.x - twoView.centerX) * scale,
+      thermalCanvas.height / 2 + (pose.y - twoView.centerY) * scale);
+  }
+  function outlinePath(points) {
+    thermalContext.beginPath(); thermalContext.moveTo(points[0][0], points[0][1]);
+    for (var i = 1; i < points.length; i += 1) thermalContext.lineTo(points[i][0], points[i][1]);
+    thermalContext.closePath();
+  }
+  function drawCooling2d(board) {
+    var cooling = board.cooling || {}, sink = cooling.heatsink, fan = cooling.fan;
+    if (sink) {
+      var sw = sink.shape === "stepped" ? sink.lower_w : sink.w, sd = sink.shape === "stepped" ? sink.lower_d : sink.d;
+      thermalContext.fillStyle = "rgba(185,196,210,.10)"; thermalContext.strokeStyle = "rgba(210,220,232,.75)";
+      thermalContext.setLineDash([3 / twoView.scale, 2 / twoView.scale]); thermalContext.fillRect(sink.x - sw / 2, sink.y - sd / 2, sw, sd); thermalContext.strokeRect(sink.x - sw / 2, sink.y - sd / 2, sw, sd); thermalContext.setLineDash([]);
+    }
+    if (fan) {
+      thermalContext.fillStyle = "rgba(98,165,255,.12)"; thermalContext.strokeStyle = "rgba(98,165,255,.95)";
+      thermalContext.fillRect(fan.x - fan.w / 2, fan.y - fan.d / 2, fan.w, fan.d); thermalContext.strokeRect(fan.x - fan.w / 2, fan.y - fan.d / 2, fan.w, fan.d);
+    }
+  }
+  function drawBoard2d(board, pose) {
+    var row = resultFor(pose.id), raster = row && rasterFor(board, row), center = board.source_center || [0, 0];
+    thermalContext.save(); worldTransform(pose); thermalContext.lineWidth = (selected2d === pose.id ? 2.5 : 1.2) / twoView.scale;
+    outlinePath(board.outline);
+    var baseColor = row && row.temperature_c != null ? rampColor(row.temperature_c, state.scaleMin, state.scaleMax) : [36, 75, 91];
+    thermalContext.fillStyle = "rgb(" + baseColor.map(Math.round).join(",") + ")"; thermalContext.fill();
+    if (raster) {
+      thermalContext.save(); outlinePath(board.outline); thermalContext.clip(); thermalContext.imageSmoothingEnabled = true;
+      thermalContext.drawImage(raster.canvas, raster.field.grid.origin_x_mm - center[0], raster.field.grid.origin_y_mm - center[1], raster.field.grid.cols * raster.field.grid.cell_mm, raster.field.grid.rows * raster.field.grid.cell_mm); thermalContext.restore();
+    }
+    thermalContext.strokeStyle = selected2d === pose.id ? "#ffffff" : "rgba(225,236,249,.78)"; outlinePath(board.outline); thermalContext.stroke();
+    thermalContext.strokeStyle = "rgba(255,255,255,.28)"; thermalContext.lineWidth = 0.65 / twoView.scale;
+    board.parts.forEach(function (part) {
+      thermalContext.save(); thermalContext.translate(part.x, part.y); thermalContext.rotate(part.rot * Math.PI / 180);
+      thermalContext.strokeRect(-part.w / 2, -part.d / 2, part.w, part.d); thermalContext.restore();
+    });
+    drawCooling2d(board);
+    if (raster && raster.field.hotspot) {
+      var hx = raster.field.hotspot.x_mm - center[0], hy = raster.field.hotspot.y_mm - center[1];
+      thermalContext.strokeStyle = "rgba(255,255,255,.9)"; thermalContext.lineWidth = 1 / twoView.scale;
+      thermalContext.beginPath(); thermalContext.arc(hx, hy, 2.4 / twoView.scale, 0, Math.PI * 2); thermalContext.stroke();
+    }
+    thermalContext.restore();
+    var sx = thermalCanvas.width / 2 + (pose.x - twoView.centerX) * twoView.scale;
+    var sy = thermalCanvas.height / 2 + (pose.y - twoView.centerY) * twoView.scale;
+    thermalContext.save(); thermalContext.font = "600 11px system-ui,sans-serif"; thermalContext.textAlign = "center"; thermalContext.textBaseline = "middle";
+    var label = pose.id + (row && row.temperature_c != null ? "  " + row.temperature_c.toFixed(1) + " °C" : "");
+    var labelWidth = thermalContext.measureText(label).width + 10; thermalContext.fillStyle = "rgba(5,10,18,.82)";
+    thermalContext.fillRect(sx - labelWidth / 2, sy - 10, labelWidth, 20); thermalContext.fillStyle = "#f4f7fb"; thermalContext.fillText(label, sx, sy); thermalContext.restore();
+  }
+  function draw2d() {
+    var width = thermalCanvas.width, height = thermalCanvas.height, scale = twoView.scale;
+    thermalContext.setTransform(1, 0, 0, 1, 0, 0); thermalContext.clearRect(0, 0, width, height);
+    thermalContext.fillStyle = "#0a101b"; thermalContext.fillRect(0, 0, width, height);
+    var step = Math.max(1, state.pitch), minX = twoView.centerX - width / (2 * scale), maxX = twoView.centerX + width / (2 * scale);
+    var minY = twoView.centerY - height / (2 * scale), maxY = twoView.centerY + height / (2 * scale);
+    thermalContext.strokeStyle = "rgba(75,108,145,.20)"; thermalContext.lineWidth = 1; thermalContext.beginPath();
+    for (var x = Math.ceil(minX / step) * step; x <= maxX; x += step) {
+      var px = width / 2 + (x - twoView.centerX) * scale; thermalContext.moveTo(px, 0); thermalContext.lineTo(px, height);
+    }
+    for (var y = Math.ceil(minY / step) * step; y <= maxY; y += step) {
+      var py = height / 2 + (y - twoView.centerY) * scale; thermalContext.moveTo(0, py); thermalContext.lineTo(width, py);
+    }
+    thermalContext.stroke();
+    state.instances.forEach(function (pose) { var board = boardByName[pose.board]; if (board && pose.on) drawBoard2d(board, pose); });
+    if (Object.keys(fieldPromises).length) {
+      thermalContext.fillStyle = "rgba(8,12,18,.78)"; thermalContext.fillRect(14, 14, 148, 28);
+      thermalContext.fillStyle = "#cbd6e5"; thermalContext.font = "12px system-ui,sans-serif"; thermalContext.fillText("Loading heat fields…", 25, 33);
+    }
+    twoDirty = false;
   }
   function occupied() {
     var minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
@@ -358,6 +542,8 @@
   }
   function syncInputs() {
     ["ambient", "pitch"].forEach(function (key) { $("#" + key).value = state[key]; }); $("#snap").checked = state.snap !== false;
+    $("#scale-min").value = state.scaleMin; $("#scale-max").value = state.scaleMax;
+    $("#legend-min").textContent = state.scaleMin + " °C"; $("#legend-max").textContent = state.scaleMax + " °C";
     state.instances.forEach(function (pose) { if (cards[pose.id]) cards[pose.id].querySelector(".enabled").checked = pose.on; });
     renderSketches(); renderExtrusions(); updateCardValues(); drawSketches(); syncExportButtons();
   }
@@ -370,24 +556,24 @@
     });
   }
   function updateThermal() {
-    thermalResult = solveSystem(usable, state.instances, state.ambient);
+    thermalResult = solveSystem(usable, state.instances, state.ambient); fieldRasters = {};
     var summary = $("#thermal-summary"), hot = thermalResult.hottest;
     if (thermalLoading) summary.textContent = "Loading board thermal models…";
     else if (!hot) summary.textContent = "No solved board thermal scenarios are available.";
     else summary.innerHTML = '<strong>' + hot.temperature_c.toFixed(1) + ' °C</strong><span>hottest board hotspot · ' + hot.id + '</span><strong>' + thermalResult.total_watts.toFixed(2) + ' W</strong><span>annotated load</span><strong>' + (thermalResult.outlet_rise_c == null ? '—' : thermalResult.outlet_rise_c.toFixed(1) + ' °C') + '</strong><span>mixed outlet rise</span>';
-    updateCardValues();
+    updateCardValues(); if (!thermalLoading) requestVisibleFields(); twoDirty = true;
   }
   function rebuild(fetchSolids) {
     updateThermal(); clearGroup(boardsModel); groupsById = {};
     state.instances.forEach(function (pose) { var board = boardByName[pose.board]; if (board && pose.on) drawBoard(board, pose); });
-    drawSketches(); lastBounds = occupied(); if (dirty) persist();
+    drawSketches(); lastBounds = occupied(); twoDirty = true; if (dirty) persist();
     if (fetchSolids !== false) rebuildBodies().catch(function (error) { $("#model-status").textContent = "Extrusion error: " + error.message; syncExportButtons(); });
   }
   async function loadThermal() {
     await Promise.all(usable.map(async function (board) { try { var query = new URLSearchParams({ ambient: "25" }); if (board.layout !== "blessed") query.set("layout", board.layout); var response = await fetch("/api/thermal/" + encodeURIComponent(board.name) + "?" + query); if (response.ok) board.thermal = await response.json(); } catch (_) {} }));
     thermalLoading = false; rebuild(false);
   }
-  function fit() {
+  function fit3d() {
     var top = state.sketches.reduce(function (value, sketch) { var extrusion = state.extrusions.find(function (row) { return row.sketch === sketch.id && row.enabled !== false; }); return Math.max(value, sketch.plane_z + (extrusion ? extrusion.distance : 0)); }, 10);
     var span = Math.max(lastBounds.width, lastBounds.depth, Math.abs(top), 30); controls.minDistance = Math.max(5, span * 0.18); controls.maxDistance = span * 8;
     camera.up.set(0, 0, 1); controls.target.set(0, 0, top / 2); camera.position.set(span * 0.95, -span * 1.15, span * 0.8); camera.near = Math.max(0.05, span / 1000); camera.far = span * 30; camera.updateProjectionMatrix(); wheelGesture.last = -Infinity; wheelGesture.total = 0; controls.update();
@@ -395,6 +581,29 @@
   function topView() {
     var sketch = activeSketch(), z = sketch ? sketch.plane_z : 0, span = Math.max(lastBounds.width, lastBounds.depth, 30);
     camera.up.set(0, 1, 0); controls.target.set(0, 0, z); camera.position.set(0, 0, z + span * 1.8); camera.near = Math.max(0.05, span / 1000); camera.far = span * 30; camera.updateProjectionMatrix(); controls.update();
+  }
+  function resize2d() {
+    var ratio = Math.min(devicePixelRatio || 1, 2), width = Math.max(1, Math.round(thermalCanvas.clientWidth * ratio)), height = Math.max(1, Math.round(thermalCanvas.clientHeight * ratio));
+    if (thermalCanvas.width === width && thermalCanvas.height === height) return false;
+    thermalCanvas.width = width; thermalCanvas.height = height; twoDirty = true; return true;
+  }
+  function fit2d() {
+    resize2d(); var margin = 70 * Math.min(devicePixelRatio || 1, 2);
+    var width = lastBounds.width, height = lastBounds.depth;
+    twoView.centerX = 0; twoView.centerY = 0;
+    twoView.scale = Math.max(0.25, Math.min((thermalCanvas.width - margin * 2) / Math.max(1, width), (thermalCanvas.height - margin * 2) / Math.max(1, height)));
+    twoDirty = true;
+  }
+  function fit() { if (viewMode === "2d") fit2d(); else fit3d(); }
+  function setView(mode) {
+    viewMode = mode === "3d" ? "3d" : "2d"; thermalCanvas.hidden = viewMode !== "2d"; canvas.hidden = viewMode !== "3d";
+    $("#view-2d").classList.toggle("on", viewMode === "2d"); $("#view-3d").classList.toggle("on", viewMode === "3d");
+    $("#view-2d").setAttribute("aria-pressed", viewMode === "2d" ? "true" : "false"); $("#view-3d").setAttribute("aria-pressed", viewMode === "3d" ? "true" : "false");
+    document.querySelectorAll(".thermal-key").forEach(function (node) { node.hidden = viewMode !== "2d"; });
+    document.querySelectorAll(".cad-key").forEach(function (node) { node.hidden = viewMode !== "3d"; });
+    $("#top").hidden = viewMode !== "3d";
+    $("#drag-help").textContent = viewMode === "2d" ? "Drag boards · drag empty space to pan · scroll to zoom" : "Orbit empty space · drag PCBs · select a sketch tool to draw on its XY plane";
+    $("#thermal-probe").hidden = true; fit();
   }
   async function saveDesign() {
     if (!D.can_write) return; $("#save").disabled = true; status("Saving…");
@@ -409,7 +618,7 @@
     try { var response = await fetch(documentUrl, { headers: { accept: "application/json" } }); if (!response.ok) throw new Error(await response.text()); var value = await response.json(); serverDocument = value.document; legacyIgnored = value.legacy_enclosure_ignored === true; } catch (error) { loadError = error; }
     if (!dirty) applyMechanical(serverDocument); if (!activeSketchId && state.sketches.length) activeSketchId = state.sketches[0].id; syncInputs();
     if (loadError) status("Could not load saved design: " + loadError.message, true); else if (dirty) status("Recovered local draft"); else if (legacyIgnored) status("Old generated enclosure ignored · blank workspace"); else if (serverDocument) status("Saved"); else status("Blank design");
-    $("#save").disabled = !D.can_write; rebuild(); fit(); loadThermal();
+    $("#save").disabled = !D.can_write; rebuild(); setView("2d"); loadThermal();
   }
 
   boardHost.addEventListener("input", function (event) {
@@ -417,6 +626,13 @@
     if (event.target.classList.contains("enabled")) pose.on = event.target.checked; else if (event.target.dataset.key) pose[event.target.dataset.key] = finite(event.target.value, 0); else return;
     setDirty(); rebuild(false);
   });
+  function updateScale() {
+    var minimum = finite($("#scale-min").value, state.scaleMin), maximum = finite($("#scale-max").value, state.scaleMax);
+    if (!(maximum > minimum)) return;
+    state.scaleMin = minimum; state.scaleMax = maximum; fieldRasters = {};
+    $("#legend-min").textContent = minimum + " °C"; $("#legend-max").textContent = maximum + " °C"; setDirty(); twoDirty = true;
+  }
+  $("#scale-min").addEventListener("input", updateScale); $("#scale-max").addEventListener("input", updateScale);
   ["ambient", "pitch"].forEach(function (key) { $("#" + key).addEventListener("input", function () { state[key] = finite(this.value, defaults[key]); setDirty(); rebuild(false); }); });
   $("#snap").addEventListener("change", function () { state.snap = this.checked; setDirty(); });
   $("#new-sketch").onclick = function () {
@@ -450,7 +666,7 @@
 
   function setTool(tool) {
     if (!activeSketch()) { status("Create or select a sketch first", true); return; }
-    topView();
+    setView("3d"); topView();
     drawTool = tool; linePoints = []; rectangleStart = null; controls.enabled = false; canvas.classList.add("sketching");
     $("#drag-help").textContent = tool === "rectangle" ? "Drag two corners on the active XY plane" : "Click line endpoints · click the first point or press Enter to close";
     document.querySelectorAll("#sketch-tools [data-tool]").forEach(function (button) { button.classList.toggle("on", button.dataset.tool === tool); });
@@ -513,7 +729,11 @@
     var next = Math.max(controls.minDistance, Math.min(controls.maxDistance, distance * Math.exp(step * 0.00043))); camera.position.copy(controls.target).add(offset.multiplyScalar(next / distance)); controls.update();
   }, { capture: true, passive: false });
 
-  $("#fit").onclick = fit; $("#top").onclick = topView; $("#save").onclick = saveDesign;
+  $("#fit").onclick = fit;
+  $("#top").onclick = topView;
+  $("#view-2d").onclick = function () { setView("2d"); };
+  $("#view-3d").onclick = function () { setView("3d"); };
+  $("#save").onclick = saveDesign;
   $("#step").onclick = function () { download("step").catch(function (error) { status(error.message, true); }); };
   $("#stl").onclick = function () { download("stl").catch(function (error) { status(error.message, true); }); };
   $("#reset").onclick = function () { localStorage.removeItem(storeKey); location.reload(); };
@@ -521,8 +741,70 @@
     var output = { schema: "netlisp-system-assembly-v1", pitch_mm: state.pitch, ambient_c: state.ambient, instances: state.instances.map(function (pose) { return { id: pose.id, board: pose.board, x: pose.x, y: pose.y, z: pose.z, rotation: pose.rot, enabled: pose.on }; }) };
     var url = URL.createObjectURL(new Blob([JSON.stringify(output, null, 2) + "\n"], { type: "application/json" })); var link = document.createElement("a"); link.href = url; link.download = "assembly.json"; link.click(); setTimeout(function () { URL.revokeObjectURL(url); }, 0);
   };
-  function resize() { var width = canvas.clientWidth, height = canvas.clientHeight, ratio = renderer.getPixelRatio(); if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) { renderer.setSize(width, height, false); camera.aspect = width / Math.max(height, 1); camera.updateProjectionMatrix(); } }
-  function animate() { requestAnimationFrame(animate); resize(); controls.update(); renderer.render(scene, camera); }
+  var twoDrag = null, twoWheelGesture = { last: -Infinity, total: 0 }, probe = $("#thermal-probe");
+  function twoPoint(event) {
+    var rect = thermalCanvas.getBoundingClientRect();
+    var px = (event.clientX - rect.left) * thermalCanvas.width / Math.max(1, rect.width), py = (event.clientY - rect.top) * thermalCanvas.height / Math.max(1, rect.height);
+    return { px: px, py: py, x: twoView.centerX + (px - thermalCanvas.width / 2) / twoView.scale, y: twoView.centerY + (py - thermalCanvas.height / 2) / twoView.scale };
+  }
+  function selectCard(id) {
+    selected2d = id; Object.keys(cards).forEach(function (key) { cards[key].classList.toggle("selected", key === id); }); twoDirty = true;
+  }
+  function showProbe(event, point) {
+    var hit = instanceAt(point.x, point.y); if (!hit) { probe.hidden = true; return; }
+    var row = resultFor(hit.pose.id), field = row && thermalFields[fieldKey(hit.board, row.field_scenario)];
+    var temperature = fieldTemperatureAt(field, hit.board, row, hit.local.x, hit.local.y);
+    if (temperature == null && row) temperature = row.temperature_c;
+    probe.textContent = hit.pose.id + (temperature == null ? " · no thermal field" : " · " + temperature.toFixed(1) + " °C");
+    var rect = $("#viewport").getBoundingClientRect(); probe.style.left = event.clientX - rect.left + 12 + "px"; probe.style.top = event.clientY - rect.top + 12 + "px"; probe.hidden = false;
+  }
+  thermalCanvas.addEventListener("pointerdown", function (event) {
+    var point = twoPoint(event), hit = instanceAt(point.x, point.y);
+    if (hit) {
+      twoDrag = { kind: "board", pointer: event.pointerId, id: hit.pose.id, startX: hit.pose.x, startY: hit.pose.y, pointX: point.x, pointY: point.y };
+      selectCard(hit.pose.id);
+    } else {
+      twoDrag = { kind: "pan", pointer: event.pointerId, px: point.px, py: point.py, centerX: twoView.centerX, centerY: twoView.centerY };
+    }
+    probe.hidden = true; thermalCanvas.classList.add("dragging"); thermalCanvas.setPointerCapture(event.pointerId); event.preventDefault();
+  });
+  thermalCanvas.addEventListener("pointermove", function (event) {
+    var point = twoPoint(event);
+    if (!twoDrag || twoDrag.pointer !== event.pointerId) { showProbe(event, point); return; }
+    if (twoDrag.kind === "pan") {
+      twoView.centerX = twoDrag.centerX - (point.px - twoDrag.px) / twoView.scale; twoView.centerY = twoDrag.centerY - (point.py - twoDrag.py) / twoView.scale;
+    } else {
+      var pose = poseFor(twoDrag.id), dx = point.x - twoDrag.pointX, dy = point.y - twoDrag.pointY;
+      if (state.snap) { dx = Math.round(dx / state.pitch) * state.pitch; dy = Math.round(dy / state.pitch) * state.pitch; }
+      pose.x = twoDrag.startX + dx; pose.y = twoDrag.startY + dy; updateThermal(); updateCardValues();
+    }
+    twoDirty = true; event.preventDefault();
+  });
+  function endTwoDrag(event) {
+    if (!twoDrag || twoDrag.pointer !== event.pointerId) return;
+    var changedBoard = twoDrag.kind === "board"; twoDrag = null; thermalCanvas.classList.remove("dragging");
+    if (changedBoard) { setDirty(); rebuild(false); } else twoDirty = true;
+  }
+  thermalCanvas.addEventListener("pointerup", endTwoDrag); thermalCanvas.addEventListener("pointercancel", endTwoDrag);
+  thermalCanvas.addEventListener("pointerleave", function () { if (!twoDrag) probe.hidden = true; });
+  thermalCanvas.addEventListener("wheel", function (event) {
+    event.preventDefault(); var point = twoPoint(event);
+    var step = boundedWheelStep(twoWheelGesture, event.deltaY, event.deltaMode, performance.now(), thermalCanvas.clientHeight); if (!step) return;
+    var nextScale = Math.max(0.2, Math.min(40, twoView.scale * Math.exp(-step * 0.00043)));
+    twoView.centerX = point.x - (point.px - thermalCanvas.width / 2) / nextScale; twoView.centerY = point.y - (point.py - thermalCanvas.height / 2) / nextScale;
+    twoView.scale = nextScale; twoDirty = true;
+  }, { passive: false });
+  thermalCanvas.addEventListener("dblclick", fit2d);
+
+  function resize3d() {
+    var width = canvas.clientWidth, height = canvas.clientHeight, ratio = renderer.getPixelRatio();
+    if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) { renderer.setSize(width, height, false); camera.aspect = width / Math.max(height, 1); camera.updateProjectionMatrix(); }
+  }
+  function animate() {
+    requestAnimationFrame(animate);
+    if (viewMode === "3d") { resize3d(); controls.update(); renderer.render(scene, camera); }
+    else if (resize2d() || twoDirty) draw2d();
+  }
 
   if (!OS) status("Sketch engine failed to load", true); else { boot(); animate(); }
 })(typeof window !== "undefined" ? window : globalThis);

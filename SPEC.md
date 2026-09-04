@@ -5905,7 +5905,7 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - the standalone draft dossier is the archive's own HTML member composed without the archive around it
 - a dossier request over a workspace that cannot compose answers the composer's diagnostic rather than a crash or a partial page
 - the system review page offers the dossier as a page action beside the draft download, pointing at the system's own dossier path
-- a strict assembly sidecar repeats reviewed board definitions as uniquely identified physical instances and preserves its authored pitch, while bounded wheel gestures prevent trackpad momentum from driving the 3D camera through the assembly
+- a strict assembly sidecar repeats reviewed board definitions as uniquely identified physical instances and preserves its authored pitch, and the system workspace opens as a 2D solved heat-field map with a separate 3D assembly view and bounded wheel gestures
 - a dossier request answers from the current or explicitly stale composed copy, or a loader when no copy exists, without ever composing inside the request
 - a completed dossier persists atomically below out and is rehydrated after restart for the same tool build, marked stale when its project tree changed and rejected when its bytes are damaged
 - one dossier composition per system is ever in flight, and a reload during one joins it rather than starting a second
@@ -7418,7 +7418,7 @@ is what makes the predicate exact rather than approximately right.
 - The PCB pad aligner moves only the source footprint when both selected pads belong to the same sub-circuit, while an outside target still moves the source sub-circuit as one owner
 - Editable sub-circuit PCB embeds expose the pad aligner's Same X and Same Y controls
 - physical board navigation exposes stable 3D and a read-only assembly workspace
-- the system 3D CAD workspace opens with imported PCBs as reference geometry and no inferred enclosure; only an authored closed shape-sketch followed by an explicit enabled extrusion creates a preview or STEP/STL solid, while legacy generated-enclosure documents are ignored rather than regenerated
+- the system CAD workspace's separate 3D assembly view shows imported PCBs as reference geometry and no inferred enclosure; only an authored closed shape-sketch followed by an explicit enabled extrusion creates a preview or STEP/STL solid, while legacy generated-enclosure documents are ignored rather than regenerated
 - the PCB 3D viewer extrudes the physical outline at the authored thickness and mounts bottom-side footprints beneath it
 - the PCB 3D viewer places its visible axis origin at the PCB outline bounding-box centre in X/Y and the board thickness mid-plane in Z, and its camera orbits that same datum
 - the PCB 3D viewer paints its base board before component previews finish, parses vendor STEP models outside the UI thread, renders only after scene or camera changes, and lowers raster density while interacting on a software WebGL renderer
