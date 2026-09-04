@@ -52,6 +52,22 @@ assert.ok(barracuda.temperature_c < result.hottest.temperature_c);
 assert.equal(barracuda.field_scenario, "fan_heatsink");
 assert.equal(result.hottest.field_scenario, "natural");
 
+const importedFans = thermal.attachedFans(boards, instances);
+assert.equal(importedFans.length, 1);
+assert.equal(importedFans[0].id, "barracuda-fan");
+assert.equal(importedFans[0].direction, "down");
+const removed = thermal.solveSystem(boards, instances, 25, []);
+assert.equal(removed.total_flow_m3_s, 0);
+assert.equal(removed.outlet_rise_c, null);
+assert.equal(removed.instances.find((row) => row.id === "barracuda").coverage, 0);
+assert.equal(removed.instances.find((row) => row.id === "barracuda").field_scenario, "heatsink");
+const movedFan = { ...importedFans[0], id: "fan-left", x: -73.95, y: -77 };
+const moved = thermal.solveSystem(boards, instances, 25, [movedFan]);
+assert.ok(moved.instances.find((row) => row.id === "black-canyon-left-1").coverage > 0.99);
+assert.equal(moved.instances.find((row) => row.id === "black-canyon-right-8").coverage, 0);
+const wrongWay = { ...movedFan, direction: "up" };
+assert.equal(thermal.fanInfluence(wrongWay, boards[1], instances[1]), null);
+
 assert.deepEqual(thermal.rampColor(25, 25, 125).map(Math.round), [7, 20, 56]);
 assert.deepEqual(thermal.rampColor(125, 25, 125).map(Math.round), [232, 64, 42]);
 const field = {

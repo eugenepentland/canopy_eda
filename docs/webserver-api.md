@@ -364,10 +364,16 @@ Local dev still uses `http://localhost:7050`.
   the board Thermal page, aligned to its saved layout and shifted by the
   system inlet estimate; pointer probing reports the local field temperature.
   A **3D assembly** toggle retains enclosure and top/bottom cooling inspection.
-  Both views render the exact PCB outlines, components, and layout-authored
-  fans/heatsinks; instances can be dragged in XY or edited numerically, with
-  drafts isolated in browser storage and exportable through **Download
-  assembly.json**. Its coupled screen reuses each board's `/api/thermal`
+  Both views render the exact PCB outlines, components, and heatsinks. The
+  workspace imports each layout-authored fan into an independent system fan;
+  fans may then be added, removed, enabled, dragged in XY, or assigned exact
+  XYZ/rotation, outlet size/direction, free-air flow, static pressure, and
+  installed-flow fraction values. Saving records them in the optional `fans`
+  array of `netlisp-mechanical-v2`; a missing array imports the legacy
+  board-attached fans, while an explicit empty array preserves the decision to
+  remove every fan. Board instances can likewise be dragged in XY or edited
+  numerically, with drafts isolated in browser storage and exportable through
+  **Download assembly.json**. Its coupled screen reuses each board's `/api/thermal`
   ladder, projects installed fan flow by plan-area overlap,
   interpolates the 0/1/2 m/s rungs without extrapolating above 2 m/s, and adds
   half the well-mixed enclosure air rise `P/(rho*cp*Q)` to approximate average

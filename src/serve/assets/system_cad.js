@@ -3,6 +3,8 @@
 
   var RHO_AIR_KG_M3 = 1.184;
   var CP_AIR_J_KGK = 1006;
+  var FAN_THICKNESS_MM = 4;
+  var FAN_JET_SPREAD_PER_SIDE = 0.1;
 
   function finite(value, fallback) {
     return Number.isFinite(Number(value)) ? Number(value) : fallback;
@@ -64,7 +66,7 @@
 
   function fieldScenario(board, coverage, velocity) {
     var cooling = board.cooling || {};
-    if (cooling.heatsink) return cooling.fan && coverage >= 0.25 ? "fan_heatsink" : "heatsink";
+    if (cooling.heatsink) return scenario(board.thermal, "fan_heatsink") && coverage >= 0.25 ? "fan_heatsink" : "heatsink";
     if (velocity >= 1.5) return "airflow_2ms";
     if (velocity >= 0.25) return "airflow_1ms";
     return "natural";
@@ -124,23 +126,47 @@
     return riseForVelocity(thermal, velocity);
   }
 
-  function solveSystem(boardDefinitions, instances, ambientC) {
+  function attachedFans(boardDefinitions, instances) {
+    var boardByName = {};
+    boardDefinitions.forEach(function (board) { boardByName[board.name] = board; });
+    var fans = [];
+    instances.forEach(function (instance) {
+      var board = boardByName[instance.board], source = board && board.cooling && board.cooling.fan;
+      if (!board || !source) return;
+      var angle = finite(instance.rot, finite(instance.rotation, 0)) * Math.PI / 180, c = Math.cos(angle), s = Math.sin(angle);
+      var localX = finite(source.x, 0), localY = finite(source.y, 0), top = source.side !== "bottom";
+      fans.push({
+        id: instance.id + "-fan", name: source.model || instance.id + " fan", enabled: true,
+        x: finite(instance.x, 0) + localX * c - localY * s,
+        y: finite(instance.y, 0) + localX * s + localY * c,
+        z: finite(instance.z, 0) + (top ? finite(board.thickness, 1.6) + finite(source.distance_mm, 0) + FAN_THICKNESS_MM / 2 : -finite(source.distance_mm, 0) - FAN_THICKNESS_MM / 2),
+        rot: finite(instance.rot, finite(instance.rotation, 0)), width: finite(source.w, 80), depth: finite(source.d, 80),
+        direction: top ? "down" : "up", free_air_flow_m3_s: finite(source.flow_m3_s, 0),
+        max_static_pressure_pa: finite(source.pressure_pa, 0), operating_flow_fraction: finite(source.operating_fraction, 1)
+      });
+    });
+    return fans;
+  }
+
+  function fanInfluence(fan, board, instance) {
+    var direction = fan.direction === "up" ? "up" : "down";
+    var outletZ = finite(fan.z, 0) + (direction === "down" ? -FAN_THICKNESS_MM / 2 : FAN_THICKNESS_MM / 2);
+    var faceZ = finite(instance.z, 0) + (direction === "down" ? finite(board.thickness, 1.6) : 0);
+    var distance = direction === "down" ? outletZ - faceZ : faceZ - outletZ;
+    if (distance < -1e-6) return null;
+    var grow = FAN_JET_SPREAD_PER_SIDE * Math.max(0, distance);
+    var width = Math.max(1e-6, finite(fan.width, 0) + 2 * grow), depth = Math.max(1e-6, finite(fan.depth, 0) + 2 * grow);
+    var bounds = rotatedBounds(width, depth, { x: fan.x, y: fan.y, rot: fan.rot }, 0, 0);
+    var flow = Math.max(0, finite(fan.free_air_flow_m3_s, 0) * finite(fan.operating_flow_fraction, 1));
+    return { bounds: bounds, velocity: flow / Math.max(1e-9, width * depth / 1e6), distance: distance };
+  }
+
+  function solveSystem(boardDefinitions, instances, ambientC, systemFans) {
     var boardByName = {};
     boardDefinitions.forEach(function (board) { boardByName[board.name] = board; });
     var active = instances.filter(function (instance) { return instance.on !== false && boardByName[instance.board]; });
-    var fans = [];
-    active.forEach(function (instance) {
-      var board = boardByName[instance.board], fan = board.cooling && board.cooling.fan;
-      if (!fan) return;
-      var flow = Math.max(0, finite(fan.flow_m3_s, 0) * finite(fan.operating_fraction, 1));
-      fans.push({
-        owner: instance.id,
-        bounds: rotatedBounds(fan.w, fan.d, instance, fan.x, fan.y),
-        flow: flow,
-        velocity: flow / Math.max(1e-9, fan.w * fan.d / 1e6)
-      });
-    });
-    var totalFlow = fans.reduce(function (sum, fan) { return sum + fan.flow; }, 0);
+    var fans = (Array.isArray(systemFans) ? systemFans : attachedFans(boardDefinitions, active)).filter(function (fan) { return fan && fan.enabled !== false; });
+    var totalFlow = fans.reduce(function (sum, fan) { return sum + Math.max(0, finite(fan.free_air_flow_m3_s, 0) * finite(fan.operating_flow_fraction, 1)); }, 0);
     var totalWatts = active.reduce(function (sum, instance) { return sum + totalBoardPower(boardByName[instance.board].thermal); }, 0);
     var outletRise = totalFlow > 0 ? totalWatts / (RHO_AIR_KG_M3 * CP_AIR_J_KGK * totalFlow) : null;
     var results = active.map(function (instance) {
@@ -148,9 +174,10 @@
       var bounds = rotatedBounds(board.width, board.depth, instance, 0, 0);
       var coverage = 0, velocity = 0;
       fans.forEach(function (fan) {
-        var overlap = overlapFraction(bounds, fan.bounds);
+        var influence = fanInfluence(fan, board, instance); if (!influence) return;
+        var overlap = overlapFraction(bounds, influence.bounds);
         coverage = Math.min(1, coverage + overlap);
-        velocity += overlap * fan.velocity;
+        velocity += overlap * influence.velocity;
       });
       var rise = boardRise(board, coverage, velocity);
       return {
@@ -163,7 +190,7 @@
       if (row.temperature_c == null) return best;
       return !best || row.temperature_c > best.temperature_c ? row : best;
     }, null);
-    return { total_watts: totalWatts, total_flow_m3_s: totalFlow, outlet_rise_c: outletRise, hottest: hottest, instances: results };
+    return { total_watts: totalWatts, total_flow_m3_s: totalFlow, outlet_rise_c: outletRise, hottest: hottest, fans: fans, instances: results };
   }
 
   function enabledExtrusionCount(value) {
@@ -177,7 +204,7 @@
     return [u, v, offset + normal];
   }
 
-  var API = { rotatedBounds: rotatedBounds, overlapFraction: overlapFraction, totalBoardPower: totalBoardPower, boundedWheelStep: boundedWheelStep, rampColor: rampColor, fieldScenario: fieldScenario, fieldTemperatureAt: fieldTemperatureAt, solveSystem: solveSystem, enabledExtrusionCount: enabledExtrusionCount, sketchWorldPoint: sketchWorldPoint };
+  var API = { rotatedBounds: rotatedBounds, overlapFraction: overlapFraction, totalBoardPower: totalBoardPower, boundedWheelStep: boundedWheelStep, rampColor: rampColor, fieldScenario: fieldScenario, fieldTemperatureAt: fieldTemperatureAt, attachedFans: attachedFans, fanInfluence: fanInfluence, solveSystem: solveSystem, enabledExtrusionCount: enabledExtrusionCount, sketchWorldPoint: sketchWorldPoint };
   if (typeof module !== "undefined" && module.exports) module.exports = API;
   root.SystemThermal = API;
   if (!root.document || !root.CAD_DATA) return;
@@ -203,13 +230,14 @@
     return usable.map(function (board, index) { return { id: board.name, board: board.name, on: true, x: 0, y: 0, z: 5 + index * 14, rot: 0 }; });
   }
 
+  var defaultInstanceRows = defaultInstances();
   var defaults = {
     version: 2,
     ambient: finite(D.assembly && D.assembly.ambient_c, 25),
     pitch: finite(D.assembly && D.assembly.pitch_mm, 22),
     scaleMin: 25, scaleMax: 125,
     snap: true,
-    instances: defaultInstances(), sketches: [], extrusions: []
+    instances: defaultInstanceRows, fans: attachedFans(usable, defaultInstanceRows), sketches: [], extrusions: []
   };
   var saved = null;
   try { saved = JSON.parse(localStorage.getItem(storeKey) || "null"); } catch (_) {}
@@ -218,6 +246,17 @@
     var prior = saved && saved.version === 2 && Array.isArray(saved.instances) ? saved.instances.find(function (value) { return value.id === base.id && value.board === base.board; }) : null;
     return Object.assign({}, base, prior || {});
   });
+  function hydrateFan(value) {
+    return {
+      id: value.id, name: value.name || value.id, enabled: value.enabled !== false,
+      x: finite(value.x, 0), y: finite(value.y, 0), z: finite(value.z, 25), rot: finite(value.rot, finite(value.rotation, 0)),
+      width: Math.max(1, finite(value.width, 80)), depth: Math.max(1, finite(value.depth, 80)), direction: value.direction === "up" ? "up" : "down",
+      free_air_flow_m3_s: Math.max(0.000001, finite(value.free_air_flow_m3_s, 0.025)),
+      max_static_pressure_pa: Math.max(0, finite(value.max_static_pressure_pa, 0)),
+      operating_flow_fraction: Math.max(0.000001, Math.min(1, finite(value.operating_flow_fraction, 0.6)))
+    };
+  }
+  state.fans = (saved && saved.version === 2 && Array.isArray(saved.fans) ? saved.fans : attachedFans(usable, state.instances)).map(hydrateFan);
   state.sketches = Array.isArray(state.sketches) ? state.sketches : [];
   state.extrusions = Array.isArray(state.extrusions) ? state.extrusions : [];
   state.sketches.forEach(function (sketch) { sketch.plane = sketch.plane || "xy"; });
@@ -261,6 +300,7 @@
     return {
       schema: "netlisp-mechanical-v2",
       boards: state.instances.map(function (pose) { return { name: pose.id, enabled: pose.on, x: pose.x, y: pose.y, z: pose.z, rotation: pose.rot }; }),
+      fans: state.fans.map(function (fan) { return { id: fan.id, name: fan.name, enabled: fan.enabled, x: fan.x, y: fan.y, z: fan.z, rotation: fan.rot, width: fan.width, depth: fan.depth, direction: fan.direction, free_air_flow_m3_s: fan.free_air_flow_m3_s, max_static_pressure_pa: fan.max_static_pressure_pa, operating_flow_fraction: fan.operating_flow_fraction }; }),
       sketches: state.sketches.map(function (sketch) { return { id: sketch.id, name: sketch.name, plane: sketchPlane(sketch.plane), plane_z: sketch.plane_z, geometry: serializeSketch(sketch.geometry) }; }),
       extrusions: clone(state.extrusions)
     };
@@ -272,13 +312,14 @@
       if (!stored) return;
       pose.on = stored.enabled !== false; pose.x = finite(stored.x, pose.x); pose.y = finite(stored.y, pose.y); pose.z = finite(stored.z, pose.z); pose.rot = finite(stored.rotation, pose.rot);
     });
+    state.fans = (Array.isArray(documentValue.fans) ? documentValue.fans : attachedFans(usable, state.instances)).map(hydrateFan);
     state.sketches = (documentValue.sketches || []).map(function (sketch) { return { id: sketch.id, name: sketch.name, plane: sketchPlane(sketch.plane), plane_z: finite(sketch.plane_z, 0), geometry: hydrateSketch(sketch.geometry) }; });
     state.extrusions = clone(documentValue.extrusions || []);
   }
 
   ["ambient", "pitch"].forEach(function (key) { $("#" + key).value = state[key]; });
   $("#snap").checked = state.snap !== false;
-  var cards = {}, boardHost = $("#boards");
+  var cards = {}, boardHost = $("#boards"), fanCards = {}, fanHost = $("#fans");
   state.instances.forEach(function (pose) {
     var board = boardByName[pose.board], item = document.createElement("div");
     item.className = "board"; item.dataset.instance = pose.id;
@@ -310,11 +351,11 @@
   scene.add(new THREE.HemisphereLight(0xd8e9ff, 0x182338, 1.25));
   var sun = new THREE.DirectionalLight(0xffffff, 0.85); sun.position.set(-80, -100, 160); scene.add(sun);
   var grid = new THREE.GridHelper(500, 50, 0x35506f, 0x23354d); grid.rotation.x = Math.PI / 2; grid.position.z = -0.02; scene.add(grid);
-  var boardsModel = new THREE.Group(), solidModel = new THREE.Group(), sketchModel = new THREE.Group(), originModel = new THREE.Group(), editGrid = new THREE.Group();
-  scene.add(boardsModel); scene.add(solidModel); scene.add(sketchModel); scene.add(originModel); scene.add(editGrid);
-  var lastBounds = { width: 80, depth: 60 }, thermalResult = null, thermalLoading = true, groupsById = {}, meshSequence = 0;
+  var boardsModel = new THREE.Group(), fansModel = new THREE.Group(), solidModel = new THREE.Group(), sketchModel = new THREE.Group(), originModel = new THREE.Group(), editGrid = new THREE.Group();
+  scene.add(boardsModel); scene.add(fansModel); scene.add(solidModel); scene.add(sketchModel); scene.add(originModel); scene.add(editGrid);
+  var lastBounds = { width: 80, depth: 60 }, thermalResult = null, thermalLoading = true, groupsById = {}, fanGroupsById = {}, meshSequence = 0;
   var viewMode = "2d", twoView = { centerX: 0, centerY: 0, scale: 1 }, twoDirty = true;
-  var thermalFields = {}, fieldPromises = {}, fieldRasters = {}, selected2d = null;
+  var thermalFields = {}, fieldPromises = {}, fieldRasters = {}, selected2d = null, selected2dKind = null;
 
   var PLANE = {
     xy: { u: new THREE.Vector3(1, 0, 0), v: new THREE.Vector3(0, 1, 0), n: new THREE.Vector3(0, 0, 1), color: 0x4f8cff, label: "XY" },
@@ -366,10 +407,11 @@
   }
   buildOriginMarker(); selectPlane("xy");
   function poseFor(id) { return state.instances.find(function (pose) { return pose.id === id; }); }
+  function fanFor(id) { return state.fans.find(function (fan) { return fan.id === id; }); }
   function resultFor(id) { return thermalResult && thermalResult.instances.find(function (row) { return row.id === id; }); }
   function temperatureColor(row) { if (!row || row.temperature_c == null) return 0x2f8f70; var rise = row.temperature_c - state.ambient; return rise < 18 ? 0x22a879 : rise < 40 ? 0xe0a93b : 0xdf5b57; }
   function attachCooling(group, board) {
-    var sink = board.cooling && board.cooling.heatsink, fan = board.cooling && board.cooling.fan;
+    var sink = board.cooling && board.cooling.heatsink;
     if (sink) {
       var down = sink.side === "bottom" ? -1 : 1, sinkZ = down < 0 ? -sink.pad_mm - sink.base_mm / 2 : board.thickness + sink.pad_mm + sink.base_mm / 2;
       box(group, sink.w, sink.d, sink.base_mm, sink.x, sink.y, sinkZ, material(0x8e9ba9, 0.88));
@@ -378,13 +420,15 @@
         box(group, sink.lower_w, sink.lower_d, sink.lower_h, sink.x, sink.y, lowerZ, material(0x7f8b99, 0.72));
       }
     }
-    if (fan) {
-      var fanDown = fan.side === "bottom" ? -1 : 1, fanZ = fanDown < 0 ? -fan.distance_mm - 2 : board.thickness + fan.distance_mm + 2;
-      var frame = material(0x313843, 0.95), flow = material(0x62a5ff, 0.18), rim = 5, thick = 4;
-      box(group, fan.w, rim, thick, fan.x, fan.y - (fan.d - rim) / 2, fanZ, frame); box(group, fan.w, rim, thick, fan.x, fan.y + (fan.d - rim) / 2, fanZ, frame);
-      box(group, rim, fan.d - 2 * rim, thick, fan.x - (fan.w - rim) / 2, fan.y, fanZ, frame); box(group, rim, fan.d - 2 * rim, thick, fan.x + (fan.w - rim) / 2, fan.y, fanZ, frame);
-      box(group, Math.max(1, fan.w - 2 * rim), Math.max(1, fan.d - 2 * rim), 0.4, fan.x, fan.y, fanZ, flow);
-    }
+  }
+  function drawSystemFan(fan) {
+    if (fan.enabled === false) return;
+    var group = new THREE.Group(), frame = material(0x313843, 0.95), flow = material(0x62a5ff, 0.2), rim = Math.min(5, fan.width / 3, fan.depth / 3), thick = FAN_THICKNESS_MM;
+    [[fan.width, rim, 0, -(fan.depth - rim) / 2], [fan.width, rim, 0, (fan.depth - rim) / 2], [rim, Math.max(1, fan.depth - 2 * rim), -(fan.width - rim) / 2, 0], [rim, Math.max(1, fan.depth - 2 * rim), (fan.width - rim) / 2, 0]].forEach(function (piece) {
+      var mesh = box(group, piece[0], piece[1], thick, piece[2], piece[3], 0, frame); mesh.userData.fanId = fan.id; mesh.userData.draggable = true;
+    });
+    var outlet = box(group, Math.max(1, fan.width - 2 * rim), Math.max(1, fan.depth - 2 * rim), 0.4, 0, 0, fan.direction === "down" ? -thick / 2 : thick / 2, flow); outlet.userData.fanId = fan.id; outlet.userData.draggable = true;
+    group.position.set(fan.x, fan.y, fan.z); group.rotation.z = fan.rot * Math.PI / 180; fansModel.add(group); fanGroupsById[fan.id] = group;
   }
   function drawBoard(board, pose) {
     var group = new THREE.Group(), shape = new THREE.Shape(), points = board.outline, row = resultFor(pose.id);
@@ -453,6 +497,17 @@
     }
     return null;
   }
+  function fanAt(x, y, handlesOnly) {
+    for (var i = state.fans.length - 1; i >= 0; i -= 1) {
+      var fan = state.fans[i]; if (fan.enabled === false) continue;
+      var local = localPoint(fan, x, y);
+      var ax = Math.abs(local.x), ay = Math.abs(local.y);
+      if (ax > fan.width / 2 || ay > fan.depth / 2) continue;
+      var tolerance = Math.max(1.5, 7 / Math.max(twoView.scale, 0.1)), edge = Math.min(fan.width / 2 - ax, fan.depth / 2 - ay), atHandle = Math.hypot(local.x, local.y) <= tolerance * 1.5;
+      if (!handlesOnly || edge <= tolerance || atHandle) return { fan: fan, local: local };
+    }
+    return null;
+  }
   function worldTransform(pose) {
     var angle = pose.rot * Math.PI / 180, c = Math.cos(angle), s = Math.sin(angle), scale = twoView.scale;
     thermalContext.setTransform(scale * c, scale * s, -scale * s, scale * c,
@@ -465,20 +520,26 @@
     thermalContext.closePath();
   }
   function drawCooling2d(board) {
-    var cooling = board.cooling || {}, sink = cooling.heatsink, fan = cooling.fan;
+    var cooling = board.cooling || {}, sink = cooling.heatsink;
     if (sink) {
       var sw = sink.shape === "stepped" ? sink.lower_w : sink.w, sd = sink.shape === "stepped" ? sink.lower_d : sink.d;
       thermalContext.fillStyle = "rgba(185,196,210,.10)"; thermalContext.strokeStyle = "rgba(210,220,232,.75)";
       thermalContext.setLineDash([3 / twoView.scale, 2 / twoView.scale]); thermalContext.fillRect(sink.x - sw / 2, sink.y - sd / 2, sw, sd); thermalContext.strokeRect(sink.x - sw / 2, sink.y - sd / 2, sw, sd); thermalContext.setLineDash([]);
     }
-    if (fan) {
-      thermalContext.fillStyle = "rgba(98,165,255,.12)"; thermalContext.strokeStyle = "rgba(98,165,255,.95)";
-      thermalContext.fillRect(fan.x - fan.w / 2, fan.y - fan.d / 2, fan.w, fan.d); thermalContext.strokeRect(fan.x - fan.w / 2, fan.y - fan.d / 2, fan.w, fan.d);
-    }
+  }
+  function drawFan2d(fan) {
+    thermalContext.save(); worldTransform(fan);
+    var selected = selected2dKind === "fan" && selected2d === fan.id;
+    thermalContext.fillStyle = "rgba(98,165,255,.12)"; thermalContext.strokeStyle = selected ? "#ffffff" : "rgba(98,165,255,.95)"; thermalContext.lineWidth = (selected ? 2.5 : 1.4) / twoView.scale;
+    thermalContext.fillRect(-fan.width / 2, -fan.depth / 2, fan.width, fan.depth); thermalContext.strokeRect(-fan.width / 2, -fan.depth / 2, fan.width, fan.depth);
+    thermalContext.beginPath(); thermalContext.moveTo(-fan.width * 0.12, 0); thermalContext.lineTo(fan.width * 0.12, 0); thermalContext.moveTo(0, -fan.depth * 0.12); thermalContext.lineTo(0, fan.depth * 0.12); thermalContext.stroke();
+    thermalContext.restore();
+    var sx = thermalCanvas.width / 2 + (fan.x - twoView.centerX) * twoView.scale, sy = thermalCanvas.height / 2 + (fan.y - twoView.centerY) * twoView.scale;
+    thermalContext.save(); thermalContext.font = "600 10px system-ui,sans-serif"; thermalContext.textAlign = "center"; thermalContext.fillStyle = "#b9d6ff"; thermalContext.fillText(fan.name, sx, sy - fan.depth * twoView.scale / 2 - 5); thermalContext.restore();
   }
   function drawBoard2d(board, pose) {
     var row = resultFor(pose.id), raster = row && rasterFor(board, row), center = board.source_center || [0, 0];
-    thermalContext.save(); worldTransform(pose); thermalContext.lineWidth = (selected2d === pose.id ? 2.5 : 1.2) / twoView.scale;
+    thermalContext.save(); worldTransform(pose); thermalContext.lineWidth = (selected2dKind === "board" && selected2d === pose.id ? 2.5 : 1.2) / twoView.scale;
     outlinePath(board.outline);
     var baseColor = row && row.temperature_c != null ? rampColor(row.temperature_c, state.scaleMin, state.scaleMax) : [36, 75, 91];
     thermalContext.fillStyle = "rgb(" + baseColor.map(Math.round).join(",") + ")"; thermalContext.fill();
@@ -486,7 +547,7 @@
       thermalContext.save(); outlinePath(board.outline); thermalContext.clip(); thermalContext.imageSmoothingEnabled = true;
       thermalContext.drawImage(raster.canvas, raster.field.grid.origin_x_mm - center[0], raster.field.grid.origin_y_mm - center[1], raster.field.grid.cols * raster.field.grid.cell_mm, raster.field.grid.rows * raster.field.grid.cell_mm); thermalContext.restore();
     }
-    thermalContext.strokeStyle = selected2d === pose.id ? "#ffffff" : "rgba(225,236,249,.78)"; outlinePath(board.outline); thermalContext.stroke();
+    thermalContext.strokeStyle = selected2dKind === "board" && selected2d === pose.id ? "#ffffff" : "rgba(225,236,249,.78)"; outlinePath(board.outline); thermalContext.stroke();
     thermalContext.strokeStyle = "rgba(255,255,255,.28)"; thermalContext.lineWidth = 0.65 / twoView.scale;
     board.parts.forEach(function (part) {
       thermalContext.save(); thermalContext.translate(part.x, part.y); thermalContext.rotate(part.rot * Math.PI / 180);
@@ -521,6 +582,7 @@
     }
     thermalContext.stroke();
     state.instances.forEach(function (pose) { var board = boardByName[pose.board]; if (board && pose.on) drawBoard2d(board, pose); });
+    state.fans.forEach(function (fan) { if (fan.enabled !== false) drawFan2d(fan); });
     if (Object.keys(fieldPromises).length) {
       thermalContext.fillStyle = "rgba(8,12,18,.78)"; thermalContext.fillRect(14, 14, 148, 28);
       thermalContext.fillStyle = "#cbd6e5"; thermalContext.font = "12px system-ui,sans-serif"; thermalContext.fillText("Loading heat fields…", 25, 33);
@@ -530,6 +592,7 @@
   function occupied() {
     var minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
     state.instances.forEach(function (pose) { var board = boardByName[pose.board]; if (!board || !pose.on) return; var bounds = rotatedBounds(board.width, board.depth, pose, 0, 0); minx = Math.min(minx, bounds.minx); maxx = Math.max(maxx, bounds.maxx); miny = Math.min(miny, bounds.miny); maxy = Math.max(maxy, bounds.maxy); });
+    state.fans.forEach(function (fan) { if (fan.enabled === false) return; var bounds = rotatedBounds(fan.width, fan.depth, fan, 0, 0); minx = Math.min(minx, bounds.minx); maxx = Math.max(maxx, bounds.maxx); miny = Math.min(miny, bounds.miny); maxy = Math.max(maxy, bounds.maxy); });
     state.sketches.forEach(function (sketch) { var compiled = OS && OS.compile(sketch.geometry); if (!compiled || !compiled.rect) return; minx = Math.min(minx, compiled.rect.x); maxx = Math.max(maxx, compiled.rect.x + compiled.rect.w); miny = Math.min(miny, compiled.rect.y); maxy = Math.max(maxy, compiled.rect.y + compiled.rect.h); });
     if (!isFinite(minx)) return { width: 80, depth: 60 };
     return { width: Math.max(1, 2 * Math.max(Math.abs(minx), Math.abs(maxx))), depth: Math.max(1, 2 * Math.max(Math.abs(miny), Math.abs(maxy))) };
@@ -587,6 +650,17 @@
     var response = await fetch("/api/systems/" + encodeURIComponent(D.system) + "/cad/export?format=" + format, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(mechanicalDocument()) });
     if (!response.ok) throw new Error(await response.text());
     var blob = await response.blob(), link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = D.system + "-mechanical." + format; link.click(); setTimeout(function () { URL.revokeObjectURL(link.href); }, 1000);
+  }
+
+  function renderFans() {
+    fanHost.textContent = ""; fanCards = {};
+    state.fans.forEach(function (fan) {
+      var card = document.createElement("div"); card.className = "feature fan-card" + (selected2dKind === "fan" && selected2d === fan.id ? " selected" : ""); card.dataset.id = fan.id;
+      card.innerHTML = '<div class="feature-title"><label class="check"><input class="enabled" type="checkbox"><strong></strong></label><button class="remove" title="Delete fan">×</button></div><div class="fan-fields"><label class="fan-name">Model<input data-key="name"></label><label>X<input type="number" step="0.5" data-key="x"></label><label>Y<input type="number" step="0.5" data-key="y"></label><label>Z<input type="number" step="0.5" data-key="z"></label><label>Rot°<input type="number" step="5" data-key="rot"></label><label>Width mm<input type="number" min="1" step="1" data-key="width"></label><label>Depth mm<input type="number" min="1" step="1" data-key="depth"></label><label>Outlet<select data-key="direction"><option value="down">Down</option><option value="up">Up</option></select></label><label>Free flow m³/s<input type="number" min="0.000001" step="0.001" data-key="free_air_flow_m3_s"></label><label>Installed fraction<input type="number" min="0.000001" max="1" step="0.05" data-key="operating_flow_fraction"></label><label>Pressure Pa<input type="number" min="0" step="1" data-key="max_static_pressure_pa"></label></div>';
+      card.querySelector("strong").textContent = fan.id; card.querySelector(".enabled").checked = fan.enabled !== false;
+      ["name", "x", "y", "z", "rot", "width", "depth", "direction", "free_air_flow_m3_s", "operating_flow_fraction", "max_static_pressure_pa"].forEach(function (key) { card.querySelector('[data-key="' + key + '"]').value = fan[key]; });
+      fanHost.appendChild(card); fanCards[fan.id] = card;
+    });
   }
 
   function renderSketches() {
@@ -735,14 +809,14 @@
   }
   function finishSketch() {
     editMode = false; sketchTool = "select"; sketchSelection = []; linePoints = []; lineCursor = null; rectangleStart = null; rectangleCurrent = null; sketchGesture = null; activeCamera = camera; controls.enabled = true; grid.visible = true; solidModel.visible = true; clearGroup(editGrid); canvas.classList.remove("sketching"); datumPlanes.forEach(function (mesh) { mesh.visible = true; });
-    document.querySelectorAll("#plane-choices button").forEach(function (button) { button.disabled = false; }); selectPlane(selectedPlane); $("#drag-help").textContent = "Orbit empty space · drag PCBs · click an origin plane to start a sketch"; renderSketches(); drawSketches(); syncPalette();
+    document.querySelectorAll("#plane-choices button").forEach(function (button) { button.disabled = false; }); selectPlane(selectedPlane); $("#drag-help").textContent = "Orbit empty space · drag PCBs or fans · click an origin plane to start a sketch"; renderSketches(); drawSketches(); syncPalette();
   }
   function syncInputs() {
     ["ambient", "pitch"].forEach(function (key) { $("#" + key).value = state[key]; }); $("#snap").checked = state.snap !== false;
     $("#scale-min").value = state.scaleMin; $("#scale-max").value = state.scaleMax;
     $("#legend-min").textContent = state.scaleMin + " °C"; $("#legend-max").textContent = state.scaleMax + " °C";
     state.instances.forEach(function (pose) { if (cards[pose.id]) cards[pose.id].querySelector(".enabled").checked = pose.on; });
-    renderSketches(); renderExtrusions(); updateCardValues(); drawSketches(); syncExportButtons();
+    renderFans(); renderSketches(); renderExtrusions(); updateCardValues(); drawSketches(); syncExportButtons();
   }
   function updateCardValues() {
     state.instances.forEach(function (pose) {
@@ -751,9 +825,13 @@
       var row = resultFor(pose.id), temp = card.querySelector(".temp"); temp.textContent = row && row.temperature_c != null ? row.temperature_c.toFixed(1) + " °C" : "no thermal model";
       temp.className = "temp " + (!row || row.temperature_c == null ? "unknown" : row.temperature_c - state.ambient < 18 ? "cool" : row.temperature_c - state.ambient < 40 ? "warm" : "hot");
     });
+    state.fans.forEach(function (fan) {
+      var card = fanCards[fan.id]; if (!card) return;
+      ["x", "y", "z", "rot"].forEach(function (key) { var input = card.querySelector('[data-key="' + key + '"]'); if (document.activeElement !== input) input.value = Number(fan[key].toFixed(3)); });
+    });
   }
   function updateThermal() {
-    thermalResult = solveSystem(usable, state.instances, state.ambient); fieldRasters = {};
+    thermalResult = solveSystem(usable, state.instances, state.ambient, state.fans); fieldRasters = {};
     var summary = $("#thermal-summary"), hot = thermalResult.hottest;
     if (thermalLoading) summary.textContent = "Loading board thermal models…";
     else if (!hot) summary.textContent = "No solved board thermal scenarios are available.";
@@ -761,8 +839,9 @@
     updateCardValues(); if (!thermalLoading) requestVisibleFields(); twoDirty = true;
   }
   function rebuild(fetchSolids) {
-    updateThermal(); clearGroup(boardsModel); groupsById = {};
+    updateThermal(); clearGroup(boardsModel); clearGroup(fansModel); groupsById = {}; fanGroupsById = {};
     state.instances.forEach(function (pose) { var board = boardByName[pose.board]; if (board && pose.on) drawBoard(board, pose); });
+    state.fans.forEach(drawSystemFan);
     drawSketches(); lastBounds = occupied(); twoDirty = true; if (dirty) persist();
     if (fetchSolids !== false) rebuildBodies().catch(function (error) { $("#model-status").textContent = "Extrusion error: " + error.message; syncExportButtons(); });
   }
@@ -772,6 +851,7 @@
   }
   function fit3d() {
     var top = state.sketches.reduce(function (value, sketch) { var extrusion = state.extrusions.find(function (row) { return row.sketch === sketch.id && row.enabled !== false; }); return Math.max(value, sketch.plane_z + (extrusion ? extrusion.distance : 0)); }, 10);
+    state.fans.forEach(function (fan) { if (fan.enabled !== false) top = Math.max(top, Math.abs(fan.z) + FAN_THICKNESS_MM); });
     var span = Math.max(lastBounds.width, lastBounds.depth, Math.abs(top), 30); controls.minDistance = Math.max(5, span * 0.18); controls.maxDistance = span * 8;
     camera.up.set(0, 0, 1); controls.target.set(0, 0, top / 2); camera.position.set(span * 0.95, -span * 1.15, span * 0.8); camera.near = Math.max(0.05, span / 1000); camera.far = span * 30; camera.updateProjectionMatrix(); wheelGesture.last = -Infinity; wheelGesture.total = 0; controls.update();
   }
@@ -799,7 +879,7 @@
     document.querySelectorAll(".thermal-key").forEach(function (node) { node.hidden = viewMode !== "2d"; });
     document.querySelectorAll(".cad-key").forEach(function (node) { node.hidden = viewMode !== "3d"; });
     $("#top").hidden = viewMode !== "3d";
-    $("#drag-help").textContent = viewMode === "2d" ? "Drag boards · drag empty space to pan · scroll to zoom" : "Orbit empty space · drag PCBs · click an origin plane to start a sketch";
+    $("#drag-help").textContent = viewMode === "2d" ? "Drag boards or fans · drag empty space to pan · scroll to zoom" : "Orbit empty space · drag PCBs or fans · click an origin plane to start a sketch";
     $("#thermal-probe").hidden = true; fit();
   }
   async function saveDesign() {
@@ -822,6 +902,34 @@
     var card = event.target.closest(".board"), pose = card && poseFor(card.dataset.instance); if (!pose) return;
     if (event.target.classList.contains("enabled")) pose.on = event.target.checked; else if (event.target.dataset.key) pose[event.target.dataset.key] = finite(event.target.value, 0); else return;
     setDirty(); rebuild(false);
+  });
+  fanHost.addEventListener("input", function (event) {
+    var card = event.target.closest(".fan-card"), fan = card && fanFor(card.dataset.id); if (!fan) return;
+    var key = event.target.dataset.key;
+    if (event.target.classList.contains("enabled")) fan.enabled = event.target.checked;
+    else if (key === "name") fan.name = event.target.value || fan.id;
+    else if (key === "direction") fan.direction = event.target.value === "up" ? "up" : "down";
+    else if (key === "width" || key === "depth") fan[key] = Math.max(1, finite(event.target.value, fan[key]));
+    else if (key === "free_air_flow_m3_s") fan[key] = Math.max(0.000001, finite(event.target.value, fan[key]));
+    else if (key === "operating_flow_fraction") fan[key] = Math.max(0.000001, Math.min(1, finite(event.target.value, fan[key])));
+    else if (key === "max_static_pressure_pa") fan[key] = Math.max(0, finite(event.target.value, fan[key]));
+    else if (key) fan[key] = finite(event.target.value, fan[key]);
+    else return;
+    setDirty(); rebuild(false);
+  });
+  fanHost.addEventListener("click", function (event) {
+    var card = event.target.closest(".fan-card"); if (!card) return;
+    if (event.target.closest(".remove")) {
+      state.fans = state.fans.filter(function (fan) { return fan.id !== card.dataset.id; });
+      if (selected2dKind === "fan" && selected2d === card.dataset.id) { selected2d = null; selected2dKind = null; }
+      renderFans(); setDirty(); rebuild(false); return;
+    }
+    selectCard("fan", card.dataset.id);
+  });
+  $("#add-fan").addEventListener("click", function () {
+    var id = nextId("fan", state.fans), highest = state.instances.reduce(function (value, pose) { var board = boardByName[pose.board]; return Math.max(value, pose.on !== false && board ? pose.z + board.thickness : value); }, 0);
+    state.fans.push(hydrateFan({ id: id, name: "System fan", x: twoView.centerX, y: twoView.centerY, z: highest + 20, width: 80, depth: 80, direction: "down", free_air_flow_m3_s: 0.025, max_static_pressure_pa: 80, operating_flow_fraction: 0.6 }));
+    selected2d = id; selected2dKind = "fan"; renderFans(); setDirty(); rebuild(false);
   });
   function updateScale() {
     var minimum = finite($("#scale-min").value, state.scaleMin), maximum = finite($("#scale-max").value, state.scaleMax);
@@ -898,12 +1006,12 @@
       else { if (!event.shiftKey) sketchSelection = []; sketchGesture = { kind: "marquee", pointer: event.pointerId, start: local, current: local, extend: event.shiftKey, moved: false }; drawSketches(); }
       canvas.setPointerCapture(event.pointerId); event.preventDefault(); return;
     }
-    pointerRay(event); var datum = raycaster.intersectObjects(datumPlanes, false)[0], hit = raycaster.intersectObjects(boardsModel.children, true).find(function (candidate) { return candidate.object.userData.draggable; });
+    pointerRay(event); var datum = raycaster.intersectObjects(datumPlanes, false)[0], hits = raycaster.intersectObjects([boardsModel, fansModel], true).filter(function (candidate) { return candidate.object.userData.draggable; }), hit = hits[0];
     if (datum && (!hit || datum.distance <= hit.distance)) { selectPlane(datum.object.userData.datumPlane); event.preventDefault(); return; }
     if (!hit) return;
-    var id = hit.object.userData.instanceId, pose = poseFor(id), point3 = pose && planePoint(pose.z, new THREE.Vector3()); if (!pose || !point3) return;
-    drag = { id: id, pointer: event.pointerId, startX: pose.x, startY: pose.y, pointX: point3.x, pointY: point3.y }; controls.enabled = false; canvas.classList.add("dragging"); canvas.setPointerCapture(event.pointerId);
-    Object.keys(cards).forEach(function (key) { cards[key].classList.toggle("selected", key === id); }); event.preventDefault();
+    var kind = hit.object.userData.fanId ? "fan" : "board", id = hit.object.userData.fanId || hit.object.userData.instanceId, pose = kind === "fan" ? fanFor(id) : poseFor(id), point3 = pose && planePoint(pose.z, new THREE.Vector3()); if (!pose || !point3) return;
+    drag = { kind: kind, id: id, pointer: event.pointerId, startX: pose.x, startY: pose.y, pointX: point3.x, pointY: point3.y }; controls.enabled = false; canvas.classList.add("dragging"); canvas.setPointerCapture(event.pointerId);
+    selectCard(kind, id); event.preventDefault();
   });
   canvas.addEventListener("pointermove", function (event) {
     if (editMode) {
@@ -921,9 +1029,9 @@
       drawSketches(); event.preventDefault(); return;
     }
     if (!drag || drag.pointer !== event.pointerId) return;
-    pointerRay(event); var pose = poseFor(drag.id), point = planePoint(pose.z, new THREE.Vector3()); if (!point) return; var dx = point.x - drag.pointX, dy = point.y - drag.pointY;
+    pointerRay(event); var pose = drag.kind === "fan" ? fanFor(drag.id) : poseFor(drag.id), point = planePoint(pose.z, new THREE.Vector3()); if (!point) return; var dx = point.x - drag.pointX, dy = point.y - drag.pointY;
     if (state.snap) { dx = Math.round(dx / state.pitch) * state.pitch; dy = Math.round(dy / state.pitch) * state.pitch; }
-    pose.x = drag.startX + dx; pose.y = drag.startY + dy; var group = groupsById[pose.id]; if (group) group.position.set(pose.x, pose.y, pose.z); updateCardValues(); event.preventDefault();
+    pose.x = drag.startX + dx; pose.y = drag.startY + dy; var group = drag.kind === "fan" ? fanGroupsById[pose.id] : groupsById[pose.id]; if (group) group.position.set(pose.x, pose.y, pose.z); updateThermal(); updateCardValues(); event.preventDefault();
   });
   function endPointer(event) {
     if (rectangleStart && rectangleStart.pointer === event.pointerId) {
@@ -983,10 +1091,17 @@
     var px = (event.clientX - rect.left) * thermalCanvas.width / Math.max(1, rect.width), py = (event.clientY - rect.top) * thermalCanvas.height / Math.max(1, rect.height);
     return { px: px, py: py, x: twoView.centerX + (px - thermalCanvas.width / 2) / twoView.scale, y: twoView.centerY + (py - thermalCanvas.height / 2) / twoView.scale };
   }
-  function selectCard(id) {
-    selected2d = id; Object.keys(cards).forEach(function (key) { cards[key].classList.toggle("selected", key === id); }); twoDirty = true;
+  function selectCard(kind, id) {
+    selected2d = id; selected2dKind = kind;
+    Object.keys(cards).forEach(function (key) { cards[key].classList.toggle("selected", kind === "board" && key === id); });
+    Object.keys(fanCards).forEach(function (key) { fanCards[key].classList.toggle("selected", kind === "fan" && key === id); }); twoDirty = true;
   }
   function showProbe(event, point) {
+    var fanHit = fanAt(point.x, point.y, true);
+    if (fanHit) {
+      probe.textContent = fanHit.fan.name + " · " + fanHit.fan.direction + " · " + (fanHit.fan.free_air_flow_m3_s * fanHit.fan.operating_flow_fraction).toFixed(4) + " m³/s installed";
+      var fanRect = $("#viewport").getBoundingClientRect(); probe.style.left = event.clientX - fanRect.left + 12 + "px"; probe.style.top = event.clientY - fanRect.top + 12 + "px"; probe.hidden = false; return;
+    }
     var hit = instanceAt(point.x, point.y); if (!hit) { probe.hidden = true; return; }
     var row = resultFor(hit.pose.id), field = row && thermalFields[fieldKey(hit.board, row.field_scenario)];
     var temperature = fieldTemperatureAt(field, hit.board, row, hit.local.x, hit.local.y);
@@ -995,10 +1110,13 @@
     var rect = $("#viewport").getBoundingClientRect(); probe.style.left = event.clientX - rect.left + 12 + "px"; probe.style.top = event.clientY - rect.top + 12 + "px"; probe.hidden = false;
   }
   thermalCanvas.addEventListener("pointerdown", function (event) {
-    var point = twoPoint(event), hit = instanceAt(point.x, point.y);
-    if (hit) {
+    var point = twoPoint(event), fanHit = fanAt(point.x, point.y, true), hit = fanHit ? null : instanceAt(point.x, point.y);
+    if (fanHit) {
+      twoDrag = { kind: "fan", pointer: event.pointerId, id: fanHit.fan.id, startX: fanHit.fan.x, startY: fanHit.fan.y, pointX: point.x, pointY: point.y };
+      selectCard("fan", fanHit.fan.id);
+    } else if (hit) {
       twoDrag = { kind: "board", pointer: event.pointerId, id: hit.pose.id, startX: hit.pose.x, startY: hit.pose.y, pointX: point.x, pointY: point.y };
-      selectCard(hit.pose.id);
+      selectCard("board", hit.pose.id);
     } else {
       twoDrag = { kind: "pan", pointer: event.pointerId, px: point.px, py: point.py, centerX: twoView.centerX, centerY: twoView.centerY };
     }
@@ -1010,7 +1128,7 @@
     if (twoDrag.kind === "pan") {
       twoView.centerX = twoDrag.centerX - (point.px - twoDrag.px) / twoView.scale; twoView.centerY = twoDrag.centerY - (point.py - twoDrag.py) / twoView.scale;
     } else {
-      var pose = poseFor(twoDrag.id), dx = point.x - twoDrag.pointX, dy = point.y - twoDrag.pointY;
+      var pose = twoDrag.kind === "fan" ? fanFor(twoDrag.id) : poseFor(twoDrag.id), dx = point.x - twoDrag.pointX, dy = point.y - twoDrag.pointY;
       if (state.snap) { dx = Math.round(dx / state.pitch) * state.pitch; dy = Math.round(dy / state.pitch) * state.pitch; }
       pose.x = twoDrag.startX + dx; pose.y = twoDrag.startY + dy; updateThermal(); updateCardValues();
     }
@@ -1018,8 +1136,8 @@
   });
   function endTwoDrag(event) {
     if (!twoDrag || twoDrag.pointer !== event.pointerId) return;
-    var changedBoard = twoDrag.kind === "board"; twoDrag = null; thermalCanvas.classList.remove("dragging");
-    if (changedBoard) { setDirty(); rebuild(false); } else twoDirty = true;
+    var changedObject = twoDrag.kind === "board" || twoDrag.kind === "fan"; twoDrag = null; thermalCanvas.classList.remove("dragging");
+    if (changedObject) { setDirty(); rebuild(false); } else twoDirty = true;
   }
   thermalCanvas.addEventListener("pointerup", endTwoDrag); thermalCanvas.addEventListener("pointercancel", endTwoDrag);
   thermalCanvas.addEventListener("pointerleave", function () { if (!twoDrag) probe.hidden = true; });

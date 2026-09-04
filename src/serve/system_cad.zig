@@ -311,6 +311,7 @@ pub fn page(
             "<div id=\"thermal-summary\" class=\"thermal-summary\">Loading board thermal models…</div>" ++
             "<p class=\"hint\">The 2D view paints the same solved board fields as Thermal, shifted by projected fan coverage and mixed-air rise. Drag a PCB or enter its exact pose. This is a system screening model, not CFD.</p></section>" ++
             "<section><h2>Board instances</h2><p class=\"hint\">The review manifest defines board types; assembly.json may repeat them as physical instances.</p><div id=\"boards\"></div></section>" ++
+            "<section><div class=\"section-head\"><h2>Fans</h2><button id=\"add-fan\">Add fan</button></div><p class=\"hint\">The blue rectangle is the fan outlet. Drag it in 2D or enter an exact pose; Z is the frame centre and the airflow footprint widens with distance.</p><div id=\"fans\"></div></section>" ++
             "<section><h2>Origin planes</h2><div id=\"plane-choices\" class=\"plane-choices\"><button data-plane=\"xy\">XY</button><button data-plane=\"xz\">XZ</button><button data-plane=\"yz\">YZ</button></div>" ++
             "<p id=\"plane-status\" class=\"hint\">XY plane selected. Click a datum plane in the viewport or choose one here.</p></section>" ++
             "<section><div class=\"section-head\"><h2>Sketches</h2><button id=\"new-sketch\">New sketch on plane</button></div>" ++
@@ -324,7 +325,7 @@ pub fn page(
             "<div class=\"sp-group\"><span>Constrain</span><button data-action=\"horizontal\">H</button><button data-action=\"vertical\">V</button><button data-action=\"coincident\">Coincident</button><button data-action=\"collinear\">Co-linear</button><button data-action=\"parallel\">∥</button><button data-action=\"perpendicular\">⟂</button><button data-action=\"tangent\">Tangent</button><button data-action=\"equal\">Equal</button><button data-action=\"midpoint\">Midpoint</button><button data-action=\"symmetric\">Symmetry</button><button data-action=\"fixed\">Fix</button></div>" ++
             "<div class=\"sp-group\"><span>Modify</span><button data-action=\"arc\">Arc</button><button data-action=\"line\">Line</button><button data-action=\"fillet\">Fillet</button><button data-action=\"remove-fillet\">Remove fillet</button><button data-action=\"chamfer\">Chamfer</button><button data-action=\"offset\">Offset</button><button data-action=\"mirror-x\">Mirror X</button><button data-action=\"mirror-y\">Mirror Y</button><button data-action=\"delete\">Delete</button></div>" ++
             "<button class=\"sp-finish sp-repair\" data-action=\"close-profile\">Close profile</button><button class=\"sp-finish sp-extrude\" data-action=\"extrude\">Extrude sketch…</button><button class=\"sp-finish\" data-action=\"finish\">Finish sketch</button></div>" ++
-            "<div id=\"thermal-probe\" hidden></div><div id=\"empty\"></div><div id=\"drag-help\">Drag boards · drag empty space to pan · scroll to zoom</div><div id=\"legend\"><span class=\"thermal-key\" id=\"legend-min\">25 °C</span><i class=\"thermal-key ramp\"></i><span class=\"thermal-key\" id=\"legend-max\">125 °C</span><span class=\"thermal-key\"><i class=\"sink\"></i>Bottom sink</span><span class=\"thermal-key\"><i class=\"fan\"></i>Top fan</span><span class=\"cad-key\" hidden><i class=\"solid\"></i>Authored solid</span><span class=\"cad-key\" hidden><i class=\"sketch\"></i>Sketch</span><span class=\"cad-key\" hidden><i class=\"cool\"></i>PCB reference</span></div></div></main>" ++
+            "<div id=\"thermal-probe\" hidden></div><div id=\"empty\"></div><div id=\"drag-help\">Drag boards or fans · drag empty space to pan · scroll to zoom</div><div id=\"legend\"><span class=\"thermal-key\" id=\"legend-min\">25 °C</span><i class=\"thermal-key ramp\"></i><span class=\"thermal-key\" id=\"legend-max\">125 °C</span><span class=\"thermal-key\"><i class=\"sink\"></i>Bottom sink</span><span class=\"thermal-key\"><i class=\"fan\"></i>Fan outlet</span><span class=\"cad-key\" hidden><i class=\"solid\"></i>Authored solid</span><span class=\"cad-key\" hidden><i class=\"sketch\"></i>Sketch</span><span class=\"cad-key\" hidden><i class=\"cool\"></i>PCB reference</span></div></div></main>" ++
             "<script>window.CAD_DATA={\"system\":",
     );
     try json_writer.writeScriptString(writer, spec.name);
@@ -635,7 +636,7 @@ test "CAD export endpoint returns only explicitly authored extrusion solids" {
     try std.testing.expect(std.mem.startsWith(u8, stl_request.res.body, "solid floor\n"));
 }
 
-// spec: Web Server - the system CAD workspace opens as a solved 2D heat-field map with a separate 3D assembly/CAD view, shows imported PCBs as reference geometry without inferring an enclosure, provides clickable XY/XZ/YZ origin datum planes, locks active sketch editing to a flat orthographic plane with the PCB outline editor's selection/constraint/modify palette, creates preview or STEP/STL solids only from explicit enabled extrusions while ignoring legacy generated-enclosure documents, and content-hashes its first-party asset URLs so fresh HTML cannot execute a stale control schema
+// spec: Web Server - the system CAD workspace opens as a solved 2D heat-field map with a separate 3D assembly/CAD view, shows imported PCBs as reference geometry without inferring an enclosure, imports legacy board-attached fans as independently persisted system fans that can be added, removed, positioned and configured, provides clickable XY/XZ/YZ origin datum planes, locks active sketch editing to a flat orthographic plane with the PCB outline editor's selection/constraint/modify palette, creates preview or STEP/STL solids only from explicit enabled extrusions while ignoring legacy generated-enclosure documents, and content-hashes its first-party asset URLs so fresh HTML cannot execute a stale control schema
 test "CAD mesh endpoint is empty for a blank document and extrudes on request" {
     const blank = "{\"schema\":\"netlisp-mechanical-v2\",\"boards\":[],\"sketches\":[],\"extrusions\":[]}";
     var request = httpz.testing.init(.{});
@@ -690,6 +691,7 @@ test "system CAD page starts from sketch tools without enclosure generators" {
     try page(request.res.arena, ".", spec, true, request.res);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"new-sketch\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"thermal-canvas\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"add-fan\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, ">2D thermal</button>") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"top\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "data-plane=\"xz\"") != null);
@@ -711,6 +713,8 @@ test "system CAD validates and serializes repeated assembly instances" {
     try std.testing.expect(std.mem.indexOf(u8, browser, "var viewMode = \"2d\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, browser, "/api/thermal-field/") != null);
     try std.testing.expect(std.mem.indexOf(u8, browser, "fieldTemperatureAt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, browser, "state.fans.map") != null);
+    try std.testing.expect(std.mem.indexOf(u8, browser, "function drawSystemFan") != null);
     try std.testing.expect(std.mem.indexOf(u8, browser, "function extrudeActiveSketch()") != null);
     try std.testing.expect(std.mem.indexOf(u8, browser, "event.key.toLowerCase() === \"d\"") != null);
     const boards = [_]system_review.BoardMember{

@@ -10,6 +10,7 @@ const json_writer = @import("../json_writer.zig");
 
 const schema_name = "netlisp-mechanical-v2";
 const legacy_enclosure_schema = "netlisp-mechanical-v1";
+const min_fan_flow_m3_s: f64 = 1e-6;
 /// Maximum accepted mechanical document size.
 pub const mechanical_document_byte_limit: usize = 256 * 1024;
 
@@ -21,6 +22,26 @@ const BoardPose = struct {
     y: f64 = 0,
     z: f64 = 5,
     rotation: f64 = 0,
+};
+
+const FanDirection = enum { down, up };
+
+/// One independently positioned axial fan. `z` is the fan-frame centre;
+/// `direction` names the direction of discharge toward PCB faces.
+const Fan = struct {
+    id: []const u8,
+    name: []const u8,
+    enabled: bool = true,
+    x: f64 = 0,
+    y: f64 = 0,
+    z: f64 = 25,
+    rotation: f64 = 0,
+    width: f64 = 80,
+    depth: f64 = 80,
+    direction: FanDirection = .down,
+    free_air_flow_m3_s: f64 = 0.025,
+    max_static_pressure_pa: f64 = 0,
+    operating_flow_fraction: f64 = 0.6,
 };
 
 /// Principal origin planes use local sketch X/Y coordinates and a right-handed
@@ -54,6 +75,9 @@ const Extrusion = struct {
 pub const Document = struct {
     schema: []const u8 = schema_name,
     boards: []const BoardPose = &.{},
+    /// Null distinguishes legacy v2 documents from an authored empty list:
+    /// the browser imports board-attached fans only for the former.
+    fans: ?[]const Fan = null,
     sketches: []const ProfileSketch = &.{},
     extrusions: []const Extrusion = &.{},
 };
@@ -80,6 +104,16 @@ fn validBoardPose(board: BoardPose) bool {
     const xy_valid = finiteBetween(board.x, -10_000, 10_000) and finiteBetween(board.y, -10_000, 10_000);
     const zr_valid = finiteBetween(board.z, -10_000, 10_000) and finiteBetween(board.rotation, -36_000, 36_000);
     return xy_valid and zr_valid;
+}
+
+fn validFan(fan: Fan) bool {
+    if (!safeId(fan.id) or fan.name.len == 0 or fan.name.len > 128) return false;
+    if (!finiteBetween(fan.x, -10_000, 10_000) or !finiteBetween(fan.y, -10_000, 10_000)) return false;
+    if (!finiteBetween(fan.z, -10_000, 10_000) or !finiteBetween(fan.rotation, -36_000, 36_000)) return false;
+    if (!finiteBetween(fan.width, 1, 1_000) or !finiteBetween(fan.depth, 1, 1_000)) return false;
+    if (!finiteBetween(fan.free_air_flow_m3_s, min_fan_flow_m3_s, 100)) return false;
+    if (!finiteBetween(fan.max_static_pressure_pa, 0, 1_000_000)) return false;
+    return finiteBetween(fan.operating_flow_fraction, min_fan_flow_m3_s, 1);
 }
 
 fn sketchIndex(document: Document, id: []const u8) ?usize {
@@ -132,10 +166,15 @@ pub fn validate(allocator: std.mem.Allocator, document: Document) ParseError!voi
     if (std.mem.eql(u8, document.schema, legacy_enclosure_schema)) return error.LegacyEnclosureDocument;
     if (!std.mem.eql(u8, document.schema, schema_name)) return error.InvalidDocument;
     if (document.boards.len > 256 or document.sketches.len > 128 or document.extrusions.len > 256) return error.InvalidDocument;
+    if (document.fans) |fans| if (fans.len > 64) return error.InvalidDocument;
     for (document.boards, 0..) |board, index| {
         if (!validBoardPose(board)) return error.InvalidDocument;
         for (document.boards[0..index]) |prior| if (std.mem.eql(u8, prior.name, board.name)) return error.InvalidDocument;
     }
+    if (document.fans) |fans| for (fans, 0..) |fan, index| {
+        if (!validFan(fan)) return error.InvalidDocument;
+        for (fans[0..index]) |prior| if (std.mem.eql(u8, prior.id, fan.id)) return error.InvalidDocument;
+    };
     for (document.sketches, 0..) |sketch, index| {
         try validateSketch(allocator, sketch);
         for (document.sketches[0..index]) |prior| if (std.mem.eql(u8, prior.id, sketch.id)) return error.InvalidDocument;
@@ -220,7 +259,32 @@ pub fn write(writer: *std.Io.Writer, document: Document) json_writer.WriteError!
             if (board.enabled) "true" else "false", board.x, board.y, board.z, board.rotation,
         });
     }
-    try writer.writeAll("],\"sketches\":[");
+    try writer.writeByte(']');
+    if (document.fans) |fans| {
+        try writer.writeAll(",\"fans\":[");
+        for (fans, 0..) |fan, index| {
+            if (index > 0) try writer.writeByte(',');
+            try writer.writeAll("{\"id\":");
+            try json_writer.writeString(writer, fan.id);
+            try writer.writeAll(",\"name\":");
+            try json_writer.writeString(writer, fan.name);
+            try writer.print(",\"enabled\":{s},\"x\":{d},\"y\":{d},\"z\":{d},\"rotation\":{d},\"width\":{d},\"depth\":{d},\"direction\":\"{s}\",\"free_air_flow_m3_s\":{d},\"max_static_pressure_pa\":{d},\"operating_flow_fraction\":{d}}}", .{
+                if (fan.enabled) "true" else "false",
+                fan.x,
+                fan.y,
+                fan.z,
+                fan.rotation,
+                fan.width,
+                fan.depth,
+                @tagName(fan.direction),
+                fan.free_air_flow_m3_s,
+                fan.max_static_pressure_pa,
+                fan.operating_flow_fraction,
+            });
+        }
+        try writer.writeByte(']');
+    }
+    try writer.writeAll(",\"sketches\":[");
     for (document.sketches, 0..) |sketch, index| {
         if (index > 0) try writer.writeByte(',');
         try writer.writeAll("{\"id\":");
@@ -254,6 +318,43 @@ test "blank mechanical document is valid and canonical" {
     defer out.deinit();
     try write(&out.writer, parsed.value);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"sketches\":[]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"fans\"") == null);
+}
+
+test "system fans round trip and an authored empty list remains distinct" {
+    const source =
+        "{\"schema\":\"netlisp-mechanical-v2\",\"boards\":[],\"fans\":[{" ++
+        "\"id\":\"fan-1\",\"name\":\"Front intake\",\"x\":12,\"y\":-3,\"z\":42,\"rotation\":90," ++
+        "\"width\":80,\"depth\":80,\"direction\":\"down\",\"free_air_flow_m3_s\":0.025," ++
+        "\"max_static_pressure_pa\":80.4,\"operating_flow_fraction\":0.6}],\"sketches\":[],\"extrusions\":[]}";
+    var parsed = try parse(std.testing.allocator, source);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.fans.?.len);
+    try std.testing.expectEqualStrings("Front intake", parsed.value.fans.?[0].name);
+    var encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer encoded.deinit();
+    try write(&encoded.writer, parsed.value);
+    var round_trip = try parse(std.testing.allocator, encoded.written());
+    defer round_trip.deinit();
+    try std.testing.expectEqual(FanDirection.down, round_trip.value.fans.?[0].direction);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.6), round_trip.value.fans.?[0].operating_flow_fraction, 1e-12);
+
+    var empty = try parse(std.testing.allocator, "{\"schema\":\"netlisp-mechanical-v2\",\"boards\":[],\"fans\":[],\"sketches\":[],\"extrusions\":[]}");
+    defer empty.deinit();
+    var empty_encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer empty_encoded.deinit();
+    try write(&empty_encoded.writer, empty.value);
+    try std.testing.expect(std.mem.indexOf(u8, empty_encoded.written(), "\"fans\":[]") != null);
+}
+
+test "system fan validation rejects duplicate ids and invalid flow" {
+    const duplicate =
+        "{\"schema\":\"netlisp-mechanical-v2\",\"fans\":[" ++
+        "{\"id\":\"fan-1\",\"name\":\"A\",\"free_air_flow_m3_s\":0.01}," ++
+        "{\"id\":\"fan-1\",\"name\":\"B\",\"free_air_flow_m3_s\":0.02}]}";
+    try std.testing.expectError(error.InvalidDocument, parse(std.testing.allocator, duplicate));
+    const invalid_flow = "{\"schema\":\"netlisp-mechanical-v2\",\"fans\":[{\"id\":\"fan-1\",\"name\":\"A\",\"free_air_flow_m3_s\":0}]}";
+    try std.testing.expectError(error.InvalidDocument, parse(std.testing.allocator, invalid_flow));
 }
 
 test "closed sketch extrusion round trips and open extrusion is rejected" {
