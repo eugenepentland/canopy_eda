@@ -4967,6 +4967,7 @@ Public functions: Package.add, Package.addNamed, centroidCsv, excellonDrill, fra
 
 - the centroid CSV lists each part's pose with its board side
 - the centroid CSV drops DNP parts by default and keeps them under keep_dnp
+- the fabrication BOM groups normalized MPNs into quantity rows and uses component identity only when MPN is absent
 - the Excellon writer splits plated pads + vias from non-plated holes and groups tools by diameter
 - fab writers share one y-up frame derived from the board outline
 - an oval drill exports as a G85 slot at its minor-axis tool between the two arc centres, in both drill files
