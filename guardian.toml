@@ -1241,6 +1241,7 @@ parity_test = "the three KiCad schematic exports produce the same files"
 [[twin]]
 name = "kicad-sch-sync"
 surfaces = ["cli:sync-kicad-sch", "http:/api/sync-kicad-sch", "mcp:sync_kicad_sch"]
+parity_test = "the three KiCad schematic pushes plan the same operations"
 
 [[twin]]
 name = "erc-checks"
@@ -1250,6 +1251,7 @@ parity_test = "the three check surfaces report the same ERC violations"
 [[twin]]
 name = "build-push"
 surfaces = ["cli:build", "http:/api/push", "mcp:build"]
+parity_test = "the push endpoint and the build tool publish the same live scene"
 
 [[twin]]
 name = "designs-list"
@@ -1274,6 +1276,7 @@ parity_test = "the three schematic image surfaces render identical PNG bytes"
 [[twin]]
 name = "import-kicad"
 surfaces = ["cli:import-kicad", "mcp:import_kicad"]
+parity_test = "the two KiCad importers write the same design from one board"
 
 [[twin]]
 name = "routing"

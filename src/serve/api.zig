@@ -16,6 +16,7 @@ const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const render_json = @import("../render_json.zig");
 const export_kicad = @import("../export_kicad.zig");
 const bom = @import("../bom.zig");
+const id_insert = @import("../id_insert.zig");
 const zipfile = @import("../zipfile.zig");
 const erc_mod = @import("../erc.zig");
 const env_mod = @import("../eval/env.zig");
@@ -107,6 +108,21 @@ pub fn pushApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerE
             return;
         },
     };
+
+    // Publish the design as its STABLE IDS name it, not as this file's current
+    // line order does — the same two steps `rebuild_design.run` takes before it
+    // renders, so the `build` tool and this endpoint cannot publish two
+    // different scenes for one design. Without them a reordered source made the
+    // pushed scene call a part C1 while the `.bom`, the emitted design, the PCB
+    // and every read tool called it C2: the viewer was the one surface not
+    // reading the identity ledger.
+    _ = id_insert.persistMintedIds(ctx.allocator, board_path, &eval);
+    if (paths.designSiblingPath(ctx.allocator, ctx.project_dir, name, ".bom")) |bom_path| {
+        defer ctx.allocator.free(bom_path);
+        bom.resolveIdentities(ctx.allocator, block, bom_path, ctx.project_dir) catch |e| {
+            log.warn("push resolveIdentities {s} failed: {s}", .{ name, @errorName(e) });
+        };
+    } else |_| {}
 
     const new_layout = render_json.renderSceneGraph(ctx.allocator, block, ctx.project_dir) catch null;
     serve_root.setLiveLayoutJson(name, new_layout);

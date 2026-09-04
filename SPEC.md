@@ -7734,6 +7734,9 @@ is what makes the predicate exact rather than approximately right.
 - The export-kicad-sch CLI subcommand, the kicad-sch endpoint and the export_kicad_sch MCP tool run one exporter, so all three produce the same sheet files byte for byte
 - The export-schematic-png CLI subcommand, the schematic-png endpoint and the get_schematic_image MCP tool render one schematic at one default width, view and theme, so all three produce identical PNG bytes
 - The export-pdf CLI subcommand and the schematic-pdf endpoint compose one review document, so both PDFs draw the same pages and the same text
+- The sync-kicad-sch CLI subcommand, the sync-kicad-sch endpoint and the sync_kicad_sch MCP tool plan one guarded schematic push, so all three name the same target and the same per-file operations
+- The import-kicad CLI subcommand and the import_kicad MCP tool run one importer, so importing one board under one name writes the same design and the same generated library files
+- The push endpoint and the build MCP tool publish one live scene for one design, so both name every part by the ref-des its stable id owns rather than by its position in the source
 - completeness-waiver: concurrent access (httpz owns request threading and each handler answers from its own response arena; the two pieces of state that really are shared — the live scene graph and a design's layout sidecar — are specified where they live, under the push and layout-backfill sections, rather than restated per endpoint)
 
 ## fab_readiness

@@ -38,6 +38,7 @@ const kicad_sch_export = @import("kicad_sch_export.zig");
 const schematic_png = @import("schematic_png.zig");
 const schematic_pdf = @import("schematic_pdf.zig");
 const export_pdf = @import("../export_pdf.zig");
+const sync_kicad_sch = @import("sync_kicad_sch.zig");
 
 const Server = serve_root.Server;
 const testing = std.testing;
@@ -460,6 +461,49 @@ fn pdfText(alloc: std.mem.Allocator, bytes: []const u8) ![]const u8 {
         try out.writer.print("{s}\n", .{line});
     }
     return out.written();
+}
+
+/// The first planned file operation the CLI's text plan does not name, else
+/// `""`. The JSON surfaces list `{name, action, bytes, note}` per file; the CLI
+/// prints one padded line per file, so name and action are what both spell.
+fn firstUnplanned(alloc: std.mem.Allocator, files: []const std.json.Value, plan_text: []const u8) ![]const u8 {
+    for (files) |f| {
+        for ([_][]const u8{ "name", "action" }) |field| {
+            const text = f.object.get(field).?.string;
+            if (std.mem.indexOf(u8, plan_text, text) == null)
+                return std.fmt.allocPrint(alloc, "{s} {s}", .{ field, text });
+        }
+    }
+    return "";
+}
+
+/// Swap the two lines of `<project>/src/<design>.sexp` that mention `a` and
+/// `b`. An author reordering two parts must not renumber them: their ref-des
+/// are pinned to their stable ids through the `.bom`, so this is the edit that
+/// separates a surface which consults that ledger from one which does not.
+fn swapLines(alloc: std.mem.Allocator, project: []const u8, design: []const u8, a: []const u8, b: []const u8) !void {
+    const path = try std.fmt.allocPrint(alloc, "{s}/src/{s}.sexp", .{ project, design });
+    const text = try infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20);
+    var lines: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| try lines.append(alloc, line);
+    const ia = try lineWith(lines.items, a);
+    const ib = try lineWith(lines.items, b);
+    std.mem.swap([]const u8, &lines.items[ia], &lines.items[ib]);
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    for (lines.items, 0..) |line, i| {
+        if (i > 0) try out.writer.writeAll("\n");
+        try out.writer.writeAll(line);
+    }
+    try infra_fs.cwd().writeFile(.{ .sub_path = path, .data = out.written() });
+}
+
+/// Index of the single line containing `needle`.
+fn lineWith(lines: []const []const u8, needle: []const u8) !usize {
+    for (lines, 0..) |line, i| {
+        if (std.mem.indexOf(u8, line, needle) != null) return i;
+    }
+    return error.LineNotFound;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -906,4 +950,162 @@ test "the export-pdf CLI and the schematic-pdf endpoint compose the same review 
     // (`export_pdf.Options.timestamp` defaults to null).
     try testing.expect(std.mem.indexOf(u8, http.body, "/CreationDate") != null);
     try testing.expect(std.mem.indexOf(u8, from_cli, "/CreationDate") == null);
+}
+
+// spec: Web Server - The sync-kicad-sch CLI subcommand, the sync-kicad-sch endpoint and the sync_kicad_sch MCP tool plan one guarded schematic push, so all three name the same target and the same per-file operations
+test "the three KiCad schematic pushes plan the same operations" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp, .routed);
+
+    // The push target is the directory holding the board the design declares,
+    // so it has to be a real absolute path — and one outside the project, since
+    // this writes into a user's KiCad project.
+    var kicad_tmp = testing.tmpDir(.{});
+    defer kicad_tmp.cleanup();
+    const kicad_dir = try kicad_tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/twinsync.sexp",
+        .data = try std.fmt.allocPrint(alloc,
+            \\(design-block "Twin Sync"
+            \\  (import cap)
+            \\  (import ic)
+            \\  (kicad-pcb "{s}/TwinProject.kicad_pcb")
+            \\  (instance "U1" ic (pin 1 "SIG") (pin 2 "GND"))
+            \\  (instance "C1" (cap "10nF") (pin 1 "SIG") (pin 2 "GND")))
+        , .{kicad_dir}),
+    });
+
+    // Every arm is a dry run: the point is the PLAN, and nothing should touch
+    // the KiCad project. The CLI runs first because its resolution persists
+    // freshly minted ids into the design source.
+    const cli = try commands.syncKicadSchReport(alloc, &.{ "--project-dir", project, "--dry-run", "twinsync" });
+    const http = try httpCall(alloc, project, sync_kicad_sch.syncKicadSchApi, "twinsync", &.{.{ "dry_run", "1" }}, null);
+    try testing.expectEqual(@as(u16, 200), http.status);
+    const tool = try mcpCall(alloc, project, "sync_kicad_sch", "{\"name\":\"twinsync\",\"dry_run\":true}");
+    try testing.expect(tool.ok);
+
+    // The endpoint and the tool share `runPush` and one JSON writer, so their
+    // bodies must be identical; the CLI renders the same plan as text, so it is
+    // compared by the target it names and the operations it lists.
+    try testing.expectEqualStrings(http.body, tool.body);
+    const plan = try asObject(alloc, http.body);
+    try testing.expect(std.mem.indexOf(u8, cli.text, plan.get("root").?.string) != null);
+    try testing.expect(std.mem.indexOf(u8, cli.text, plan.get("dir").?.string) != null);
+    try testing.expectEqualStrings("", try firstUnplanned(alloc, plan.get("files").?.array.items, cli.text));
+    try testing.expect(plan.get("files").?.array.items.len > 0);
+    try testing.expect(cli.refusal == null);
+}
+
+// spec: Web Server - The import-kicad CLI subcommand and the import_kicad MCP tool run one importer, so importing one board under one name writes the same design and the same generated library files
+test "the two KiCad importers write the same design from one board" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    // One board, imported into two identical fresh projects — an import WRITES
+    // into the project tree, so the surfaces cannot share one.
+    var board_tmp = testing.tmpDir(.{});
+    defer board_tmp.cleanup();
+    try board_tmp.dir.writeFile(std.testing.io, .{ .sub_path = "TwinBoard.kicad_pcb", .data =
+        \\(kicad_pcb (version 20260206) (generator "pcbnew")
+        \\  (footprint "Capacitor_SMD:C_0402_1005Metric"
+        \\    (at 10 20 0)
+        \\    (property "Reference" "C9" (at 0 0 0))
+        \\    (property "Value" "22nF" (at 0 0 0))
+        \\    (pad "1" smd roundrect (at -0.48 0 0) (size 0.56 0.62) (net "VBUS") (pintype "passive"))
+        \\    (pad "2" smd roundrect (at 0.48 0 0) (size 0.56 0.62) (net "GND") (pintype "passive")))
+        \\  (footprint "Package_DFN_QFN:DFN-8"
+        \\    (at 30 40)
+        \\    (property "Reference" "U9" (at 0 0 0))
+        \\    (property "Value" "TWINREG" (at 0 0 0))
+        \\    (pad "1" smd roundrect (at -1 -1) (size 0.3 0.5) (net "VBUS") (pinfunction "VIN"))
+        \\    (pad "2" smd roundrect (at -1 1) (size 0.3 0.5) (net "GND") (pinfunction "GND"))))
+    });
+    const board = try std.fmt.allocPrint(alloc, "{s}/TwinBoard.kicad_pcb", .{
+        try board_tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc),
+    });
+
+    var cli_tmp = testing.tmpDir(.{});
+    defer cli_tmp.cleanup();
+    const cli_project = try fixtureProject(alloc, &cli_tmp, .routed);
+    var tool_tmp = testing.tmpDir(.{});
+    defer tool_tmp.cleanup();
+    const tool_project = try fixtureProject(alloc, &tool_tmp, .routed);
+
+    try commands.cmdImportKicad(alloc, &.{ board, "--project-dir", cli_project, "--name", "twinimp" });
+    const args = try std.fmt.allocPrint(alloc, "{{\"board_path\":\"{s}\",\"name\":\"twinimp\"}}", .{board});
+    const tool = try mcpCall(alloc, tool_project, "import_kicad", args);
+    try testing.expect(tool.ok);
+
+    // The design the importer wrote, and the library files it generated for the
+    // parts it could not family-map: the whole product of an import.
+    try testing.expectEqualStrings(
+        try fileIn(alloc, cli_project, "src/twinimp.sexp"),
+        try fileIn(alloc, tool_project, "src/twinimp.sexp"),
+    );
+    try testing.expectEqualStrings("", try firstExportDifference(
+        alloc,
+        try std.fmt.allocPrint(alloc, "{s}/lib/components", .{cli_project}),
+        try std.fmt.allocPrint(alloc, "{s}/lib/components", .{tool_project}),
+    ));
+
+    // …over a real import: the tool reports what it wrote, and the board has a
+    // custom part that had to become a library file.
+    const summary = try asObject(alloc, tool.body);
+    try testing.expectEqual(@as(i64, 2), intField(summary, "parts"));
+    try testing.expect(intField(summary, "lib_written") > 0);
+}
+
+// spec: Web Server - The push endpoint and the build MCP tool publish one live scene for one design, so both name every part by the ref-des its stable id owns rather than by its position in the source
+test "the push endpoint and the build tool publish the same live scene" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp, .routed);
+    // Descriptive labels, not ref-des: these get auto-assigned C1/C2, which is
+    // what makes them renumberable — and what the `.bom` ledger then pins.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/twinbuild.sexp", .data =
+        \\(design-block "Twin Build"
+        \\  (import cap)
+        \\  (import ic)
+        \\  (instance "input-cap" (cap "10nF") (pin 1 "VIN") (pin 2 "GND"))
+        \\  (instance "output-cap" (cap "22nF") (pin 1 "VIN") (pin 2 "GND"))
+        \\  (instance "reg" ic (pin 1 "VIN") (pin 2 "GND")))
+    });
+
+    // One build to mint the ids, write them back into the source and record the
+    // ref-des each id owns in the `.bom`.
+    try testing.expect((try mcpCall(alloc, project, "build", "{\"name\":\"twinbuild\"}")).ok);
+
+    // Now reorder the two caps. Their ids travel with them, so the ledger still
+    // says which is C1 — but a surface that re-evaluates without consulting it
+    // sees the new source order instead.
+    try swapLines(alloc, project, "twinbuild", "input-cap", "output-cap");
+
+    const http = try httpCall(alloc, project, api.pushApi, "twinbuild", &.{}, null);
+    try testing.expectEqual(@as(u16, 200), http.status);
+    const pushed = serve_root.liveLayoutFor(alloc, "twinbuild").?;
+
+    const tool = try mcpCall(alloc, project, "build", "{\"name\":\"twinbuild\"}");
+    try testing.expect(tool.ok);
+    const built = serve_root.liveLayoutFor(alloc, "twinbuild").?;
+
+    // Both surfaces end by publishing a scene graph for the browser to render.
+    // It has to be the same scene: the viewer must not name a part differently
+    // depending on which of the two last touched it.
+    try testing.expectEqualStrings(built, pushed);
+
+    // Pinned by name, not just by agreement: the 22nF cap was declared second
+    // and is therefore C2, and it stays C2 after the reorder because its id
+    // owns that ref-des. Agreement alone would not catch both surfaces
+    // regressing to source-order numbering together.
+    try testing.expect(std.mem.indexOf(u8, built, "\"ref\":\"C2\",\"component\":\"cap\",\"value\":\"22nF\"") != null);
 }

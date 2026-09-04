@@ -255,6 +255,7 @@ src/canonical_module_check.zig::run | fn run( allocator: std.mem.Allocator, bloc
 src/checks.zig::Severity enum_
 src/commands.zig::CheckReport struct_
 src/commands.zig::CommandError value
+src/commands.zig::SyncSchReport struct_
 src/commands.zig::checkReport | fn checkReport(allocator: std.mem.Allocator, args: []const []const u8) CommandError!CheckReport
 src/commands.zig::cmdBackfillLayouts | fn cmdBackfillLayouts( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdBuild | fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
@@ -272,6 +273,7 @@ src/commands.zig::cmdReviewAudit | fn cmdReviewAudit(allocator: std.mem.Allocato
 src/commands.zig::cmdRouteKicadReference | fn cmdRouteKicadReference( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdSyncKicadSch | fn cmdSyncKicadSch(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdSystemCheck | fn cmdSystemCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
+src/commands.zig::syncKicadSchReport | fn syncKicadSchReport(allocator: std.mem.Allocator, args: []const []const u8) CommandError!SyncSchReport
 src/component_classification.zig::isActiveSemiconductor | fn isActiveSemiconductor(inst: env.Instance) bool
 src/component_classification.zig::isPassThroughConnector | fn isPassThroughConnector(inst: env.Instance) bool
 src/config.zig::cseEmail | fn cseEmail(allocator: std.mem.Allocator) ?[]u8
