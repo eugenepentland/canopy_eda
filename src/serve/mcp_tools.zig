@@ -775,12 +775,24 @@ fn toolPreviewModule(allocator: std.mem.Allocator, project_dir: []const u8, args
     const args_text = optionalString(args_val, "args") orelse "";
     const view = optionalString(args_val, "view") orelse "summary";
 
-    // Synthesize a one-sub-block wrapper design and evaluate it in-memory —
-    // the same shape modules.resolveModuleBlock uses for the /modules page.
+    // Import the module and CALL it: the call is the last top-level form, so
+    // `evalSource` hands back the module's OWN evaluated block — the same block
+    // `eval_modules.instantiateStandalone` (the /modules page's resolver)
+    // returns for the zero-argument case — with the caller's arguments still
+    // spliced into the call.
+    //
+    // NOT `(design-block "preview" (sub-block "m" (m …)))`, which is what this
+    // synthesized until 2026-09-04. A design's sub-block instances go through
+    // `ids.autoAssignSubBlockRefDes`, which renames EVERY sub-block instance to
+    // a ref-des unique across the host design — right for a real board, wrong
+    // for a preview whose only host is the wrapper itself. A module whose
+    // source declares C1/C2 previewed as C3/C4: ref-des that appear in no file,
+    // on no `/modules/<m>` page and in no design, handed to an agent this
+    // tool's own description tells to iterate on that very source.
     const source = try std.fmt.allocPrint(
         allocator,
-        "(import {s})\n(design-block \"preview\" (sub-block \"{s}\" ({s} {s})))",
-        .{ module, module, module, args_text },
+        "(import {s})\n({s} {s})",
+        .{ module, module, args_text },
     );
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
@@ -791,18 +803,13 @@ fn toolPreviewModule(allocator: std.mem.Allocator, project_dir: []const u8, args
         try w.writeAll("}");
         return false;
     };
-    const wrapper: *env_mod.DesignBlock = switch (result) {
+    const block: *env_mod.DesignBlock = switch (result) {
         .design_block => |b| b,
         else => {
             try w.writeAll("{\"ok\":false,\"error\":\"module did not evaluate to a design block\"}");
             return false;
         },
     };
-    if (wrapper.sub_blocks.len == 0) {
-        try w.writeAll("{\"ok\":false,\"error\":\"module call produced no sub-block\"}");
-        return false;
-    }
-    const block = wrapper.sub_blocks[0].block;
 
     if (std.mem.eql(u8, view, "scene_graph")) {
         const graph = try render_json.renderSceneGraph(allocator, block, project_dir);

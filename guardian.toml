@@ -1269,6 +1269,7 @@ surfaces = ["cli:import-kicad", "mcp:import_kicad"]
 [[twin]]
 name = "routing"
 surfaces = ["http:/api/pcb-route", "mcp:route_pcb"]
+parity_test = "routes the same board to the same copper as the pcb-route endpoint"
 
 [[twin]]
 name = "layout-save"
@@ -1281,6 +1282,7 @@ surfaces = ["cli:instances", "mcp:list_instances"]
 [[twin]]
 name = "module-standalone"
 surfaces = ["http:/modules", "mcp:preview_module"]
+parity_test = "preview_module and the standalone module page resolve one module identically"
 
 # ── The three require_in rules ────────────────────────────────────────────
 # These name a mirror the project DECIDED to keep and demand it stay in step,
