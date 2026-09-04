@@ -496,6 +496,7 @@ fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step) void {
         // wired to NOTHING". All three exit 0 with a pass line today.
         &.{ "node", "src/serve/assets/shape_sketch.test.js" },
         &.{ "node", "src/serve/assets/pcb_3d_surface.test.js" },
+        &.{ "node", "src/serve/assets/system_cad.test.js" },
         &.{ "node", "scripts/test_pcb_region.js" },
     };
     for (checks) |argv| {

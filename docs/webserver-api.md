@@ -354,6 +354,23 @@ Local dev still uses `http://localhost:7050`.
   outer face (fin tips or the lower block); actual jet/contact overlap lowers the sink theta-SA, the base blocks a
   duplicate bare-PCB convection path beneath it, and exposed PCB is evaluated
   at the additional base-plus-fin distance.
+- **System thermal workspace**: `GET /systems/:name/cad` imports each board
+  definition and selected saved layout from the system review manifest. An
+  optional `src/systems/<name>/assembly.json` with schema
+  `netlisp-system-assembly-v1` supplies repeatable physical instances
+  (`id`, `board`, `x`, `y`, `z`, `rotation`, `enabled`), the board-centre snap
+  pitch and ambient. The viewport renders the exact PCB outlines, components,
+  and layout-authored fans/heatsinks; instances can be dragged in XY or edited
+  numerically, with drafts isolated in browser storage and exportable through
+  **Download assembly.json**. Its coupled screen reuses each board's
+  `/api/thermal` ladder, projects installed fan flow by plan-area overlap,
+  interpolates the 0/1/2 m/s rungs without extrapolating above 2 m/s, and adds
+  half the well-mixed enclosure air rise `P/(rho*cp*Q)` to approximate average
+  inlet temperature. It reports annotated system watts, hottest instance and
+  mixed outlet rise. This deliberately excludes wake/recirculation, buoyancy,
+  pressure-network and enclosure-wall conduction effects; it is an early
+  arrangement screen, not CFD or thermal signoff. The enclosure mesh and
+  STEP/STL exports remain driven by the occupied plan envelope.
 - **Live push**: `POST /api/push/:name` — rebuild and push update. On eval failure the JSON (and the schematic page, and the CLI `build` tool) carries a structured `diagnostic` `{file,line,col,message,source_line}` rendered compiler-style with a caret (`src/serve/diag_format.zig`).
 - **Version history + diff**: `GET /api/history/:name` — stored snapshot ids (file copies under `<project>/history/<name>/<timestamp>/`, written before every mutation); `GET /api/diff/:name?from=<id>&to=<id|current>` — request-local netlist diff (instances added/removed, value/footprint changes, net membership changes; `src/serve/design_diff.zig`). Schematic header's History panel renders it. Caveat: snapshots capture the design file only, so an old revision re-evaluates against today's lib/ modules.
 - **Datasheet attach**: `POST /api/attach-datasheet` `{component,file}` — splices an uploaded PDF filename or an HTTP(S) URL into `lib/components/<name>.sexp` (idempotent and scheme/path-safe); the library page has a per-card attach control. `GET /api/datasheets` lists uploaded local candidates. The CLI twin is the `attach_datasheet` tool (below), which an agent pairs with `fetch_datasheet` to go from a manufacturer URL to a declared `(datasheet "…")` without a browser.
