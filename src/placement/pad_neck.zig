@@ -32,6 +32,11 @@ const adaptive_width_per_length: f64 = 2;
 const default_neck_length_mm: f64 = 0.75;
 const default_taper_length_mm: f64 = 0.35;
 const rf_taper_widths: f64 = 1.2;
+/// Router cleanup can leave a nominally face-normal pad exit a fraction of a
+/// degree off axis. Treat up to three degrees as the same flat-face launch;
+/// otherwise the exact boundary chord is discontinuous at zero angle and a
+/// 1.8 mm land collapses to almost half width from harmless float-scale skew.
+const flat_face_alignment_cos: f64 = 0.9986295347545738;
 
 const Pad = struct {
     at: [2]f64,
@@ -103,6 +108,14 @@ fn launchSpan(pad: Pad, direction: [2]f64) f64 {
         if (hi < lo - eps) return 0;
     }
     return @max(0, hi - lo);
+}
+
+fn rfLaunchSpan(pad: Pad, direction: [2]f64) f64 {
+    const local = localComponents(pad, direction);
+    if (@max(@abs(local[0]), @abs(local[1])) >= flat_face_alignment_cos) {
+        return if (@abs(local[0]) >= @abs(local[1])) 2 * pad.half_h else 2 * pad.half_w;
+    }
+    return launchSpan(pad, direction);
 }
 
 fn needsNeck(profile: pad_neck_profile.Profile, nominal: f64, pad: Pad, direction: [2]f64) bool {
@@ -194,7 +207,7 @@ pub fn allowsTrack(
             const required = profileWidth(@max(da, db), neck, nominal, neck_len, taper_len);
             if (track.width + eps >= required) return true;
         } else {
-            const across = launchSpan(pad, direction);
+            const across = rfLaunchSpan(pad, direction);
             if (!(across > 0) or across >= nominal - eps) continue;
             const land = boxRayHalfExtent(pad, direction);
             const rf_taper = nominal * rf_taper_widths;
@@ -617,13 +630,13 @@ fn rfEndpointProfile(
     var land: f64 = 0;
     for (copper.pads) |pad| {
         if (pad.layer != layer or !samePoint(pad.at, point)) continue;
-        const span = launchSpan(pad, direction);
+        const span = rfLaunchSpan(pad, direction);
         if (!(span > 0)) continue;
         found = true;
-        // A near-corner crossing can have an arbitrarily tiny incidental
-        // chord through an otherwise substantial land. The hand router uses
-        // the land's narrow physical dimension in that case; generated routes
-        // must apply the identical floor instead of pinching below fab width.
+        // A real diagonal crossing uses its boundary chord. A face-normal
+        // launch uses the whole flat face even when cleanup leaves a tiny
+        // angular skew; never let that numerical skew halve a rectangular
+        // filter land's launch width.
         const pad_width = 2 * @min(pad.half_w, pad.half_h);
         width = @max(width, @max(span, pad_width));
         land = @max(land, boxRayHalfExtent(pad, direction));
@@ -1613,7 +1626,7 @@ test "DRC allowance accepts only neck-profile copper beside its own undersized S
     try testing.expect(!try allowsTrack(arena, placement, far, 0.2532, 0.127));
 }
 
-// spec: placement/rf-port-frame-routing - every single-ended controlled-impedance SMD launch tapers between the pad-boundary chord available at its actual path crossing and nominal width, including wider lands, bends inside the pad, full flat-face collars on rectangular and oval pads, and via-fed or branched nets, without diagonal centre-chord flares
+// spec: placement/rf-port-frame-routing - every single-ended controlled-impedance SMD launch tapers between the pad-boundary chord available at its actual path crossing and nominal width, including wider lands, bends inside the pad, full flat-face collars on rectangular and oval pads whose harmless cleanup skew stays face-aligned, and via-fed or branched nets, without diagonal centre-chord flares
 test "pad launch span and edge distance follow a diagonal entry" {
     const root = @sqrt(0.5);
     const pad = Pad{
@@ -1635,6 +1648,21 @@ test "pad launch span and edge distance follow a diagonal entry" {
     };
     try testing.expectApproxEqAbs(@as(f64, 0), launchSpan(square, .{ root, root }), 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 0.5), launchSpan(square, .{ 1, 0 }), 1e-12);
+}
+
+test "RF flat-face launch keeps the full rectangular span through cleanup skew" {
+    const pad = Pad{
+        .at = .{ 0, 0 },
+        .layer = 0,
+        .half_w = 0.375,
+        .half_h = 0.9,
+        .axis_x = .{ 1, 0 },
+    };
+    const direction = unit(.{ 0.375, -0.005 }).?;
+    try testing.expect(launchSpan(pad, direction) < 1.0);
+    try testing.expectApproxEqAbs(@as(f64, 1.8), rfLaunchSpan(pad, direction), 1e-12);
+    const diagonal = unit(.{ 1, 1 }).?;
+    try testing.expectApproxEqAbs(launchSpan(pad, diagonal), rfLaunchSpan(pad, diagonal), 1e-12);
 }
 
 test "generated controlled-impedance launch tapers both wider and narrower lands on a branched net" {

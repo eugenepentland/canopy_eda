@@ -1,13 +1,14 @@
 //! Recover exact swept copper for straight RF tapers emitted by `pad_neck`.
 //!
-//! The router keeps ordinary tracks as edit handles.  A width-changing launch
+//! The router keeps ordinary tracks as edit handles. A width-changing launch
 //! is therefore emitted as short, constant-width segments, but drawing those
 //! segments as round-ended capsules makes their union bulge past the intended
-//! straight taper.  This final-output adapter recognizes collinear,
-//! width-varying runs on single-ended controlled-impedance nets and records
-//! the endpoint widths that describe their exact butt-ended sweep. The same
-//! adapter is reused after route-plan rescue, because that ladder can replace
-//! an already-finished net after the router's ordinary output seam has run.
+//! taper. This final-output adapter records the endpoint widths that describe
+//! the exact butt-ended sweep. On a two-pad RF chain it also carries a taper
+//! through a bend when the straight pad-exit leg ends before the profile does,
+//! matching the hand router's arclength-based taper. The same adapter is reused
+//! after route-plan rescue, because that ladder can replace an already-finished
+//! net after the router's ordinary output seam has run.
 
 const std = @import("std");
 const bend_smooth = @import("bend_smooth.zig");
@@ -20,15 +21,25 @@ const router = @import("router.zig");
 const variable_width_copper = @import("variable_width_copper.zig");
 
 const eps: f64 = 1e-7;
+const taper_step_mm: f64 = 0.025;
+const rf_taper_widths: f64 = 1.2;
 
 fn eligible(rule: optimizer.NetRule) bool {
     return rule.rf.impedance.ohms > 0 and rule.rf.impedance.diff_ohms <= 0;
 }
 
-fn hasSuccessfulPath(outcomes: []const rf_port_report.Outcome, net: i32) bool {
+fn hasSuccessfulPath(
+    outcomes: []const rf_port_report.Outcome,
+    tracks: []const router.Track,
+    net: i32,
+) bool {
     for (outcomes) |outcome| {
         if (outcome.net != net or !outcome.success) continue;
-        if (!outcome.physical.gate_removed and outcome.physical.samples.len >= 2) return true;
+        if (outcome.physical.gate_removed or outcome.physical.samples.len < 2) continue;
+        for (tracks) |track| {
+            if (track.net != net or track.layer != outcome.physical.layer) continue;
+            if (variable_width_copper.ownsTrack(outcome.physical.samples, track)) return true;
+        }
     }
     return false;
 }
@@ -51,6 +62,131 @@ fn varyingWidths(widths: []const f64) bool {
     if (widths.len < 2) return false;
     for (widths[1..]) |width| if (@abs(width - widths[0]) > eps) return true;
     return false;
+}
+
+const EndProfile = struct {
+    width: f64,
+    land: f64,
+    taper: f64,
+};
+
+fn pointDistance(a: [2]f64, b: [2]f64) f64 {
+    return std.math.hypot(b[0] - a[0], b[1] - a[1]);
+}
+
+fn chainLength(chain: bend_smooth.Chain) f64 {
+    var total: f64 = 0;
+    for (chain.pts[1..], 1..) |point, i| total += pointDistance(chain.pts[i - 1], point);
+    return total;
+}
+
+/// Recover the land plateau from conservative pad-neck slices. On a taper
+/// from a wide land the first taper cell has the same (wider-end) width as the
+/// plateau and `extractChains` merges them; subtract one known slicer step to
+/// put the width station back at the real land boundary.
+fn inferEndProfile(chain: bend_smooth.Chain, nominal: f64, reverse: bool) ?EndProfile {
+    if (chain.widths.len < 2) return null;
+    const endpoint_width = if (reverse) chain.widths[chain.widths.len - 1] else chain.widths[0];
+    if (@abs(endpoint_width - nominal) <= eps) return null;
+    var distance: f64 = 0;
+    for (0..chain.widths.len) |walk_i| {
+        const i = if (reverse) chain.widths.len - 1 - walk_i else walk_i;
+        const leg = pointDistance(chain.pts[i], chain.pts[i + 1]);
+        if (@abs(chain.widths[i] - endpoint_width) > eps) {
+            const merged = if (endpoint_width > nominal + eps) @min(leg, taper_step_mm) else 0;
+            return .{
+                .width = endpoint_width,
+                .land = @max(0, distance - merged),
+                .taper = nominal * rf_taper_widths,
+            };
+        }
+        distance += leg;
+    }
+    return null;
+}
+
+fn profileWidth(distance: f64, profile: EndProfile, nominal: f64) f64 {
+    if (distance <= profile.land) return profile.width;
+    if (distance >= profile.land + profile.taper or profile.taper <= eps) return nominal;
+    const f = (distance - profile.land) / profile.taper;
+    return profile.width + (nominal - profile.width) * std.math.clamp(f, 0, 1);
+}
+
+fn chainWidthAt(s: f64, total: f64, nominal: f64, start: ?EndProfile, end: ?EndProfile) f64 {
+    const start_active = if (start) |profile| s < profile.land + profile.taper else false;
+    const end_active = if (end) |profile| total - s < profile.land + profile.taper else false;
+    const start_width = if (start) |profile| profileWidth(s, profile, nominal) else nominal;
+    const end_width = if (end) |profile| profileWidth(total - s, profile, nominal) else nominal;
+    if (start_active and end_active) {
+        if (start_width <= nominal and end_width <= nominal) return @min(start_width, end_width);
+        if (start_width >= nominal and end_width >= nominal) return @max(start_width, end_width);
+        const f = if (total > eps) std.math.clamp(s / total, 0, 1) else 0;
+        return start_width + (end_width - start_width) * f;
+    }
+    if (start_active) return start_width;
+    if (end_active) return end_width;
+    return nominal;
+}
+
+fn pointOnChain(chain: bend_smooth.Chain, target: f64) [2]f64 {
+    var distance: f64 = 0;
+    for (chain.pts[1..], 1..) |point, i| {
+        const before = chain.pts[i - 1];
+        const leg = pointDistance(before, point);
+        if (target <= distance + leg + eps) {
+            const f = if (leg > eps) std.math.clamp((target - distance) / leg, 0, 1) else 0;
+            return .{ before[0] + (point[0] - before[0]) * f, before[1] + (point[1] - before[1]) * f };
+        }
+        distance += leg;
+    }
+    return chain.pts[chain.pts.len - 1];
+}
+
+fn appendStation(stations: *std.ArrayList(f64), arena: std.mem.Allocator, value: f64, total: f64) std.mem.Allocator.Error!void {
+    if (value > eps and value < total - eps) try stations.append(arena, value);
+}
+
+/// Build one arclength-profiled path over the complete two-pad chain. The
+/// input slices prove the endpoint widths and land lengths; the declared RF
+/// taper length remains authoritative after the first straight leg ends.
+fn profiledChainSamples(
+    arena: std.mem.Allocator,
+    chain: bend_smooth.Chain,
+    nominal: f64,
+) std.mem.Allocator.Error!?[]const rf_path_solver.Sample {
+    const start = inferEndProfile(chain, nominal, false);
+    const end = inferEndProfile(chain, nominal, true);
+    if (start == null and end == null) return null;
+    const total = chainLength(chain);
+    if (total <= eps) return null;
+    var stations: std.ArrayList(f64) = .empty;
+    try stations.append(arena, 0);
+    var distance: f64 = 0;
+    for (chain.pts[1..], 1..) |point, i| {
+        distance += pointDistance(chain.pts[i - 1], point);
+        try stations.append(arena, distance);
+    }
+    if (start) |profile| {
+        try appendStation(&stations, arena, profile.land, total);
+        try appendStation(&stations, arena, profile.land + profile.taper, total);
+    }
+    if (end) |profile| {
+        try appendStation(&stations, arena, total - profile.land, total);
+        try appendStation(&stations, arena, total - profile.land - profile.taper, total);
+    }
+    std.mem.sort(f64, stations.items, {}, std.sort.asc(f64));
+    var samples: std.ArrayList(rf_path_solver.Sample) = .empty;
+    for (stations.items) |station| {
+        if (samples.items.len > 0 and @abs(station - samples.items[samples.items.len - 1].s_mm) <= eps) continue;
+        try samples.append(arena, .{
+            .at = pointOnChain(chain, station),
+            .s_mm = station,
+            .curvature = 0,
+            .width_mm = chainWidthAt(station, total, nominal, start, end),
+        });
+    }
+    const owned: []const rf_path_solver.Sample = try samples.toOwnedSlice(arena);
+    return owned;
 }
 
 /// The pad-neck slicer assigns each cell the wider of its two true endpoint
@@ -130,6 +266,17 @@ fn appendRun(
 ) std.mem.Allocator.Error!void {
     if (!varyingWidths(widths)) return;
     const samples = try samplesForRun(arena, points, widths);
+    try appendSamples(arena, out, net, layer, widths.len, samples);
+}
+
+fn appendSamples(
+    arena: std.mem.Allocator,
+    out: *std.ArrayList(rf_port_report.Outcome),
+    net: i32,
+    layer: u8,
+    emitted_tracks: usize,
+    samples: []const rf_path_solver.Sample,
+) std.mem.Allocator.Error!void {
     try out.append(arena, .{
         .net = net,
         .chosen = 0,
@@ -139,29 +286,41 @@ fn appendRun(
         .trials = &.{},
         .physical = .{
             .sample_count = samples.len,
-            .emitted_tracks = widths.len,
+            .emitted_tracks = emitted_tracks,
             .samples = samples,
             .layer = layer,
         },
     });
 }
 
+const ChainContext = struct {
+    net: i32,
+    layer: u8,
+    nominal: f64,
+    two_pin: bool,
+};
+
 fn appendChainTapers(
     arena: std.mem.Allocator,
     out: *std.ArrayList(rf_port_report.Outcome),
-    net: i32,
-    layer: u8,
+    context: ChainContext,
     chain: bend_smooth.Chain,
 ) std.mem.Allocator.Error!void {
     if (chain.widths.len < 2 or chain.pts.len != chain.widths.len + 1) return;
+    if (context.two_pin) {
+        if (try profiledChainSamples(arena, chain, context.nominal)) |samples| {
+            try appendSamples(arena, out, context.net, context.layer, chain.widths.len, samples);
+            return;
+        }
+    }
     var first_leg: usize = 0;
     var vertex: usize = 1;
     while (vertex < chain.pts.len - 1) : (vertex += 1) {
         if (continuesStraight(chain.pts, vertex)) continue;
-        try appendRun(arena, out, net, layer, chain.pts[first_leg .. vertex + 1], chain.widths[first_leg..vertex]);
+        try appendRun(arena, out, context.net, context.layer, chain.pts[first_leg .. vertex + 1], chain.widths[first_leg..vertex]);
         first_leg = vertex;
     }
-    try appendRun(arena, out, net, layer, chain.pts[first_leg..], chain.widths[first_leg..]);
+    try appendRun(arena, out, context.net, context.layer, chain.pts[first_leg..], chain.widths[first_leg..]);
 }
 
 /// Capture one exact swept path for every straight autorouter taper that had
@@ -179,7 +338,7 @@ pub fn exactFallbacks(
     for (0..placement.nets.len) |net_i| {
         if (net_i >= placement.rules.net.len or !eligible(placement.rules.net[net_i])) continue;
         const net: i32 = @intCast(net_i);
-        if (hasSuccessfulPath(outcomes, net)) continue;
+        if (hasSuccessfulPath(outcomes, tracks, net)) continue;
         var layers: [256]bool = @splat(false);
         for (tracks) |track| {
             if (track.net == net) layers[track.layer] = true;
@@ -191,17 +350,22 @@ pub fn exactFallbacks(
                 if (track.net == net and track.layer == layer_i) try mine.append(arena, track);
             }
             const chains = try bend_smooth.extractChains(arena, mine.items);
-            for (chains) |chain| try appendChainTapers(arena, &out, net, @intCast(layer_i), chain);
+            const rule = placement.rules.net[net_i];
+            const nominal = if (rule.width > 0) rule.width else placement.rules.design.track_width;
+            const context = ChainContext{
+                .net = net,
+                .layer = @intCast(layer_i),
+                .nominal = nominal,
+                .two_pin = placement.nets[net_i].pins.len == 2,
+            };
+            for (chains) |chain| try appendChainTapers(arena, &out, context, chain);
         }
     }
     return out.toOwnedSlice(arena);
 }
 
-fn fallbackOwnsTrack(path: rf_port_report.Outcome, track: router.Track) bool {
-    if (!path.success or path.physical.gate_removed) return false;
-    if (path.net != track.net or path.physical.layer != track.layer) return false;
-    if (path.physical.samples.len < 2) return false;
-    const samples = path.physical.samples;
+fn straightRunOwnsTrack(samples: []const rf_path_solver.Sample, track: router.Track) bool {
+    if (samples.len < 2) return false;
     const first = samples[0].at;
     const last = samples[samples.len - 1].at;
     const dx = last[0] - first[0];
@@ -241,6 +405,39 @@ fn fallbackOwnsTrack(path: rf_port_report.Outcome, track: router.Track) bool {
     return track.width <= widest + conservative_step + router.clearance_eps;
 }
 
+fn samplesContinueStraight(samples: []const rf_path_solver.Sample, vertex: usize) bool {
+    const points = [3][2]f64{ samples[vertex - 1].at, samples[vertex].at, samples[vertex + 1].at };
+    return continuesStraight(&points, 1);
+}
+
+fn fallbackOwnsTrack(path: rf_port_report.Outcome, track: router.Track) bool {
+    if (!path.success or path.physical.gate_removed) return false;
+    if (path.net != track.net or path.physical.layer != track.layer) return false;
+    const samples = path.physical.samples;
+    if (samples.len < 2) return false;
+    var first: usize = 0;
+    for (1..samples.len - 1) |vertex| {
+        if (samplesContinueStraight(samples, vertex)) continue;
+        if (straightRunOwnsTrack(samples[first .. vertex + 1], track)) return true;
+        first = vertex;
+    }
+    return straightRunOwnsTrack(samples[first..], track);
+}
+
+fn pathDistance(path: rf_port_report.Outcome, other: router.Track) f64 {
+    var best = std.math.inf(f64);
+    const samples = path.physical.samples;
+    for (samples[1..], 1..) |sample, i| {
+        best = @min(best, pad_shape.segSegDist(
+            samples[i - 1].at,
+            sample.at,
+            .{ other.x1, other.y1 },
+            .{ other.x2, other.y2 },
+        ));
+    }
+    return best;
+}
+
 fn compactCentrelineTouches(
     fallbacks: []const rf_port_report.Outcome,
     track: router.Track,
@@ -248,11 +445,7 @@ fn compactCentrelineTouches(
 ) bool {
     for (fallbacks) |path| {
         if (!fallbackOwnsTrack(path, track)) continue;
-        const samples = path.physical.samples;
-        const first = samples[0].at;
-        const last = samples[samples.len - 1].at;
-        if (pad_shape.segSegDist(first, last, .{ other.x1, other.y1 }, .{ other.x2, other.y2 }) <=
-            copper_contact.join_slack_mm) return true;
+        if (pathDistance(path, other) <= copper_contact.join_slack_mm) return true;
     }
     return false;
 }
@@ -265,36 +458,75 @@ fn closestPathBridge(
     for (fallbacks) |path| {
         if (!fallbackOwnsTrack(path, track)) continue;
         const samples = path.physical.samples;
-        const a = samples[0].at;
-        const b = samples[samples.len - 1].at;
-        const dx = b[0] - a[0];
-        const dy = b[1] - a[1];
-        const len_sq = dx * dx + dy * dy;
-        if (len_sq <= eps * eps) continue;
         var best: ?router.Track = null;
         var best_len = std.math.inf(f64);
-        for ([_][2]f64{ .{ other.x1, other.y1 }, .{ other.x2, other.y2 } }) |point| {
-            const t = std.math.clamp(((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / len_sq, 0, 1);
-            const projected = [2]f64{ a[0] + dx * t, a[1] + dy * t };
-            const distance = std.math.hypot(point[0] - projected[0], point[1] - projected[1]);
-            if (distance >= best_len) continue;
-            best_len = distance;
-            best = .{
-                .x1 = point[0],
-                .y1 = point[1],
-                .x2 = projected[0],
-                .y2 = projected[1],
-                .layer = track.layer,
-                // The bridge is outside the land-axis taper exemption. Use the
-                // wider adjoining handle so it remains class-width legal; it
-                // lies wholly inside their already-overlapping copper union.
-                .width = @max(track.width, other.width),
-                .net = track.net,
-            };
+        for (samples[1..], 1..) |sample, i| {
+            const a = samples[i - 1].at;
+            const b = sample.at;
+            const dx = b[0] - a[0];
+            const dy = b[1] - a[1];
+            const len_sq = dx * dx + dy * dy;
+            if (len_sq <= eps * eps) continue;
+            for ([_][2]f64{ .{ other.x1, other.y1 }, .{ other.x2, other.y2 } }) |point| {
+                const t = std.math.clamp(((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / len_sq, 0, 1);
+                const projected = [2]f64{ a[0] + dx * t, a[1] + dy * t };
+                const distance = std.math.hypot(point[0] - projected[0], point[1] - projected[1]);
+                if (distance >= best_len) continue;
+                best_len = distance;
+                best = .{
+                    .x1 = point[0],
+                    .y1 = point[1],
+                    .x2 = projected[0],
+                    .y2 = projected[1],
+                    .layer = track.layer,
+                    // The bridge is outside the land-axis taper exemption. Use
+                    // the wider adjoining handle so it stays class-width legal.
+                    .width = @max(track.width, other.width),
+                    .net = track.net,
+                };
+            }
         }
         if (best_len > copper_contact.join_slack_mm) return best;
     }
     return null;
+}
+
+fn appendStraightHandle(
+    arena: std.mem.Allocator,
+    out: *std.ArrayList(router.Track),
+    path: rf_port_report.Outcome,
+    samples: []const rf_path_solver.Sample,
+) std.mem.Allocator.Error!void {
+    if (samples.len < 2) return;
+    var width = samples[0].width_mm;
+    for (samples[1..]) |sample| width = @min(width, sample.width_mm);
+    const first = samples[0].at;
+    const last = samples[samples.len - 1].at;
+    if (pointDistance(first, last) <= eps) return;
+    try out.append(arena, .{
+        .x1 = first[0],
+        .y1 = first[1],
+        .x2 = last[0],
+        .y2 = last[1],
+        .layer = path.physical.layer,
+        .width = width,
+        .net = path.net,
+    });
+}
+
+fn appendPathHandles(
+    arena: std.mem.Allocator,
+    out: *std.ArrayList(router.Track),
+    path: rf_port_report.Outcome,
+) std.mem.Allocator.Error!void {
+    const samples = path.physical.samples;
+    var first: usize = 0;
+    for (1..samples.len - 1) |vertex| {
+        if (samplesContinueStraight(samples, vertex)) continue;
+        try appendStraightHandle(arena, out, path, samples[first .. vertex + 1]);
+        first = vertex;
+    }
+    try appendStraightHandle(arena, out, path, samples[first..]);
 }
 
 /// Replace the conservative capsule slices owned by freshly captured fallback
@@ -348,20 +580,7 @@ pub fn compactFallbackHandles(
     try out.appendSlice(arena, bridges.items);
     for (fallbacks) |path| {
         if (!path.success or path.physical.gate_removed or path.physical.samples.len < 2) continue;
-        const samples = path.physical.samples;
-        var width = samples[0].width_mm;
-        for (samples[1..]) |sample| width = @min(width, sample.width_mm);
-        const first = samples[0].at;
-        const last = samples[samples.len - 1].at;
-        try out.append(arena, .{
-            .x1 = first[0],
-            .y1 = first[1],
-            .x2 = last[0],
-            .y2 = last[1],
-            .layer = path.physical.layer,
-            .width = width,
-            .net = path.net,
-        });
+        try appendPathHandles(arena, &out, path);
     }
     tracks.clearRetainingCapacity();
     try tracks.appendSlice(arena, out.items);
@@ -375,7 +594,7 @@ test "autorouter fallback taper recovers exact endpoint widths" {
     const points = [_][2]f64{ .{ 0, 0 }, .{ 0.25, 0 }, .{ 0.5, 0 }, .{ 0.75, 0 } };
     const widths = [_]f64{ 1.8, 1.2, 0.6 };
     var outcomes: std.ArrayList(rf_port_report.Outcome) = .empty;
-    try appendChainTapers(arena, &outcomes, 7, 0, .{
+    try appendChainTapers(arena, &outcomes, .{ .net = 7, .layer = 0, .nominal = 0.6, .two_pin = false }, .{
         .pts = try arena.dupe([2]f64, &points),
         .widths = try arena.dupe(f64, &widths),
     });
@@ -399,6 +618,66 @@ test "fallback detection retains two-sided tapers and splits bends" {
     try std.testing.expect(!varyingWidths(&.{ 0.3, 0.3, 0.3 }));
     try std.testing.expect(continuesStraight(&.{ .{ 0, 0 }, .{ 1, 0 }, .{ 2, 0 } }, 1));
     try std.testing.expect(!continuesStraight(&.{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 } }, 1));
+}
+
+test "stale successful RF metadata does not suppress fallback regeneration" {
+    const stale_samples = [_]rf_path_solver.Sample{
+        .{ .at = .{ 0, 0 }, .s_mm = 0, .curvature = 0, .width_mm = 1.8 },
+        .{ .at = .{ 1, 0 }, .s_mm = 1, .curvature = 0, .width_mm = 0.3124 },
+    };
+    const outcomes = [_]rf_port_report.Outcome{.{
+        .net = 3,
+        .chosen = 0,
+        .feasible = true,
+        .success = true,
+        .metrics = .{},
+        .trials = &.{},
+        .physical = .{ .samples = &stale_samples, .sample_count = stale_samples.len, .layer = 0 },
+    }};
+    const moved = [_]router.Track{.{ .x1 = 0, .y1 = 0.1, .x2 = 1, .y2 = 0.1, .layer = 0, .width = 0.3124, .net = 3 }};
+    const owned = [_]router.Track{.{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .layer = 0, .width = 0.3124, .net = 3 }};
+    try std.testing.expect(!hasSuccessfulPath(&outcomes, &moved, 3));
+    try std.testing.expect(hasSuccessfulPath(&outcomes, &owned, 3));
+}
+
+// spec: placement/rf-port-frame-routing - an autorouter pad taper that outlives its straight escape leg continues linearly by arclength through the following bend instead of ending in a width step at the corner
+test "two-pad fallback carries an unfinished taper through its bend" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const points = [_][2]f64{
+        .{ 0, 0 },
+        .{ 0.925, 0 },
+        .{ 0.95, 0 },
+        .{ 1.0, 0.05 },
+        .{ 1.3, 0.35 },
+    };
+    const widths = [_]f64{ 1.02, 0.9728, 0.8312, 0.3124 };
+    var outcomes: std.ArrayList(rf_port_report.Outcome) = .empty;
+    try appendChainTapers(arena, &outcomes, .{ .net = 4, .layer = 0, .nominal = 0.3124, .two_pin = true }, .{
+        .pts = try arena.dupe([2]f64, &points),
+        .widths = try arena.dupe(f64, &widths),
+    });
+    try std.testing.expectEqual(@as(usize, 1), outcomes.items.len);
+    const samples = outcomes.items[0].physical.samples;
+    var bend_width: ?f64 = null;
+    for (samples) |sample| {
+        if (pointDistance(sample.at, .{ 1.0, 0.05 }) <= eps) bend_width = sample.width_mm;
+    }
+    try std.testing.expect(bend_width != null);
+    try std.testing.expect(bend_width.? > 0.7 and bend_width.? < 0.9);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.02), samples[0].width_mm, 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.3124), samples[samples.len - 1].width_mm, 1e-12);
+
+    var tracks: std.ArrayList(router.Track) = .empty;
+    try tracks.appendSlice(arena, &.{
+        .{ .x1 = 0, .y1 = 0, .x2 = 0.925, .y2 = 0, .layer = 0, .width = 1.02, .net = 4 },
+        .{ .x1 = 0.925, .y1 = 0, .x2 = 0.95, .y2 = 0, .layer = 0, .width = 0.9728, .net = 4 },
+        .{ .x1 = 0.95, .y1 = 0, .x2 = 1.0, .y2 = 0.05, .layer = 0, .width = 0.8312, .net = 4 },
+        .{ .x1 = 1.0, .y1 = 0.05, .x2 = 1.3, .y2 = 0.35, .layer = 0, .width = 0.3124, .net = 4 },
+    });
+    try compactFallbackHandles(arena, &tracks, outcomes.items);
+    try std.testing.expectEqual(@as(usize, 2), tracks.items.len);
 }
 
 test "fallback compaction removes gloss-snapped capsules and keeps one handle" {
