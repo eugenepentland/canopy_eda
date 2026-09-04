@@ -3693,6 +3693,8 @@ src/query.zig::cmdLibrary | fn cmdLibrary(allocator: std.mem.Allocator, args: []
 src/query.zig::cmdNet | fn cmdNet(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void
 src/query.zig::cmdReference | fn cmdReference(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void
 src/query.zig::cmdSchematic | fn cmdSchematic(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void
+src/query.zig::designsJson | fn designsJson(a: std.mem.Allocator, project_dir: []const u8) QueryError![]const u8
+src/query.zig::scopeOf | fn scopeOf(args: []const []const u8) mcp_tools.Scope
 src/raster.zig::Anchor enum_
 src/raster.zig::Canvas struct_
 src/raster.zig::Caps enum_

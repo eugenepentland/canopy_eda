@@ -7728,6 +7728,8 @@ is what makes the predicate exact rather than approximately right.
 - The compare_layout_to_starred MCP tool and the layout-match endpoint share one scorer, so both report the same agreement against the starred layout
 - The list_history MCP tool and the history endpoint write one snapshot list through one serializer, so a snapshot with no note reads the same on both
 - The save_pcb_layout MCP tool and the pcb-layouts save endpoint persist the same board, so a layout saved through either surface carries identical poses and copper
+- The designs CLI listing, the designs endpoint and the list_designs MCP tool name the same designs with the same titles, and all three skip a design's sidecar .sexp files
+- The instances CLI subcommand and the list_instances MCP tool emit one payload at one default scope, so a flattened or top-level listing reads the same on both
 - completeness-waiver: concurrent access (httpz owns request threading and each handler answers from its own response arena; the two pieces of state that really are shared — the live scene graph and a design's layout sidecar — are specified where they live, under the push and layout-backfill sections, rather than restated per endpoint)
 
 ## fab_readiness

@@ -31,6 +31,8 @@ const layout_match = @import("layout_match.zig");
 const route_analyze_api = @import("route_analyze_api.zig");
 const design_diff = @import("design_diff.zig");
 const infra_fs = @import("../infra/fs.zig");
+const query_cli = @import("../query.zig");
+const api = @import("api.zig");
 
 const Server = serve_root.Server;
 const testing = std.testing;
@@ -315,6 +317,22 @@ fn copperCount(row: std.json.Value, field: []const u8) i64 {
     return arrayLen(routes.object, field);
 }
 
+/// `name` → `title` for every row of a design listing, whatever the listing's
+/// shape: the CLI answers `{"designs":[…]}` and the two server surfaces answer
+/// a bare array, so the comparison is over the pairs, not the bytes.
+fn designTitles(alloc: std.mem.Allocator, listing: std.json.Value) !std.StringArrayHashMapUnmanaged([]const u8) {
+    var out: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+    const rows = switch (listing) {
+        .array => |a| a.items,
+        .object => |o| o.get("designs").?.array.items,
+        else => &[_]std.json.Value{},
+    };
+    for (rows) |row| {
+        try out.put(alloc, row.object.get("name").?.string, row.object.get("title").?.string);
+    }
+    return out;
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 // spec: Web Server - The describe_pcb_layout MCP tool and the pcb-describe endpoint share one implementation, so a no-argument read returns the same spatial-facts document on both surfaces
@@ -550,4 +568,67 @@ test "save_pcb_layout persists the same board as the pcb-layouts save endpoint" 
     const from_http = rowNamed(sidecar, "from-http");
     try testing.expectEqualStrings("", try firstSavedDifference(alloc, from_tool, from_http));
     try testing.expectEqual(@as(i64, 3), copperCount(from_tool, "tracks"));
+}
+
+// spec: Web Server - The designs CLI listing, the designs endpoint and the list_designs MCP tool name the same designs with the same titles, and all three skip a design's sidecar .sexp files
+test "the three design listings agree on which designs exist and what they are called" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp, .routed);
+    // A sidecar .sexp beside the design: the CLI skips any stem containing a
+    // dot, the summaries skip `.checks.sexp` by name. Two different rules for
+    // one expectation, so the fixture has to carry the file that exercises it.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/twinfx.checks.sexp",
+        .data = "(design-block \"Not A Design\")",
+    });
+
+    const cli = try designTitles(alloc, try std.json.parseFromSliceLeaky(std.json.Value, alloc, try query_cli.designsJson(alloc, project), .{}));
+    const http = try httpCall(alloc, project, api.designsApi, "", &.{}, null);
+    const from_http = try designTitles(alloc, try std.json.parseFromSliceLeaky(std.json.Value, alloc, http.body, .{}));
+    const tool = try mcpCall(alloc, project, "list_designs", "{}");
+    try testing.expect(tool.ok);
+    const from_tool = try designTitles(alloc, try std.json.parseFromSliceLeaky(std.json.Value, alloc, tool.body, .{}));
+
+    // The endpoint and the tool are hand-copied loops over one summary set, so
+    // they must be byte-identical; the CLI walks src/ itself and reads titles
+    // out of the source text, so it is compared pair-by-pair.
+    try testing.expectEqualStrings(http.body, tool.body);
+    try testing.expectEqual(from_http.count(), cli.count());
+    try testing.expectEqual(@as(usize, 1), cli.count());
+    try testing.expectEqualStrings("Twin Fixture", cli.get("twinfx").?);
+    try testing.expectEqualStrings("Twin Fixture", from_http.get("twinfx").?);
+    try testing.expectEqualStrings("Twin Fixture", from_tool.get("twinfx").?);
+}
+
+// spec: Web Server - The instances CLI subcommand and the list_instances MCP tool emit one payload at one default scope, so a flattened or top-level listing reads the same on both
+test "the instances CLI and list_instances emit the same payload at the same scopes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp, .routed);
+
+    // The payload is one `pub fn`, so the two surfaces can only disagree by
+    // asking it for a different scope — which is exactly what an argv default
+    // and a JSON-argument default are free to do independently.
+    var flat: std.Io.Writer.Allocating = .init(alloc);
+    try testing.expect(try mcp_tools.listInstances(alloc, project, "twinfx", query_cli.scopeOf(&.{}), &flat.writer));
+    const flat_tool = try mcpCall(alloc, project, "list_instances", "{\"name\":\"twinfx\"}");
+    try testing.expect(flat_tool.ok);
+    try testing.expectEqualStrings(flat.written(), flat_tool.body);
+
+    var top: std.Io.Writer.Allocating = .init(alloc);
+    try testing.expect(try mcp_tools.listInstances(alloc, project, "twinfx", query_cli.scopeOf(&.{"--top-level"}), &top.writer));
+    const top_tool = try mcpCall(alloc, project, "list_instances", "{\"name\":\"twinfx\",\"flatten\":false}");
+    try testing.expect(top_tool.ok);
+    try testing.expectEqualStrings(top.written(), top_tool.body);
+
+    try testing.expect(std.mem.indexOf(u8, flat.written(), "C1") != null);
 }

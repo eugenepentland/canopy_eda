@@ -1252,6 +1252,7 @@ surfaces = ["cli:build", "http:/api/push", "mcp:build"]
 [[twin]]
 name = "designs-list"
 surfaces = ["cli:designs", "http:/api/designs", "mcp:list_designs"]
+parity_test = "the three design listings agree on which designs exist and what they are called"
 
 [[twin]]
 name = "history-list"
@@ -1283,6 +1284,7 @@ parity_test = "persists the same board as the pcb-layouts save endpoint"
 [[twin]]
 name = "query-introspection"
 surfaces = ["cli:instances", "mcp:list_instances"]
+parity_test = "the instances CLI and list_instances emit the same payload at the same scopes"
 
 [[twin]]
 name = "module-standalone"
