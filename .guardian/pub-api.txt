@@ -253,7 +253,10 @@ src/build_id.zig::load | fn load( io: std.Io, allocator: std.mem.Allocator, repo
 src/canonical_module_check.zig::Finding struct_
 src/canonical_module_check.zig::run | fn run( allocator: std.mem.Allocator, block: *const env.DesignBlock, project_dir: []const u8, ) std.mem.Allocator.Error![]Finding
 src/checks.zig::Severity enum_
+src/commands.zig::CheckReport struct_
 src/commands.zig::CommandError value
+src/commands.zig::SyncSchReport struct_
+src/commands.zig::checkReport | fn checkReport(allocator: std.mem.Allocator, args: []const []const u8) CommandError!CheckReport
 src/commands.zig::cmdBackfillLayouts | fn cmdBackfillLayouts( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdBuild | fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdCheck | fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
@@ -270,6 +273,7 @@ src/commands.zig::cmdReviewAudit | fn cmdReviewAudit(allocator: std.mem.Allocato
 src/commands.zig::cmdRouteKicadReference | fn cmdRouteKicadReference( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdSyncKicadSch | fn cmdSyncKicadSch(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdSystemCheck | fn cmdSystemCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
+src/commands.zig::syncKicadSchReport | fn syncKicadSchReport(allocator: std.mem.Allocator, args: []const []const u8) CommandError!SyncSchReport
 src/component_classification.zig::isActiveSemiconductor | fn isActiveSemiconductor(inst: env.Instance) bool
 src/component_classification.zig::isPassThroughConnector | fn isPassThroughConnector(inst: env.Instance) bool
 src/config.zig::cseEmail | fn cseEmail(allocator: std.mem.Allocator) ?[]u8
@@ -1012,6 +1016,7 @@ src/export_matlab_rf.zig::errorMessage | fn errorMessage(err: anyerror) []const 
 src/export_pdf.zig::Error value
 src/export_pdf.zig::Options struct_
 src/export_pdf.zig::compose | fn compose( gpa: Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, doc: review.ReviewDoc, opts: Options, ) Error![]u8
+src/export_pdf.zig::extractTj | fn extractTj(a: Allocator, bytes: []const u8) Allocator.Error![]const []const u8
 src/export_pdf.zig::pageCount | fn pageCount(bytes: []const u8) usize
 src/fab_gate.zig::BoardInput struct_
 src/fab_gate.zig::Input struct_
@@ -3698,6 +3703,8 @@ src/query.zig::cmdLibrary | fn cmdLibrary(allocator: std.mem.Allocator, args: []
 src/query.zig::cmdNet | fn cmdNet(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void
 src/query.zig::cmdReference | fn cmdReference(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void
 src/query.zig::cmdSchematic | fn cmdSchematic(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void
+src/query.zig::designsJson | fn designsJson(a: std.mem.Allocator, project_dir: []const u8) QueryError![]const u8
+src/query.zig::scopeOf | fn scopeOf(args: []const []const u8) mcp_tools.Scope
 src/raster.zig::Anchor enum_
 src/raster.zig::Canvas struct_
 src/raster.zig::Caps enum_
@@ -4326,6 +4333,7 @@ src/serve/history.zig::listSnapshots | fn listSnapshots( allocator: std.mem.Allo
 src/serve/history.zig::restore | fn restore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, ) HistoryError!void
 src/serve/history.zig::snapshot | fn snapshot( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, description: ?[]const u8, ) HistoryError!?[]const u8
 src/serve/history.zig::snapshotLayouts | fn snapshotLayouts( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, sidecar_path: []const u8, ) HistoryError!?[]const u8
+src/serve/history.zig::writeSnapshotsJson | fn writeSnapshotsJson(w: *std.Io.Writer, snaps: []const SnapshotInfo) (std.Io.Writer.Error || std.mem.Allocator.Error)!void
 src/serve/kicad_sch_export.zig::ExportZipError value
 src/serve/kicad_sch_export.zig::HandlerError value
 src/serve/kicad_sch_export.zig::exportFor | fn exportFor( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: export_kicad_sch.Options, deps: ?*?page_cache.FileSet, ) ExportZipError!export_kicad_sch.Output

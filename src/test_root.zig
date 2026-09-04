@@ -517,6 +517,7 @@ test {
     _ = @import("serve/subprocess.zig");
     _ = @import("serve/sync.zig");
     _ = @import("serve/sync_kicad_sch.zig");
+    _ = @import("serve/twin_parity.zig");
     _ = @import("serve/upload.zig");
     _ = @import("serve/upload_datasheet.zig");
     _ = @import("serve/vfs.zig");

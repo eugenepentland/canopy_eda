@@ -88,7 +88,12 @@ fn hasFlag(args: []const []const u8, flag: []const u8) bool {
 const top_level_flag = "--top-level";
 
 /// Introspection scope: flattened by default, top-level-only with `--top-level`.
-fn scopeOf(args: []const []const u8) mcp_tools.Scope {
+///
+/// Public because it is the ONLY thing that can drift between `netlisp
+/// instances` and the `list_instances` tool — the payload is one shared `pub
+/// fn`, so the surfaces can only disagree by asking it for different scopes.
+/// The twin-parity test compares this default against `scopeArg`'s.
+pub fn scopeOf(args: []const []const u8) mcp_tools.Scope {
     return if (hasFlag(args, top_level_flag)) .top_level else .flat;
 }
 
@@ -267,11 +272,19 @@ pub fn cmdDesigns(allocator: std.mem.Allocator, args: []const []const u8) QueryE
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
+    try emit(try designsJson(a, projectDir(args)));
+}
 
-    const src_path = try std.fmt.allocPrint(a, "{s}/src", .{projectDir(args)});
+/// The `{"designs":[{name,title}]}` document `netlisp designs` prints, built
+/// without touching stdout. Split out of `cmdDesigns` so the twin-parity test
+/// can compare this listing against `/api/designs` and `list_designs`, which
+/// answer the same question through a completely different implementation
+/// (`mcp_tools.listDesignSummaries`, which EVALUATES each design rather than
+/// reading its title out of the source text).
+pub fn designsJson(a: std.mem.Allocator, project_dir: []const u8) QueryError![]const u8 {
+    const src_path = try std.fmt.allocPrint(a, "{s}/src", .{project_dir});
     var dir = infra_fs.cwd().openDir(src_path, .{ .iterate = true }) catch {
-        try emit("{\"designs\":[]}");
-        return;
+        return "{\"designs\":[]}";
     };
     defer dir.close();
 
@@ -306,7 +319,7 @@ pub fn cmdDesigns(allocator: std.mem.Allocator, args: []const []const u8) QueryE
         try w.writeAll("}");
     }
     try w.writeAll("]}");
-    try emit(buf.written());
+    return buf.written();
 }
 
 /// Extract the quoted title immediately after `(design-block` at `db_idx`.

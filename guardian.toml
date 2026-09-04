@@ -1248,74 +1248,92 @@ parity_test = "returns the same body as the fence endpoint"
 [[twin]]
 name = "pcb-describe"
 surfaces = ["http:/api/pcb-describe", "mcp:describe_pcb_layout"]
+parity_test = "returns the same facts document as the pcb-describe endpoint"
 
 [[twin]]
 name = "layout-progress"
 surfaces = ["http:/api/layout-progress", "mcp:get_layout_progress"]
+parity_test = "returns the same ladder as the layout-progress endpoint"
 
 [[twin]]
 name = "pcb-png"
 surfaces = ["http:/api/pcb-png", "mcp:get_pcb_layout_image"]
+parity_test = "decodes to the same PNG the pcb-png endpoint serves"
 
 [[twin]]
 name = "diagnose-net"
 surfaces = ["http:/api/pcb-route-analyze", "mcp:diagnose_net"]
+parity_test = "returns the same per-net analysis as the pcb-route-analyze endpoint"
 
 [[twin]]
 name = "layout-match"
 surfaces = ["http:/api/layout-match", "mcp:compare_layout_to_starred"]
+parity_test = "returns the same score as the layout-match endpoint"
 
 [[twin]]
 name = "kicad-sch-export"
 surfaces = ["cli:export-kicad-sch", "http:/api/kicad-sch", "mcp:export_kicad_sch"]
+parity_test = "the three KiCad schematic exports produce the same files"
 
 [[twin]]
 name = "kicad-sch-sync"
 surfaces = ["cli:sync-kicad-sch", "http:/api/sync-kicad-sch", "mcp:sync_kicad_sch"]
+parity_test = "the three KiCad schematic pushes plan the same operations"
 
 [[twin]]
 name = "erc-checks"
 surfaces = ["cli:check", "http:/api/erc", "mcp:run_checks"]
+parity_test = "the three check surfaces report the same ERC violations"
 
 [[twin]]
 name = "build-push"
 surfaces = ["cli:build", "http:/api/push", "mcp:build"]
+parity_test = "the push endpoint and the build tool publish the same live scene"
 
 [[twin]]
 name = "designs-list"
 surfaces = ["cli:designs", "http:/api/designs", "mcp:list_designs"]
+parity_test = "the three design listings agree on which designs exist and what they are called"
 
 [[twin]]
 name = "history-list"
 surfaces = ["http:/api/history", "mcp:list_history"]
+parity_test = "returns the same snapshot list as the history endpoint"
 
 [[twin]]
 name = "review-pdf"
 surfaces = ["cli:export-pdf", "http:/api/schematic-pdf"]
+parity_test = "the export-pdf CLI and the schematic-pdf endpoint compose the same review document"
 
 [[twin]]
 name = "schematic-png"
 surfaces = ["cli:export-schematic-png", "http:/api/schematic-png", "mcp:get_schematic_image"]
+parity_test = "the three schematic image surfaces render identical PNG bytes"
 
 [[twin]]
 name = "import-kicad"
 surfaces = ["cli:import-kicad", "mcp:import_kicad"]
+parity_test = "the two KiCad importers write the same design from one board"
 
 [[twin]]
 name = "routing"
 surfaces = ["http:/api/pcb-route", "mcp:route_pcb"]
+parity_test = "routes the same board to the same copper as the pcb-route endpoint"
 
 [[twin]]
 name = "layout-save"
 surfaces = ["http:/api/pcb-layouts", "mcp:save_pcb_layout"]
+parity_test = "persists the same board as the pcb-layouts save endpoint"
 
 [[twin]]
 name = "query-introspection"
 surfaces = ["cli:instances", "mcp:list_instances"]
+parity_test = "the instances CLI and list_instances emit the same payload at the same scopes"
 
 [[twin]]
 name = "module-standalone"
 surfaces = ["http:/modules", "mcp:preview_module"]
+parity_test = "preview_module and the standalone module page resolve one module identically"
 
 # ── The three require_in rules ────────────────────────────────────────────
 # These name a mirror the project DECIDED to keep and demand it stay in step,

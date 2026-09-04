@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
+const json_writer = @import("../json_writer.zig");
 const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
 const sortable_stamp = @import("sortable_stamp.zig");
@@ -126,6 +127,30 @@ pub fn listSnapshots(
         }
     }.lessThan);
     return entries.toOwnedSlice(allocator);
+}
+
+/// Write the `{"snapshots":[{id,description}, …]}` document BOTH history
+/// surfaces answer — `GET /api/history/:name` and the `list_history` tool.
+///
+/// One writer because the two hand-written copies had already drifted on the
+/// only field either of them formats: the endpoint spelled a snapshot with no
+/// `.note` as `"description":""` and the tool as `"description":null`, so one
+/// list read two different ways depending on which surface asked. `null` is
+/// the spelling kept — it is what `SnapshotInfo.description` holds, and it
+/// distinguishes "no note" from a note that is empty. The history panel in
+/// `schematic_viewer.js` tests the field for truthiness, which reads both the
+/// same, so the browser is unaffected.
+pub fn writeSnapshotsJson(w: *std.Io.Writer, snaps: []const SnapshotInfo) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
+    try w.writeAll("{\"snapshots\":[");
+    for (snaps, 0..) |s, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"id\":");
+        try json_writer.writeString(w, s.id);
+        try w.writeAll(",\"description\":");
+        if (s.description) |d| try json_writer.writeString(w, d) else try w.writeAll("null");
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}");
 }
 
 /// Restore the snapshot at `id` back into src/. Does NOT snapshot the current

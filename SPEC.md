@@ -7754,6 +7754,24 @@ is what makes the predicate exact rather than approximately right.
 - The WASM DRC session probe enforces an RF net's declared keepout halo, so the mid-drag gate refuses the copper the full check flags
 - The WASM DRC session probe reads each net's class identity, waiving the keepout halo between one class's own members and inside a pad-escape zone
 - The shared DRC JSON writer escapes a violation's names for the page's script blob, so a net named </script> cannot close the element
+- The describe_pcb_layout MCP tool and the pcb-describe endpoint share one implementation, so a no-argument read returns the same spatial-facts document on both surfaces
+- The get_layout_progress MCP tool and the layout-progress endpoint share one implementation, so both report the same completion ladder
+- The route_pcb MCP tool and the pcb-route endpoint route the same poses to the same copper, reporting the same connectivity, track, via and DRC counts
+- The preview_module MCP tool and the standalone module page instantiate a module the same way, so both draw the same instances and nets and both refuse a module whose parameters have no defaults
+- The get_pcb_layout_image MCP tool and the pcb-png endpoint render one board through one renderer, so the tool's base64 payload decodes to the endpoint's exact PNG bytes
+- The diagnose_net MCP tool and the pcb-route-analyze endpoint run one diagnosis, so a named net reads identically on both surfaces
+- The compare_layout_to_starred MCP tool and the layout-match endpoint share one scorer, so both report the same agreement against the starred layout
+- The list_history MCP tool and the history endpoint write one snapshot list through one serializer, so a snapshot with no note reads the same on both
+- The save_pcb_layout MCP tool and the pcb-layouts save endpoint persist the same board, so a layout saved through either surface carries identical poses and copper
+- The designs CLI listing, the designs endpoint and the list_designs MCP tool name the same designs with the same titles, and all three skip a design's sidecar .sexp files
+- The instances CLI subcommand and the list_instances MCP tool emit one payload at one default scope, so a flattened or top-level listing reads the same on both
+- The check CLI subcommand, the erc endpoint and the run_checks MCP tool run one electrical-rule check over one design, so all three report the same violations in the same order
+- The export-kicad-sch CLI subcommand, the kicad-sch endpoint and the export_kicad_sch MCP tool run one exporter, so all three produce the same sheet files byte for byte
+- The export-schematic-png CLI subcommand, the schematic-png endpoint and the get_schematic_image MCP tool render one schematic at one default width, view and theme, so all three produce identical PNG bytes
+- The export-pdf CLI subcommand and the schematic-pdf endpoint compose one review document, so both PDFs draw the same pages and the same text
+- The sync-kicad-sch CLI subcommand, the sync-kicad-sch endpoint and the sync_kicad_sch MCP tool plan one guarded schematic push, so all three name the same target and the same per-file operations
+- The import-kicad CLI subcommand and the import_kicad MCP tool run one importer, so importing one board under one name writes the same design and the same generated library files
+- The push endpoint and the build MCP tool publish one live scene for one design, so both name every part by the ref-des its stable id owns rather than by its position in the source
 - completeness-waiver: concurrent access (httpz owns request threading and each handler answers from its own response arena; the two pieces of state that really are shared — the live scene graph and a design's layout sidecar — are specified where they live, under the push and layout-backfill sections, rather than restated per endpoint)
 
 ## fab_readiness

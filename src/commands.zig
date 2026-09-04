@@ -311,6 +311,20 @@ fn writeCheckFindings(
 
 /// `netlisp check <name>` — run unified validation and print findings.
 pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
+    const report = try checkReport(allocator, args);
+    try std.Io.File.stdout().writeStreamingAll(infra_fs.currentIo(), report.text);
+    if (report.errors > 0) exit.failure();
+}
+
+/// What `netlisp check` printed, and whether it should have failed the process.
+pub const CheckReport = struct { text: []const u8, errors: usize, shown: usize };
+
+/// Build `netlisp check`'s findings report for `args` without touching stdout
+/// or exiting. Split out of `cmdCheck` so the twin-parity test can compare this
+/// surface's ERC set against `/api/erc` and the `run_checks` tool, which answer
+/// the same question through two more implementations; `args` is the real argv
+/// so the comparison covers this surface's own flag handling too.
+pub fn checkReport(allocator: std.mem.Allocator, args: []const []const u8) CommandError!CheckReport {
     const parsed = parseCheckArgs(args);
 
     const board_path = try paths.designSourcePath(allocator, parsed.project_dir, parsed.design);
@@ -331,7 +345,6 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
 
     const violations = try erc_mod.runErc(allocator, block, parsed.project_dir);
     var w_buf: std.Io.Writer.Allocating = .init(allocator);
-    defer w_buf.deinit();
     const w = &w_buf.writer;
     var counts = try writeCheckErc(w, violations, parsed.severity);
     counts.include(try writeCheckAssertions(w, &eval, parsed.severity));
@@ -339,9 +352,7 @@ pub fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     defer report.deinit(allocator);
     counts.include(try writeCheckFindings(w, report.findings, parsed.severity));
     try w.print("\n{d} violation(s)\n", .{counts.shown});
-    try std.Io.File.stdout().writeStreamingAll(infra_fs.currentIo(), w_buf.written());
-
-    if (counts.errors > 0) exit.failure();
+    return .{ .text = w_buf.written(), .errors = counts.errors, .shown = counts.shown };
 }
 
 /// `netlisp system-check <name>` — print the exact system-release readiness
@@ -867,6 +878,21 @@ fn parseSyncSchArgs(args: []const []const u8) SyncSchArgs {
 /// nothing is written at all if any one file would be refused. `--dry-run`
 /// prints the same plan without touching disk.
 pub fn cmdSyncKicadSch(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
+    const report = try syncKicadSchReport(allocator, args);
+    try std.Io.File.stdout().writeStreamingAll(infra_fs.currentIo(), report.text);
+    if (report.refusal) |why| exit.fatal("Refused: {s}\n", .{why});
+}
+
+/// What `netlisp sync-kicad-sch` printed, and the refusal that would have
+/// failed the process.
+pub const SyncSchReport = struct { text: []const u8, refusal: ?[]const u8 };
+
+/// Build `netlisp sync-kicad-sch`'s plan report for `args` without touching
+/// stdout or exiting. Split out of `cmdSyncKicadSch` so the twin-parity test
+/// can compare this surface's plan against `/api/sync-kicad-sch` and the
+/// `sync_kicad_sch` tool, which reach the same `kicad_sch_push.run` through a
+/// different block resolution.
+pub fn syncKicadSchReport(allocator: std.mem.Allocator, args: []const []const u8) CommandError!SyncSchReport {
     const parsed = parseSyncSchArgs(args);
     if (parsed.design.len == 0) exit.fatal(sync_sch_usage, .{});
 
@@ -883,35 +909,34 @@ pub fn cmdSyncKicadSch(allocator: std.mem.Allocator, args: []const []const u8) C
         std.debug.print("warning: no .bom sidecar path for {s}: {s}\n", .{ parsed.design, @errorName(err) });
     }
 
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const result = kicad_sch_push.run(allocator, arena_state.allocator(), block, parsed.project_dir, .{
+    const result = kicad_sch_push.run(allocator, allocator, block, parsed.project_dir, .{
         .dry_run = parsed.dry_run,
         .force = parsed.force,
     }) catch |err| exit.fatal("Schematic push failed: {s}\n", .{kicad_sch_push_reason.explain(err)});
 
-    printSyncSchPlan(result, parsed.dry_run);
-    if (result.plan.refusal) |why| exit.fatal("Refused: {s}\n", .{why});
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    try writeSyncSchPlan(&buf.writer, result, parsed.dry_run);
+    return .{ .text = buf.written(), .refusal = result.plan.refusal };
 }
 
-/// Print the plan as one line per file, then what was (or was not) done.
-fn printSyncSchPlan(result: kicad_sch_push.Result, dry_run: bool) void {
+/// Write the plan as one line per file, then what was (or was not) done.
+fn writeSyncSchPlan(w: *std.Io.Writer, result: kicad_sch_push.Result, dry_run: bool) std.Io.Writer.Error!void {
     const plan = result.plan;
-    std.debug.print("KiCad project: {s}\n  directory: {s}\n  root sheet: {s}\n", .{
+    try w.print("KiCad project: {s}\n  directory: {s}\n  root sheet: {s}\n", .{
         plan.target.project, plan.target.dir, plan.root,
     });
     for (plan.ops) |op| {
-        std.debug.print("  {s: <10} {s}", .{ op.action.label(), op.name });
-        if (op.bytes > 0) std.debug.print(" ({d} bytes)", .{op.bytes});
-        if (op.note.len > 0) std.debug.print(" — {s}", .{op.note});
-        std.debug.print("\n", .{});
+        try w.print("  {s: <10} {s}", .{ op.action.label(), op.name });
+        if (op.bytes > 0) try w.print(" ({d} bytes)", .{op.bytes});
+        if (op.note.len > 0) try w.print(" — {s}", .{op.note});
+        try w.writeAll("\n");
     }
     if (plan.refusal != null) return;
     if (dry_run) {
-        std.debug.print("Dry run — nothing written.\n", .{});
+        try w.writeAll("Dry run — nothing written.\n");
         return;
     }
-    std.debug.print("Wrote {d} file(s) into {s} (replaced files rolled into backups/).\n", .{
+    try w.print("Wrote {d} file(s) into {s} (replaced files rolled into backups/).\n", .{
         plan.count(.create) + plan.count(.overwrite),
         plan.target.dir,
     });
