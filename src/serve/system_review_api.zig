@@ -25,6 +25,7 @@ const pcb_layout_page = @import("pcb_layout_page.zig");
 const system_cad = @import("system_cad.zig");
 const cad_document = @import("../mechanical/cad_document.zig");
 const vfs = @import("vfs.zig");
+const navbar = @import("navbar.zig");
 
 const Server = serve_root.Server;
 
@@ -1466,13 +1467,14 @@ pub fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
         "<!doctype html><html><head><meta charset=\"utf-8\">" ++
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
             "<title>System review</title><style>" ++
+            navbar.css ++
             ":root{color-scheme:dark;font:14px/1.45 system-ui,sans-serif;background:#0b1020;color:#e8edf7}" ++
             "*{box-sizing:border-box}body{margin:0}button,input,textarea{font:inherit}" ++
             "header{display:flex;gap:18px;align-items:center;padding:18px 22px;border-bottom:1px solid #293249}" ++
             "header h1{font-size:20px;margin:0}header p{margin:2px 0 0;color:#9eabc2}.grow{flex:1}" ++
             "button,.button{border:1px solid #42506c;background:#172139;color:#e8edf7;border-radius:7px;padding:7px 11px;cursor:pointer;text-decoration:none}" ++
             "button.primary{background:#2864dc;border-color:#3977ef}button:disabled{opacity:.45;cursor:not-allowed}" ++
-            "main{display:grid;grid-template-columns:260px minmax(360px,1fr) minmax(360px,1fr);height:calc(100vh - 76px)}" ++
+            "main{display:grid;grid-template-columns:260px minmax(360px,1fr) minmax(360px,1fr);height:calc(100vh - 118px)}" ++
             "aside,.editor,.preview{min-width:0;overflow:auto;padding:16px;border-right:1px solid #293249}" ++
             "#docs{display:grid;gap:6px;margin:14px 0}#docs button{text-align:left;background:transparent}" ++
             "#docs button.active{background:#1d2b49;border-color:#5b86d7}.tag{font-size:11px;color:#9eabc2;display:block}" ++
@@ -1482,7 +1484,12 @@ pub fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
             "#rendered td,#rendered th{border:1px solid #39455f;padding:6px}pre{white-space:pre-wrap}.status{padding:10px;border:1px solid #35415b;border-radius:8px;color:#aebbd0}" ++
             ".ok{color:#65d38e}.blocked{color:#ffb85c}#message{position:fixed;right:18px;bottom:18px;max-width:520px;background:#172139;border:1px solid #53617d;border-radius:8px;padding:10px;display:none}" ++
             "@media(max-width:1000px){main{grid-template-columns:220px 1fr}.preview{display:none}}" ++
-            "</style></head><body><header><div><h1 id=\"title\">System review</h1><p id=\"identity\">Loading manifest…</p></div>" ++
+            "@media(max-width:920px){main{height:calc(100vh - 124px)}}" ++
+            "</style></head><body>",
+    );
+    try navbar.write(writer, .none);
+    try writer.writeAll(
+        "<header><div><h1 id=\"title\">System review</h1><p id=\"identity\">Loading manifest…</p></div>" ++
             "<div class=\"grow\"></div><a class=\"button\" id=\"cad\">3D CAD</a><a class=\"button\" id=\"dossier\" target=\"_blank\" rel=\"noopener\">View dossier</a>" ++
             "<a class=\"button\" id=\"draft\">Download draft</a>" ++
             "<label><input id=\"waive\" type=\"checkbox\"> accept waivers</label><button id=\"release\">Final release</button></header>" ++
@@ -2088,6 +2095,7 @@ test "the system review page carries the view-dossier action" {
     request.param("name", "demo");
     try systemPage(&server, request.req, request.res);
     const body = request.res.body;
+    try std.testing.expect(std.mem.indexOf(u8, body, "<nav class=\"navbar\" aria-label=\"Primary\"><a href=\"/\" class=\"brand\">Netlisp</a>") != null);
     // A labelled action beside the existing draft download…
     try std.testing.expect(std.mem.indexOf(u8, body, ">View dossier</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, ">Download draft</a>") != null);

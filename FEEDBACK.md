@@ -667,3 +667,8 @@ matters when the person re-recording is the author of the change.
 - **blocker:** Three unchanged exact-commit preparations passed all 72 Guardian checks, all 4,782 tests, and ReleaseSafe compilation, then discarded the candidate on unrelated `pcb_editor_perf` outliers. The runs respectively failed at 231.4 ms GPU, by 0.8 ms on one Canvas p95, and at 239.6 ms GPU; this left the tested ruler branch unmerged after roughly ten minutes of repeated green build/test work plus 146 seconds queued behind the shared gate.
 - **idea:** Preserve a candidate whose Guardian, tests, and build passed, then perform one bounded serialized `pcb_editor_perf` retry against that exact stripped binary before discarding it. This recurring failure mode currently forces the entire release preparation to repeat even though the browser stage already has the only artifact it needs.
 - **status:** open
+
+## 2026-09-04 · codex · primary navigation standardization
+- **blocker:** Two exact-commit preparations passed all 72 Guardian checks, all 4,785 tests, and ReleaseSafe compilation, then discarded the unrelated navbar candidate on Canvas zoom outliers. The retries measured 66.8 ms and 86.5 ms zoom-in p95 against 45 ms while concurrent release jobs drove host load above 15, leaving the completed UI branch unmerged after 225 seconds of shared-lock queueing and roughly six minutes of repeated release work.
+- **idea:** Keep the verified candidate and perform one load-aware, serialized `pcb_editor_perf` retry against that exact binary after CPU load falls below the benchmark's calibrated ceiling; avoid rerunning compilation and 4,785 passing tests when only host-timing noise failed.
+- **status:** open

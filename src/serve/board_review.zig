@@ -18,6 +18,7 @@ const review_audit = @import("../review_audit.zig");
 const review_assessment = @import("../review_assessment.zig");
 const review_datasheets = @import("../review_datasheet_inventory.zig");
 const serve_root = @import("../serve.zig");
+const navbar = @import("navbar.zig");
 const Server = serve_root.Server;
 
 /// Allocation or response-writer failures that may escape an HTTP handler.
@@ -26,7 +27,6 @@ const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
 const catalog_markdown = catalog.markdown;
 const page_css = @embedFile("assets/board_review.css");
 const page_js = @embedFile("assets/board_review.js");
-const navbar_css = @embedFile("assets/navbar.css");
 const max_body_bytes: usize = 16 * 1024;
 const max_evidence_bytes = review_state.max_evidence_bytes;
 const max_note_bytes = review_state.max_note_bytes;
@@ -196,9 +196,11 @@ pub fn reviewPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     try w.writeAll("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>");
     try writeHtmlEscaped(w, name);
     try w.writeAll(" — Board Review</title><style>");
-    try w.writeAll(navbar_css);
+    try w.writeAll(navbar.css);
     try w.writeAll(page_css);
-    try w.writeAll("</style></head><body><div class=\"navbar\"><span class=\"brand\">Canopy EDA</span><a href=\"/\">Designs</a><a href=\"/library\">Library</a><a href=\"/account\" style=\"margin-left:auto\">Account</a></div><main class=\"review-shell\"><header class=\"review-head\"><div class=\"review-title\"><h1>");
+    try w.writeAll("</style></head><body>");
+    try navbar.write(w, .none);
+    try w.writeAll("<main class=\"review-shell\"><header class=\"review-head\"><div class=\"review-title\"><h1>");
     try writeHtmlEscaped(w, name);
     try w.writeAll("</h1><p>Board design review · ");
     if (layout) |selected| {
@@ -317,6 +319,8 @@ test "board review page exposes scoped progress filters and read-only controls" 
     try reviewPage(&server, request.req, request.res);
 
     const body = request.res.body;
+    try std.testing.expect(std.mem.indexOf(u8, body, "<nav class=\"navbar\" aria-label=\"Primary\"><a href=\"/\" class=\"brand\">Netlisp</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "href=\"/account\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "id=\"metric-ready\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "id=\"metric-static\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "id=\"metric-agent\"") != null);

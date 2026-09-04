@@ -19,6 +19,7 @@ const bom = @import("../bom.zig");
 const export_kicad = @import("../export_kicad.zig");
 const rework_guide = @import("rework_guide.zig");
 const serve_root = @import("../serve.zig");
+const navbar = @import("navbar.zig");
 const Server = serve_root.Server;
 
 const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error;
@@ -801,12 +802,20 @@ fn renderPageWithOptions(allocator: std.mem.Allocator, name: []const u8, index: 
         try w.writeAll("<style>");
         try w.writeAll(@embedFile("assets/assembly_debug.css"));
         try w.writeAll("</style>");
-    } else try w.print("<link rel=\"stylesheet\" href=\"/static/assembly_debug.css?v={x}\">", .{std.hash.Wyhash.hash(0, @embedFile("assets/assembly_debug.css"))});
-    try w.writeAll("</head><body><header class=\"topbar\">");
-    if (opts.meta.standalone)
-        try w.writeAll("<span class=\"brand\">Released assembly</span>")
-    else
-        try w.writeAll("<a class=\"brand\" href=\"/\">netlisp</a>");
+    } else {
+        try w.writeAll("<style>");
+        try w.writeAll(navbar.css);
+        try w.writeAll("</style>");
+        try w.print("<link rel=\"stylesheet\" href=\"/static/assembly_debug.css?v={x}\">", .{std.hash.Wyhash.hash(0, @embedFile("assets/assembly_debug.css"))});
+    }
+    try w.writeAll("</head><body");
+    if (opts.meta.standalone) try w.writeAll(" class=\"standalone\"");
+    try w.writeAll(">");
+    if (!opts.meta.standalone) try navbar.write(w, .none);
+    try w.writeAll("<header class=\"topbar\">");
+    if (opts.meta.standalone) {
+        try w.writeAll("<span class=\"brand\">Released assembly</span>");
+    }
     try w.writeAll("<strong>");
     try escape.writeXml(w, name);
     try w.writeAll("</strong>");
@@ -1339,6 +1348,7 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
         .entities = &.{},
         .nets = &.{},
     }, null, false);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<nav class=\"navbar\" aria-label=\"Primary\"><a href=\"/\" class=\"brand\">Netlisp</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "/pcb-layout/demo?embed=1&amp;review=1&amp;drc=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "model_sprites=1") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "assembly-debug-data") != null);

@@ -499,6 +499,7 @@ fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step) void {
         &.{ "node", "src/serve/assets/system_cad.test.js" },
         &.{ "node", "scripts/test_pcb_region.js" },
         &.{ "node", "scripts/gerber_measure_snap_test.mjs" },
+        &.{ "node", "scripts/perf_host_idle.test.js" },
     };
     for (checks) |argv| {
         const run = b.addSystemCommand(argv);

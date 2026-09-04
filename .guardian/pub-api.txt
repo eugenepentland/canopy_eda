@@ -4498,6 +4498,9 @@ src/serve/modules.zig::moduleViewPage | fn moduleViewPage(ctx: *Server, req: *ht
 src/serve/modules.zig::modulesListPage | fn modulesListPage(_: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/modules.zig::renderModulePage | fn renderModulePage( ctx: *Server, res: *httpz.Response, name: []const u8, schematic_view: render_html.SchematicView, ) HandlerError!void
 src/serve/modules.zig::resolveModuleBlock | fn resolveModuleBlock( allocator: std.mem.Allocator, project_dir: []const u8, module_name: []const u8, ) ?ResolvedBlock
+src/serve/navbar.zig::Active enum_
+src/serve/navbar.zig::css value
+src/serve/navbar.zig::write | fn write(w: *std.Io.Writer, active: Active) std.Io.Writer.Error!void
 src/serve/notes.zig::HandlerError value
 src/serve/notes.zig::Note struct_
 src/serve/notes.zig::NoteStatus enum_

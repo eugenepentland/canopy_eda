@@ -416,6 +416,9 @@ const prepareRelease = fs.readFileSync(path.join(root, ".githooks", "prepare-rel
 const deployProd = fs.readFileSync(path.join(root, ".githooks", "deploy-prod.sh"), "utf8");
 assert(prepareRelease.includes("scripts/pcb_editor_perf/run.js") && prepareRelease.includes("pcb_editor_perf=passed"),
   "release preparation must run and certify the PCB editor zoom gate");
+assert(prepareRelease.includes("scripts/perf_host_idle.js") && prepareRelease.includes("NETLISP_EDITOR_PERF_ATTEMPTS") &&
+  prepareRelease.includes("PCB editor zoom regression:"),
+  "release preparation must wait for a quiet host and retry timing-only editor failures");
 assert(deployProd.includes("pcb_editor_perf=passed"),
   "deployment must reject a candidate that lacks PCB editor performance certification");
 const prePush = fs.readFileSync(path.join(root, ".githooks", "pre-push"), "utf8");

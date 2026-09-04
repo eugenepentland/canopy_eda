@@ -35,7 +35,7 @@ button.danger { color: #ff8e8e; }
 .toolbar .tool.active { color: #dcebff; background: #163d63; border-color: #2b7abb; }
 .divider { width: 1px; height: 24px; background: var(--border); margin: 0 4px; }
 .top-actions { display: flex; gap: 5px; }
-main { height: calc(100% - 52px); display: grid; grid-template-columns: 220px minmax(300px, 1fr) 286px; }
+main { height: calc(100% - 94px); display: grid; grid-template-columns: 220px minmax(300px, 1fr) 286px; }
 .panel { background: var(--panel); overflow: auto; }
 .left-panel { border-right: 1px solid var(--border); }
 .right-panel { border-left: 1px solid var(--border); }
@@ -128,4 +128,8 @@ kbd { padding: 1px 4px; background: #242931; border: 1px solid #3b424d; border-r
   .title { min-width: 120px; }
   .toolbar button { font-size: 0; padding: 4px 8px; }
   .toolbar button::first-letter { font-size: 14px; }
+}
+
+@media (max-width: 920px) {
+  main { height: calc(100% - 100px); }
 }
