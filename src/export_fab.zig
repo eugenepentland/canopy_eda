@@ -69,6 +69,13 @@ pub const auto_outline_margin_mm: f64 = 1.0;
 /// parts; `.keep` (the `?dnp=keep` opt-in) lists them (a populated variant).
 pub const DnpMode = enum { drop, keep };
 
+/// Board-copy frames for panel-level assembly outputs. Frames are row-major;
+/// `columns` gives each repeated designator its stable RnCn suffix.
+pub const AssemblyPanel = struct {
+    frames: []const Frame,
+    columns: u8,
+};
+
 /// True when an evaluated instance belongs in both assembly outputs. Probe
 /// pads and board-only mechanical artwork are never sourced or placed; DNP
 /// rows are included only for an explicitly selected populated variant.
@@ -122,9 +129,46 @@ pub fn centroidCsv(
     dnp: DnpMode,
 ) std.Io.Writer.Error!void {
     try w.writeAll("Designator,Val,Package,Mid X (mm),Mid Y (mm),Rotation,Layer\n");
+    try centroidRows(w, parts, instances, frame, dnp, null);
+}
+
+/// Write a panel-level centroid: every populated source part repeated in each
+/// panel frame, with its designator suffixed `_RnCn` to remain unique and to
+/// match the panel BOM's References field.
+pub fn panelCentroidCsv(
+    w: *std.Io.Writer,
+    parts: []const optimizer.Part,
+    instances: []const export_kicad.FlatInstance,
+    panel: AssemblyPanel,
+    dnp: DnpMode,
+) std.Io.Writer.Error!void {
+    try w.writeAll("Designator,Val,Package,Mid X (mm),Mid Y (mm),Rotation,Layer\n");
+    for (panel.frames, 0..) |frame, board_index| {
+        try centroidRows(w, parts, instances, frame, dnp, cellFor(board_index, panel.columns));
+    }
+}
+
+const PanelCell = struct { row: usize, column: usize };
+
+fn cellFor(board_index: usize, requested_columns: u8) PanelCell {
+    const columns = @max(@as(usize, requested_columns), 1);
+    return .{ .row = board_index / columns + 1, .column = board_index % columns + 1 };
+}
+
+fn centroidRows(
+    w: *std.Io.Writer,
+    parts: []const optimizer.Part,
+    instances: []const export_kicad.FlatInstance,
+    frame: Frame,
+    dnp: DnpMode,
+    cell: ?PanelCell,
+) std.Io.Writer.Error!void {
     for (parts, 0..) |p, i| {
         if (i >= instances.len or !assemblyPopulated(instances[i], dnp)) continue;
-        try writeCsvField(w, p.ref_des);
+        if (cell) |panel_cell|
+            try writePanelReferenceField(w, p.ref_des, panel_cell)
+        else
+            try writeCsvField(w, p.ref_des);
         try w.writeByte(',');
         if (i < instances.len) try writeCsvField(w, instances[i].value);
         try w.writeByte(',');
@@ -156,6 +200,27 @@ pub fn assemblyBomCsv(
     instances: []const export_kicad.FlatInstance,
     dnp: DnpMode,
 ) std.Io.Writer.Error!void {
+    return assemblyBomRows(w, instances, dnp, null);
+}
+
+/// Write the BOM for a fully assembled panel. Quantities are multiplied by
+/// the board count and References use the same `_RnCn` identifiers as the
+/// panel centroid.
+pub fn panelAssemblyBomCsv(
+    w: *std.Io.Writer,
+    instances: []const export_kicad.FlatInstance,
+    panel: AssemblyPanel,
+    dnp: DnpMode,
+) std.Io.Writer.Error!void {
+    return assemblyBomRows(w, instances, dnp, panel);
+}
+
+fn assemblyBomRows(
+    w: *std.Io.Writer,
+    instances: []const export_kicad.FlatInstance,
+    dnp: DnpMode,
+    panel: ?AssemblyPanel,
+) std.Io.Writer.Error!void {
     try w.writeAll("Qty,References,Component,Value,Footprint,MPN,Manufacturer,DNP\r\n");
     for (instances, 0..) |instance, instance_index| {
         if (!assemblyPopulated(instance, dnp)) continue;
@@ -182,16 +247,9 @@ pub fn assemblyBomCsv(
             if (manufacturer.len == 0) manufacturer = bomProperty(candidate, "manufacturer");
         }
 
-        try w.print("{d},\"", .{quantity});
-        var first_ref = true;
-        for (instances) |candidate| {
-            if (!assemblyPopulated(candidate, dnp) or !sameBomGroup(instance, candidate)) continue;
-            if (!first_ref) try w.writeAll(", ");
-            for (candidate.ref_des) |ch| {
-                if (ch == '"') try w.writeAll("\"\"") else try w.writeByte(ch);
-            }
-            first_ref = false;
-        }
+        const board_count = if (panel) |array| array.frames.len else 1;
+        try w.print("{d},\"", .{quantity * board_count});
+        try writeBomReferences(w, instances, instance, dnp, panel);
         try w.writeAll("\",");
         try writeCsvField(w, instance.component);
         try w.writeByte(',');
@@ -202,13 +260,54 @@ pub fn assemblyBomCsv(
         try writeCsvField(w, bomProperty(instance, "mpn"));
         try w.writeByte(',');
         try writeCsvField(w, manufacturer);
-        const dnp_label = if (dnp_quantity == 0)
+        const panel_dnp_quantity = dnp_quantity * board_count;
+        const panel_quantity = quantity * board_count;
+        const dnp_label = if (panel_dnp_quantity == 0)
             "no"
-        else if (dnp_quantity == quantity)
+        else if (panel_dnp_quantity == panel_quantity)
             "yes"
         else
             "mixed";
         try w.print(",{s}\r\n", .{dnp_label});
+    }
+}
+
+fn writeBomReferences(
+    w: *std.Io.Writer,
+    instances: []const export_kicad.FlatInstance,
+    group: export_kicad.FlatInstance,
+    dnp: DnpMode,
+    panel: ?AssemblyPanel,
+) std.Io.Writer.Error!void {
+    const board_count = if (panel) |array| array.frames.len else 1;
+    var first_ref = true;
+    for (0..board_count) |board_index| {
+        for (instances) |candidate| {
+            if (!assemblyPopulated(candidate, dnp) or !sameBomGroup(group, candidate)) continue;
+            if (!first_ref) try w.writeAll(", ");
+            if (panel) |array|
+                try writePanelReferenceRaw(w, candidate.ref_des, cellFor(board_index, array.columns))
+            else
+                try writeCsvEscaped(w, candidate.ref_des);
+            first_ref = false;
+        }
+    }
+}
+
+fn writePanelReferenceField(w: *std.Io.Writer, ref_des: []const u8, cell: PanelCell) std.Io.Writer.Error!void {
+    try w.writeByte('"');
+    try writePanelReferenceRaw(w, ref_des, cell);
+    try w.writeByte('"');
+}
+
+fn writePanelReferenceRaw(w: *std.Io.Writer, ref_des: []const u8, cell: PanelCell) std.Io.Writer.Error!void {
+    try writeCsvEscaped(w, ref_des);
+    try w.print("_R{d}C{d}", .{ cell.row, cell.column });
+}
+
+fn writeCsvEscaped(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
+    for (value) |ch| {
+        if (ch == '"') try w.writeAll("\"\"") else try w.writeByte(ch);
     }
 }
 
@@ -519,6 +618,43 @@ test "assemblyBomCsv groups rows by normalized MPN" {
         keep.written(),
         "3,\"R1, R2, R_OPT\",res,10k,0402,RC0402-10K,Yageo,mixed\r\n",
     ) != null);
+}
+
+// spec: export_fab - panel assembly outputs repeat centroid coordinates in every board frame, multiply BOM quantities, and suffix matching references with their row and column
+test "panel assembly BOM and centroid repeat matching row-column references" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+
+    const parts = [_]optimizer.Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 1, .y = 2 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 3, .y = 4 },
+    };
+    const instances = [_]export_kicad.FlatInstance{
+        .{ .ref_des = "R1", .component = "res", .value = "10k", .footprint = "0402", .uuid = "", .properties = &.{} },
+        .{ .ref_des = "R2", .component = "res", .value = "10k", .footprint = "0402", .uuid = "", .properties = &.{} },
+    };
+    const frames = [_]Frame{
+        .{ .ox = 0, .oy = 10 },
+        .{ .ox = -22, .oy = 10 },
+        .{ .ox = 0, .oy = 22 },
+        .{ .ox = -22, .oy = 22 },
+    };
+    const panel = AssemblyPanel{ .frames = &frames, .columns = 2 };
+
+    var centroid: std.Io.Writer.Allocating = .init(alloc);
+    try panelCentroidCsv(&centroid.writer, &parts, &instances, panel, .drop);
+    try testing.expectEqual(@as(usize, 9), std.mem.count(u8, centroid.written(), "\n"));
+    try testing.expect(std.mem.indexOf(u8, centroid.written(), "\"R1_R1C1\",10k,0402,1.000,8.000,0,Top") != null);
+    try testing.expect(std.mem.indexOf(u8, centroid.written(), "\"R2_R2C2\",10k,0402,25.000,18.000,0,Top") != null);
+
+    var bom: std.Io.Writer.Allocating = .init(alloc);
+    try panelAssemblyBomCsv(&bom.writer, &instances, panel, .drop);
+    try testing.expectEqualStrings(
+        "Qty,References,Component,Value,Footprint,MPN,Manufacturer,DNP\r\n" ++
+            "8,\"R1_R1C1, R2_R1C1, R1_R1C2, R2_R1C2, R1_R2C1, R2_R2C1, R1_R2C2, R2_R2C2\",res,10k,0402,,,no\r\n",
+        bom.written(),
+    );
 }
 
 // spec: export_fab - fab writers share one y-up frame derived from the board outline

@@ -40,6 +40,7 @@ const std = @import("std");
 const clock = @import("infra/clock.zig");
 const export_fab = @import("export_fab.zig");
 const export_gerber = @import("export_gerber.zig");
+const export_kicad = @import("export_kicad.zig");
 const fab_filename = @import("serve/fab_filename.zig");
 const fab_identity = @import("fab_identity.zig");
 const fab_readiness = @import("fab_readiness.zig");
@@ -283,17 +284,12 @@ pub fn compose(
     if (board.panel) |panel| {
         var pw: std.Io.Writer.Allocating = .init(arena);
         try pw.writer.print(
-            "{{\n  \"rows\": {d},\n  \"columns\": {d},\n  \"method\": \"{s}\",\n  \"board_gap_mm\": {d:.3},\n  \"rail_mm\": {d:.3},\n  \"tab_width_mm\": {d:.3},\n  \"mouse_bite_diameter_mm\": {d:.3},\n  \"mouse_bite_pitch_mm\": {d:.3},\n  \"panel_width_mm\": {d:.3},\n  \"panel_height_mm\": {d:.3},\n  \"board_count\": {d},\n  \"assembly_outputs\": \"single-board reference; multiply BOM quantities and generate an assembly-house-specific panel centroid before PCBA\"\n}}\n",
-            .{ panel.options.rows, panel.options.columns, @tagName(panel.options.method), panel.options.gap_mm, panel.options.rail_mm, panel.options.tab_mm, panel.options.mouse_bites.diameter_mm, panel.options.mouse_bites.pitch_mm, panel.width_mm, panel.height_mm, panel.frames.len },
+            "{{\n  \"rows\": {d},\n  \"columns\": {d},\n  \"method\": \"{s}\",\n  \"board_gap_mm\": {d:.3},\n  \"rail_mm\": {d:.3},\n  \"tab_width_mm\": {d:.3},\n  \"mouse_bite_diameter_mm\": {d:.3},\n  \"mouse_bite_pitch_mm\": {d:.3},\n  \"panel_width_mm\": {d:.3},\n  \"panel_height_mm\": {d:.3},\n  \"board_count\": {d},\n  \"assembly_outputs\": {{\n    \"single_board_bom\": \"{s}-bom.csv\",\n    \"single_board_centroid\": \"{s}-centroid.csv\",\n    \"panel_bom\": \"{s}-panel-bom.csv\",\n    \"panel_centroid\": \"{s}-panel-centroid.csv\"\n  }}\n}}\n",
+            .{ panel.options.rows, panel.options.columns, @tagName(panel.options.method), panel.options.gap_mm, panel.options.rail_mm, panel.options.tab_mm, panel.options.mouse_bites.diameter_mm, panel.options.mouse_bites.pitch_mm, panel.width_mm, panel.height_mm, panel.frames.len, pkg.prefix, pkg.prefix, pkg.prefix, pkg.prefix },
         );
         try pkg.add("panelization.json", pw.written());
     }
-    var cw: std.Io.Writer.Allocating = .init(arena);
-    try export_fab.centroidCsv(&cw.writer, board.placement.parts, board.placement.instances, board.frame, parts.dnp);
-    try pkg.add("centroid.csv", cw.written());
-    var bw: std.Io.Writer.Allocating = .init(arena);
-    try export_fab.assemblyBomCsv(&bw.writer, board.placement.instances, parts.dnp);
-    try pkg.add("bom.csv", bw.written());
+    try addAssemblyCsvs(arena, &pkg, board.placement, board.frame, board.panel, parts.dnp);
     try pkg.add("assembly.html", parts.assembly_html);
     var displayed_id = parts.mark.short_hex;
     _ = std.ascii.upperString(&displayed_id, &parts.mark.short_hex);
@@ -326,6 +322,33 @@ pub fn compose(
     return pkg;
 }
 
+fn addAssemblyCsvs(
+    arena: std.mem.Allocator,
+    pkg: *export_fab.Package,
+    placement: optimizer.Placement,
+    frame: export_fab.Frame,
+    panel: ?*const panelize.Plan,
+    dnp: export_fab.DnpMode,
+) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
+    var centroid: std.Io.Writer.Allocating = .init(arena);
+    try export_fab.centroidCsv(&centroid.writer, placement.parts, placement.instances, frame, dnp);
+    try pkg.add("centroid.csv", centroid.written());
+    var bom: std.Io.Writer.Allocating = .init(arena);
+    try export_fab.assemblyBomCsv(&bom.writer, placement.instances, dnp);
+    try pkg.add("bom.csv", bom.written());
+    const plan = panel orelse return;
+    const assembly_panel = export_fab.AssemblyPanel{
+        .frames = plan.frames,
+        .columns = plan.options.columns,
+    };
+    var panel_centroid: std.Io.Writer.Allocating = .init(arena);
+    try export_fab.panelCentroidCsv(&panel_centroid.writer, placement.parts, placement.instances, assembly_panel, dnp);
+    try pkg.add("panel-centroid.csv", panel_centroid.written());
+    var panel_bom: std.Io.Writer.Allocating = .init(arena);
+    try export_fab.panelAssemblyBomCsv(&panel_bom.writer, placement.instances, assembly_panel, dnp);
+    try pkg.add("panel-bom.csv", panel_bom.written());
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 fn testRow(name: []const u8, default: bool, parts: []const sidecar_types.PartPose) SavedLayout {
@@ -333,6 +356,61 @@ fn testRow(name: []const u8, default: bool, parts: []const sidecar_types.PartPos
 }
 
 const one_part: []const sidecar_types.PartPose = &.{.{ .ref = "U1", .x = 1, .y = 2, .rot = 0 }};
+
+// spec: fabrication-release - a panelized fabrication ZIP retains the single-board BOM and centroid and adds panel BOM and centroid files with repeated placements and total quantities
+test "panel package adds total BOM and repeated centroid beside single-board files" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var board_parts = [_]optimizer.Part{.{
+        .ref_des = "U1",
+        .kind = .hub,
+        .hw = 1,
+        .hh = 1,
+        .pads = &.{},
+        .fallback = false,
+        .x = 1,
+        .y = 2,
+    }};
+    const instances = [_]export_kicad.FlatInstance{.{
+        .ref_des = "U1",
+        .component = "mcu",
+        .value = "MCU",
+        .footprint = "QFN",
+        .uuid = "",
+        .origin_key = "",
+        .properties = &.{},
+    }};
+    const placement = optimizer.Placement{
+        .parts = &board_parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &instances,
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 10,
+        .maxy = 10,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 10, .h = 10 },
+    };
+    const frame = export_fab.frameFor(placement);
+    const panel = try panelize.plan(arena, panelize.sourceFor(placement), .{ .rows = 2, .columns = 2 });
+    var pkg = export_fab.Package{ .arena = arena, .prefix = "demo" };
+    try addAssemblyCsvs(arena, &pkg, placement, frame, &panel, .drop);
+
+    try std.testing.expectEqual(@as(usize, 4), pkg.entries.items.len);
+    try std.testing.expectEqualStrings("demo-centroid.csv", pkg.entries.items[0].name);
+    try std.testing.expectEqualStrings("demo-bom.csv", pkg.entries.items[1].name);
+    try std.testing.expectEqualStrings("demo-panel-centroid.csv", pkg.entries.items[2].name);
+    try std.testing.expectEqualStrings("demo-panel-bom.csv", pkg.entries.items[3].name);
+    try std.testing.expect(std.mem.indexOf(u8, pkg.entries.items[0].data, "U1,MCU,QFN,1.000,8.000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pkg.entries.items[1].data, "1,\"U1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pkg.entries.items[2].data, "\"U1_R2C2\",MCU,QFN,18.000,25.000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pkg.entries.items[3].data, "4,\"U1_R1C1, U1_R1C2, U1_R2C1, U1_R2C2\"") != null);
+}
 
 // spec: fabrication-release - a fabrication package request whose project source revision already blocks the release is refused before the board is placed, checked or digested
 test "a dirty or unrevisioned project is a provable refusal, a clean one is not" {

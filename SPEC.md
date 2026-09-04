@@ -4965,13 +4965,14 @@ Public functions: classify, commit, findLock, isLockName, planFor, run, targetFo
 
 ## export_fab
 
-Public functions: Package.add, Package.addNamed, centroidCsv, excellonDrill, frameFor, outlineRect
+Public functions: Package.add, Package.addNamed, assemblyBomCsv, centroidCsv, panelAssemblyBomCsv, panelCentroidCsv, excellonDrill, frameFor, outlineRect
 
 - ordinary manufacturing-package members are named from the package's one shared prefix; vendor-contract auxiliary files may retain an exact safe basename, and the job file's Path fields resolve both forms exactly
 
 - the centroid CSV labels coordinate units in its headers and lists each part's unitless-numeric pose with its board side
 - the centroid CSV drops DNP parts by default and keeps them under keep_dnp
 - the fabrication BOM groups normalized MPNs into quantity rows and uses component identity only when MPN is absent
+- panel assembly outputs repeat centroid coordinates in every board frame, multiply BOM quantities, and suffix matching references with their row and column
 - the Excellon writer splits plated pads + vias from non-plated holes and groups tools by diameter
 - fab writers share one y-up frame derived from the board outline
 - an oval drill exports as a G85 slot at its minor-axis tool between the two arc centres, in both drill files
@@ -7750,6 +7751,7 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 
 - DRC findings require a separate explicit browser acknowledgment while non-DRC evidence failures remain visibly non-waivable
 - every acknowledged fabrication ZIP includes dedicated JSON and Markdown reports containing every raw DRC error and warning
+- a panelized fabrication ZIP retains the single-board BOM and centroid and adds panel BOM and centroid files with repeated placements and total quantities
 - a stable release renderer may extend the exact read trace with assembly-only inputs, while any changed byte still blocks packaging
 - revision, source-ID, BOM/centroid, and fallback-geometry identity failures can never be waived
 - consumed-input closure identity is independent of filesystem read order

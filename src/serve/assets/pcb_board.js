@@ -12448,7 +12448,7 @@ function fabRenderReport(rep){
    '<label>Rails <span><input id="fab-panel-rail" type="number" min="0" max="30" step="0.1" value="'+fabPanel.rail+'"> mm</span></label>'+
    '<label class="fab-routed-field">Tab width <span><input id="fab-panel-tab" type="number" min="1" step="0.1" value="'+fabPanel.tab+'"> mm</span></label>'+
    '<label class="fab-routed-field">Mouse bites <span><input id="fab-panel-bite" type="number" min="0.2" max="1" step="0.05" value="'+fabPanel.bite+'"> mm</span></label></div>'+
-   '<div class="fab-panel-note">Routed panels support square or rounded rectangular outlines and emit tabbed profiles with NPTH mouse-bites. V-score requires square corners and forces zero gap. Confirm the generated panel drawing with your fabricator.</div></fieldset>';}
+   '<div class="fab-panel-note">Routed panels support square or rounded rectangular outlines and emit tabbed profiles with NPTH mouse-bites. V-score requires square corners and forces zero gap. Panel-specific BOM and centroid CSVs are included. Confirm the generated panel drawing with your fabricator.</div></fieldset>';}
  var s=rep.stats||{};
  h+='<div class="fab-stats">'+(s.parts||0)+' parts · '+
   (s.connected_nets||0)+'/'+(s.routable_nets||0)+' routable nets connected · '+

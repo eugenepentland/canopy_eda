@@ -898,6 +898,7 @@ src/export_elmer_thermal.zig::comparisonJson | fn comparisonJson(alloc: std.mem.
 src/export_elmer_thermal.zig::comparisonMarkdown | fn comparisonMarkdown(alloc: std.mem.Allocator, input: Input, comparison: Comparison) Error![]const u8
 src/export_elmer_thermal.zig::parseVtu | fn parseVtu(alloc: std.mem.Allocator, xml: []const u8, model: thermal_field.Discretized) Error!ParsedResult
 src/export_elmer_thermal.zig::result_filename value
+src/export_fab.zig::AssemblyPanel struct_
 src/export_fab.zig::DnpMode enum_
 src/export_fab.zig::DrillClass enum_
 src/export_fab.zig::DrillFile struct_
@@ -915,6 +916,8 @@ src/export_fab.zig::excellonDrill | fn excellonDrill( w: *std.Io.Writer, alloc: 
 src/export_fab.zig::excellonDrillRepeated | fn excellonDrillRepeated( w: *std.Io.Writer, alloc: std.mem.Allocator, parts: []const optimizer.Part, vias: []const router.Via, file: DrillFile, repeat: DrillRepeat, ) (std.Io.Writer.Error || std.mem.Allocator.Error)!void
 src/export_fab.zig::frameFor | fn frameFor(placement: optimizer.Placement) Frame
 src/export_fab.zig::outlineRect | fn outlineRect(placement: optimizer.Placement) optimizer.BoardRect
+src/export_fab.zig::panelAssemblyBomCsv | fn panelAssemblyBomCsv( w: *std.Io.Writer, instances: []const export_kicad.FlatInstance, panel: AssemblyPanel, dnp: DnpMode, ) std.Io.Writer.Error!void
+src/export_fab.zig::panelCentroidCsv | fn panelCentroidCsv( w: *std.Io.Writer, parts: []const optimizer.Part, instances: []const export_kicad.FlatInstance, panel: AssemblyPanel, dnp: DnpMode, ) std.Io.Writer.Error!void
 src/export_fab.zig::pt | fn pt(self: Frame, x: f64, y: f64) [2]f64
 src/export_gerber.zig::Copper value
 src/export_gerber.zig::Error value
