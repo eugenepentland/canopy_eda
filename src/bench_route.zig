@@ -38,6 +38,7 @@ const route_plan = @import("serve/route_plan.zig");
 const route_timing = @import("placement/route_timing.zig");
 const route_policy = @import("placement/route_policy.zig");
 const route_space_cache = @import("placement/route_space_cache.zig");
+const json_writer = @import("json_writer.zig");
 const route_score = @import("placement/route_score.zig");
 const route_shape_score = @import("placement/route_shape_score.zig");
 const router = @import("placement/router.zig");
@@ -479,13 +480,20 @@ pub fn writeTable(w: *std.Io.Writer, results: []const BoardResult) std.Io.Writer
 
 /// Render the same results as JSON, for a driver that records them in the
 /// `[benchmark]` ledger rather than reading them.
-pub fn writeJson(w: *std.Io.Writer, results: []const BoardResult) std.Io.Writer.Error!void {
+///
+// not the json-escaper-def idiom: this is the report emitter, not a string
+/// escaper — every free string in it goes through `json_writer.writeString`.
+pub fn writeJson(w: *std.Io.Writer, results: []const BoardResult) json_writer.WriteError!void {
     try w.print("{{\"geomean_completion\":{d:.6},\"boards\":[", .{geomeanCompletion(results)});
     for (results, 0..) |r, i| {
         if (i > 0) try w.writeAll(",");
+        // The board name is a design filename, so it is escaped rather than
+        // interpolated: a quote or backslash in one used to tear the record.
+        try w.writeAll("{\"name\":");
+        try json_writer.writeString(w, r.name);
         try w.print(
-            "{{\"name\":\"{s}\",\"ok\":{s},\"placed\":{s},\"routed\":{d},\"total\":{d},\"drc\":{d},\"drc_errors\":{d},",
-            .{ r.name, if (r.ok) "true" else "false", if (r.placed) "true" else "false", r.nets.routed, r.nets.total, r.drc.total, r.drc.errors },
+            ",\"ok\":{s},\"placed\":{s},\"routed\":{d},\"total\":{d},\"drc\":{d},\"drc_errors\":{d},",
+            .{ if (r.ok) "true" else "false", if (r.placed) "true" else "false", r.nets.routed, r.nets.total, r.drc.total, r.drc.errors },
         );
         try w.print("\"{s}\":{d},\"{s}\":{d},\"{s}\":{d},", .{
             @tagName(drc.Kind.dangling_copper),   r.drc.count(.dangling_copper),
@@ -547,13 +555,13 @@ pub fn writeJson(w: *std.Io.Writer, results: []const BoardResult) std.Io.Writer.
     try w.writeAll("]}\n");
 }
 
-fn writeOpen(w: *std.Io.Writer, open: []const []const u8) std.Io.Writer.Error!void {
+fn writeOpen(w: *std.Io.Writer, open: []const []const u8) json_writer.WriteError!void {
     try w.writeAll("[");
     for (open, 0..) |name, i| {
         if (i > 0) try w.writeAll(",");
         // A net name comes from design source, so it is escaped rather than
         // interpolated: a quote or control byte in one must not tear the row.
-        try std.json.Stringify.encodeJsonString(name, .{}, w);
+        try json_writer.writeString(w, name);
     }
     try w.writeAll("]");
 }
@@ -562,12 +570,12 @@ fn writePerNet(
     w: *std.Io.Writer,
     per_net: []const router.NetRouted,
     open: []const []const u8,
-) std.Io.Writer.Error!void {
+) json_writer.WriteError!void {
     try w.writeAll("[");
     for (per_net, 0..) |net, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll("{\"name\":");
-        try std.json.Stringify.encodeJsonString(net.name, .{}, w);
+        try json_writer.writeString(w, net.name);
         try w.print(",\"trace_mm\":{d:.4},\"vias\":{d},\"open\":{s}}}", .{
             net.mm,
             net.vias,
@@ -1028,6 +1036,27 @@ test "json output carries every board and the geomean" {
     try testing.expect(std.mem.indexOf(u8, s, "\"open_trace_mm\":50.25") != null);
     try testing.expect(std.mem.indexOf(u8, s, "\"per_net\":[{\"name\":\"SIG\",\"trace_mm\":12.5000,\"vias\":1,\"open\":false}]") != null);
     try testing.expect(std.mem.indexOf(u8, s, "\"geomean_completion\"") != null);
+}
+
+// spec: bench-route - the JSON board name is escaped like every other string in the row, so a design filename carrying a quote still yields a parseable ledger
+test "json output escapes the board name" {
+    // The board name is a design filename, and a filename may hold a quote or a
+    // backslash. It used to be interpolated raw as `"name":"{s}"`, which tore
+    // the record the `--baseline` gate re-reads.
+    const results = [_]BoardResult{.{
+        .name = "we\"ird\\board",
+        .ok = true,
+        .placed = true,
+        .nets = .{ .routed = 1, .total = 1 },
+    }};
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeJson(&w, &results);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, w.buffered(), .{});
+    defer parsed.deinit();
+    const board = parsed.value.object.get("boards").?.array.items[0].object;
+    try testing.expectEqualStrings(results[0].name, board.get("name").?.string);
 }
 
 // spec: bench-route - trace totals separate completed-net copper from partial copper left by open nets, and JSON reports per-net trace/via totals so runs with unlike completion can be compared on common nets

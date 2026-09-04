@@ -1930,6 +1930,11 @@ fn writePinNets(w: anytype, pin_nets: []const PinNet) !void {
 const writeJsonString = json_writer.writeField;
 
 /// Serialize one hub box (identity, geometry, authored sheet, both pin columns).
+///
+// not the json-escaper-def idiom: this and `writeJsonPin` are structural
+/// emitters, not string escapers — the file's `writeJsonString` /
+/// `writeEscaped` are already aliases of `json_writer.writeField` /
+/// `json_writer.writeEscaped`.
 fn writeJsonHub(w: anytype, h: JsonHub) !void {
     try w.writeAll("{");
     try writeJsonString(w, "ref", h.ref);

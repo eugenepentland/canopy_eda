@@ -552,6 +552,10 @@ fn writeDasherized(w: anytype, s: []const u8) !void {
     for (s) |ch| try w.writeByte(if (ch == '_') '-' else ch);
 }
 
+/// `{"ok":false,"error":"<msg>"}` — the shared failure shape.
+///
+// not the json-escaper-def idiom: this is the error envelope, not a string
+/// escaper; `msg` itself goes through `json_writer.writeString`.
 fn writeJsonError(allocator: std.mem.Allocator, out: *std.ArrayList(u8), msg: []const u8) !bool {
     out.clearRetainingCapacity();
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);

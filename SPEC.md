@@ -734,6 +734,7 @@ one-board anecdote.
 - a board with no saved layout is reported but kept out of the corpus score, since its fallback placement is neither blessed nor stable
 - the corpus results serialise to JSON so a driver can record them in the benchmark ledger
 - the JSON per-board row names the oracle's still-open nets, sorted, so a completion change reads net by net
+- the JSON board name is escaped like every other string in the row, so a design filename carrying a quote still yields a parseable ledger
 - trace totals separate completed-net copper from partial copper left by open nets, and JSON reports per-net trace/via totals so runs with unlike completion can be compared on common nets
 - --route-space field selects the signed-margin path director while lattice remains the default
 - degree-two direction changes are bends and a short segment trapped between two bends is a micro-jog

@@ -266,6 +266,10 @@ pub fn writeBlobJson(w: *std.Io.Writer) std.Io.Writer.Error!void {
 }
 
 /// One palette as comma-separated JSON string members (no braces).
+///
+// not the json-escaper-def idiom: it emits a compile-time table of
+/// `#RRGGBB` / `rgba(…)` literals declared in this file, so there is no
+/// runtime string for an escaper to see.
 fn writeJsonPairs(w: *std.Io.Writer, entries: []const Entry) std.Io.Writer.Error!void {
     for (entries, 0..) |e, i| {
         if (i > 0) try w.writeByte(',');

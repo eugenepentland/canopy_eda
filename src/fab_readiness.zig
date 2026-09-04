@@ -1841,6 +1841,9 @@ test "release identity rejects fallback footprint geometry" {
 
 /// Serialize a report to the JSON the endpoint returns / the modal reads:
 /// `{"ok":bool,"errors":[{id,message,net?,ref?,count?}],"warnings":[…],"stats":{…}}`.
+// not the json-escaper-def idiom: this is the report emitter, not a string
+/// escaper — `writeItems` puts every free string through
+/// `json_writer.writeScriptString`, and the `{s}` slots here are booleans.
 pub fn writeJson(w: *std.Io.Writer, report: Report) std.Io.Writer.Error!void {
     try w.print("{{\"ok\":{s},\"errors\":[", .{if (report.ok()) "true" else "false"});
     try writeItems(w, report.errors);

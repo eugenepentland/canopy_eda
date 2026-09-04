@@ -552,6 +552,9 @@ fn currentUrl(req: *httpz.Request) AuthError![]const u8 {
 /// Write a JSON response with `status` and `body`, then stop dispatch (returns
 /// false). The shared shape behind the plain-body responders below; the redirect
 /// and bearer-challenge writers stay separate because they add a header.
+///
+// not the json-escaper-def idiom: this sets `res.status`/`res.body` and
+/// writes no string at all — `body` is always one of this file's constants.
 fn writeJson(res: *httpz.Response, status: u16, body: []const u8) bool {
     res.status = status;
     res.content_type = .JSON;

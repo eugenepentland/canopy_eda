@@ -529,6 +529,9 @@ fn hashId(arena: Allocator, kind: []const u8, key: []const u8) Allocator.Error![
 /// `fab_readiness.writeJson`'s style. `current_wave` is emitted only when the
 /// current stage is wave-split; `warnings` only when the plan had unresolved
 /// names, so a caller supplying no plan gets the exact pre-wave JSON.
+// not the json-escaper-def idiom: this is the report emitter, not a string
+/// escaper — every free string goes through `json_writer.writeScriptString`,
+/// and the `{s}` slots here are `@tagName` enum spellings.
 pub fn writeJson(w: *std.Io.Writer, report: Report) std.Io.Writer.Error!void {
     try w.print("{{\"current\":\"{s}\",\"stages\":[", .{@tagName(report.current)});
     for (report.stages, 0..) |st, i| {

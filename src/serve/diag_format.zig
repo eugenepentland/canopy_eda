@@ -134,6 +134,9 @@ pub fn formatText(allocator: std.mem.Allocator, d: Diagnostic) (std.mem.Allocato
 /// Write the diagnostic as a JSON object:
 /// `{"file":…,"line":N,"col":N,"message":…,"source_line":…}`. Callers pass
 /// ArrayList writers, so the error surface is allocation only.
+///
+// not the json-escaper-def idiom: this is the object emitter, not a string
+/// escaper — all three of its strings go through `json_writer.writeString`.
 pub fn writeJson(w: anytype, d: Diagnostic) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     try w.writeAll("{\"file\":");
     try json_writer.writeString(w, d.file);

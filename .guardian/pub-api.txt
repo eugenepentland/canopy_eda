@@ -39,7 +39,7 @@ src/bench_route.zig::corpus | fn corpus(arena: std.mem.Allocator, project_dir: [
 src/bench_route.zig::geomeanCompletion | fn geomeanCompletion(results: []const BoardResult) f64
 src/bench_route.zig::scorable | fn scorable(self: BoardResult) bool
 src/bench_route.zig::writeBreakdown | fn writeBreakdown(w: *std.Io.Writer, results: []const BoardResult) std.Io.Writer.Error!void
-src/bench_route.zig::writeJson | fn writeJson(w: *std.Io.Writer, results: []const BoardResult) std.Io.Writer.Error!void
+src/bench_route.zig::writeJson | fn writeJson(w: *std.Io.Writer, results: []const BoardResult) json_writer.WriteError!void
 src/bench_route.zig::writeTable | fn writeTable(w: *std.Io.Writer, results: []const BoardResult) std.Io.Writer.Error!void
 src/board_layers.zig::GerberId struct_
 src/board_layers.zig::Kind enum_
