@@ -121,7 +121,7 @@ pub fn centroidCsv(
     frame: Frame,
     dnp: DnpMode,
 ) std.Io.Writer.Error!void {
-    try w.writeAll("Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n");
+    try w.writeAll("Designator,Val,Package,Mid X (mm),Mid Y (mm),Rotation,Layer\n");
     for (parts, 0..) |p, i| {
         if (i >= instances.len or !assemblyPopulated(instances[i], dnp)) continue;
         try writeCsvField(w, p.ref_des);
@@ -138,7 +138,7 @@ pub fn centroidCsv(
         // `F.Cu`/`B.Cu`: those are the words every assembler's pick-and-place
         // importer expects in a centroid file. They mean the same two faces
         // the table calls `Side.front` / `Side.back` (`board_layers.Side`).
-        try w.print(",{d:.3}mm,{d:.3}mm,{d:.0},{s}\n", .{
+        try w.print(",{d:.3},{d:.3},{d:.0},{s}\n", .{
             c[0],
             c[1],
             @mod(360.0 - p.rot, 360.0),
@@ -396,7 +396,7 @@ fn writeCsvField(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
 const testing = std.testing;
 const geometry = @import("placement/geometry.zig");
 
-// spec: export_fab - the centroid CSV lists each part's pose with its board side
+// spec: export_fab - the centroid CSV labels coordinate units in its headers and lists each part's unitless-numeric pose with its board side
 test "centroidCsv emits one side-aware row per part" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -415,8 +415,10 @@ test "centroidCsv emits one side-aware row per part" {
     // CW-positive placement angle comes out CCW-positive (90→270).
     try centroidCsv(&aw.writer, &parts, &instances, .{ .ox = 0, .oy = 20 }, .drop);
     const out = aw.written();
-    try testing.expect(std.mem.indexOf(u8, out, "U1,STM32,LQFP-48,10.000mm,15.000mm,270,Top") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "C1,100nF,C_0402,1.000mm,18.000mm,0,Bottom") != null);
+    try testing.expect(std.mem.startsWith(u8, out, "Designator,Val,Package,Mid X (mm),Mid Y (mm),Rotation,Layer\n"));
+    try testing.expect(std.mem.indexOf(u8, out, "U1,STM32,LQFP-48,10.000,15.000,270,Top") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "C1,100nF,C_0402,1.000,18.000,0,Bottom") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "mm,") == null);
 }
 
 // spec: export_fab - the centroid CSV drops DNP parts by default and keeps them under keep_dnp
