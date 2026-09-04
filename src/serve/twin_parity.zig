@@ -29,6 +29,8 @@ const pcb_layout_page = @import("pcb_layout_page.zig");
 const modules_page = @import("modules.zig");
 const layout_match = @import("layout_match.zig");
 const route_analyze_api = @import("route_analyze_api.zig");
+const design_diff = @import("design_diff.zig");
+const infra_fs = @import("../infra/fs.zig");
 
 const Server = serve_root.Server;
 const testing = std.testing;
@@ -249,6 +251,70 @@ fn firstUndrawn(alloc: std.mem.Allocator, summary: std.json.ObjectMap, html: []c
     return "";
 }
 
+/// Two snapshot directories under `history/twinfx/`, one carrying a `.note`
+/// and one without — the second is the case the two history surfaces used to
+/// spell differently, so a fixture that only ever had notes would prove
+/// nothing.
+fn writeHistoryFixture(dir: std.Io.Dir) !void {
+    try dir.createDirPath(std.testing.io, "history/twinfx/20260101-000001");
+    try dir.createDirPath(std.testing.io, "history/twinfx/20260102-000002");
+    try dir.writeFile(std.testing.io, .{
+        .sub_path = "history/twinfx/20260101-000001/.note",
+        .data = "before the fence run",
+    });
+}
+
+/// `<project>/src/twinfx.layouts.json` parsed — what a save surface actually
+/// left on disk, read back the way the next page load would read it.
+fn readSidecar(alloc: std.mem.Allocator, project: []const u8) !std.json.Value {
+    const path = try std.fmt.allocPrint(alloc, "{s}/src/twinfx.layouts.json", .{project});
+    const text = try infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20);
+    return std.json.parseFromSliceLeaky(std.json.Value, alloc, text, .{});
+}
+
+/// The saved-layout row named `want`, or a null value when the sidecar has no
+/// such row (which fails the comparison rather than skipping it).
+fn rowNamed(sidecar: std.json.Value, want: []const u8) std.json.Value {
+    for (sidecar.object.get("layouts").?.array.items) |row| {
+        const nm = row.object.get("name") orelse continue;
+        if (nm == .string and std.mem.eql(u8, nm.string, want)) return row;
+    }
+    return .null;
+}
+
+/// The first way two saved rows' persisted GEOMETRY differs — part poses in
+/// order, then copper counts — else `""`. Name, timestamp and score are
+/// deliberately not compared: the two surfaces are asked to save under
+/// different names, and only one of them stamps a clock.
+fn firstSavedDifference(alloc: std.mem.Allocator, a: std.json.Value, b: std.json.Value) ![]const u8 {
+    const pa = a.object.get("parts").?.array.items;
+    const pb = b.object.get("parts").?.array.items;
+    if (pa.len != pb.len)
+        return std.fmt.allocPrint(alloc, "part count {d} vs {d}", .{ pa.len, pb.len });
+    for (pa, pb) |x, y| {
+        for ([_][]const u8{ "ref", "x", "y", "rot" }) |field| {
+            const sx = try std.json.Stringify.valueAlloc(alloc, x.object.get(field) orelse std.json.Value.null, .{});
+            const sy = try std.json.Stringify.valueAlloc(alloc, y.object.get(field) orelse std.json.Value.null, .{});
+            if (!std.mem.eql(u8, sx, sy))
+                return std.fmt.allocPrint(alloc, "part {s}: {s} vs {s}", .{ field, sx, sy });
+        }
+    }
+    for ([_][]const u8{ "tracks", "vias" }) |field| {
+        const ca = copperCount(a, field);
+        const cb = copperCount(b, field);
+        if (ca != cb) return std.fmt.allocPrint(alloc, "{s} {d} vs {d}", .{ field, ca, cb });
+    }
+    return "";
+}
+
+/// How many `routes.<field>` entries a saved row carries (-1 when it has no
+/// routes object at all, so "no copper" and "empty copper" cannot match).
+fn copperCount(row: std.json.Value, field: []const u8) i64 {
+    const routes = row.object.get("routes") orelse return -1;
+    if (routes != .object) return -1;
+    return arrayLen(routes.object, field);
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 // spec: Web Server - The describe_pcb_layout MCP tool and the pcb-describe endpoint share one implementation, so a no-argument read returns the same spatial-facts document on both surfaces
@@ -428,4 +494,60 @@ test "compare_layout_to_starred returns the same score as the layout-match endpo
     try testing.expectEqualStrings(http.body, tool.body);
     try testing.expect(std.mem.indexOf(u8, http.body, "\"starred\":\"routed\"") != null);
     try testing.expect(std.mem.indexOf(u8, http.body, "\"coverage\":") != null);
+}
+
+// spec: Web Server - The list_history MCP tool and the history endpoint write one snapshot list through one serializer, so a snapshot with no note reads the same on both
+test "list_history returns the same snapshot list as the history endpoint" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp, .routed);
+    try writeHistoryFixture(tmp.dir);
+
+    const http = try httpCall(alloc, project, design_diff.historyApi, "twinfx", &.{}, null);
+    const tool = try mcpCall(alloc, project, "list_history", "{\"name\":\"twinfx\"}");
+    try testing.expect(tool.ok);
+    try testing.expectEqualStrings(http.body, tool.body);
+
+    // The field the two hand-written copies disagreed on until they were made
+    // to share `history.writeSnapshotsJson`: a snapshot with no `.note` was
+    // `"description":""` from the endpoint and `"description":null` from the
+    // tool. Both now say null, and a snapshot WITH a note still carries it.
+    try testing.expect(std.mem.indexOf(u8, http.body, "\"description\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, http.body, "before the fence run") != null);
+}
+
+// spec: Web Server - The save_pcb_layout MCP tool and the pcb-layouts save endpoint persist the same board, so a layout saved through either surface carries identical poses and copper
+test "save_pcb_layout persists the same board as the pcb-layouts save endpoint" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp, .routed);
+
+    // The tool forks the working (★) layout under a new name; the endpoint is
+    // handed the same poses and copper in its request body. Two different
+    // writers, one board — what lands in the sidecar must not depend on which
+    // surface asked.
+    const tool = try mcpCall(alloc, project, "save_pcb_layout", "{\"name\":\"twinfx\",\"layout_name\":\"from-tool\"}");
+    try testing.expect(tool.ok);
+    const http = try httpCall(alloc, project, pcb_layout_page.saveNamedLayoutApi, "twinfx", &.{},
+        \\{"name":"from-http","parts":[{"ref":"C1","x":5,"y":5,"rot":0},{"ref":"C2","x":10,"y":5,"rot":0}],
+        \\ "routes":{"tracks":[
+        \\  {"x1":4.52,"y1":5,"x2":4.52,"y2":3,"l":0,"w":0.2,"net":"SIG"},
+        \\  {"x1":4.52,"y1":3,"x2":9.52,"y2":3,"l":0,"w":0.2,"net":"SIG"},
+        \\  {"x1":9.52,"y1":3,"x2":9.52,"y2":5,"l":0,"w":0.2,"net":"SIG"}],"vias":[]}}
+    );
+    try testing.expectEqual(@as(u16, 200), http.status);
+
+    const sidecar = try readSidecar(alloc, project);
+    const from_tool = rowNamed(sidecar, "from-tool");
+    const from_http = rowNamed(sidecar, "from-http");
+    try testing.expectEqualStrings("", try firstSavedDifference(alloc, from_tool, from_http));
+    try testing.expectEqual(@as(i64, 3), copperCount(from_tool, "tracks"));
 }

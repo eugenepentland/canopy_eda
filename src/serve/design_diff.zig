@@ -308,17 +308,10 @@ pub fn historyApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
         return;
     };
     var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
-    const w = &buf.writer;
-    try w.writeAll("{\"snapshots\":[");
-    for (snaps, 0..) |s, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"id\":");
-        try json_writer.writeString(w, s.id);
-        try w.writeAll(",\"description\":");
-        try json_writer.writeString(w, s.description orelse "");
-        try w.writeAll("}");
-    }
-    try w.writeAll("]}");
+    // The shared writer, not a second hand-written copy: this endpoint and the
+    // `list_history` tool answer the same list, and used to spell a missing
+    // description differently (`""` here, `null` there).
+    try history.writeSnapshotsJson(&buf.writer, snaps);
     res.body = buf.written();
 }
 

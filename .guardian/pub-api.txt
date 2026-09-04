@@ -4321,6 +4321,7 @@ src/serve/history.zig::listSnapshots | fn listSnapshots( allocator: std.mem.Allo
 src/serve/history.zig::restore | fn restore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, ) HistoryError!void
 src/serve/history.zig::snapshot | fn snapshot( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, description: ?[]const u8, ) HistoryError!?[]const u8
 src/serve/history.zig::snapshotLayouts | fn snapshotLayouts( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, sidecar_path: []const u8, ) HistoryError!?[]const u8
+src/serve/history.zig::writeSnapshotsJson | fn writeSnapshotsJson(w: *std.Io.Writer, snaps: []const SnapshotInfo) (std.Io.Writer.Error || std.mem.Allocator.Error)!void
 src/serve/kicad_sch_export.zig::ExportZipError value
 src/serve/kicad_sch_export.zig::HandlerError value
 src/serve/kicad_sch_export.zig::exportFor | fn exportFor( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: export_kicad_sch.Options, deps: ?*?page_cache.FileSet, ) ExportZipError!export_kicad_sch.Output

@@ -7726,6 +7726,8 @@ is what makes the predicate exact rather than approximately right.
 - The get_pcb_layout_image MCP tool and the pcb-png endpoint render one board through one renderer, so the tool's base64 payload decodes to the endpoint's exact PNG bytes
 - The diagnose_net MCP tool and the pcb-route-analyze endpoint run one diagnosis, so a named net reads identically on both surfaces
 - The compare_layout_to_starred MCP tool and the layout-match endpoint share one scorer, so both report the same agreement against the starred layout
+- The list_history MCP tool and the history endpoint write one snapshot list through one serializer, so a snapshot with no note reads the same on both
+- The save_pcb_layout MCP tool and the pcb-layouts save endpoint persist the same board, so a layout saved through either surface carries identical poses and copper
 - completeness-waiver: concurrent access (httpz owns request threading and each handler answers from its own response arena; the two pieces of state that really are shared — the live scene graph and a design's layout sidecar — are specified where they live, under the push and layout-backfill sections, rather than restated per endpoint)
 
 ## fab_readiness

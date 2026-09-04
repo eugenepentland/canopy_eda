@@ -662,18 +662,10 @@ fn toolListHistory(allocator: std.mem.Allocator, project_dir: []const u8, args_v
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
     defer out.* = aw.toArrayList();
-    const w = &aw.writer;
     const snaps = try history.listSnapshots(allocator, project_dir, name);
-    try w.writeAll("{\"snapshots\":[");
-    for (snaps, 0..) |s, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll("{\"id\":");
-        try json_writer.writeString(w, s.id);
-        try w.writeAll(json_description_key);
-        if (s.description) |d| try json_writer.writeString(w, d) else try w.writeAll("null");
-        try w.writeAll("}");
-    }
-    try w.writeAll("]}");
+    // The shared writer, not a second hand-written copy — see
+    // `history.writeSnapshotsJson`.
+    try history.writeSnapshotsJson(&aw.writer, snaps);
     return true;
 }
 

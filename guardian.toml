@@ -1256,6 +1256,7 @@ surfaces = ["cli:designs", "http:/api/designs", "mcp:list_designs"]
 [[twin]]
 name = "history-list"
 surfaces = ["http:/api/history", "mcp:list_history"]
+parity_test = "returns the same snapshot list as the history endpoint"
 
 [[twin]]
 name = "review-pdf"
@@ -1277,6 +1278,7 @@ parity_test = "routes the same board to the same copper as the pcb-route endpoin
 [[twin]]
 name = "layout-save"
 surfaces = ["http:/api/pcb-layouts", "mcp:save_pcb_layout"]
+parity_test = "persists the same board as the pcb-layouts save endpoint"
 
 [[twin]]
 name = "query-introspection"
