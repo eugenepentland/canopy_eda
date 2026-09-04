@@ -28,6 +28,7 @@ const review_md_mod = @import("../review_md.zig");
 const req_checks = @import("../req_checks.zig");
 const edit_mod = @import("edit.zig");
 const diag_format = @import("diag_format.zig");
+const urlcodec = @import("urlcodec.zig");
 const page_cache = @import("page_cache.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
@@ -193,7 +194,7 @@ pub fn pinoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     };
     // Decode before validating so `%2e%2e` can't slip past the traversal check,
     // and so library files with reserved chars (e.g. `…#pbf`) actually resolve.
-    const name = try urlDecodeAlloc(ctx.allocator, name_raw);
+    const name = try urlcodec.decodeAlloc(ctx.allocator, name_raw);
     if (name.len == 0 or std.mem.indexOfAny(u8, name, "/\\") != null or std.mem.indexOf(u8, name, "..") != null) {
         res.status = http_bad_request;
         res.body = "{\"error\":\"invalid component name\"}";
@@ -1120,7 +1121,7 @@ pub fn addComponentDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.R
         res.status = http_not_found;
         return;
     };
-    const component = try urlDecodeAlloc(ctx.allocator, component_raw);
+    const component = try urlcodec.decodeAlloc(ctx.allocator, component_raw);
     const body = req.body() orelse {
         res.status = http_bad_request;
         return;
@@ -1146,7 +1147,7 @@ pub fn removeComponentDatasheetApi(ctx: *Server, req: *httpz.Request, res: *http
         res.status = http_not_found;
         return;
     };
-    const component = try urlDecodeAlloc(ctx.allocator, component_raw);
+    const component = try urlcodec.decodeAlloc(ctx.allocator, component_raw);
     const body = req.body() orelse {
         res.status = http_bad_request;
         return;
@@ -1200,13 +1201,4 @@ fn jsonBoolField(body: []const u8, key: []const u8) ?bool {
     if (std.mem.startsWith(u8, body[val_start..], "true")) return true;
     if (std.mem.startsWith(u8, body[val_start..], "false")) return false;
     return null;
-}
-
-/// httpz returns URL path params verbatim — `%23` stays `%23`, not `#`.
-/// Library filenames can include reserved chars (e.g. `ltc6655bhms8-2-5#pbf`),
-/// so endpoints that map a `:component` param to a file on disk need to
-/// percent-decode first or they'll miss the file.
-fn urlDecodeAlloc(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
-    const buf = try allocator.dupe(u8, raw);
-    return std.Uri.percentDecodeInPlace(buf);
 }

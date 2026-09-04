@@ -17,6 +17,7 @@ const footprint_preview = @import("footprint_preview.zig");
 const upload = @import("upload.zig");
 const lib_limits = @import("../lib_limits.zig");
 const datasheet_ref = @import("datasheet_ref.zig");
+const urlcodec = @import("urlcodec.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const sexp_ext_len: usize = ".sexp".len;
@@ -300,7 +301,7 @@ pub fn libraryCardApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
     const aa = arena.allocator();
-    const name = urlDecode(aa, raw_name) catch return sendErr(res, 400, err_invalid_name);
+    const name = urlcodec.decodeAlloc(aa, raw_name) catch return sendErr(res, 400, err_invalid_name);
     if (!isSafeLibName(name)) return sendErr(res, 400, err_invalid_name);
     const row = rowForName(aa, ctx.project_dir, name) orelse {
         res.status = 404;
@@ -409,14 +410,6 @@ pub fn isSafeLibName(name: []const u8) bool {
 /// (or can't be percent-decoded).
 const err_invalid_name = "{\"ok\":false,\"error\":\"invalid name\"}";
 
-/// Percent-decode a URL path param. httpz hands params back verbatim, so
-/// `encodeURIComponent`'d reserved chars (a comma → `%2C`) arrive encoded;
-/// decode before mapping the name to a file on disk.
-fn urlDecode(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]u8 {
-    const buf = try allocator.dupe(u8, raw);
-    return std.Uri.percentDecodeInPlace(buf);
-}
-
 fn sendErr(res: *httpz.Response, status: u16, json_body: []const u8) void {
     res.status = status;
     res.content_type = .JSON;
@@ -440,7 +433,7 @@ pub fn uploadModelApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
 
     // Decode so part numbers like `74ahct1g125gm,132` (sent as `%2C`) map to the
     // right file on disk, then validate the decoded name.
-    const name = urlDecode(aa, name_raw) catch return sendErr(res, 400, err_invalid_name);
+    const name = urlcodec.decodeAlloc(aa, name_raw) catch return sendErr(res, 400, err_invalid_name);
     if (!isSafeLibName(name)) return sendErr(res, 400, err_invalid_name);
 
     const filename = req.header("x-filename") orelse "model.zip";
