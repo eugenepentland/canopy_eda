@@ -7732,6 +7732,8 @@ is what makes the predicate exact rather than approximately right.
 - The instances CLI subcommand and the list_instances MCP tool emit one payload at one default scope, so a flattened or top-level listing reads the same on both
 - The check CLI subcommand, the erc endpoint and the run_checks MCP tool run one electrical-rule check over one design, so all three report the same violations in the same order
 - The export-kicad-sch CLI subcommand, the kicad-sch endpoint and the export_kicad_sch MCP tool run one exporter, so all three produce the same sheet files byte for byte
+- The export-schematic-png CLI subcommand, the schematic-png endpoint and the get_schematic_image MCP tool render one schematic at one default width, view and theme, so all three produce identical PNG bytes
+- The export-pdf CLI subcommand and the schematic-pdf endpoint compose one review document, so both PDFs draw the same pages and the same text
 - completeness-waiver: concurrent access (httpz owns request threading and each handler answers from its own response arena; the two pieces of state that really are shared — the live scene graph and a design's layout sidecar — are specified where they live, under the push and layout-backfill sections, rather than restated per endpoint)
 
 ## fab_readiness

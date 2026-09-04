@@ -1264,10 +1264,12 @@ parity_test = "returns the same snapshot list as the history endpoint"
 [[twin]]
 name = "review-pdf"
 surfaces = ["cli:export-pdf", "http:/api/schematic-pdf"]
+parity_test = "the export-pdf CLI and the schematic-pdf endpoint compose the same review document"
 
 [[twin]]
 name = "schematic-png"
 surfaces = ["cli:export-schematic-png", "http:/api/schematic-png", "mcp:get_schematic_image"]
+parity_test = "the three schematic image surfaces render identical PNG bytes"
 
 [[twin]]
 name = "import-kicad"

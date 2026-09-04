@@ -1013,6 +1013,7 @@ src/export_matlab_rf.zig::errorMessage | fn errorMessage(err: anyerror) []const 
 src/export_pdf.zig::Error value
 src/export_pdf.zig::Options struct_
 src/export_pdf.zig::compose | fn compose( gpa: Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, doc: review.ReviewDoc, opts: Options, ) Error![]u8
+src/export_pdf.zig::extractTj | fn extractTj(a: Allocator, bytes: []const u8) Allocator.Error![]const []const u8
 src/export_pdf.zig::pageCount | fn pageCount(bytes: []const u8) usize
 src/fab_gate.zig::BoardInput struct_
 src/fab_gate.zig::Input struct_

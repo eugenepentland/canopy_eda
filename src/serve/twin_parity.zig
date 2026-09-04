@@ -35,6 +35,9 @@ const query_cli = @import("../query.zig");
 const api = @import("api.zig");
 const commands = @import("../commands.zig");
 const kicad_sch_export = @import("kicad_sch_export.zig");
+const schematic_png = @import("schematic_png.zig");
+const schematic_pdf = @import("schematic_pdf.zig");
+const export_pdf = @import("../export_pdf.zig");
 
 const Server = serve_root.Server;
 const testing = std.testing;
@@ -61,6 +64,11 @@ fn writeTwinFixture(dir: std.Io.Dir, copper: Copper) !void {
     try dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/cap.sexp", .data =
         \\(component-family cap
         \\  (param-type capacitance)
+        \\  (footprint "0402"))
+    });
+    try dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/ic.sexp", .data =
+        \\(component ic
+        \\  (description "minimal test IC")
         \\  (footprint "0402"))
     });
     try dir.writeFile(std.testing.io, .{ .sub_path = "lib/footprints/0402.sexp", .data =
@@ -426,6 +434,32 @@ fn firstMissingFromZip(alloc: std.mem.Allocator, dir_path: []const u8, zip: []co
             return std.fmt.allocPrint(alloc, "bytes of {s}", .{name});
     }
     return "";
+}
+
+/// A second design carrying a HUB (a `U`-prefix part), written only by the
+/// tests that need one: the schematic renderer draws hubs, and a board of
+/// nothing but passives has no renderable block at all. Kept out of the shared
+/// fixture so the design-listing comparison still has exactly one design.
+fn writeHubDesign(dir: std.Io.Dir) !void {
+    try dir.writeFile(std.testing.io, .{ .sub_path = "src/twinsch.sexp", .data =
+        \\(design-block "Twin Schematic"
+        \\  (import cap)
+        \\  (import ic)
+        \\  (instance "U1" ic (pin 1 "SIG") (pin 2 "GND"))
+        \\  (instance "C1" (cap "10nF") (pin 1 "SIG") (pin 2 "GND")))
+    });
+}
+
+/// Every string a PDF draws, minus the one line that is a clock read — the
+/// cover's "Generated <stamp> · build <hash>". Two surfaces composing one
+/// review document seconds apart must agree on everything else.
+fn pdfText(alloc: std.mem.Allocator, bytes: []const u8) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    for (try export_pdf.extractTj(alloc, bytes)) |line| {
+        if (std.mem.startsWith(u8, line, "Generated ")) continue;
+        try out.writer.print("{s}\n", .{line});
+    }
+    return out.written();
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -802,4 +836,74 @@ test "the three KiCad schematic exports produce the same files" {
     try testing.expectEqual(@as(u16, 200), http.status);
     try testing.expectEqualStrings("", try firstMissingFromZip(alloc, from_cli, http.body));
     try testing.expect((try dirFiles(alloc, from_cli)).len > 1);
+}
+
+// spec: Web Server - The export-schematic-png CLI subcommand, the schematic-png endpoint and the get_schematic_image MCP tool render one schematic at one default width, view and theme, so all three produce identical PNG bytes
+test "the three schematic image surfaces render identical PNG bytes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp, .routed);
+
+    // The CLI first, because its export path persists any freshly minted `(id
+    // …)` back into the design source: running it last would leave the other
+    // two comparing a picture of a different file.
+    try writeHubDesign(tmp.dir);
+
+    const png_path = try std.fmt.allocPrint(alloc, "{s}/twinsch.png", .{project});
+    try commands.cmdExportSchematicPng(alloc, &.{ "--project-dir", project, "--output", png_path, "twinsch" });
+    const from_cli = try infra_fs.cwd().readFileAlloc(alloc, png_path, 8 << 20);
+
+    // Three independent default sets — an argv struct default, a query-string
+    // fallback and a JSON-argument fallback — all feeding one renderer. Width,
+    // view and theme are exactly the kind of default that drifts on one side.
+    const http = try httpCall(alloc, project, schematic_png.schematicPngApi, "twinsch", &.{}, null);
+    try testing.expectEqual(@as(u16, 200), http.status);
+    const tool = try mcpCall(alloc, project, "get_schematic_image", "{\"name\":\"twinsch\"}");
+    try testing.expect(tool.ok);
+    const dec = std.base64.standard.Decoder;
+    const raw = try alloc.alloc(u8, try dec.calcSizeForSlice(tool.body));
+    try dec.decode(raw, tool.body);
+
+    try testing.expectEqualSlices(u8, from_cli, http.body);
+    try testing.expectEqualSlices(u8, from_cli, raw);
+    try testing.expectEqualSlices(u8, "\x89PNG", from_cli[0..4]);
+}
+
+// spec: Web Server - The export-pdf CLI subcommand and the schematic-pdf endpoint compose one review document, so both PDFs draw the same pages and the same text
+test "the export-pdf CLI and the schematic-pdf endpoint compose the same review document" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp, .routed);
+    try writeHubDesign(tmp.dir);
+
+    // The CLI first: like the other export commands it persists freshly minted
+    // `(id …)` back into the design source.
+    const pdf_path = try std.fmt.allocPrint(alloc, "{s}/twinsch.pdf", .{project});
+    try commands.cmdExportPdf(alloc, &.{ "--project-dir", project, "--output", pdf_path, "twinsch" });
+    const from_cli = try infra_fs.cwd().readFileAlloc(alloc, pdf_path, 32 << 20);
+
+    const http = try httpCall(alloc, project, schematic_pdf.schematicPdfApi, "twinsch", &.{}, null);
+    try testing.expectEqual(@as(u16, 200), http.status);
+
+    // Compared by what the two documents DRAW, not by bytes: both streams are
+    // uncompressed, so every drawn string is in the file, and the only line
+    // that is a clock read is dropped.
+    try testing.expectEqual(export_pdf.pageCount(from_cli), export_pdf.pageCount(http.body));
+    try testing.expectEqualStrings(try pdfText(alloc, from_cli), try pdfText(alloc, http.body));
+    try testing.expect(export_pdf.pageCount(from_cli) > 0);
+
+    // The one place they deliberately differ, pinned so it stays deliberate:
+    // the download carries a `/CreationDate` matching its own cover stamp,
+    // while the CLI export omits it and stays byte-reproducible
+    // (`export_pdf.Options.timestamp` defaults to null).
+    try testing.expect(std.mem.indexOf(u8, http.body, "/CreationDate") != null);
+    try testing.expect(std.mem.indexOf(u8, from_cli, "/CreationDate") == null);
 }

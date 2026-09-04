@@ -1656,7 +1656,12 @@ const testing = std.testing;
 /// Every `(…) Tj` string in `bytes`, decoded out of PDF literal-string syntax.
 /// The writer emits uncompressed content streams, so the drawn text is right
 /// there in the file — this is the content oracle the plan calls for.
-fn extractTj(a: Allocator, bytes: []const u8) Allocator.Error![]const []const u8 {
+///
+/// Public because it is also the only way to compare the two review-PDF
+/// surfaces (`netlisp export-pdf` and `/api/schematic-pdf`) by CONTENT: the two
+/// files legitimately differ in metadata, so the twin-parity test compares the
+/// text they actually draw.
+pub fn extractTj(a: Allocator, bytes: []const u8) Allocator.Error![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     var at: usize = 0;
     while (std.mem.indexOfPos(u8, bytes, at, ") Tj")) |end| {
