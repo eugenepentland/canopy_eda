@@ -320,10 +320,10 @@ pub fn page(
             "<section><h2>Model boundary</h2><ul><li>PCBs, components, fans and heatsinks are reference geometry only</li><li>Only closed sketches with an explicit enabled extrusion become solids</li><li>Each extrusion remains a separate STEP/STL body</li><li>Current extrusion profiles must be convex; use separate bodies for floors and walls</li><li>No automatic enclosure, lid, boss, cutout, or boolean operation</li></ul></section></aside>" ++
             "<div id=\"viewport\"><canvas id=\"thermal-canvas\" aria-label=\"System thermal heatmap\"></canvas><canvas id=\"canvas\" hidden></canvas><div id=\"sketch-palette\" class=\"sketch-palette\" hidden>" ++
             "<div class=\"sp-head\"><b id=\"sketch-title\">Sketch</b><span id=\"sketch-dof\">0 DOF</span></div>" ++
-            "<div class=\"sp-group\"><span>Create</span><button data-action=\"select\">Select</button><button data-action=\"rectangle\">Rectangle</button><button data-action=\"line-tool\">Line</button><button data-action=\"dimension\">Dimension</button><button data-action=\"undo\">Undo</button><button data-action=\"redo\">Redo</button></div>" ++
+            "<div class=\"sp-group\"><span>Create</span><button data-action=\"select\">Select</button><button data-action=\"rectangle\">Rectangle</button><button data-action=\"line-tool\">Line</button><button data-action=\"dimension\">Dimension (D)</button><button data-action=\"undo\">Undo</button><button data-action=\"redo\">Redo</button></div>" ++
             "<div class=\"sp-group\"><span>Constrain</span><button data-action=\"horizontal\">H</button><button data-action=\"vertical\">V</button><button data-action=\"coincident\">Coincident</button><button data-action=\"collinear\">Co-linear</button><button data-action=\"parallel\">∥</button><button data-action=\"perpendicular\">⟂</button><button data-action=\"tangent\">Tangent</button><button data-action=\"equal\">Equal</button><button data-action=\"midpoint\">Midpoint</button><button data-action=\"symmetric\">Symmetry</button><button data-action=\"fixed\">Fix</button></div>" ++
             "<div class=\"sp-group\"><span>Modify</span><button data-action=\"arc\">Arc</button><button data-action=\"line\">Line</button><button data-action=\"fillet\">Fillet</button><button data-action=\"remove-fillet\">Remove fillet</button><button data-action=\"chamfer\">Chamfer</button><button data-action=\"offset\">Offset</button><button data-action=\"mirror-x\">Mirror X</button><button data-action=\"mirror-y\">Mirror Y</button><button data-action=\"delete\">Delete</button></div>" ++
-            "<button class=\"sp-finish sp-repair\" data-action=\"close-profile\">Close profile</button><button class=\"sp-finish\" data-action=\"finish\">Finish sketch</button></div>" ++
+            "<button class=\"sp-finish sp-repair\" data-action=\"close-profile\">Close profile</button><button class=\"sp-finish sp-extrude\" data-action=\"extrude\">Extrude sketch…</button><button class=\"sp-finish\" data-action=\"finish\">Finish sketch</button></div>" ++
             "<div id=\"thermal-probe\" hidden></div><div id=\"empty\"></div><div id=\"drag-help\">Drag boards · drag empty space to pan · scroll to zoom</div><div id=\"legend\"><span class=\"thermal-key\" id=\"legend-min\">25 °C</span><i class=\"thermal-key ramp\"></i><span class=\"thermal-key\" id=\"legend-max\">125 °C</span><span class=\"thermal-key\"><i class=\"sink\"></i>Bottom sink</span><span class=\"thermal-key\"><i class=\"fan\"></i>Top fan</span><span class=\"cad-key\" hidden><i class=\"solid\"></i>Authored solid</span><span class=\"cad-key\" hidden><i class=\"sketch\"></i>Sketch</span><span class=\"cad-key\" hidden><i class=\"cool\"></i>PCB reference</span></div></div></main>" ++
             "<script>window.CAD_DATA={\"system\":",
     );
@@ -695,6 +695,8 @@ test "system CAD page starts from sketch tools without enclosure generators" {
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "data-plane=\"xz\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "data-action=\"fillet\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "data-action=\"perpendicular\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "data-action=\"extrude\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "Dimension (D)") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "Extrude selected") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "/static/system_cad.css?v=") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "/static/shape_sketch.js?v=") != null);
@@ -703,12 +705,14 @@ test "system CAD page starts from sketch tools without enclosure generators" {
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "PCB clearance") == null);
 }
 
-// spec: system-review - a strict assembly sidecar repeats reviewed board definitions as uniquely identified physical instances and preserves its authored pitch, and the system workspace opens as a 2D solved heat-field map with a separate 3D assembly view and bounded wheel gestures
+// spec: system-review - a strict assembly sidecar repeats reviewed board definitions as uniquely identified physical instances and preserves its authored pitch, and the system workspace opens as a 2D solved heat-field map with a separate 3D assembly view and bounded wheel gestures, a D driving-dimension shortcut, and direct extrusion of a closed active sketch
 test "system CAD validates and serializes repeated assembly instances" {
     const browser = @embedFile("assets/system_cad.js");
     try std.testing.expect(std.mem.indexOf(u8, browser, "var viewMode = \"2d\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, browser, "/api/thermal-field/") != null);
     try std.testing.expect(std.mem.indexOf(u8, browser, "fieldTemperatureAt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, browser, "function extrudeActiveSketch()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, browser, "event.key.toLowerCase() === \"d\"") != null);
     const boards = [_]system_review.BoardMember{
         .{ .name = "barracuda", .role = "controller", .source = "src/boards/barracuda/barracuda.sexp", .part_number = "BAR", .revision = "2" },
         .{ .name = "black-canyon", .role = "channel", .source = "src/boards/black-canyon/black-canyon.sexp", .part_number = "BC", .revision = "1" },

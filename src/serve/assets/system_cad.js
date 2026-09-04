@@ -665,6 +665,21 @@
       return value != null && value > 0 && !!OS.addConstraint(geometry, kind, a, b, value);
     });
   }
+  function extrudeActiveSketch() {
+    var sketch = activeSketch(), compiled = sketch && OS.compile(sketch.geometry);
+    if (!sketch || !compiled || !compiled.closed) { status("Close the active sketch profile before extruding", true); return false; }
+    var distance = sketchNumber("Extrusion distance (mm)", 2);
+    if (distance == null) return false;
+    if (!(distance > 0)) { status("Extrusion distance must be greater than zero", true); return false; }
+    if (editMode) finishSketch();
+    var id = nextId("extrude", state.extrusions);
+    state.extrusions.push({ id: id, name: sketch.name, sketch: sketch.id, distance: distance, enabled: true });
+    renderExtrusions(); setDirty(); status("Building " + sketch.name + " extrusion…");
+    rebuildBodies().then(function () { status("Extruded " + sketch.name + " by " + distance + " mm"); }).catch(function (error) {
+      $("#model-status").textContent = "Extrusion error: " + error.message; status("Extrusion failed: " + error.message, true); syncExportButtons();
+    });
+    return true;
+  }
   function removeSelectedFillet() {
     sketchMutate("Fillet removed", function (geometry) { var curves = selectedIds("curve"), points = selectedIds("point"), arcs = [], changed = false;
       curves.forEach(function (id) { var curve = OS.curve(geometry, id); if (curve && curve.kind === "arc") arcs.push(id); });
@@ -836,10 +851,7 @@
     else return;
     setDirty(); if (editMode && sketch.id === activeSketchId && (event.target.dataset.key === "plane" || event.target.dataset.key === "plane_z")) enterSketch(sketch); drawSketches(); renderExtrusions(); rebuildBodies();
   });
-  $("#add-extrusion").onclick = function () {
-    var sketch = activeSketch(), compiled = sketch && OS.compile(sketch.geometry); if (!sketch || !compiled || !compiled.closed) { status("Select and close a sketch before extruding", true); return; }
-    var id = nextId("extrude", state.extrusions); state.extrusions.push({ id: id, name: sketch.name, sketch: sketch.id, distance: 2, enabled: true }); renderExtrusions(); setDirty(); rebuildBodies();
-  };
+  $("#add-extrusion").onclick = extrudeActiveSketch;
   $("#extrusions").addEventListener("click", function (event) {
     var card = event.target.closest(".feature"); if (!card || !event.target.classList.contains("remove")) return; state.extrusions = state.extrusions.filter(function (row) { return row.id !== card.dataset.id; }); renderExtrusions(); setDirty(); rebuildBodies();
   });
@@ -851,6 +863,7 @@
   $("#sketch-palette").addEventListener("click", function (event) {
     var action = event.target.dataset.action; if (!action || event.target.disabled) return;
     if (action === "finish") return finishSketch();
+    if (action === "extrude") return extrudeActiveSketch();
     if (action === "undo") return undoSketch();
     if (action === "redo") return redoSketch();
     if (action === "close-profile") return sketchMutate("Profile closed · ready to extrude", function (geometry) { return OS.closeProfile(geometry); });
@@ -938,6 +951,7 @@
     if (!editMode) return; var typing = /input|select|textarea/i.test(event.target.tagName || ""); if (typing) return;
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); return event.shiftKey ? redoSketch() : undoSketch(); }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") { event.preventDefault(); return redoSketch(); }
+    if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "d") { event.preventDefault(); return sketchDimension(); }
     if (event.key === "Escape") { if (sketchTool !== "select") { sketchTool = "select"; linePoints = []; lineCursor = null; rectangleStart = null; rectangleCurrent = null; syncPalette(); drawSketches(); } else finishSketch(); }
     if (event.key === "Enter" && sketchTool === "line-tool") { sketchTool = "select"; linePoints = []; lineCursor = null; syncPalette(); drawSketches(); }
     if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); modifySketch("delete"); }
