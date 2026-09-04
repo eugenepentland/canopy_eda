@@ -7418,6 +7418,7 @@ is what makes the predicate exact rather than approximately right.
 - The PCB pad aligner moves only the source footprint when both selected pads belong to the same sub-circuit, while an outside target still moves the source sub-circuit as one owner
 - Editable sub-circuit PCB embeds expose the pad aligner's Same X and Same Y controls
 - physical board navigation exposes stable 3D and a read-only assembly workspace
+- the system 3D CAD workspace opens with imported PCBs as reference geometry and no inferred enclosure; only an authored closed shape-sketch followed by an explicit enabled extrusion creates a preview or STEP/STL solid, while legacy generated-enclosure documents are ignored rather than regenerated
 - the PCB 3D viewer extrudes the physical outline at the authored thickness and mounts bottom-side footprints beneath it
 - the PCB 3D viewer places its visible axis origin at the PCB outline bounding-box centre in X/Y and the board thickness mid-plane in Z, and its camera orbits that same datum
 - the PCB 3D viewer paints its base board before component previews finish, parses vendor STEP models outside the UI thread, renders only after scene or camera changes, and lowers raster density while interacting on a software WebGL renderer

@@ -1483,7 +1483,7 @@ pub fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
             ".ok{color:#65d38e}.blocked{color:#ffb85c}#message{position:fixed;right:18px;bottom:18px;max-width:520px;background:#172139;border:1px solid #53617d;border-radius:8px;padding:10px;display:none}" ++
             "@media(max-width:1000px){main{grid-template-columns:220px 1fr}.preview{display:none}}" ++
             "</style></head><body><header><div><h1 id=\"title\">System review</h1><p id=\"identity\">Loading manifest…</p></div>" ++
-            "<div class=\"grow\"></div><a class=\"button\" id=\"cad\">System Thermal</a><a class=\"button\" id=\"dossier\" target=\"_blank\" rel=\"noopener\">View dossier</a>" ++
+            "<div class=\"grow\"></div><a class=\"button\" id=\"cad\">3D CAD</a><a class=\"button\" id=\"dossier\" target=\"_blank\" rel=\"noopener\">View dossier</a>" ++
             "<a class=\"button\" id=\"draft\">Download draft</a>" ++
             "<label><input id=\"waive\" type=\"checkbox\"> accept waivers</label><button id=\"release\">Final release</button></header>" ++
             "<main><aside><strong>Documents</strong><div id=\"docs\"></div><div class=\"status\" id=\"readiness\">Computing readiness…</div>" ++
@@ -1560,7 +1560,20 @@ pub fn systemCadDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
     var out: std.Io.Writer.Allocating = .init(res.arena);
     try out.writer.writeAll("{\"document\":");
     if (raw) |bytes| {
-        var parsed = cad_document.parse(res.arena, bytes) catch return sendJsonError(res, 422, "saved mechanical document is invalid");
+        var parsed = cad_document.parse(res.arena, bytes) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.LegacyEnclosureDocument => {
+                try out.writer.writeAll("null,\"sha256\":null,\"legacy_enclosure_ignored\":true");
+                try out.writer.writeAll(",\"permissions\":{\"write\":");
+                try out.writer.writeAll(if (canWrite(ctx)) "true" else "false");
+                try out.writer.writeAll("}}");
+                res.content_type = .JSON;
+                res.header("cache-control", "private, no-store");
+                res.body = out.written();
+                return;
+            },
+            error.InvalidDocument => return sendJsonError(res, 422, "saved mechanical document is invalid"),
+        };
         defer parsed.deinit();
         try cad_document.write(&out.writer, parsed.value);
         try out.writer.writeAll(",\"sha256\":");
@@ -1586,6 +1599,7 @@ pub fn putSystemCadDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Re
     if (body.len > cad_document.mechanical_document_byte_limit) return sendJsonError(res, 413, "mechanical document too large");
     var parsed = cad_document.parse(ctx.allocator, body) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.LegacyEnclosureDocument => return sendJsonError(res, 422, "generated enclosure documents are no longer accepted; create sketches and extrusions instead"),
         error.InvalidDocument => return sendJsonError(res, 422, "invalid mechanical document"),
     };
     defer parsed.deinit();
@@ -1629,8 +1643,8 @@ pub fn putSystemCadDocumentApi(ctx: *Server, req: *httpz.Request, res: *httpz.Re
     res.body = out.written();
 }
 
-/// GET /api/systems/:name/cad/export — emit base/lid solids from the same Zig
-/// enclosure parameters used by the browser workspace.
+/// POST /api/systems/:name/cad/export — emit explicit sketch-extrusion bodies
+/// from the same Zig kernel used by the browser workspace.
 pub fn systemCadExportApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     var diagnostic: system_review.Diagnostic = .{};
     var loaded = (try loadSystemForRequest(ctx, req, res, &diagnostic)) orelse return;
@@ -1638,8 +1652,8 @@ pub fn systemCadExportApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
     try system_cad.exportFile(res.arena, loaded.parsed.value.name, req, res);
 }
 
-/// GET /api/systems/:name/cad/mesh — validate the system identity, then build
-/// display topology with the same native generator used by file export.
+/// POST /api/systems/:name/cad/mesh — validate the system identity, then build
+/// only the document's explicit sketch extrusions.
 pub fn systemCadMeshApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     var diagnostic: system_review.Diagnostic = .{};
     var loaded = (try loadSystemForRequest(ctx, req, res, &diagnostic)) orelse return;
@@ -1687,7 +1701,7 @@ test "system mechanical document API persists validated canonical JSON" {
         .request_auth = .{ .username = "writer@example.com", .role = .writer },
         .state = &state,
     };
-    const document = "{\"occupied\":{\"width\":90,\"depth\":55},\"cutouts\":[{\"wall\":\"front\",\"center\":0,\"width\":12,\"bottom\":5,\"height\":8}]}";
+    const document = "{\"schema\":\"netlisp-mechanical-v2\",\"boards\":[{\"name\":\"board\",\"z\":5}],\"sketches\":[],\"extrusions\":[]}";
     var put = httpz.testing.init(.{});
     defer put.deinit();
     server.allocator = put.res.arena;
@@ -1696,7 +1710,7 @@ test "system mechanical document API persists validated canonical JSON" {
     put.body(document);
     try putSystemCadDocumentApi(&server, put.req, put.res);
     try std.testing.expectEqual(@as(u16, 200), put.res.status);
-    try std.testing.expect(std.mem.indexOf(u8, put.res.body, "netlisp-mechanical-v1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, put.res.body, "netlisp-mechanical-v2") != null);
 
     var get = httpz.testing.init(.{});
     defer get.deinit();
@@ -1705,7 +1719,21 @@ test "system mechanical document API persists validated canonical JSON" {
     try systemCadDocumentApi(&server, get.req, get.res);
     try std.testing.expectEqual(httpz.ContentType.JSON, get.res.content_type.?);
     try std.testing.expect(std.mem.indexOf(u8, get.res.body, "\"document\":{") != null);
-    try std.testing.expect(std.mem.indexOf(u8, get.res.body, "\"cutouts\":[{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, get.res.body, "\"sketches\":[]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, get.res.body, "\"extrusions\":[]") != null);
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/demo/mechanical.json",
+        .data = "{\"schema\":\"netlisp-mechanical-v1\",\"occupied\":{\"width\":90,\"depth\":55}}",
+    });
+    var legacy = httpz.testing.init(.{});
+    defer legacy.deinit();
+    server.allocator = legacy.res.arena;
+    legacy.param("name", "demo");
+    try systemCadDocumentApi(&server, legacy.req, legacy.res);
+    try std.testing.expectEqual(@as(u16, 200), legacy.res.status);
+    try std.testing.expect(std.mem.indexOf(u8, legacy.res.body, "\"document\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, legacy.res.body, "\"legacy_enclosure_ignored\":true") != null);
 }
 
 // spec: system-review - system-review mutations require the custom review header, document replacement requires If-Match, and release JSON is size-bounded
@@ -2063,7 +2091,7 @@ test "the system review page carries the view-dossier action" {
     // A labelled action beside the existing draft download…
     try std.testing.expect(std.mem.indexOf(u8, body, ">View dossier</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, ">Download draft</a>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, ">System Thermal</a>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, ">3D CAD</a>") != null);
     // …pointing at this system's own page-side dossier path, not the API family.
     try std.testing.expect(std.mem.indexOf(
         u8,

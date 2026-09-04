@@ -1,18 +1,19 @@
 //! Persisted system mechanical-CAD document.
 //!
-//! The browser edits this small, source-controlled JSON sidecar, while the
-//! native enclosure generator and exporters consume the same typed values.
+//! PCBs are reference geometry. Mechanical solids exist only when the author
+//! creates a sketch and explicitly extrudes it; opening a system never infers
+//! or generates an enclosure from the occupied board envelope.
 
 const std = @import("std");
-const enclosure = @import("enclosure.zig");
-const prismatic = @import("prismatic.zig");
+const shape_sketch = @import("../shape_sketch.zig");
 const json_writer = @import("../json_writer.zig");
 
-const schema_name = "netlisp-mechanical-v1";
+const schema_name = "netlisp-mechanical-v2";
+const legacy_enclosure_schema = "netlisp-mechanical-v1";
 /// Maximum accepted mechanical document size.
 pub const mechanical_document_byte_limit: usize = 256 * 1024;
 
-/// Saved assembly pose for one imported PCB.
+/// Saved assembly pose for one imported PCB reference.
 const BoardPose = struct {
     name: []const u8,
     enabled: bool = true,
@@ -22,35 +23,34 @@ const BoardPose = struct {
     rotation: f64 = 0,
 };
 
-/// Native screw-boss recipe stored in a document.
-const Boss = enclosure.Boss;
-/// Native wall-opening recipe stored in a document.
-const Cutout = prismatic.WallCutout;
-
-/// Exterior and cavity construction values edited together in the UI.
-const CaseSettings = struct {
-    clearance: f64 = 2.5,
-    wall: f64 = 2.4,
-    floor: f64 = 2,
-    height: f64 = 28,
-    lid_thickness: f64 = 2.4,
-    lid_explode: f64 = 24,
+/// One XY work-plane sketch. Geometry remains authored even while open; only
+/// a closed sketch may be referenced by an extrusion.
+const ProfileSketch = struct {
+    id: []const u8,
+    name: []const u8,
+    plane_z: f64 = 0,
+    geometry: shape_sketch.Sketch,
 };
 
-/// Current occupied PCB envelope in the enclosure XY frame.
-const Occupied = struct { width: f64, depth: f64 };
+/// Explicit additive solid operation. Boolean add/cut is intentionally not
+/// implied: every extrusion is exported as its own named body for now.
+const Extrusion = struct {
+    id: []const u8,
+    name: []const u8,
+    sketch: []const u8,
+    distance: f64,
+    enabled: bool = true,
+};
 
 /// Versioned, source-controlled mechanical state for one system.
 pub const Document = struct {
     schema: []const u8 = schema_name,
-    occupied: Occupied,
-    settings: CaseSettings = .{},
     boards: []const BoardPose = &.{},
-    bosses: []const Boss = &.{},
-    cutouts: []const Cutout = &.{},
+    sketches: []const ProfileSketch = &.{},
+    extrusions: []const Extrusion = &.{},
 };
 
-pub const DocumentError = error{InvalidDocument};
+pub const DocumentError = error{ InvalidDocument, LegacyEnclosureDocument };
 /// Parsing preserves allocation failure but normalizes malformed input.
 pub const ParseError = std.mem.Allocator.Error || DocumentError;
 
@@ -58,45 +58,93 @@ fn finiteBetween(value: f64, minimum: f64, maximum: f64) bool {
     return std.math.isFinite(value) and value >= minimum and value <= maximum;
 }
 
+fn safeId(value: []const u8) bool {
+    if (value.len == 0 or value.len > 128 or !std.ascii.isAlphanumeric(value[0])) return false;
+    for (value[1..]) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-') continue;
+        if (c != '_' and c != '.') return false;
+    }
+    return true;
+}
+
 fn validBoardPose(board: BoardPose) bool {
-    if (board.name.len == 0 or board.name.len > 128) return false;
-    const xy_valid = finiteBetween(board.x, -2000, 2000) and finiteBetween(board.y, -2000, 2000);
-    const zr_valid = finiteBetween(board.z, -500, 500) and finiteBetween(board.rotation, -36000, 36000);
+    if (!safeId(board.name)) return false;
+    const xy_valid = finiteBetween(board.x, -10_000, 10_000) and finiteBetween(board.y, -10_000, 10_000);
+    const zr_valid = finiteBetween(board.z, -10_000, 10_000) and finiteBetween(board.rotation, -36_000, 36_000);
     return xy_valid and zr_valid;
 }
 
-/// Check all document bounds and native feature constraints without writing.
-pub fn validate(document: Document) DocumentError!void {
+fn sketchIndex(document: Document, id: []const u8) ?usize {
+    for (document.sketches, 0..) |sketch, index| if (std.mem.eql(u8, sketch.id, id)) return index;
+    return null;
+}
+
+fn sketchPoint(sketch: shape_sketch.Sketch, id: u32) ?shape_sketch.Point {
+    for (sketch.points) |point| if (point.id == id) return point;
+    return null;
+}
+
+fn structurallyValidSketch(sketch: shape_sketch.Sketch) bool {
+    for (sketch.points) |point| {
+        if (!std.math.isFinite(point.x) or !std.math.isFinite(point.y)) return false;
+    }
+    for (sketch.curves) |curve| {
+        const a = sketchPoint(sketch, curve.a) orelse return false;
+        const b = sketchPoint(sketch, curve.b) orelse return false;
+        if (curve.a == curve.b or std.math.hypot(a.x - b.x, a.y - b.y) <= 1e-9) return false;
+        switch (curve.kind) {
+            .line => if (curve.mid != null) return false,
+            .arc => {
+                const mid = curve.mid orelse return false;
+                if (!std.math.isFinite(mid[0]) or !std.math.isFinite(mid[1])) return false;
+            },
+        }
+    }
+    return true;
+}
+
+fn validateSketch(allocator: std.mem.Allocator, sketch: ProfileSketch) ParseError!void {
+    if (!safeId(sketch.id) or sketch.name.len == 0 or sketch.name.len > 128) return error.InvalidDocument;
+    if (!finiteBetween(sketch.plane_z, -10_000, 10_000)) return error.InvalidDocument;
+    if (!structurallyValidSketch(sketch.geometry)) return error.InvalidDocument;
+    const compiled = shape_sketch.compile(allocator, sketch.geometry, shape_sketch.default_sagitta_mm) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // Open profiles are valid saved authoring drafts; an extrusion may not
+        // reference one until it is closed.
+        error.OpenProfile => return,
+        else => return error.InvalidDocument,
+    };
+    allocator.free(compiled.pts);
+    allocator.free(compiled.poly);
+    allocator.free(compiled.arcs);
+}
+
+/// Check all document bounds and sketch/extrusion references without writing.
+pub fn validate(allocator: std.mem.Allocator, document: Document) ParseError!void {
+    if (std.mem.eql(u8, document.schema, legacy_enclosure_schema)) return error.LegacyEnclosureDocument;
     if (!std.mem.eql(u8, document.schema, schema_name)) return error.InvalidDocument;
-    if (!finiteBetween(document.occupied.width, 1, 2000) or !finiteBetween(document.occupied.depth, 1, 2000)) return error.InvalidDocument;
-    if (!finiteBetween(document.settings.clearance, 0.1, 100) or !finiteBetween(document.settings.wall, 0.2, 100)) return error.InvalidDocument;
-    if (!finiteBetween(document.settings.floor, 0.2, 100) or !finiteBetween(document.settings.height, 0.5, 500)) return error.InvalidDocument;
-    if (document.settings.floor >= document.settings.height) return error.InvalidDocument;
-    if (!finiteBetween(document.settings.lid_thickness, 0.2, 100) or !finiteBetween(document.settings.lid_explode, 0, 500)) return error.InvalidDocument;
-    if (document.boards.len > 64 or document.bosses.len > 64 or document.cutouts.len > 32) return error.InvalidDocument;
+    if (document.boards.len > 256 or document.sketches.len > 128 or document.extrusions.len > 256) return error.InvalidDocument;
     for (document.boards, 0..) |board, index| {
         if (!validBoardPose(board)) return error.InvalidDocument;
         for (document.boards[0..index]) |prior| if (std.mem.eql(u8, prior.name, board.name)) return error.InvalidDocument;
     }
-    _ = enclosure.validateParameters(parameters(document), features(document)) catch return error.InvalidDocument;
-}
-
-/// Lower persisted case values into the semantic enclosure recipe.
-pub fn parameters(document: Document) enclosure.Parameters {
-    return .{
-        .occupied_width = document.occupied.width,
-        .occupied_depth = document.occupied.depth,
-        .clearance = document.settings.clearance,
-        .wall = document.settings.wall,
-        .floor = document.settings.floor,
-        .height = document.settings.height,
-        .lid_thickness = document.settings.lid_thickness,
-    };
-}
-
-/// Lower persisted additive details into native generator features.
-pub fn features(document: Document) enclosure.Features {
-    return .{ .cutouts = document.cutouts, .bosses = document.bosses };
+    for (document.sketches, 0..) |sketch, index| {
+        try validateSketch(allocator, sketch);
+        for (document.sketches[0..index]) |prior| if (std.mem.eql(u8, prior.id, sketch.id)) return error.InvalidDocument;
+    }
+    for (document.extrusions, 0..) |extrusion, index| {
+        if (!safeId(extrusion.id) or extrusion.name.len == 0 or extrusion.name.len > 128) return error.InvalidDocument;
+        if (!finiteBetween(extrusion.distance, 0.01, 10_000)) return error.InvalidDocument;
+        const sketch_i = sketchIndex(document, extrusion.sketch) orelse return error.InvalidDocument;
+        const compiled = shape_sketch.compile(allocator, document.sketches[sketch_i].geometry, shape_sketch.default_sagitta_mm) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidDocument,
+        };
+        allocator.free(compiled.pts);
+        allocator.free(compiled.poly);
+        allocator.free(compiled.arcs);
+        for (document.extrusions[0..index]) |prior| if (std.mem.eql(u8, prior.id, extrusion.id)) return error.InvalidDocument;
+    }
 }
 
 /// Parse and fully validate an authored mechanical JSON document.
@@ -107,24 +155,53 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!std.js
         .ignore_unknown_fields = false,
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidDocument,
+        else => {
+            var tree = std.json.parseFromSlice(std.json.Value, allocator, source, .{}) catch return error.InvalidDocument;
+            defer tree.deinit();
+            if (tree.value == .object) if (tree.value.object.get("schema")) |schema| {
+                if (schema == .string and std.mem.eql(u8, schema.string, legacy_enclosure_schema)) return error.LegacyEnclosureDocument;
+            };
+            return error.InvalidDocument;
+        },
     };
     errdefer parsed.deinit();
-    try validate(parsed.value);
+    try validate(allocator, parsed.value);
     return parsed;
+}
+
+fn writeSketch(writer: *std.Io.Writer, sketch: shape_sketch.Sketch) json_writer.WriteError!void {
+    try writer.print("{{\"version\":{d},\"points\":[", .{sketch.version});
+    for (sketch.points, 0..) |point, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writer.print("{{\"id\":{d},\"x\":{d},\"y\":{d}", .{ point.id, point.x, point.y });
+        if (point.construction) try writer.writeAll(",\"construction\":true");
+        try writer.writeByte('}');
+    }
+    try writer.writeAll("],\"curves\":[");
+    for (sketch.curves, 0..) |curve, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writer.print("{{\"id\":{d},\"kind\":\"{s}\",\"a\":{d},\"b\":{d}", .{ curve.id, @tagName(curve.kind), curve.a, curve.b });
+        if (curve.mid) |mid| try writer.print(",\"mid\":[{d},{d}]", .{ mid[0], mid[1] });
+        if (curve.construction) try writer.writeAll(",\"construction\":true");
+        try writer.writeByte('}');
+    }
+    try writer.writeAll("],\"constraints\":[");
+    for (sketch.constraints, 0..) |constraint, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writer.print("{{\"id\":{d},\"kind\":\"{s}\",\"a\":{d}", .{ constraint.id, @tagName(constraint.kind), constraint.a });
+        if (constraint.b) |b| try writer.print(",\"b\":{d}", .{b});
+        if (constraint.c) |c| try writer.print(",\"c\":{d}", .{c});
+        if (constraint.value) |value| try writer.print(",\"value\":{d}", .{value});
+        try writer.print(",\"mode\":\"{s}\"}}", .{@tagName(constraint.mode)});
+    }
+    try writer.writeAll("]}");
 }
 
 /// Canonical, stable JSON used for source control and request bodies.
 pub fn write(writer: *std.Io.Writer, document: Document) json_writer.WriteError!void {
     try writer.writeAll("{\"schema\":\"");
     try writer.writeAll(schema_name);
-    try writer.writeByte('"');
-    try writer.print(",\"occupied\":{{\"width\":{d},\"depth\":{d}}}", .{ document.occupied.width, document.occupied.depth });
-    try writer.writeAll(",\"settings\":{");
-    try writer.print("\"clearance\":{d},\"wall\":{d},\"floor\":{d},\"height\":{d},\"lid_thickness\":{d},\"lid_explode\":{d}}}", .{
-        document.settings.clearance, document.settings.wall, document.settings.floor, document.settings.height, document.settings.lid_thickness, document.settings.lid_explode,
-    });
-    try writer.writeAll(",\"boards\":[");
+    try writer.writeAll("\",\"boards\":[");
     for (document.boards, 0..) |board, index| {
         if (index > 0) try writer.writeByte(',');
         try writer.writeAll("{\"name\":");
@@ -133,43 +210,71 @@ pub fn write(writer: *std.Io.Writer, document: Document) json_writer.WriteError!
             if (board.enabled) "true" else "false", board.x, board.y, board.z, board.rotation,
         });
     }
-    try writer.writeAll("],\"bosses\":[");
-    for (document.bosses, 0..) |boss, index| {
+    try writer.writeAll("],\"sketches\":[");
+    for (document.sketches, 0..) |sketch, index| {
         if (index > 0) try writer.writeByte(',');
-        try writer.print("{{\"x\":{d},\"y\":{d},\"outer_diameter\":{d},\"hole_diameter\":{d},\"height\":{d}}}", .{
-            boss.x, boss.y, boss.outer_diameter, boss.hole_diameter, boss.height,
-        });
+        try writer.writeAll("{\"id\":");
+        try json_writer.writeString(writer, sketch.id);
+        try writer.writeAll(",\"name\":");
+        try json_writer.writeString(writer, sketch.name);
+        try writer.print(",\"plane_z\":{d},\"geometry\":", .{sketch.plane_z});
+        try writeSketch(writer, sketch.geometry);
+        try writer.writeByte('}');
     }
-    try writer.writeAll("],\"cutouts\":[");
-    for (document.cutouts, 0..) |cutout, index| {
+    try writer.writeAll("],\"extrusions\":[");
+    for (document.extrusions, 0..) |extrusion, index| {
         if (index > 0) try writer.writeByte(',');
-        try writer.print("{{\"wall\":\"{s}\",\"center\":{d},\"width\":{d},\"bottom\":{d},\"height\":{d}}}", .{
-            @tagName(cutout.wall), cutout.center, cutout.width, cutout.bottom, cutout.height,
-        });
+        try writer.writeAll("{\"id\":");
+        try json_writer.writeString(writer, extrusion.id);
+        try writer.writeAll(",\"name\":");
+        try json_writer.writeString(writer, extrusion.name);
+        try writer.writeAll(",\"sketch\":");
+        try json_writer.writeString(writer, extrusion.sketch);
+        try writer.print(",\"distance\":{d},\"enabled\":{s}}}", .{ extrusion.distance, if (extrusion.enabled) "true" else "false" });
     }
     try writer.writeAll("]}\n");
 }
 
-test "mechanical document validates and canonical JSON round-trips" {
-    const source =
-        "{\"schema\":\"netlisp-mechanical-v1\",\"occupied\":{\"width\":90,\"depth\":55}," ++
-        "\"boards\":[{\"name\":\"barracuda\",\"z\":5}]," ++
-        "\"bosses\":[{\"x\":20,\"y\":10,\"outer_diameter\":6,\"hole_diameter\":2.8,\"height\":3}]," ++
-        "\"cutouts\":[{\"wall\":\"front\",\"center\":0,\"width\":12,\"bottom\":5,\"height\":8}]}";
+test "blank mechanical document is valid and canonical" {
+    const source = "{\"schema\":\"netlisp-mechanical-v2\",\"boards\":[{\"name\":\"barracuda\",\"z\":5}],\"sketches\":[],\"extrusions\":[]}";
     var parsed = try parse(std.testing.allocator, source);
     defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 0), parsed.value.extrusions.len);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     try write(&out.writer, parsed.value);
-    var again = try parse(std.testing.allocator, out.written());
-    defer again.deinit();
-    try std.testing.expectEqual(@as(usize, 1), again.value.bosses.len);
-    try std.testing.expectEqual(prismatic.Wall.front, again.value.cutouts[0].wall);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"sketches\":[]") != null);
 }
 
-test "mechanical document rejects bosses outside the case" {
+test "closed sketch extrusion round trips and open extrusion is rejected" {
     const source =
-        "{\"occupied\":{\"width\":20,\"depth\":20}," ++
-        "\"bosses\":[{\"x\":30,\"y\":0,\"outer_diameter\":6,\"hole_diameter\":2.8,\"height\":3}]}";
-    try std.testing.expectError(error.InvalidDocument, parse(std.testing.allocator, source));
+        "{\"schema\":\"netlisp-mechanical-v2\",\"sketches\":[{\"id\":\"sketch-1\",\"name\":\"Floor\",\"geometry\":{" ++
+        "\"version\":1,\"points\":[{\"id\":1,\"x\":-20,\"y\":-15},{\"id\":2,\"x\":20,\"y\":-15},{\"id\":3,\"x\":20,\"y\":15},{\"id\":4,\"x\":-20,\"y\":15}]," ++
+        "\"curves\":[{\"id\":11,\"kind\":\"line\",\"a\":1,\"b\":2},{\"id\":12,\"kind\":\"line\",\"a\":2,\"b\":3},{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4},{\"id\":14,\"kind\":\"line\",\"a\":4,\"b\":1}],\"constraints\":[{\"id\":21,\"kind\":\"horizontal\",\"a\":11,\"mode\":\"driving\"}]}}]," ++
+        "\"extrusions\":[{\"id\":\"extrude-1\",\"name\":\"Floor\",\"sketch\":\"sketch-1\",\"distance\":2}]}";
+    var parsed = try parse(std.testing.allocator, source);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(f64, 2), parsed.value.extrusions[0].distance);
+    var encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer encoded.deinit();
+    try write(&encoded.writer, parsed.value);
+    var round_trip = try parse(std.testing.allocator, encoded.written());
+    defer round_trip.deinit();
+    try std.testing.expectEqualStrings("sketch-1", round_trip.value.extrusions[0].sketch);
+
+    const open =
+        "{\"schema\":\"netlisp-mechanical-v2\",\"sketches\":[{\"id\":\"open\",\"name\":\"Open\",\"geometry\":{" ++
+        "\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":10,\"y\":0}],\"curves\":[{\"id\":3,\"kind\":\"line\",\"a\":1,\"b\":2}],\"constraints\":[]}}]," ++
+        "\"extrusions\":[{\"id\":\"bad\",\"name\":\"Bad\",\"sketch\":\"open\",\"distance\":2}]}";
+    try std.testing.expectError(error.InvalidDocument, parse(std.testing.allocator, open));
+
+    const malformed_draft =
+        "{\"schema\":\"netlisp-mechanical-v2\",\"sketches\":[{\"id\":\"bad-draft\",\"name\":\"Bad draft\",\"geometry\":{" ++
+        "\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0}],\"curves\":[{\"id\":3,\"kind\":\"line\",\"a\":1,\"b\":2}],\"constraints\":[]}}]}";
+    try std.testing.expectError(error.InvalidDocument, parse(std.testing.allocator, malformed_draft));
+}
+
+test "legacy generated enclosure document is identified rather than loaded" {
+    const source = "{\"schema\":\"netlisp-mechanical-v1\",\"occupied\":{\"width\":90,\"depth\":55}}";
+    try std.testing.expectError(error.LegacyEnclosureDocument, parse(std.testing.allocator, source));
 }

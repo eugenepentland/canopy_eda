@@ -1676,11 +1676,9 @@ src/markdown_row.zig::split | fn split(line: []const u8, out: *[max_cells][]cons
 src/mechanical/cad_document.zig::Document struct_
 src/mechanical/cad_document.zig::DocumentError value
 src/mechanical/cad_document.zig::ParseError value
-src/mechanical/cad_document.zig::features | fn features(document: Document) enclosure.Features
 src/mechanical/cad_document.zig::mechanical_document_byte_limit value
-src/mechanical/cad_document.zig::parameters | fn parameters(document: Document) enclosure.Parameters
 src/mechanical/cad_document.zig::parse | fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError!std.json.Parsed(Document)
-src/mechanical/cad_document.zig::validate | fn validate(document: Document) DocumentError!void
+src/mechanical/cad_document.zig::validate | fn validate(allocator: std.mem.Allocator, document: Document) ParseError!void
 src/mechanical/cad_document.zig::write | fn write(writer: *std.Io.Writer, document: Document) json_writer.WriteError!void
 src/mechanical/enclosure.zig::Boss struct_
 src/mechanical/enclosure.zig::Dimensions struct_
