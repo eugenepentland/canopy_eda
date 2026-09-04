@@ -5186,6 +5186,7 @@ src/shape_sketch.zig::ConstraintKind enum_
 src/shape_sketch.zig::ConstraintMode enum_
 src/shape_sketch.zig::Curve struct_
 src/shape_sketch.zig::CurveKind enum_
+src/shape_sketch.zig::DimensionMeasure enum_
 src/shape_sketch.zig::Point struct_
 src/shape_sketch.zig::Sketch struct_
 src/shape_sketch.zig::closeSingleGap | fn closeSingleGap(alloc: std.mem.Allocator, sketch: Sketch) CompileError!?Sketch

@@ -208,7 +208,7 @@
     var number = Math.round(finite(value, 0) * 1000) / 1000;
     if (kind === "radius") return "R " + number + " mm";
     if (kind === "diameter") return "Ø " + number + " mm";
-    if (kind === "angle") return number + "°";
+    if (kind === "angle" || kind === "angle_between") return number + "°";
     return number + " mm";
   }
 
@@ -299,7 +299,8 @@
       curves: (geometry.curves || []).map(function (curve) { var out = { id: curve.id, kind: curve.kind, a: curve.a, b: curve.b }; if (curve.mid) out.mid = curve.mid.slice(); if (curve.construction) out.construction = true; return out; }),
       constraints: (geometry.constraints || []).map(function (constraint) {
         var out = { id: constraint.id, kind: constraint.kind, a: constraint.a, mode: constraint.enabled === false ? "disabled" : constraint.driving === false ? "reference" : "driving" };
-        ["b", "c", "value"].forEach(function (key) { if (constraint[key] != null) out[key] = constraint[key]; });
+        ["b", "c", "value", "measure"].forEach(function (key) { if (constraint[key] != null) out[key] = constraint[key]; });
+        if (constraint.placement) out.placement = constraint.placement.slice();
         return out;
       })
     };
@@ -349,7 +350,7 @@
   if (!usable.length) { $("#empty").style.display = "block"; $("#empty").textContent = "No saved PCB layouts could be imported; the CAD work plane is still available."; }
 
   var canvas = $("#canvas"), thermalCanvas = $("#thermal-canvas"), thermalContext = thermalCanvas.getContext("2d");
-  var dimensionLayer = $("#sketch-dimensions"), dimensionPopover = $("#sketch-dimension-popover"), dimensionInput = $("#sketch-dimension-value"), pendingDimension = null;
+  var dimensionLayer = $("#sketch-dimensions"), dimensionPopover = $("#sketch-dimension-popover"), dimensionInput = $("#sketch-dimension-value"), pendingDimension = null, dimensionDraft = null;
   var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2)); renderer.outputEncoding = THREE.sRGBEncoding;
   var scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(38, 1, 0.1, 5000);
@@ -624,6 +625,27 @@
     if (!points || points.length < 2) return;
     var world = points.map(function (point) { return localToWorld(sketch, point[0], point[1], 0.05); }), line = lineObject(world, color, 0.9); line.renderOrder = 8; sketchModel.add(line);
   }
+  function dimensionEntityAnchor(geometry, entity) {
+    if (entity.type === "point") { var point = OS.point(geometry, entity.id); return point && [point.x, point.y]; }
+    var curve = OS.curve(geometry, entity.id); if (!curve) return null;
+    if (curve.kind === "arc") { var arc = OS.arcCircle(geometry, curve); return arc && [arc.cx, arc.cy]; }
+    var a = OS.point(geometry, curve.a), b = OS.point(geometry, curve.b); return a && b && [(a.x + b.x) / 2, (a.y + b.y) / 2];
+  }
+  function drawDimensionPreview(sketch) {
+    if (!dimensionDraft || !dimensionDraft.cursor || !dimensionDraft.entities.length) return;
+    var q = OS.inferDimension(sketch.geometry, dimensionDraft.entities, dimensionDraft.cursor); if (!q) return;
+    var label = q.placement, first = dimensionDraft.entities[0], second = dimensionDraft.entities[1], curve = first.type === "curve" && OS.curve(sketch.geometry, first.id), a, b, n, offset;
+    if (!second && curve && curve.kind === "line") {
+      a = OS.point(sketch.geometry, curve.a); b = OS.point(sketch.geometry, curve.b); var length = Math.hypot(b.x - a.x, b.y - a.y) || 1; n = { x: -(b.y - a.y) / length, y: (b.x - a.x) / length }; offset = (label[0] - (a.x + b.x) / 2) * n.x + (label[1] - (a.y + b.y) / 2) * n.y;
+      var da = [a.x + n.x * offset, a.y + n.y * offset], db = [b.x + n.x * offset, b.y + n.y * offset]; previewLine(sketch, [[a.x, a.y], da], 0x7ee787); previewLine(sketch, [[b.x, b.y], db], 0x7ee787); previewLine(sketch, [da, db], 0x7ee787); return;
+    }
+    if (!second && curve && curve.kind === "arc") { var arc = OS.arcCircle(sketch.geometry, curve); if (arc) previewLine(sketch, [[arc.cx, arc.cy], label], 0x7ee787); return; }
+    if (q.kind === "distance_x" || q.kind === "distance_y") {
+      a = OS.point(sketch.geometry, first.id); b = OS.point(sketch.geometry, second.id); if (!a || !b) return;
+      var da2 = q.kind === "distance_x" ? [a.x, label[1]] : [label[0], a.y], db2 = q.kind === "distance_x" ? [b.x, label[1]] : [label[0], b.y]; previewLine(sketch, [[a.x, a.y], da2], 0x7ee787); previewLine(sketch, [[b.x, b.y], db2], 0x7ee787); previewLine(sketch, [da2, db2], 0x7ee787); return;
+    }
+    a = dimensionEntityAnchor(sketch.geometry, first); b = second && dimensionEntityAnchor(sketch.geometry, second); if (a) previewLine(sketch, [a, label], 0x7ee787); if (b) { previewLine(sketch, [b, label], 0x7ee787); previewLine(sketch, [a, b], 0x7ee787); }
+  }
   function drawSketches() {
     clearGroup(sketchModel);
     state.sketches.forEach(function (sketch) {
@@ -639,6 +661,7 @@
       });
     });
     var sketch = activeSketch(); renderSketchDimensions(); if (!editMode || !sketch) return;
+    drawDimensionPreview(sketch);
     if (linePoints.length) { var chain = linePoints.slice(); if (lineCursor) chain.push([lineCursor.x, lineCursor.y]); previewLine(sketch, chain, 0x7ee787); }
     if (rectangleStart && rectangleCurrent) previewLine(sketch, [[rectangleStart.x, rectangleStart.y], [rectangleCurrent.x, rectangleStart.y], [rectangleCurrent.x, rectangleCurrent.y], [rectangleStart.x, rectangleCurrent.y], [rectangleStart.x, rectangleStart.y]], 0x7ee787);
     if (sketchGesture && sketchGesture.kind === "marquee" && sketchGesture.current) previewLine(sketch, [[sketchGesture.start.x, sketchGesture.start.y], [sketchGesture.current.x, sketchGesture.start.y], [sketchGesture.current.x, sketchGesture.current.y], [sketchGesture.start.x, sketchGesture.current.y], [sketchGesture.start.x, sketchGesture.start.y]], 0x62a5ff);
@@ -727,6 +750,7 @@
   }
   function sketchNumber(label, value) { var text = root.prompt(label, String(Math.round(finite(value, 0) * 1000) / 1000)); if (text == null) return null; var number = Number(text); return Number.isFinite(number) ? number : null; }
   function dimensionAnchor(geometry, dimension) {
+    if (dimension.placement) return { x: +dimension.placement[0], y: +dimension.placement[1] };
     var curve = OS.curve(geometry, dimension.a), a = OS.point(geometry, dimension.a), b = dimension.b != null ? OS.point(geometry, dimension.b) : null;
     if (curve) { a = OS.point(geometry, curve.a); b = OS.point(geometry, curve.b); }
     return a && b ? { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } : { x: 0, y: 0 };
@@ -744,18 +768,30 @@
     dimensionPopover.style.left = left + "px"; dimensionPopover.style.top = Math.max(pad, top) + "px";
   }
   function closeDimensionPopover() { dimensionPopover.hidden = true; pendingDimension = null; $("#sketch-dimension-error").hidden = true; }
-  function openDimensionPopover(dimension) {
+  function dimensionName(kind) {
+    return { length: "line length", radius: "arc radius", diameter: "arc diameter", distance: "aligned distance", distance_x: "horizontal distance", distance_y: "vertical distance", angle: "line angle", angle_between: "angle between lines", offset: "perpendicular offset", tangent_distance: "tangent distance" }[kind] || "dimension";
+  }
+  function fillDimensionTypes(dimension) {
+    var row = $("#sketch-dimension-type-row"), select = $("#sketch-dimension-type"), choices = [];
+    if (dimension.kind === "radius" || dimension.kind === "diameter") choices = [["radius", "Radius"], ["diameter", "Diameter"]];
+    else if (["distance", "distance_x", "distance_y"].indexOf(dimension.kind) >= 0) choices = [["distance", "Aligned"], ["distance_x", "Horizontal"], ["distance_y", "Vertical"]];
+    else if (dimension.kind === "tangent_distance") choices = [["near", "Nearest tangents"], ["far", "Outside tangents"], ["center", "Arc centre"]];
+    row.hidden = choices.length < 2; select.textContent = "";
+    choices.forEach(function (choice) { var option = document.createElement("option"); option.value = choice[0]; option.textContent = choice[1]; select.appendChild(option); });
+    if (choices.length) select.value = dimension.kind === "tangent_distance" ? dimension.measure || "near" : dimension.kind;
+  }
+  function openDimensionPopover(dimension, fromTool) {
     var sketch = activeSketch(); if (!sketch) return;
     var existing = (sketch.geometry.constraints || []).find(function (constraint) { return constraint.id === dimension.id; });
-    if (existing) dimension = { id: existing.id, kind: existing.kind, a: existing.a, b: existing.b, value: OS.dimensionValue(sketch.geometry, existing) };
-    pendingDimension = { id: dimension.id, kind: dimension.kind, a: dimension.a, b: dimension.b, value: dimension.value, anchor: dimensionAnchor(sketch.geometry, dimension) };
-    $("#sketch-dimension-title").textContent = (dimension.id == null ? "Add " : "Edit ") + (dimension.kind === "radius" ? "radius" : dimension.kind === "distance" ? "point distance" : "line length");
+    if (existing) dimension = Object.assign({}, existing, { value: OS.dimensionValue(sketch.geometry, existing) }, dimension.placement ? { placement: dimension.placement } : {});
+    pendingDimension = { id: dimension.id, kind: dimension.kind, a: dimension.a, b: dimension.b, value: dimension.value, placement: dimension.placement && dimension.placement.slice(), measure: dimension.measure, anchor: dimensionAnchor(sketch.geometry, dimension), fromTool: !!fromTool };
+    $("#sketch-dimension-title").textContent = (dimension.id == null ? "Add " : "Edit ") + dimensionName(dimension.kind); fillDimensionTypes(pendingDimension); $("#sketch-dimension-unit").textContent = dimension.kind === "angle" || dimension.kind === "angle_between" ? "°" : "mm";
     dimensionInput.value = String(Math.round(finite(dimension.value, 0) * 1000) / 1000); $("#sketch-dimension-error").hidden = true; dimensionPopover.hidden = false; positionDimensionPopover();
     dimensionInput.focus(); dimensionInput.select();
   }
   function positionSketchDimensions() {
     var sketch = activeSketch(); if (!editMode || !sketch) return;
-    dimensionLayer.querySelectorAll("[data-dimension-id]").forEach(function (button) {
+    dimensionLayer.querySelectorAll("[data-x][data-y]").forEach(function (button) {
       var point = dimensionScreenPoint(sketch, { x: Number(button.dataset.x), y: Number(button.dataset.y) }); button.style.left = point.x + "px"; button.style.top = point.y - 16 + "px";
     });
     positionDimensionPopover();
@@ -766,18 +802,19 @@
     OS.annotations(sketch.geometry).forEach(function (annotation) {
       var button = document.createElement("button"); button.type = "button"; button.className = "sketch-dimension-label"; button.dataset.dimensionId = annotation.id; button.dataset.x = annotation.x; button.dataset.y = annotation.y; button.textContent = dimensionLabel(annotation.kind, annotation.value); button.title = "Edit dimension"; button.setAttribute("aria-label", "Edit " + button.textContent + " dimension"); dimensionLayer.appendChild(button);
     });
+    if (dimensionDraft && dimensionDraft.cursor) { var draft = OS.inferDimension(sketch.geometry, dimensionDraft.entities, dimensionDraft.cursor); if (draft) { var ghost = document.createElement("span"); ghost.className = "sketch-dimension-label draft"; ghost.dataset.x = draft.placement[0]; ghost.dataset.y = draft.placement[1]; ghost.textContent = dimensionLabel(draft.kind, draft.value); dimensionLayer.appendChild(ghost); } }
     positionSketchDimensions();
   }
   function applyPendingDimension() {
     if (!pendingDimension) return false;
     var value = Number(dimensionInput.value), error = $("#sketch-dimension-error"), edit = pendingDimension.id != null, pending = pendingDimension;
-    if (!Number.isFinite(value) || !(value > 0)) { error.textContent = "Enter a dimension greater than zero."; error.hidden = false; dimensionInput.focus(); return false; }
+    if (!Number.isFinite(value) || !(value > 0) || (pending.kind === "angle_between" && value >= 180)) { error.textContent = pending.kind === "angle_between" ? "Enter an angle between 0 and 180 degrees." : "Enter a dimension greater than zero."; error.hidden = false; dimensionInput.focus(); return false; }
     var applied = sketchMutate(edit ? "Driving dimension updated" : "Driving dimension added", function (geometry) {
-      if (!edit) return !!OS.addConstraint(geometry, pending.kind, pending.a, pending.b, value);
+      if (!edit) return !!OS.addConstraint(geometry, pending.kind, pending.a, pending.b, value, null, { placement: pending.placement, measure: pending.measure });
       var constraint = (geometry.constraints || []).find(function (row) { return row.id === pending.id; }); if (!constraint) return false;
-      constraint.value = value; constraint.enabled = true; constraint.driving = true; return true;
+      constraint.kind = pending.kind; constraint.value = value; constraint.enabled = true; constraint.driving = true; constraint.placement = pending.placement && pending.placement.slice(); if (pending.measure) constraint.measure = pending.measure; else delete constraint.measure; return true;
     });
-    if (applied) closeDimensionPopover(); else { error.textContent = "That value conflicts with the sketch constraints."; error.hidden = false; }
+    if (applied) { var repeat = pending.fromTool; closeDimensionPopover(); if (repeat && sketchTool === "dimension") { dimensionDraft = { entities: [], cursor: null }; sketchSelection = []; status("Dimension tool · select geometry"); drawSketches(); } } else { error.textContent = "That value conflicts with the sketch constraints."; error.hidden = false; }
     return applied;
   }
   function sketchConstraint(kind) {
@@ -794,14 +831,8 @@
     });
   }
   function sketchDimension() {
-    var sketch = activeSketch(), geometry = sketch && sketch.geometry, curves = selectedIds("curve"), points = selectedIds("point"), dimension, curve;
-    if (!geometry) return;
-    if (curves.length) { curve = OS.curve(geometry, curves[0]); dimension = { kind: curve.kind === "arc" ? "radius" : "length", a: curve.id, value: curve.kind === "arc" ? OS.arcCircle(geometry, curve).r : Math.hypot(OS.point(geometry, curve.b).x - OS.point(geometry, curve.a).x, OS.point(geometry, curve.b).y - OS.point(geometry, curve.a).y) }; }
-    else if (points.length >= 2) { dimension = { kind: "distance", a: points[0], b: points[1], value: Math.hypot(OS.point(geometry, points[1]).x - OS.point(geometry, points[0]).x, OS.point(geometry, points[1]).y - OS.point(geometry, points[0]).y) }; }
-    else { status("Select one curve or two points to dimension", true); return; }
-    var existing = (geometry.constraints || []).find(function (constraint) { return constraint.kind === dimension.kind && constraint.a === dimension.a && (constraint.b == null ? null : constraint.b) === (dimension.b == null ? null : dimension.b) && constraint.driving !== false && constraint.enabled !== false; });
-    if (existing) dimension.id = existing.id;
-    openDimensionPopover(dimension); status(existing ? "Edit the driving dimension" : "Enter the driving dimension");
+    if (!activeSketch()) return; closeDimensionPopover(); sketchTool = "dimension"; dimensionDraft = { entities: [], cursor: null }; sketchSelection = []; linePoints = []; lineCursor = null; rectangleStart = null; rectangleCurrent = null; sketchGesture = null;
+    $("#drag-help").textContent = "Dimension · select a curve or two compatible entities · move and click to place · Esc cancels"; status("Dimension tool · select geometry"); syncPalette(); drawSketches();
   }
   function extrudeActiveSketch() {
     var sketch = activeSketch(), compiled = sketch && OS.compile(sketch.geometry);
@@ -865,14 +896,14 @@
   function enterSketch(sketch) {
     sketch = sketch || activeSketch(); if (!sketch) { status("Create or select a sketch first", true); return; }
     if (viewMode !== "3d") setView("3d");
-    closeDimensionPopover(); activeSketchId = sketch.id; selectedPlane = sketchPlane(sketch.plane); editMode = true; sketchTool = "select"; sketchSelection = []; linePoints = []; lineCursor = null; rectangleStart = null; rectangleCurrent = null; sketchGesture = null;
+    closeDimensionPopover(); dimensionDraft = null; activeSketchId = sketch.id; selectedPlane = sketchPlane(sketch.plane); editMode = true; sketchTool = "select"; sketchSelection = []; linePoints = []; lineCursor = null; rectangleStart = null; rectangleCurrent = null; sketchGesture = null;
     activeCamera = orthoCamera; controls.enabled = false; grid.visible = false; solidModel.visible = false; datumPlanes.forEach(function (mesh) { mesh.visible = false; }); canvas.classList.add("sketching");
     document.querySelectorAll("#plane-choices button").forEach(function (button) { button.disabled = true; button.classList.toggle("on", button.dataset.plane === selectedPlane); });
     $("#plane-status").textContent = PLANE[selectedPlane].label + " sketch plane · view locked normal to plane"; $("#drag-help").textContent = "Flat 2D sketch · select and drag points/edges · Shift adds selection · wheel zooms";
     editFit(); renderSketches(); drawSketches(); syncPalette();
   }
   function finishSketch() {
-    closeDimensionPopover(); editMode = false; sketchTool = "select"; sketchSelection = []; linePoints = []; lineCursor = null; rectangleStart = null; rectangleCurrent = null; sketchGesture = null; activeCamera = camera; controls.enabled = true; grid.visible = true; solidModel.visible = true; clearGroup(editGrid); canvas.classList.remove("sketching"); datumPlanes.forEach(function (mesh) { mesh.visible = true; });
+    closeDimensionPopover(); dimensionDraft = null; editMode = false; sketchTool = "select"; sketchSelection = []; linePoints = []; lineCursor = null; rectangleStart = null; rectangleCurrent = null; sketchGesture = null; activeCamera = camera; controls.enabled = true; grid.visible = true; solidModel.visible = true; clearGroup(editGrid); canvas.classList.remove("sketching"); datumPlanes.forEach(function (mesh) { mesh.visible = true; });
     document.querySelectorAll("#plane-choices button").forEach(function (button) { button.disabled = false; }); selectPlane(selectedPlane); $("#drag-help").textContent = "Orbit empty space · drag PCBs or fans · click an origin plane to start a sketch"; renderSketches(); drawSketches(); syncPalette();
   }
   function syncInputs() {
@@ -1042,7 +1073,7 @@
     if (action === "dimension") return sketchDimension();
     if (["horizontal", "vertical", "coincident", "collinear", "parallel", "perpendicular", "tangent", "equal", "midpoint", "symmetric", "fixed"].indexOf(action) >= 0) return sketchConstraint(action);
     if (["arc", "line", "fillet", "remove-fillet", "chamfer", "offset", "mirror-x", "mirror-y", "delete"].indexOf(action) >= 0) return modifySketch(action);
-    sketchTool = action; linePoints = []; lineCursor = null; rectangleStart = null; rectangleCurrent = null; sketchGesture = null; $("#drag-help").textContent = action === "rectangle" ? "Flat 2D sketch · drag two corners" : action === "line-tool" ? "Flat 2D sketch · click connected endpoints · click the start to close · Enter stops" : "Flat 2D sketch · select and drag points/edges · Shift adds selection"; syncPalette(); drawSketches();
+    closeDimensionPopover(); dimensionDraft = null; sketchTool = action; linePoints = []; lineCursor = null; rectangleStart = null; rectangleCurrent = null; sketchGesture = null; $("#drag-help").textContent = action === "rectangle" ? "Flat 2D sketch · drag two corners" : action === "line-tool" ? "Flat 2D sketch · click connected endpoints · click the start to close · Enter stops" : "Flat 2D sketch · select and drag points/edges · Shift adds selection"; syncPalette(); drawSketches();
   });
   dimensionLayer.addEventListener("click", function (event) {
     var button = event.target.closest("[data-dimension-id]"), sketch = activeSketch(); if (!button || !sketch) return;
@@ -1050,6 +1081,12 @@
     event.preventDefault(); event.stopPropagation(); openDimensionPopover(constraint);
   });
   dimensionPopover.addEventListener("submit", function (event) { event.preventDefault(); applyPendingDimension(); });
+  $("#sketch-dimension-type").addEventListener("change", function (event) {
+    if (!pendingDimension) return; var choice = event.target.value, sketch = activeSketch();
+    if (pendingDimension.kind === "tangent_distance") pendingDimension.measure = choice;
+    else pendingDimension.kind = choice;
+    pendingDimension.value = OS.dimensionValue(sketch.geometry, pendingDimension); dimensionInput.value = String(Math.round(pendingDimension.value * 1000) / 1000); $("#sketch-dimension-title").textContent = (pendingDimension.id == null ? "Add " : "Edit ") + dimensionName(pendingDimension.kind); $("#sketch-dimension-unit").textContent = pendingDimension.kind === "angle" || pendingDimension.kind === "angle_between" ? "°" : "mm";
+  });
   dimensionPopover.querySelector("[data-dimension-cancel]").addEventListener("click", closeDimensionPopover);
   dimensionPopover.addEventListener("keydown", function (event) { if (event.key === "Escape") { event.preventDefault(); closeDimensionPopover(); canvas.focus(); } });
   document.addEventListener("pointerdown", function (event) { if (!dimensionPopover.hidden && !dimensionPopover.contains(event.target) && !event.target.closest("[data-dimension-id]")) closeDimensionPopover(); });
@@ -1063,6 +1100,28 @@
   function hitSketchPoint(point) { var sketch = activeSketch(), tolerance = sketchTolerance(), best = null; OS.physicalPoints(sketch.geometry).forEach(function (candidate) { var distance = Math.hypot(point.x - candidate.x, point.y - candidate.y); if (distance <= tolerance && (!best || distance < best.distance)) best = { id: candidate.id, distance: distance }; }); return best; }
   function segmentDistance(point, a, b) { var dx = b[0] - a[0], dy = b[1] - a[1], length = dx * dx + dy * dy, t = length ? Math.max(0, Math.min(1, ((point.x - a[0]) * dx + (point.y - a[1]) * dy) / length)) : 0; return Math.hypot(point.x - a[0] - t * dx, point.y - a[1] - t * dy); }
   function hitSketchCurve(point) { var sketch = activeSketch(), tolerance = sketchTolerance(), best = null; OS.physicalCurves(sketch.geometry).forEach(function (curve) { var points = curveLocalPoints(sketch, curve), distance = Infinity; for (var i = 1; i < points.length; i += 1) distance = Math.min(distance, segmentDistance(point, points[i - 1], points[i])); if (distance <= tolerance && (!best || distance < best.distance)) best = { id: curve.id, distance: distance }; }); return best; }
+  function sameDimensionEntities(constraint, dimension) {
+    var same = constraint.a === dimension.a && (constraint.b == null ? null : constraint.b) === (dimension.b == null ? null : dimension.b), reversed = constraint.a === dimension.b && constraint.b === dimension.a;
+    if (!same && !reversed) return false;
+    if ((constraint.kind === "radius" || constraint.kind === "diameter") && (dimension.kind === "radius" || dimension.kind === "diameter")) return true;
+    return constraint.kind === dimension.kind && (constraint.kind !== "tangent_distance" || (constraint.measure || "near") === (dimension.measure || "near"));
+  }
+  function placeDimensionDraft(local) {
+    var sketch = activeSketch(), dimension = sketch && dimensionDraft && OS.inferDimension(sketch.geometry, dimensionDraft.entities, local); if (!dimension) { status(dimensionDraft && dimensionDraft.entities.length ? "Select compatible geometry before placing the dimension" : "Select geometry to dimension", true); return false; }
+    var existing = (sketch.geometry.constraints || []).find(function (constraint) { return constraint.enabled !== false && sameDimensionEntities(constraint, dimension); }); if (existing) dimension.id = existing.id;
+    openDimensionPopover(dimension, true); status(existing ? "Edit the driving dimension" : "Enter the dimension value"); return true;
+  }
+  function dimensionPointerDown(local, hitPoint, hitCurve) {
+    if (!dimensionDraft) dimensionDraft = { entities: [], cursor: local }; dimensionDraft.cursor = local;
+    var entity = hitPoint ? { type: "point", id: hitPoint.id } : hitCurve ? { type: "curve", id: hitCurve.id } : null;
+    if (!entity) return placeDimensionDraft(local);
+    if (dimensionDraft.entities.some(function (row) { return row.type === entity.type && row.id === entity.id; })) return placeDimensionDraft(local);
+    if (dimensionDraft.entities.length >= 2) dimensionDraft.entities = [];
+    var trial = dimensionDraft.entities.concat([entity]);
+    if (trial.length === 2 && !OS.inferDimension(activeSketch().geometry, trial, local)) { status("Those entities do not define a supported dimension", true); return false; }
+    dimensionDraft.entities = trial; sketchSelection = trial.slice();
+    status(trial.length === 1 ? (entity.type === "curve" ? "Move and click to place, or select a second entity" : "Select a second point, line, or arc") : "Move the pointer and click empty space to place the dimension"); drawSketches(); return true;
+  }
   canvas.addEventListener("pointerdown", function (event) {
     if (editMode) {
       var sketch = activeSketch(), local = sketchPoint(event); if (!sketch || !local) return;
@@ -1074,6 +1133,7 @@
         event.preventDefault(); return;
       }
       var hitPoint = hitSketchPoint(local), hitCurve = hitPoint ? null : hitSketchCurve(local);
+      if (sketchTool === "dimension") { if (!dimensionPopover.hidden) { closeDimensionPopover(); drawSketches(); } else dimensionPointerDown(local, hitPoint, hitCurve); event.preventDefault(); event.stopPropagation(); return; }
       if (hitPoint) { selectSketchEntity("point", hitPoint.id, event.shiftKey); sketchGesture = { kind: "point", id: hitPoint.id, pointer: event.pointerId, start: local, before: clone(sketch.geometry), moved: false }; }
       else if (hitCurve) { selectSketchEntity("curve", hitCurve.id, event.shiftKey); sketchGesture = { kind: "curve", id: hitCurve.id, pointer: event.pointerId, start: local, before: clone(sketch.geometry), moved: false }; }
       else { if (!event.shiftKey) sketchSelection = []; sketchGesture = { kind: "marquee", pointer: event.pointerId, start: local, current: local, extend: event.shiftKey, moved: false }; drawSketches(); }
@@ -1091,6 +1151,7 @@
       var sketch = activeSketch(), local = sketchPoint(event); if (!sketch || !local) return;
       if (rectangleStart && rectangleStart.pointer === event.pointerId) { var rectSnap = snapSketchPoint(local, []); rectangleCurrent = { x: rectSnap.x, y: rectSnap.y }; drawSketches(); event.preventDefault(); return; }
       if (sketchTool === "line-tool" && linePoints.length && !sketchGesture) { lineCursor = snapSketchPoint(local, linePoints); drawSketches(); return; }
+      if (sketchTool === "dimension") { if (!dimensionPopover.hidden) return; if (!dimensionDraft) dimensionDraft = { entities: [], cursor: local }; dimensionDraft.cursor = local; drawSketches(); return; }
       if (!sketchGesture || sketchGesture.pointer !== event.pointerId) return;
       var gesture = sketchGesture; gesture.current = local; gesture.moved = gesture.moved || Math.hypot(local.x - gesture.start.x, local.y - gesture.start.y) > sketchTolerance() * 0.2;
       if (gesture.kind === "point" || gesture.kind === "curve") {
@@ -1133,7 +1194,7 @@
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); return event.shiftKey ? redoSketch() : undoSketch(); }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") { event.preventDefault(); return redoSketch(); }
     if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "d") { event.preventDefault(); return sketchDimension(); }
-    if (event.key === "Escape") { if (sketchTool !== "select") { sketchTool = "select"; linePoints = []; lineCursor = null; rectangleStart = null; rectangleCurrent = null; syncPalette(); drawSketches(); } else finishSketch(); }
+    if (event.key === "Escape") { if (sketchTool !== "select") { closeDimensionPopover(); dimensionDraft = null; sketchTool = "select"; sketchSelection = []; linePoints = []; lineCursor = null; rectangleStart = null; rectangleCurrent = null; $("#drag-help").textContent = "Flat 2D sketch · select and drag points/edges · Shift adds selection · wheel zooms"; syncPalette(); drawSketches(); } else finishSketch(); }
     if (event.key === "Enter" && sketchTool === "line-tool") { sketchTool = "select"; linePoints = []; lineCursor = null; syncPalette(); drawSketches(); }
     if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); modifySketch("delete"); }
   });

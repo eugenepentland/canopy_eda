@@ -60,12 +60,20 @@ pub const ConstraintKind = enum {
     distance,
     length,
     angle,
+    angle_between,
+    offset,
+    tangent_distance,
     radius,
     diameter,
 };
 
 /// Whether a relationship drives geometry, only reports it, or is disabled.
 pub const ConstraintMode = enum { driving, reference, disabled };
+
+/// Which pair of tangencies a distance dimension measures when an arc is
+/// involved. `near` measures the closest selected sides and `far` the outside
+/// span; `center` is retained for explicit centre-based dimensions.
+pub const DimensionMeasure = enum { near, far, center };
 
 /// `a` and `b` address stable point or curve IDs according to `kind`. Numeric
 /// dimensions carry `value`; reference-only dimensions set `driving=false`.
@@ -77,6 +85,8 @@ pub const Constraint = struct {
     c: ?u32 = null,
     value: ?f64 = null,
     mode: ConstraintMode = .driving,
+    placement: ?[2]f64 = null,
+    measure: ?DimensionMeasure = null,
 };
 
 /// Versioned parametric authoring state persisted with a layout shape.
@@ -147,6 +157,11 @@ fn lineExists(sketch: Sketch, id: u32) bool {
     return false;
 }
 
+fn arcExists(sketch: Sketch, id: u32) bool {
+    for (sketch.curves) |curve| if (curve.id == id) return curve.kind == .arc;
+    return false;
+}
+
 fn pointExists(sketch: Sketch, id: u32) bool {
     return pointIndex(sketch.points, id) != null;
 }
@@ -160,41 +175,63 @@ fn dimensionValid(constraint: Constraint) bool {
     };
 }
 
-fn constraintsValid(sketch: Sketch) bool {
-    for (sketch.constraints) |constraint| switch (constraint.kind) {
-        .horizontal, .vertical => if (!curveExists(sketch, constraint.a)) return false,
-        .length, .angle, .radius, .diameter => {
-            if (!curveExists(sketch, constraint.a)) return false;
-            if (!dimensionValid(constraint)) return false;
+fn entityExists(sketch: Sketch, id: u32) bool {
+    return curveExists(sketch, id) or pointExists(sketch, id);
+}
+
+fn numericConstraintValid(sketch: Sketch, constraint: Constraint) bool {
+    return switch (constraint.kind) {
+        .length, .angle => lineExists(sketch, constraint.a) and dimensionValid(constraint),
+        .radius, .diameter => arcExists(sketch, constraint.a) and dimensionValid(constraint),
+        .angle_between => lineExists(sketch, constraint.a) and
+            lineExists(sketch, constraint.b orelse return false) and
+            dimensionValid(constraint) and constraint.value.? < 180,
+        .offset => lineExists(sketch, constraint.a) and
+            (lineExists(sketch, constraint.b orelse return false) or pointExists(sketch, constraint.b.?)) and
+            dimensionValid(constraint),
+        .tangent_distance => blk: {
+            const b = constraint.b orelse break :blk false;
+            if (!entityExists(sketch, constraint.a) or !entityExists(sketch, b)) break :blk false;
+            if (!arcExists(sketch, constraint.a) and !arcExists(sketch, b)) break :blk false;
+            break :blk dimensionValid(constraint);
         },
-        .collinear => {
-            if (!lineExists(sketch, constraint.a)) return false;
-            if (!lineExists(sketch, constraint.b orelse return false)) return false;
-        },
-        .parallel, .perpendicular, .tangent, .equal => {
-            if (!curveExists(sketch, constraint.a)) return false;
-            if (!curveExists(sketch, constraint.b orelse return false)) return false;
-        },
-        .coincident => {
-            if (!pointExists(sketch, constraint.a)) return false;
-            if (!pointExists(sketch, constraint.b orelse return false)) return false;
-        },
-        .distance_x, .distance_y, .distance => {
-            if (!pointExists(sketch, constraint.a)) return false;
-            if (!pointExists(sketch, constraint.b orelse return false)) return false;
-            if (!dimensionValid(constraint)) return false;
-        },
-        .midpoint => {
-            if (!pointExists(sketch, constraint.a)) return false;
-            if (!curveExists(sketch, constraint.b orelse return false)) return false;
-        },
-        .symmetric => {
-            if (!pointExists(sketch, constraint.a)) return false;
-            if (!pointExists(sketch, constraint.b orelse return false)) return false;
-            if (!curveExists(sketch, constraint.c orelse return false)) return false;
-        },
-        .fixed => if (!pointExists(sketch, constraint.a)) return false,
+        .distance_x, .distance_y, .distance => pointExists(sketch, constraint.a) and
+            pointExists(sketch, constraint.b orelse return false) and dimensionValid(constraint),
+        else => false,
     };
+}
+
+fn isNumericConstraint(kind: ConstraintKind) bool {
+    return switch (kind) {
+        .distance_x, .distance_y, .distance, .length, .angle, .angle_between, .offset, .tangent_distance, .radius, .diameter => true,
+        else => false,
+    };
+}
+
+fn relationshipConstraintValid(sketch: Sketch, constraint: Constraint) bool {
+    return switch (constraint.kind) {
+        .horizontal, .vertical => curveExists(sketch, constraint.a),
+        .collinear => lineExists(sketch, constraint.a) and lineExists(sketch, constraint.b orelse return false),
+        .parallel, .perpendicular, .tangent, .equal => curveExists(sketch, constraint.a) and curveExists(sketch, constraint.b orelse return false),
+        .coincident => pointExists(sketch, constraint.a) and pointExists(sketch, constraint.b orelse return false),
+        .midpoint => pointExists(sketch, constraint.a) and curveExists(sketch, constraint.b orelse return false),
+        .symmetric => pointExists(sketch, constraint.a) and
+            pointExists(sketch, constraint.b orelse return false) and
+            curveExists(sketch, constraint.c orelse return false),
+        .fixed => pointExists(sketch, constraint.a),
+        else => numericConstraintValid(sketch, constraint),
+    };
+}
+
+fn constraintsValid(sketch: Sketch) bool {
+    for (sketch.constraints) |constraint| {
+        if ((constraint.placement != null or constraint.measure != null) and !isNumericConstraint(constraint.kind)) return false;
+        if (constraint.measure != null and constraint.kind != .tangent_distance) return false;
+        if (constraint.placement) |placement| {
+            if (!std.math.isFinite(placement[0]) or !std.math.isFinite(placement[1])) return false;
+        }
+        if (!relationshipConstraintValid(sketch, constraint)) return false;
+    }
     return true;
 }
 

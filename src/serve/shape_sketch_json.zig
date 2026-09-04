@@ -76,7 +76,7 @@ fn curveMatches(value: std.json.Value, curve: sketch_mod.Curve) bool {
 }
 
 fn constraintMatches(value: std.json.Value, constraint: sketch_mod.Constraint) bool {
-    if (!hasOnlyKeys(value, .{ "id", "kind", "a", "b", "c", "value", "enabled", "driving" })) return false;
+    if (!hasOnlyKeys(value, .{ "id", "kind", "a", "b", "c", "value", "enabled", "driving", "placement", "measure" })) return false;
     const kind_value = value.object.get("kind") orelse return false;
     if (kind_value != .string or std.meta.stringToEnum(sketch_mod.ConstraintKind, kind_value.string) != constraint.kind) return false;
     inline for (.{ "enabled", "driving" }) |key| if (value.object.get(key)) |state| if (state != .bool) return false;
@@ -84,13 +84,19 @@ fn constraintMatches(value: std.json.Value, constraint: sketch_mod.Constraint) b
     const raw_b = if (value.object.get("b")) |b| id(b) orelse return false else null;
     const raw_c = if (value.object.get("c")) |c| id(c) orelse return false else null;
     const raw_value = if (value.object.get("value")) |n| number(n) orelse return false else null;
+    const raw_placement = if (value.object.get("placement")) |placement| pointPair(placement) orelse return false else null;
+    const raw_measure: ?sketch_mod.DimensionMeasure = if (value.object.get("measure")) |measure| blk: {
+        if (measure != .string) return false;
+        break :blk std.meta.stringToEnum(sketch_mod.DimensionMeasure, measure.string) orelse return false;
+    } else null;
     const raw_mode: sketch_mod.ConstraintMode = if (!flag(value.object.get("enabled"), true))
         .disabled
     else if (!flag(value.object.get("driving"), true))
         .reference
     else
         .driving;
-    return raw_b == constraint.b and raw_c == constraint.c and raw_value == constraint.value and raw_mode == constraint.mode;
+    return raw_b == constraint.b and raw_c == constraint.c and raw_value == constraint.value and
+        std.meta.eql(raw_placement, constraint.placement) and raw_measure == constraint.measure and raw_mode == constraint.mode;
 }
 
 /// Return true only when `sketch` is an exact, lossless interpretation of the
@@ -167,6 +173,11 @@ pub fn parse(alloc: std.mem.Allocator, v: ?std.json.Value) ?sketch_mod.Sketch {
                 .b = if (item.object.get("b")) |b| id(b) orelse return null else null,
                 .c = if (item.object.get("c")) |c| id(c) orelse return null else null,
                 .value = if (item.object.get("value")) |n| number(n) orelse return null else null,
+                .placement = if (item.object.get("placement")) |placement| pointPair(placement) orelse return null else null,
+                .measure = if (item.object.get("measure")) |measure| blk: {
+                    if (measure != .string) return null;
+                    break :blk std.meta.stringToEnum(sketch_mod.DimensionMeasure, measure.string) orelse return null;
+                } else null,
                 .mode = if (!flag(item.object.get("enabled"), true))
                     .disabled
                 else if (!flag(item.object.get("driving"), true))
@@ -212,6 +223,8 @@ pub fn write(w: *std.Io.Writer, sketch: sketch_mod.Sketch) std.Io.Writer.Error!v
         if (constraint.b) |b| try w.print(",\"b\":{d}", .{b});
         if (constraint.c) |c| try w.print(",\"c\":{d}", .{c});
         if (constraint.value) |dimension| try w.print(",\"value\":{d}", .{dimension});
+        if (constraint.placement) |placement| try w.print(",\"placement\":[{d},{d}]", .{ placement[0], placement[1] });
+        if (constraint.measure) |measure| try w.print(",\"measure\":\"{s}\"", .{@tagName(measure)});
         if (constraint.mode == .reference) try w.writeAll(",\"driving\":false");
         if (constraint.mode == .disabled) try w.writeAll(",\"enabled\":false");
         try w.writeAll("}");
@@ -287,4 +300,28 @@ test "collinear line constraints round trip through the sketch sidecar" {
     defer encoded.deinit();
     try write(&encoded.writer, sketch);
     try std.testing.expect(std.mem.indexOf(u8, encoded.written(), "\"kind\":\"collinear\"") != null);
+}
+
+test "placed smart dimensions round trip through the sketch sidecar" {
+    const alloc = std.testing.allocator;
+    const source =
+        "{\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":10,\"y\":0}," ++
+        "{\"id\":3,\"x\":0,\"y\":5},{\"id\":4,\"x\":10,\"y\":5}]," ++
+        "\"curves\":[{\"id\":11,\"kind\":\"line\",\"a\":1,\"b\":2},{\"id\":12,\"kind\":\"arc\",\"a\":3,\"b\":4,\"mid\":[5,2]}]," ++
+        "\"constraints\":[{\"id\":21,\"kind\":\"tangent_distance\",\"a\":11,\"b\":12,\"value\":5,\"placement\":[5,7],\"measure\":\"near\"}]}";
+    var tree = try std.json.parseFromSlice(std.json.Value, alloc, source, .{});
+    defer tree.deinit();
+    const sketch = parse(alloc, tree.value) orelse return error.TestUnexpectedResult;
+    defer alloc.free(sketch.points);
+    defer alloc.free(sketch.curves);
+    defer alloc.free(sketch.constraints);
+    try std.testing.expectEqual(sketch_mod.ConstraintKind.tangent_distance, sketch.constraints[0].kind);
+    try std.testing.expectEqualDeep(@as(?[2]f64, .{ 5, 7 }), sketch.constraints[0].placement);
+    try std.testing.expectEqual(sketch_mod.DimensionMeasure.near, sketch.constraints[0].measure.?);
+
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    defer encoded.deinit();
+    try write(&encoded.writer, sketch);
+    try std.testing.expect(std.mem.indexOf(u8, encoded.written(), "\"placement\":[5,7]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded.written(), "\"measure\":\"near\"") != null);
 }

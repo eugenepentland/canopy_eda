@@ -241,6 +241,8 @@ fn writeSketch(writer: *std.Io.Writer, sketch: shape_sketch.Sketch) json_writer.
         if (constraint.b) |b| try writer.print(",\"b\":{d}", .{b});
         if (constraint.c) |c| try writer.print(",\"c\":{d}", .{c});
         if (constraint.value) |value| try writer.print(",\"value\":{d}", .{value});
+        if (constraint.placement) |placement| try writer.print(",\"placement\":[{d},{d}]", .{ placement[0], placement[1] });
+        if (constraint.measure) |measure| try writer.print(",\"measure\":\"{s}\"", .{@tagName(measure)});
         try writer.print(",\"mode\":\"{s}\"}}", .{@tagName(constraint.mode)});
     }
     try writer.writeAll("]}");
@@ -361,13 +363,14 @@ test "closed sketch extrusion round trips and open extrusion is rejected" {
     const source =
         "{\"schema\":\"netlisp-mechanical-v2\",\"sketches\":[{\"id\":\"sketch-1\",\"name\":\"Floor\",\"plane\":\"xz\",\"plane_z\":4,\"geometry\":{" ++
         "\"version\":1,\"points\":[{\"id\":1,\"x\":-20,\"y\":-15},{\"id\":2,\"x\":20,\"y\":-15},{\"id\":3,\"x\":20,\"y\":15},{\"id\":4,\"x\":-20,\"y\":15}]," ++
-        "\"curves\":[{\"id\":11,\"kind\":\"line\",\"a\":1,\"b\":2},{\"id\":12,\"kind\":\"line\",\"a\":2,\"b\":3},{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4},{\"id\":14,\"kind\":\"line\",\"a\":4,\"b\":1}],\"constraints\":[{\"id\":21,\"kind\":\"horizontal\",\"a\":11,\"mode\":\"driving\"}]}}]," ++
+        "\"curves\":[{\"id\":11,\"kind\":\"line\",\"a\":1,\"b\":2},{\"id\":12,\"kind\":\"line\",\"a\":2,\"b\":3},{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4},{\"id\":14,\"kind\":\"line\",\"a\":4,\"b\":1}],\"constraints\":[{\"id\":21,\"kind\":\"horizontal\",\"a\":11,\"mode\":\"driving\"},{\"id\":22,\"kind\":\"offset\",\"a\":11,\"b\":13,\"value\":30,\"placement\":[0,18],\"mode\":\"driving\"}]}}]," ++
         "\"extrusions\":[{\"id\":\"extrude-1\",\"name\":\"Floor\",\"sketch\":\"sketch-1\",\"distance\":2}]}";
     var parsed = try parse(std.testing.allocator, source);
     defer parsed.deinit();
     try std.testing.expectEqual(@as(f64, 2), parsed.value.extrusions[0].distance);
     try std.testing.expectEqual(SketchPlane.xz, parsed.value.sketches[0].plane);
     try std.testing.expectEqual(@as(f64, 4), parsed.value.sketches[0].plane_z);
+    try std.testing.expectEqualDeep(@as(?[2]f64, .{ 0, 18 }), parsed.value.sketches[0].geometry.constraints[1].placement);
     var encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer encoded.deinit();
     try write(&encoded.writer, parsed.value);
@@ -375,6 +378,7 @@ test "closed sketch extrusion round trips and open extrusion is rejected" {
     defer round_trip.deinit();
     try std.testing.expectEqualStrings("sketch-1", round_trip.value.extrusions[0].sketch);
     try std.testing.expectEqual(SketchPlane.xz, round_trip.value.sketches[0].plane);
+    try std.testing.expect(std.mem.indexOf(u8, encoded.written(), "\"placement\":[0,18]") != null);
 
     const open =
         "{\"schema\":\"netlisp-mechanical-v2\",\"sketches\":[{\"id\":\"open\",\"name\":\"Open\",\"geometry\":{" ++

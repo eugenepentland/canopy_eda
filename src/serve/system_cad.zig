@@ -331,7 +331,7 @@ pub fn page(
             "<div class=\"sp-group\"><span>Modify</span><button data-action=\"arc\">Arc</button><button data-action=\"line\">Line</button><button data-action=\"fillet\">Fillet</button><button data-action=\"remove-fillet\">Remove fillet</button><button data-action=\"chamfer\">Chamfer</button><button data-action=\"offset\">Offset</button><button data-action=\"mirror-x\">Mirror X</button><button data-action=\"mirror-y\">Mirror Y</button><button data-action=\"delete\">Delete</button></div>" ++
             "<button class=\"sp-finish sp-repair\" data-action=\"close-profile\">Close profile</button><button class=\"sp-finish sp-extrude\" data-action=\"extrude\">Extrude sketch…</button><button class=\"sp-finish\" data-action=\"finish\">Finish sketch</button></div>" ++
             "<div id=\"sketch-dimensions\" class=\"sketch-dimensions\" aria-live=\"polite\"></div>" ++
-            "<form id=\"sketch-dimension-popover\" class=\"sketch-dimension-popover\" role=\"dialog\" aria-labelledby=\"sketch-dimension-title\" hidden><strong id=\"sketch-dimension-title\">Dimension</strong><label><span>Value</span><span class=\"dimension-value-field\"><input id=\"sketch-dimension-value\" type=\"number\" min=\"0\" step=\"any\" required><i>mm</i></span></label><p id=\"sketch-dimension-error\" hidden></p><div><button type=\"button\" data-dimension-cancel>Cancel</button><button type=\"submit\" class=\"primary\">Apply</button></div></form>" ++
+            "<form id=\"sketch-dimension-popover\" class=\"sketch-dimension-popover\" role=\"dialog\" aria-labelledby=\"sketch-dimension-title\" hidden><strong id=\"sketch-dimension-title\">Dimension</strong><label id=\"sketch-dimension-type-row\" hidden><span>Type</span><select id=\"sketch-dimension-type\"></select></label><label><span>Value</span><span class=\"dimension-value-field\"><input id=\"sketch-dimension-value\" type=\"number\" min=\"0\" step=\"any\" required><i id=\"sketch-dimension-unit\">mm</i></span></label><p id=\"sketch-dimension-error\" hidden></p><div><button type=\"button\" data-dimension-cancel>Cancel</button><button type=\"submit\" class=\"primary\">Apply</button></div></form>" ++
             "<div id=\"thermal-probe\" hidden></div><div id=\"empty\"></div><div id=\"drag-help\">Drag boards or fans · drag empty space to pan · scroll to zoom</div><div id=\"legend\"><span class=\"thermal-key\" id=\"legend-min\">25 °C</span><i class=\"thermal-key ramp\"></i><span class=\"thermal-key\" id=\"legend-max\">125 °C</span><span class=\"thermal-key\"><i class=\"sink\"></i>Bottom sink</span><span class=\"thermal-key\"><i class=\"fan\"></i>Fan outlet</span><span class=\"cad-key\" hidden><i class=\"solid\"></i>Authored solid</span><span class=\"cad-key\" hidden><i class=\"sketch\"></i>Sketch</span><span class=\"cad-key\" hidden><i class=\"cool\"></i>PCB reference</span></div></div></main>" ++
             "<script>window.CAD_DATA={\"system\":",
     );
@@ -762,6 +762,18 @@ test "system CAD validates and serializes repeated assembly instances" {
     try writeAssembly(&output.writer, assembly);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"pitch_mm\":22") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"black-canyon-left-2\"") != null);
+}
+
+// spec: system-review - the system CAD dimension tool selects geometry before placement, previews the inferred measurement, persists its canvas position, and supports line length, arc radius or diameter, point alignment, line angle or offset, and tangent-aware arc distances for later editing
+test "system CAD uses a placed geometry-aware dimension tool" {
+    const browser = @embedFile("assets/system_cad.js");
+    const kernel = @embedFile("assets/shape_sketch.js");
+    try std.testing.expect(std.mem.indexOf(u8, browser, "function dimensionPointerDown(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, browser, "function drawDimensionPreview(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, browser, "placement: pending.placement") != null);
+    try std.testing.expect(std.mem.indexOf(u8, kernel, "angle_between") != null);
+    try std.testing.expect(std.mem.indexOf(u8, kernel, "tangent_distance") != null);
+    try std.testing.expect(std.mem.indexOf(u8, kernel, "inferDimension:inferDimension") != null);
 }
 
 test "system CAD serializes saved top fan and bottom stepped heatsink" {

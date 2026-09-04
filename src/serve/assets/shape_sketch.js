@@ -13,7 +13,7 @@
   "use strict";
 
   var VERSION = 1, SAG = 0.01, TAU = Math.PI * 2;
-  var DIM_KINDS = {distance_x:1,distance_y:1,distance:1,length:1,angle:1,radius:1,diameter:1};
+  var DIM_KINDS = {distance_x:1,distance_y:1,distance:1,length:1,angle:1,angle_between:1,offset:1,tangent_distance:1,radius:1,diameter:1};
 
   function cp(v) { return JSON.parse(JSON.stringify(v)); }
   function finite(v) { return typeof v === "number" && isFinite(v); }
@@ -143,6 +143,18 @@
   function writeVars(vars,x){vars.forEach(function(v,i){if(v.kind==="px")v.e.x=x[i];else if(v.kind==="py")v.e.y=x[i];else if(v.kind==="mx")v.e.mid[0]=x[i];else v.e.mid[1]=x[i];});}
   function entityLength(s,id){var c=curve(s,id);if(!c)return NaN;if(c.kind==="line")return dist(point(s,c.a),point(s,c.b));var g=arcCircle(s,c);return g?g.r:NaN;}
   function pointLineResidual(p,a,b){var dx=b.x-a.x,dy=b.y-a.y,l=Math.hypot(dx,dy)||1;return ((p.x-a.x)*dy-(p.y-a.y)*dx)/l;}
+  function angleBetweenValue(s,q){var ca=curve(s,q.a),cb=q.b!=null?curve(s,q.b):null,da=ca&&lineDir(s,ca),db=cb&&lineDir(s,cb);if(!da||!db)return NaN;
+    var acute=Math.acos(Math.max(-1,Math.min(1,Math.abs(da.x*db.x+da.y*db.y))))*180/Math.PI;return +q.value>90?180-acute:acute;}
+  function placedAngleBetween(s,ca,cb,placement){var aa=point(s,ca.a),ab=point(s,ca.b),ba=point(s,cb.a),bb=point(s,cb.b),origin=lineIntersection(aa,ab,ba,bb),da=lineDir(s,ca),db=lineDir(s,cb);if(!origin||!da||!db||!placement)return NaN;
+    var vx=placement.x-origin.x,vy=placement.y-origin.y;if(da.x*vx+da.y*vy<0)da={x:-da.x,y:-da.y};if(db.x*vx+db.y*vy<0)db={x:-db.x,y:-db.y};return Math.acos(Math.max(-1,Math.min(1,da.x*db.x+da.y*db.y)))*180/Math.PI;}
+  function offsetValue(s,q){var line=curve(s,q.a),la=line&&point(s,line.a),lb=line&&point(s,line.b),p=point(s,q.b),other=curve(s,q.b);if(!line||line.kind!=="line"||!la||!lb)return NaN;
+    if(p)return Math.abs(pointLineResidual(p,la,lb));if(other&&other.kind==="line")return (Math.abs(pointLineResidual(point(s,other.a),la,lb))+Math.abs(pointLineResidual(point(s,other.b),la,lb)))/2;return NaN;}
+  function tangentDistanceValue(s,q){var ca=curve(s,q.a),cb=q.b!=null?curve(s,q.b):null,pa=point(s,q.a),pb=q.b!=null?point(s,q.b):null,arc=ca&&ca.kind==="arc"?ca:cb&&cb.kind==="arc"?cb:null;if(!arc)return NaN;
+    var g=arcCircle(s,arc),other=arc===ca?cb:ca,p=arc===ca?pb:pa,d,r2=0;if(!g)return NaN;
+    if(other&&other.kind==="line"){var oa=point(s,other.a),ob=point(s,other.b);d=Math.abs(pointLineResidual({x:g.cx,y:g.cy},oa,ob));}
+    else if(other&&other.kind==="arc"){var og=arcCircle(s,other);if(!og)return NaN;d=Math.hypot(g.cx-og.cx,g.cy-og.cy);r2=og.r;}
+    else if(p)d=Math.hypot(g.cx-p.x,g.cy-p.y);else return NaN;
+    if(q.measure==="center")return d;if(q.measure==="far")return d+g.r+r2;return Math.abs(d-g.r-r2);}
 
   function residuals(s,fixed,targets) {
     var out=[];
@@ -152,12 +164,15 @@
       if(q.kind==="horizontal"&&ca){a=point(s,ca.a);b=point(s,ca.b);add(b.y-a.y);}
       else if(q.kind==="vertical"&&ca){a=point(s,ca.a);b=point(s,ca.b);add(b.x-a.x);}
       else if(q.kind==="coincident"&&a&&b){add(b.x-a.x);add(b.y-a.y);}
-      else if(q.kind==="distance_x"&&a&&b&&finite(v))add((b.x-a.x)-v);
-      else if(q.kind==="distance_y"&&a&&b&&finite(v))add((b.y-a.y)-v);
+      else if(q.kind==="distance_x"&&a&&b&&finite(v))add(Math.abs(b.x-a.x)-v);
+      else if(q.kind==="distance_y"&&a&&b&&finite(v))add(Math.abs(b.y-a.y)-v);
       else if(q.kind==="distance"&&a&&b&&finite(v))add(dist(a,b)-v);
       else if(q.kind==="length"&&ca&&finite(v))add(entityLength(s,ca.id)-v);
       else if((q.kind==="radius"||q.kind==="diameter")&&ca&&finite(v)){var ag=arcCircle(s,ca);if(ag)add(ag.r-(q.kind==="diameter"?v/2:v));}
       else if(q.kind==="angle"&&ca&&finite(v)){var d=lineDir(s,ca);if(d)add(wrapAngle(Math.atan2(d.y,d.x)-v*Math.PI/180));}
+      else if(q.kind==="angle_between"&&ca&&cb&&finite(v)){var ad=lineDir(s,ca),bd=lineDir(s,cb);if(ad&&bd){var current=Math.acos(Math.max(-1,Math.min(1,Math.abs(ad.x*bd.x+ad.y*bd.y)))),target=Math.min(v,180-v)*Math.PI/180;add(current-target);}}
+      else if(q.kind==="offset"&&ca&&finite(v)){var op=point(s,q.b),oc=curve(s,q.b),oa=point(s,ca.a),ob=point(s,ca.b);if(op)add(Math.abs(pointLineResidual(op,oa,ob))-v);else if(oc&&oc.kind==="line"){add(Math.abs(pointLineResidual(point(s,oc.a),oa,ob))-v);add(Math.abs(pointLineResidual(point(s,oc.b),oa,ob))-v);}}
+      else if(q.kind==="tangent_distance"&&finite(v))add(tangentDistanceValue(s,q)-v);
       else if(q.kind==="collinear"&&ca&&cb&&ca.kind==="line"&&cb.kind==="line"){var cla=point(s,ca.a),clb=point(s,ca.b),clda=lineDir(s,ca),cldb=lineDir(s,cb);if(clda&&cldb){add(pointLineResidual(point(s,cb.a),cla,clb));add(pointLineResidual(point(s,cb.b),cla,clb));}}
       else if((q.kind==="parallel"||q.kind==="perpendicular")&&ca&&cb){var da=lineDir(s,ca),db=lineDir(s,cb);if(da&&db)add(q.kind==="parallel"?da.x*db.y-da.y*db.x:da.x*db.x+da.y*db.y);}
       else if(q.kind==="equal"&&ca&&cb)add(entityLength(s,ca.id)-entityLength(s,cb.id));
@@ -204,8 +219,9 @@
     return {ok:!conflict,conflict:conflict,dof:dof,residual:residual,iterations:it};
   }
 
-  function addConstraint(s,kind,a,b,value,c) {
+  function addConstraint(s,kind,a,b,value,c,options) {
     var q={id:nextId(s),kind:kind,a:a,driving:true,enabled:true};if(b!=null)q.b=b;if(value!=null)q.value=+value;if(c!=null)q.c=c;
+    if(options&&options.placement)q.placement=[+options.placement[0],+options.placement[1]];if(options&&options.measure)q.measure=options.measure;
     s.constraints=s.constraints||[];s.constraints.push(q);var result=solve(s);if(result.conflict){s.constraints.pop();return null;}return q;
   }
   function removeConstraint(s,id){s.constraints=(s.constraints||[]).filter(function(q){return q.id!==id;});return solve(s);}
@@ -261,8 +277,8 @@
   // that point and leaves loose endpoints. It never invents a healing segment.
   function deletePoint(s,pid){if(!point(s,pid))return false;var hit=physicalCurves(s).filter(function(c){return c.a===pid||c.b===pid;});if(!hit.length)return false;
     dropEntities(s,[pid],hit.map(function(c){return c.id;}));return true;}
-  function toArc(s,cid,mid){var c=curve(s,cid);if(!c||c.construction)return false;c.kind="arc";c.mid=[+mid[0],+mid[1]];return !!arcCircle(s,c);}
-  function toLine(s,cid){var c=curve(s,cid);if(!c)return false;c.kind="line";delete c.mid;s.constraints=(s.constraints||[]).filter(function(q){return !((q.kind==="radius"||q.kind==="diameter")&&q.a===cid);});return true;}
+  function toArc(s,cid,mid){var c=curve(s,cid);if(!c||c.construction)return false;c.kind="arc";c.mid=[+mid[0],+mid[1]];s.constraints=(s.constraints||[]).filter(function(q){return !((q.a===cid||q.b===cid)&&(q.kind==="length"||q.kind==="angle"||q.kind==="angle_between"||q.kind==="offset"));});return !!arcCircle(s,c);}
+  function toLine(s,cid){var c=curve(s,cid);if(!c)return false;c.kind="line";delete c.mid;s.constraints=(s.constraints||[]).filter(function(q){return !((q.a===cid||q.b===cid)&&(q.kind==="radius"||q.kind==="diameter"||q.kind==="tangent_distance"));});return true;}
   function cornerCurves(s,pid){var pcs=physicalCurves(s),prev=null,next=null;pcs.forEach(function(c){if(c.b===pid)prev=c;if(c.a===pid)next=c;});return prev&&next?{prev:prev,next:next}:null;}
   function splitCorner(s,pid,radius,chamfer){var pair=cornerCurves(s,pid);if(!pair||pair.prev.kind!=="line"||pair.next.kind!=="line")return false;
     var a=point(s,pair.prev.a),b=point(s,pid),c=point(s,pair.next.b),f;
@@ -335,11 +351,18 @@
   function mirror(s,axis,coordinate){if(axis!=="x"&&axis!=="y")return false;s.points.forEach(function(p){if(axis==="x")p.x=2*coordinate-p.x;else p.y=2*coordinate-p.y;});
     s.curves.forEach(function(c){if(c.mid){if(axis==="x")c.mid[0]=2*coordinate-c.mid[0];else c.mid[1]=2*coordinate-c.mid[1];}});return true;}
   function dimensionValue(s,q){var a=point(s,q.a),b=q.b!=null?point(s,q.b):null,c=curve(s,q.a);
-    if(q.kind==="distance_x"&&a&&b)return b.x-a.x;if(q.kind==="distance_y"&&a&&b)return b.y-a.y;if(q.kind==="distance"&&a&&b)return dist(a,b);
+    if(q.kind==="distance_x"&&a&&b)return Math.abs(b.x-a.x);if(q.kind==="distance_y"&&a&&b)return Math.abs(b.y-a.y);if(q.kind==="distance"&&a&&b)return dist(a,b);
     if(q.kind==="length"&&c)return c.kind==="line"?dist(point(s,c.a),point(s,c.b)):NaN;if((q.kind==="radius"||q.kind==="diameter")&&c){var g=arcCircle(s,c);return g?g.r*(q.kind==="diameter"?2:1):NaN;}
-    if(q.kind==="angle"&&c){var d=lineDir(s,c);return d?Math.atan2(d.y,d.x)*180/Math.PI:NaN;}return +q.value;}
+    if(q.kind==="angle"&&c){var d=lineDir(s,c);return d?Math.atan2(d.y,d.x)*180/Math.PI:NaN;}if(q.kind==="angle_between")return angleBetweenValue(s,q);if(q.kind==="offset")return offsetValue(s,q);if(q.kind==="tangent_distance")return tangentDistanceValue(s,q);return +q.value;}
+  function inferDimension(s,selections,placement){selections=selections||[];var first=selections[0],second=selections[1],a=first&&(first.type==="curve"?curve(s,first.id):point(s,first.id)),b=second&&(second.type==="curve"?curve(s,second.id):point(s,second.id)),q=null;
+    if(!a)return null;if(!b){if(first.type!=="curve")return null;q={kind:a.kind==="arc"?"radius":"length",a:a.id};}
+    else if(first.type==="point"&&second.type==="point"){var pa=a,pb=b,mx=(pa.x+pb.x)/2,my=(pa.y+pb.y)/2,ox=(placement?placement.x:mx)-mx,oy=(placement?placement.y:my)-my;q={kind:Math.abs(oy)>Math.abs(ox)*1.5?"distance_x":Math.abs(ox)>Math.abs(oy)*1.5?"distance_y":"distance",a:pa.id,b:pb.id};}
+    else if(first.type==="curve"&&second.type==="curve"&&a.kind==="line"&&b.kind==="line"){var da=lineDir(s,a),db=lineDir(s,b);q={kind:da&&db&&Math.abs(da.x*db.y-da.y*db.x)<.02?"offset":"angle_between",a:a.id,b:b.id};}
+    else if((first.type==="curve"&&a.kind==="line"&&second.type==="point")||(second.type==="curve"&&b.kind==="line"&&first.type==="point")){q={kind:"offset",a:first.type==="curve"?a.id:b.id,b:first.type==="point"?a.id:b.id};}
+    else {var hasArc=first.type==="curve"&&a.kind==="arc"||second.type==="curve"&&b.kind==="arc";if(hasArc)q={kind:"tangent_distance",a:a.id,b:b.id,measure:"near"};}
+    if(!q)return null;if(q.kind==="angle_between")q.value=placedAngleBetween(s,a,b,placement);if(placement)q.placement=[placement.x,placement.y];q.value=dimensionValue(s,q);return finite(q.value)?q:null;}
   function annotations(s){var out=[];(s.constraints||[]).forEach(function(q){if(!DIM_KINDS[q.kind])return;var c=curve(s,q.a),a=point(s,q.a),b=q.b!=null?point(s,q.b):null,x=0,y=0;
-      if(c){var p=point(s,c.a),z=point(s,c.b);x=(p.x+z.x)/2;y=(p.y+z.y)/2;}else if(a&&b){x=(a.x+b.x)/2;y=(a.y+b.y)/2;}else return;
+      if(q.placement&&finite(+q.placement[0])&&finite(+q.placement[1])){x=+q.placement[0];y=+q.placement[1];}else if(c){var p=point(s,c.a),z=point(s,c.b);x=(p.x+z.x)/2;y=(p.y+z.y)/2;}else if(a&&b){x=(a.x+b.x)/2;y=(a.y+b.y)/2;}else return;
       out.push({id:q.id,x:x,y:y,kind:q.kind,value:dimensionValue(s,q),driving:q.driving!==false});});return out;}
   function state(s){var copy=cp(s),result=solve(copy,{iterations:1});return result;}
 
@@ -347,5 +370,5 @@
     point:point,curve:curve,physicalCurves:physicalCurves,physicalPoints:physicalPoints,nextId:nextId,arcCircle:arcCircle,
     solve:solve,state:state,addConstraint:addConstraint,removeConstraint:removeConstraint,pointDragAxis:pointDragAxis,pointDragTarget:pointDragTarget,movePoint:movePoint,moveCurve:moveCurve,moveGeometry:moveGeometry,
     insertPoint:insertPoint,deletePoint:deletePoint,deleteSegment:deleteSegment,addLinePath:addLinePath,closeProfile:closeProfile,canCloseProfile:canCloseProfile,closingEndpointTarget:closingEndpointTarget,closeByMergingEndpoints:closeByMergingEndpoints,toArc:toArc,toLine:toLine,filletPoint:filletPoint,chamferPoint:chamferPoint,removeFillet:removeFillet,snapLinePoint:snapLinePoint,
-    offset:offset,mirror:mirror,annotations:annotations,dimensionValue:dimensionValue};
+    offset:offset,mirror:mirror,annotations:annotations,dimensionValue:dimensionValue,inferDimension:inferDimension};
 });
