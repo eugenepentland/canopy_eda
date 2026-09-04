@@ -23,11 +23,19 @@ const BoardPose = struct {
     rotation: f64 = 0,
 };
 
-/// One XY work-plane sketch. Geometry remains authored even while open; only
-/// a closed sketch may be referenced by an extrusion.
+/// Principal origin planes use local sketch X/Y coordinates and a right-handed
+/// outward normal. XZ therefore extrudes toward -Y, matching X cross Z.
+const SketchPlane = enum { xy, xz, yz };
+
+/// One principal-plane sketch. Geometry remains authored even while open;
+/// only a closed sketch may be referenced by an extrusion.
 const ProfileSketch = struct {
     id: []const u8,
     name: []const u8,
+    plane: SketchPlane = .xy,
+    /// Coordinate on the axis normal to the selected plane. The legacy field
+    /// name remains source-compatible with documents written by the first v2
+    /// workspace.
     plane_z: f64 = 0,
     geometry: shape_sketch.Sketch,
 };
@@ -136,13 +144,15 @@ pub fn validate(allocator: std.mem.Allocator, document: Document) ParseError!voi
         if (!safeId(extrusion.id) or extrusion.name.len == 0 or extrusion.name.len > 128) return error.InvalidDocument;
         if (!finiteBetween(extrusion.distance, 0.01, 10_000)) return error.InvalidDocument;
         const sketch_i = sketchIndex(document, extrusion.sketch) orelse return error.InvalidDocument;
-        const compiled = shape_sketch.compile(allocator, document.sketches[sketch_i].geometry, shape_sketch.default_sagitta_mm) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidDocument,
-        };
-        allocator.free(compiled.pts);
-        allocator.free(compiled.poly);
-        allocator.free(compiled.arcs);
+        if (extrusion.enabled) {
+            const compiled = shape_sketch.compile(allocator, document.sketches[sketch_i].geometry, shape_sketch.default_sagitta_mm) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidDocument,
+            };
+            allocator.free(compiled.pts);
+            allocator.free(compiled.poly);
+            allocator.free(compiled.arcs);
+        }
         for (document.extrusions[0..index]) |prior| if (std.mem.eql(u8, prior.id, extrusion.id)) return error.InvalidDocument;
     }
 }
@@ -217,7 +227,7 @@ pub fn write(writer: *std.Io.Writer, document: Document) json_writer.WriteError!
         try json_writer.writeString(writer, sketch.id);
         try writer.writeAll(",\"name\":");
         try json_writer.writeString(writer, sketch.name);
-        try writer.print(",\"plane_z\":{d},\"geometry\":", .{sketch.plane_z});
+        try writer.print(",\"plane\":\"{s}\",\"plane_z\":{d},\"geometry\":", .{ @tagName(sketch.plane), sketch.plane_z });
         try writeSketch(writer, sketch.geometry);
         try writer.writeByte('}');
     }
@@ -248,25 +258,34 @@ test "blank mechanical document is valid and canonical" {
 
 test "closed sketch extrusion round trips and open extrusion is rejected" {
     const source =
-        "{\"schema\":\"netlisp-mechanical-v2\",\"sketches\":[{\"id\":\"sketch-1\",\"name\":\"Floor\",\"geometry\":{" ++
+        "{\"schema\":\"netlisp-mechanical-v2\",\"sketches\":[{\"id\":\"sketch-1\",\"name\":\"Floor\",\"plane\":\"xz\",\"plane_z\":4,\"geometry\":{" ++
         "\"version\":1,\"points\":[{\"id\":1,\"x\":-20,\"y\":-15},{\"id\":2,\"x\":20,\"y\":-15},{\"id\":3,\"x\":20,\"y\":15},{\"id\":4,\"x\":-20,\"y\":15}]," ++
         "\"curves\":[{\"id\":11,\"kind\":\"line\",\"a\":1,\"b\":2},{\"id\":12,\"kind\":\"line\",\"a\":2,\"b\":3},{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4},{\"id\":14,\"kind\":\"line\",\"a\":4,\"b\":1}],\"constraints\":[{\"id\":21,\"kind\":\"horizontal\",\"a\":11,\"mode\":\"driving\"}]}}]," ++
         "\"extrusions\":[{\"id\":\"extrude-1\",\"name\":\"Floor\",\"sketch\":\"sketch-1\",\"distance\":2}]}";
     var parsed = try parse(std.testing.allocator, source);
     defer parsed.deinit();
     try std.testing.expectEqual(@as(f64, 2), parsed.value.extrusions[0].distance);
+    try std.testing.expectEqual(SketchPlane.xz, parsed.value.sketches[0].plane);
+    try std.testing.expectEqual(@as(f64, 4), parsed.value.sketches[0].plane_z);
     var encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer encoded.deinit();
     try write(&encoded.writer, parsed.value);
     var round_trip = try parse(std.testing.allocator, encoded.written());
     defer round_trip.deinit();
     try std.testing.expectEqualStrings("sketch-1", round_trip.value.extrusions[0].sketch);
+    try std.testing.expectEqual(SketchPlane.xz, round_trip.value.sketches[0].plane);
 
     const open =
         "{\"schema\":\"netlisp-mechanical-v2\",\"sketches\":[{\"id\":\"open\",\"name\":\"Open\",\"geometry\":{" ++
         "\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":10,\"y\":0}],\"curves\":[{\"id\":3,\"kind\":\"line\",\"a\":1,\"b\":2}],\"constraints\":[]}}]," ++
         "\"extrusions\":[{\"id\":\"bad\",\"name\":\"Bad\",\"sketch\":\"open\",\"distance\":2}]}";
     try std.testing.expectError(error.InvalidDocument, parse(std.testing.allocator, open));
+    const disabled_open =
+        "{\"schema\":\"netlisp-mechanical-v2\",\"sketches\":[{\"id\":\"open\",\"name\":\"Open\",\"plane\":\"yz\",\"geometry\":{" ++
+        "\"version\":1,\"points\":[{\"id\":1,\"x\":0,\"y\":0},{\"id\":2,\"x\":10,\"y\":0}],\"curves\":[{\"id\":3,\"kind\":\"line\",\"a\":1,\"b\":2}],\"constraints\":[]}}]," ++
+        "\"extrusions\":[{\"id\":\"paused\",\"name\":\"Paused\",\"sketch\":\"open\",\"distance\":2,\"enabled\":false}]}";
+    var disabled = try parse(std.testing.allocator, disabled_open);
+    disabled.deinit();
 
     const malformed_draft =
         "{\"schema\":\"netlisp-mechanical-v2\",\"sketches\":[{\"id\":\"bad-draft\",\"name\":\"Bad draft\",\"geometry\":{" ++

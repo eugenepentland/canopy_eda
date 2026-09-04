@@ -170,7 +170,14 @@
     return value && Array.isArray(value.extrusions) ? value.extrusions.filter(function (extrusion) { return extrusion && extrusion.enabled !== false; }).length : 0;
   }
 
-  var API = { rotatedBounds: rotatedBounds, overlapFraction: overlapFraction, totalBoardPower: totalBoardPower, boundedWheelStep: boundedWheelStep, rampColor: rampColor, fieldScenario: fieldScenario, fieldTemperatureAt: fieldTemperatureAt, solveSystem: solveSystem, enabledExtrusionCount: enabledExtrusionCount };
+  function sketchWorldPoint(plane, offset, u, v, normal) {
+    offset = finite(offset, 0); normal = finite(normal, 0);
+    if (plane === "xz") return [u, offset - normal, v];
+    if (plane === "yz") return [offset + normal, u, v];
+    return [u, v, offset + normal];
+  }
+
+  var API = { rotatedBounds: rotatedBounds, overlapFraction: overlapFraction, totalBoardPower: totalBoardPower, boundedWheelStep: boundedWheelStep, rampColor: rampColor, fieldScenario: fieldScenario, fieldTemperatureAt: fieldTemperatureAt, solveSystem: solveSystem, enabledExtrusionCount: enabledExtrusionCount, sketchWorldPoint: sketchWorldPoint };
   if (typeof module !== "undefined" && module.exports) module.exports = API;
   root.SystemThermal = API;
   if (!root.document || !root.CAD_DATA) return;
@@ -213,7 +220,10 @@
   });
   state.sketches = Array.isArray(state.sketches) ? state.sketches : [];
   state.extrusions = Array.isArray(state.extrusions) ? state.extrusions : [];
-  var dirty = !!(saved && saved.version === 2), activeSketchId = null, drawTool = null, linePoints = [], rectangleStart = null;
+  state.sketches.forEach(function (sketch) { sketch.plane = sketch.plane || "xy"; });
+  var dirty = !!(saved && saved.version === 2), activeSketchId = null, selectedPlane = "xy", editMode = false, sketchTool = "select";
+  var sketchSelection = [], linePoints = [], lineCursor = null, rectangleStart = null, rectangleCurrent = null, sketchGesture = null;
+  var undoBySketch = {}, redoBySketch = {}, orthoHalf = 50;
 
   function clone(value) { return JSON.parse(JSON.stringify(value)); }
   function status(message, isError) { var node = $("#save-status"); node.textContent = message || ""; node.className = isError ? "error" : ""; }
@@ -225,6 +235,7 @@
     return prefix + "-" + n;
   }
   function activeSketch() { return state.sketches.find(function (sketch) { return sketch.id === activeSketchId; }) || null; }
+  function sketchPlane(value) { return value === "xz" || value === "yz" ? value : "xy"; }
   function hydrateSketch(geometry) {
     var result = clone(geometry);
     (result.constraints || []).forEach(function (constraint) {
@@ -250,7 +261,7 @@
     return {
       schema: "netlisp-mechanical-v2",
       boards: state.instances.map(function (pose) { return { name: pose.id, enabled: pose.on, x: pose.x, y: pose.y, z: pose.z, rotation: pose.rot }; }),
-      sketches: state.sketches.map(function (sketch) { return { id: sketch.id, name: sketch.name, plane_z: sketch.plane_z, geometry: serializeSketch(sketch.geometry) }; }),
+      sketches: state.sketches.map(function (sketch) { return { id: sketch.id, name: sketch.name, plane: sketchPlane(sketch.plane), plane_z: sketch.plane_z, geometry: serializeSketch(sketch.geometry) }; }),
       extrusions: clone(state.extrusions)
     };
   }
@@ -261,7 +272,7 @@
       if (!stored) return;
       pose.on = stored.enabled !== false; pose.x = finite(stored.x, pose.x); pose.y = finite(stored.y, pose.y); pose.z = finite(stored.z, pose.z); pose.rot = finite(stored.rotation, pose.rot);
     });
-    state.sketches = (documentValue.sketches || []).map(function (sketch) { return { id: sketch.id, name: sketch.name, plane_z: finite(sketch.plane_z, 0), geometry: hydrateSketch(sketch.geometry) }; });
+    state.sketches = (documentValue.sketches || []).map(function (sketch) { return { id: sketch.id, name: sketch.name, plane: sketchPlane(sketch.plane), plane_z: finite(sketch.plane_z, 0), geometry: hydrateSketch(sketch.geometry) }; });
     state.extrusions = clone(documentValue.extrusions || []);
   }
 
@@ -292,17 +303,35 @@
   var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2)); renderer.outputEncoding = THREE.sRGBEncoding;
   var scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(38, 1, 0.1, 5000);
+  var orthoCamera = new THREE.OrthographicCamera(-50, 50, 50, -50, 0.1, 5000), activeCamera = camera;
   camera.up.set(0, 0, 1); camera.position.set(180, -210, 150);
   var controls = new THREE.OrbitControls(camera, canvas); controls.enableDamping = true; controls.dampingFactor = 0.08; controls.target.set(0, 0, 10);
   var wheelGesture = { last: -Infinity, total: 0 };
   scene.add(new THREE.HemisphereLight(0xd8e9ff, 0x182338, 1.25));
   var sun = new THREE.DirectionalLight(0xffffff, 0.85); sun.position.set(-80, -100, 160); scene.add(sun);
   var grid = new THREE.GridHelper(500, 50, 0x35506f, 0x23354d); grid.rotation.x = Math.PI / 2; grid.position.z = -0.02; scene.add(grid);
-  var boardsModel = new THREE.Group(), solidModel = new THREE.Group(), sketchModel = new THREE.Group();
-  scene.add(boardsModel); scene.add(solidModel); scene.add(sketchModel);
+  var boardsModel = new THREE.Group(), solidModel = new THREE.Group(), sketchModel = new THREE.Group(), originModel = new THREE.Group(), editGrid = new THREE.Group();
+  scene.add(boardsModel); scene.add(solidModel); scene.add(sketchModel); scene.add(originModel); scene.add(editGrid);
   var lastBounds = { width: 80, depth: 60 }, thermalResult = null, thermalLoading = true, groupsById = {}, meshSequence = 0;
   var viewMode = "2d", twoView = { centerX: 0, centerY: 0, scale: 1 }, twoDirty = true;
   var thermalFields = {}, fieldPromises = {}, fieldRasters = {}, selected2d = null;
+
+  var PLANE = {
+    xy: { u: new THREE.Vector3(1, 0, 0), v: new THREE.Vector3(0, 1, 0), n: new THREE.Vector3(0, 0, 1), color: 0x4f8cff, label: "XY" },
+    xz: { u: new THREE.Vector3(1, 0, 0), v: new THREE.Vector3(0, 0, 1), n: new THREE.Vector3(0, -1, 0), color: 0x59c878, label: "XZ" },
+    yz: { u: new THREE.Vector3(0, 1, 0), v: new THREE.Vector3(0, 0, 1), n: new THREE.Vector3(1, 0, 0), color: 0xf16b6b, label: "YZ" }
+  };
+  var datumPlanes = [];
+
+  function planeBasis(sketchOrName) { return PLANE[sketchPlane(typeof sketchOrName === "string" ? sketchOrName : sketchOrName && sketchOrName.plane)]; }
+  function localToWorld(sketch, x, y, normal) {
+    var point = sketchWorldPoint(sketchPlane(sketch && sketch.plane), sketch && sketch.plane_z, x, y, normal); return new THREE.Vector3(point[0], point[1], point[2]);
+  }
+  function worldToLocal(sketch, point) {
+    var basis = planeBasis(sketch), origin = localToWorld(sketch, 0, 0, 0), delta = point.clone().sub(origin);
+    return { x: delta.dot(basis.u), y: delta.dot(basis.v) };
+  }
+  function sketchPlane3(sketch) { var basis = planeBasis(sketch), origin = localToWorld(sketch, 0, 0, 0); return new THREE.Plane(basis.n, -basis.n.dot(origin)); }
 
   function material(color, opacity) { return new THREE.MeshStandardMaterial({ color: color, roughness: 0.72, metalness: 0.04, transparent: opacity < 1, opacity: opacity, side: THREE.DoubleSide, depthWrite: opacity > 0.7 }); }
   function box(group, width, depth, height, x, y, z, mat) { var mesh = new THREE.Mesh(new THREE.BoxGeometry(width, depth, height), mat); mesh.position.set(x, y, z); group.add(mesh); return mesh; }
@@ -312,6 +341,30 @@
       object.traverse(function (child) { if (child.geometry) child.geometry.dispose(); if (child.material) (Array.isArray(child.material) ? child.material : [child.material]).forEach(function (mat) { mat.dispose(); }); });
     }
   }
+  function lineObject(points, color, opacity) {
+    return new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: color, transparent: opacity < 1, opacity: opacity, depthTest: opacity >= 1 }));
+  }
+  function buildOriginMarker() {
+    [[new THREE.Vector3(-32, 0, 0), new THREE.Vector3(32, 0, 0), 0xf16b6b], [new THREE.Vector3(0, -32, 0), new THREE.Vector3(0, 32, 0), 0x59c878], [new THREE.Vector3(0, 0, -32), new THREE.Vector3(0, 0, 32), 0x4f8cff]].forEach(function (axis) {
+      var line = lineObject([axis[0], axis[1]], axis[2], 1); line.renderOrder = 8; originModel.add(line);
+    });
+    Object.keys(PLANE).forEach(function (name) {
+      var sketch = { plane: name, plane_z: 0 }, corners = [[-12, -12], [12, -12], [12, 12], [-12, -12], [12, 12], [-12, 12]], positions = [];
+      corners.forEach(function (point) { var world = localToWorld(sketch, point[0], point[1], 0); positions.push(world.x, world.y, world.z); });
+      var geometry = new THREE.BufferGeometry(); geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+      var mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: PLANE[name].color, transparent: true, opacity: 0.11, side: THREE.DoubleSide, depthWrite: false }));
+      mesh.userData.datumPlane = name; mesh.renderOrder = 2; originModel.add(mesh); datumPlanes.push(mesh);
+    });
+    var origin = new THREE.Mesh(new THREE.SphereGeometry(1.3, 16, 12), new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false })); origin.renderOrder = 9; originModel.add(origin);
+  }
+  function selectPlane(name) {
+    if (editMode) return;
+    selectedPlane = sketchPlane(name);
+    datumPlanes.forEach(function (mesh) { var active = mesh.userData.datumPlane === selectedPlane; mesh.material.opacity = active ? 0.34 : 0.11; mesh.material.color.setHex(active ? 0xffcf66 : PLANE[mesh.userData.datumPlane].color); });
+    document.querySelectorAll("#plane-choices [data-plane]").forEach(function (button) { button.classList.toggle("on", button.dataset.plane === selectedPlane); });
+    $("#plane-status").textContent = PLANE[selectedPlane].label + " plane selected · New sketch will use this plane";
+  }
+  buildOriginMarker(); selectPlane("xy");
   function poseFor(id) { return state.instances.find(function (pose) { return pose.id === id; }); }
   function resultFor(id) { return thermalResult && thermalResult.instances.find(function (row) { return row.id === id; }); }
   function temperatureColor(row) { if (!row || row.temperature_c == null) return 0x2f8f70; var rise = row.temperature_c - state.ambient; return rise < 18 ? 0x22a879 : rise < 40 ? 0xe0a93b : 0xdf5b57; }
@@ -486,17 +539,37 @@
     recipe.triangles.forEach(function (triangle) { triangle.forEach(function (index) { var point = recipe.points[index]; positions.push(point[0], point[1], point[2]); }); });
     var geometry = new THREE.BufferGeometry(); geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3)); geometry.computeVertexNormals(); return new THREE.Mesh(geometry, mat);
   }
+  function selectedEntity(type, id) { return sketchSelection.some(function (row) { return row.type === type && row.id === id; }); }
+  function curveLocalPoints(sketch, curve) {
+    var a = OS.point(sketch.geometry, curve.a), b = OS.point(sketch.geometry, curve.b); if (!a || !b) return [];
+    if (curve.kind !== "arc") return [[a.x, a.y], [b.x, b.y]];
+    var arc = OS.arcCircle(sketch.geometry, curve); if (!arc) return [[a.x, a.y], [b.x, b.y]];
+    var count = Math.max(8, Math.min(96, Math.ceil(Math.abs(arc.sweep) * Math.sqrt(Math.max(arc.r, 1)) * 2))), points = [];
+    for (var i = 0; i <= count; i += 1) { var angle = arc.start + arc.sweep * i / count; points.push([arc.cx + arc.r * Math.cos(angle), arc.cy + arc.r * Math.sin(angle)]); }
+    return points;
+  }
+  function previewLine(sketch, points, color) {
+    if (!points || points.length < 2) return;
+    var world = points.map(function (point) { return localToWorld(sketch, point[0], point[1], 0.05); }), line = lineObject(world, color, 0.9); line.renderOrder = 8; sketchModel.add(line);
+  }
   function drawSketches() {
     clearGroup(sketchModel);
     state.sketches.forEach(function (sketch) {
-      var compiled = OS && OS.compile(sketch.geometry), physical = OS ? OS.physicalPoints(sketch.geometry) : [];
-      if (compiled && compiled.points.length) {
-        var linePoints3 = compiled.points.map(function (point) { return new THREE.Vector3(point[0], point[1], sketch.plane_z + 0.03); });
-        var geometry = new THREE.BufferGeometry().setFromPoints(linePoints3), line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: sketch.id === activeSketchId ? 0xffcf66 : 0x76b4e6, depthTest: false }));
-        if (compiled.closed) line = new THREE.LineLoop(geometry, line.material); line.renderOrder = 5; sketchModel.add(line);
-      }
-      physical.forEach(function (point) { var marker = new THREE.Mesh(new THREE.SphereGeometry(0.7, 10, 8), material(sketch.id === activeSketchId ? 0xffcf66 : 0x76b4e6, 1)); marker.position.set(point.x, point.y, sketch.plane_z + 0.06); sketchModel.add(marker); });
+      var active = sketch.id === activeSketchId, color = active ? 0xffcf66 : 0x76b4e6;
+      OS.physicalCurves(sketch.geometry).forEach(function (curve) {
+        var points = curveLocalPoints(sketch, curve).map(function (point) { return localToWorld(sketch, point[0], point[1], 0.04); });
+        var line = lineObject(points, selectedEntity("curve", curve.id) && active ? 0xffffff : color, active ? 1 : 0.75); if (editMode && active) line.material.depthTest = false; line.userData.sketchCurve = curve.id; line.renderOrder = 7; sketchModel.add(line);
+      });
+      OS.physicalPoints(sketch.geometry).forEach(function (point) {
+        var selected = active && selectedEntity("point", point.id), radius = editMode && active ? orthoHalf * 0.012 : 0.7;
+        var marker = new THREE.Mesh(new THREE.SphereGeometry(Math.max(0.35, radius), 12, 9), new THREE.MeshBasicMaterial({ color: selected ? 0xffffff : color, depthTest: false }));
+        marker.position.copy(localToWorld(sketch, point.x, point.y, 0.08)); marker.userData.sketchPoint = point.id; marker.renderOrder = 9; sketchModel.add(marker);
+      });
     });
+    var sketch = activeSketch(); if (!editMode || !sketch) return;
+    if (linePoints.length) { var chain = linePoints.slice(); if (lineCursor) chain.push([lineCursor.x, lineCursor.y]); previewLine(sketch, chain, 0x7ee787); }
+    if (rectangleStart && rectangleCurrent) previewLine(sketch, [[rectangleStart.x, rectangleStart.y], [rectangleCurrent.x, rectangleStart.y], [rectangleCurrent.x, rectangleCurrent.y], [rectangleStart.x, rectangleCurrent.y], [rectangleStart.x, rectangleStart.y]], 0x7ee787);
+    if (sketchGesture && sketchGesture.kind === "marquee" && sketchGesture.current) previewLine(sketch, [[sketchGesture.start.x, sketchGesture.start.y], [sketchGesture.current.x, sketchGesture.start.y], [sketchGesture.current.x, sketchGesture.current.y], [sketchGesture.start.x, sketchGesture.current.y], [sketchGesture.start.x, sketchGesture.start.y]], 0x62a5ff);
   }
   async function rebuildBodies() {
     var sequence = ++meshSequence; clearGroup(solidModel);
@@ -521,10 +594,10 @@
     state.sketches.forEach(function (sketch) {
       var compiled = OS && OS.compile(sketch.geometry), sketchState = OS && OS.state(sketch.geometry), card = document.createElement("div");
       card.className = "feature sketch-card" + (sketch.id === activeSketchId ? " selected" : ""); card.dataset.id = sketch.id;
-      card.innerHTML = '<div class="feature-title"><button class="select-sketch"></button><button class="remove" title="Delete sketch">×</button></div><div class="sketch-fields"><label>Name<input data-key="name"></label><label>Plane Z<input type="number" step="0.5" data-key="plane_z"></label></div><div class="sketch-state"></div><div class="point-grid"></div>';
-      card.querySelector(".select-sketch").textContent = sketch.id === activeSketchId ? "Editing" : "Edit";
-      card.querySelector('[data-key="name"]').value = sketch.name; card.querySelector('[data-key="plane_z"]').value = sketch.plane_z;
-      card.querySelector(".sketch-state").textContent = (compiled && compiled.closed ? "Closed profile" : "Open profile") + " · " + (sketchState ? sketchState.dof + " DOF" : "empty");
+      card.innerHTML = '<div class="feature-title"><button class="select-sketch"></button><button class="remove" title="Delete sketch">×</button></div><div class="sketch-fields"><label>Name<input data-key="name"></label><label>Plane<select data-key="plane"><option value="xy">XY</option><option value="xz">XZ</option><option value="yz">YZ</option></select></label><label>Plane offset<input type="number" step="0.5" data-key="plane_z"></label></div><div class="sketch-state"></div><div class="point-grid"></div>';
+      card.querySelector(".select-sketch").textContent = sketch.id === activeSketchId && editMode ? "Editing" : "Edit";
+      card.querySelector('[data-key="name"]').value = sketch.name; card.querySelector('[data-key="plane"]').value = sketchPlane(sketch.plane); card.querySelector('[data-key="plane_z"]').value = sketch.plane_z;
+      card.querySelector(".sketch-state").textContent = PLANE[sketchPlane(sketch.plane)].label + " · " + (compiled && compiled.closed ? "Closed profile" : "Open profile") + " · " + (sketchState ? sketchState.dof + " DOF" : "empty");
       var points = card.querySelector(".point-grid");
       (sketch.geometry.points || []).forEach(function (point) { var row = document.createElement("label"); row.textContent = "P" + point.id; row.dataset.point = point.id; row.innerHTML += '<input type="number" step="0.5" data-axis="x" value="' + point.x + '"><input type="number" step="0.5" data-axis="y" value="' + point.y + '">'; points.appendChild(row); });
       host.appendChild(card);
@@ -539,6 +612,115 @@
       card.querySelector(".sketch-state").textContent = "From " + extrusion.sketch;
       host.appendChild(card);
     });
+  }
+  function history(map, id) { return map[id] || (map[id] = []); }
+  function disableOpenExtrusions(sketch) {
+    var compiled = OS.compile(sketch.geometry), disabled = false;
+    if (compiled && compiled.closed) return false;
+    state.extrusions.forEach(function (extrusion) { if (extrusion.sketch === sketch.id && extrusion.enabled !== false) { extrusion.enabled = false; disabled = true; } });
+    return disabled;
+  }
+  function afterSketchChange(label) {
+    var sketch = activeSketch(), disabled = sketch && disableOpenExtrusions(sketch); setDirty(); renderSketches(); renderExtrusions(); drawSketches(); syncPalette(); rebuildBodies().catch(function (error) { status("Extrusion error: " + error.message, true); });
+    status(label + (disabled ? " · dependent extrusion disabled while profile is open" : ""));
+  }
+  function sketchMutate(label, mutate) {
+    var sketch = activeSketch(); if (!sketch) return false; var before = clone(sketch.geometry), ok = mutate(sketch.geometry), solved = ok === false ? null : OS.solve(sketch.geometry), compiled = solved && !solved.conflict ? OS.compile(sketch.geometry) : null;
+    if (ok === false || !solved || solved.conflict || !compiled) { sketch.geometry = before; status("Sketch change conflicts with its constraints", true); drawSketches(); return false; }
+    var stack = history(undoBySketch, sketch.id); stack.push(before); if (stack.length > 80) stack.shift(); redoBySketch[sketch.id] = []; afterSketchChange(label); return true;
+  }
+  function undoSketch() {
+    var sketch = activeSketch(), stack = sketch && history(undoBySketch, sketch.id); if (!sketch || !stack.length) return;
+    history(redoBySketch, sketch.id).push(clone(sketch.geometry)); sketch.geometry = stack.pop(); sketchSelection = []; afterSketchChange("Undo");
+  }
+  function redoSketch() {
+    var sketch = activeSketch(), stack = sketch && history(redoBySketch, sketch.id); if (!sketch || !stack.length) return;
+    history(undoBySketch, sketch.id).push(clone(sketch.geometry)); sketch.geometry = stack.pop(); sketchSelection = []; afterSketchChange("Redo");
+  }
+  function selectedIds(type) { return sketchSelection.filter(function (row) { return row.type === type; }).map(function (row) { return row.id; }); }
+  function selectSketchEntity(type, id, extend) {
+    var at = sketchSelection.findIndex(function (row) { return row.type === type && row.id === id; }); if (!extend) sketchSelection = [];
+    if (at >= 0 && extend) sketchSelection.splice(at, 1); else sketchSelection.push({ type: type, id: id }); drawSketches(); syncPalette();
+  }
+  function sketchNumber(label, value) { var text = root.prompt(label, String(Math.round(finite(value, 0) * 1000) / 1000)); if (text == null) return null; var number = Number(text); return Number.isFinite(number) ? number : null; }
+  function sketchConstraint(kind) {
+    sketchMutate(kind + " constraint", function (geometry) {
+      var curves = selectedIds("curve"), points = selectedIds("point"), result = null;
+      if (kind === "horizontal" || kind === "vertical") result = curves.length && OS.addConstraint(geometry, kind, curves[0]);
+      else if (kind === "coincident") result = points.length >= 2 && OS.addConstraint(geometry, kind, points[0], points[1]);
+      else if (kind === "collinear" && curves.length >= 2) { var a = OS.curve(geometry, curves[0]), b = OS.curve(geometry, curves[1]); if (a && b && a.kind === "line" && b.kind === "line") result = OS.addConstraint(geometry, kind, curves[0], curves[1]); }
+      else if (kind === "midpoint") result = points.length && curves.length && OS.addConstraint(geometry, kind, points[0], curves[0]);
+      else if (kind === "symmetric") result = points.length >= 2 && curves.length && OS.addConstraint(geometry, kind, points[0], points[1], null, curves[0]);
+      else if (kind === "fixed") { if (points.length) result = OS.addConstraint(geometry, kind, points[0]); else if (curves.length) { var curve = OS.curve(geometry, curves[0]); result = curve && OS.addConstraint(geometry, kind, curve.a); if (result) OS.addConstraint(geometry, kind, curve.b); } }
+      else if (curves.length >= 2) result = OS.addConstraint(geometry, kind, curves[0], curves[1]);
+      if (!result) status("Select compatible points or curves for " + kind, true); return !!result;
+    });
+  }
+  function sketchDimension() {
+    sketchMutate("Driving dimension added", function (geometry) {
+      var curves = selectedIds("curve"), points = selectedIds("point"), kind, a, b, value, curve;
+      if (curves.length) { curve = OS.curve(geometry, curves[0]); kind = curve.kind === "arc" ? "radius" : "length"; a = curve.id; value = sketchNumber(kind === "radius" ? "Arc radius (mm)" : "Line length (mm)", curve.kind === "arc" ? OS.arcCircle(geometry, curve).r : Math.hypot(OS.point(geometry, curve.b).x - OS.point(geometry, curve.a).x, OS.point(geometry, curve.b).y - OS.point(geometry, curve.a).y)); }
+      else if (points.length >= 2) { kind = "distance"; a = points[0]; b = points[1]; value = sketchNumber("Point distance (mm)", Math.hypot(OS.point(geometry, b).x - OS.point(geometry, a).x, OS.point(geometry, b).y - OS.point(geometry, a).y)); }
+      else { status("Select one curve or two points to dimension", true); return false; }
+      return value != null && value > 0 && !!OS.addConstraint(geometry, kind, a, b, value);
+    });
+  }
+  function removeSelectedFillet() {
+    sketchMutate("Fillet removed", function (geometry) { var curves = selectedIds("curve"), points = selectedIds("point"), arcs = [], changed = false;
+      curves.forEach(function (id) { var curve = OS.curve(geometry, id); if (curve && curve.kind === "arc") arcs.push(id); });
+      OS.physicalCurves(geometry).forEach(function (curve) { if (curve.kind === "arc" && points.indexOf(curve.a) >= 0 && points.indexOf(curve.b) >= 0 && arcs.indexOf(curve.id) < 0) arcs.push(curve.id); });
+      arcs.forEach(function (id) { if (OS.removeFillet(geometry, id)) changed = true; }); sketchSelection = []; return changed;
+    });
+  }
+  function modifySketch(action) {
+    if (action === "remove-fillet") return removeSelectedFillet();
+    sketchMutate(action, function (geometry) {
+      var curves = selectedIds("curve"), points = selectedIds("point"), curve, a, b, dx, dy, length, number, compiled, changed = false;
+      if (action === "delete") { points.forEach(function (id) { changed = OS.deletePoint(geometry, id) || changed; }); curves.forEach(function (id) { changed = OS.deleteSegment(geometry, id) || changed; }); sketchSelection = []; return changed; }
+      if (action === "arc") { if (!curves.length) return false; curve = OS.curve(geometry, curves[0]); a = OS.point(geometry, curve.a); b = OS.point(geometry, curve.b); dx = b.x - a.x; dy = b.y - a.y; length = Math.hypot(dx, dy); number = sketchNumber("Arc rise at midpoint (mm)", Math.max(0.5, length / 5)); return number != null && length > 0 && OS.toArc(geometry, curve.id, [(a.x + b.x) / 2 - dy / length * number, (a.y + b.y) / 2 + dx / length * number]); }
+      if (action === "line") return curves.length && OS.toLine(geometry, curves[0]);
+      if (action === "fillet" || action === "chamfer") { number = sketchNumber((action === "fillet" ? "Fillet radius" : "Chamfer distance") + " (mm)", 1); return points.length && number > 0 && !!(action === "fillet" ? OS.filletPoint(geometry, points[0], number) : OS.chamferPoint(geometry, points[0], number)); }
+      if (action === "offset") { number = sketchNumber("Profile offset (mm, positive = outward)", 1); return number != null && OS.offset(geometry, number); }
+      if (action === "mirror-x" || action === "mirror-y") { compiled = OS.compile(geometry); return compiled && OS.mirror(geometry, action.slice(-1), action === "mirror-x" ? compiled.rect.x + compiled.rect.w / 2 : compiled.rect.y + compiled.rect.h / 2); }
+      return false;
+    });
+  }
+  function updateOrthoFrustum() {
+    var aspect = canvas.clientWidth / Math.max(canvas.clientHeight, 1); orthoCamera.left = -orthoHalf * aspect; orthoCamera.right = orthoHalf * aspect; orthoCamera.top = orthoHalf; orthoCamera.bottom = -orthoHalf; orthoCamera.updateProjectionMatrix();
+  }
+  function rebuildEditGrid() {
+    clearGroup(editGrid); if (!editMode || !activeSketch()) return; var sketch = activeSketch(), span = orthoHalf * 2.5, step = orthoHalf > 160 ? 20 : orthoHalf > 70 ? 10 : orthoHalf > 28 ? 5 : 1;
+    for (var value = -Math.ceil(span / step) * step; value <= span; value += step) {
+      var strong = Math.abs(value) < 1e-9, color = strong ? 0x6f829d : 0x263b54, opacity = strong ? 0.8 : 0.45;
+      editGrid.add(lineObject([localToWorld(sketch, value, -span, -0.03), localToWorld(sketch, value, span, -0.03)], color, opacity));
+      editGrid.add(lineObject([localToWorld(sketch, -span, value, -0.03), localToWorld(sketch, span, value, -0.03)], color, opacity));
+    }
+  }
+  function editFit() {
+    var sketch = activeSketch(); if (!sketch) return; var compiled = OS.compile(sketch.geometry), width = compiled && compiled.rect ? compiled.rect.w : lastBounds.width, height = compiled && compiled.rect ? compiled.rect.h : lastBounds.depth;
+    var centerX = compiled && compiled.rect ? compiled.rect.x + compiled.rect.w / 2 : 0, centerY = compiled && compiled.rect ? compiled.rect.y + compiled.rect.h / 2 : 0;
+    orthoHalf = Math.max(15, width * 0.7, height * 0.7); var basis = planeBasis(sketch), target = localToWorld(sketch, centerX, centerY, 0), position = target.clone().add(basis.n.clone().multiplyScalar(1000));
+    orthoCamera.up.copy(basis.v); orthoCamera.position.copy(position); orthoCamera.lookAt(target); orthoCamera.near = 0.1; orthoCamera.far = 2500; updateOrthoFrustum(); rebuildEditGrid();
+  }
+  function syncPalette() {
+    var palette = $("#sketch-palette"), sketch = activeSketch(), stateValue = sketch && OS.state(sketch.geometry), compiled = sketch && OS.compile(sketch.geometry); palette.hidden = !editMode || !sketch;
+    if (!sketch) return; $("#sketch-title").textContent = sketch.name + " · " + PLANE[sketchPlane(sketch.plane)].label; $("#sketch-dof").textContent = stateValue && stateValue.conflict ? "conflict" : ((compiled && !compiled.closed ? "open · " : "") + (stateValue ? stateValue.dof : 0) + " DOF"); $("#sketch-dof").classList.toggle("bad", !!(stateValue && stateValue.conflict));
+    palette.querySelectorAll("[data-action]").forEach(function (button) { button.classList.toggle("on", button.dataset.action === sketchTool); });
+    var close = palette.querySelector('[data-action="close-profile"]'); close.disabled = !(compiled && !compiled.closed && OS.canCloseProfile(sketch.geometry));
+    palette.querySelector('[data-action="undo"]').disabled = !history(undoBySketch, sketch.id).length; palette.querySelector('[data-action="redo"]').disabled = !history(redoBySketch, sketch.id).length;
+  }
+  function enterSketch(sketch) {
+    sketch = sketch || activeSketch(); if (!sketch) { status("Create or select a sketch first", true); return; }
+    if (viewMode !== "3d") setView("3d");
+    activeSketchId = sketch.id; selectedPlane = sketchPlane(sketch.plane); editMode = true; sketchTool = "select"; sketchSelection = []; linePoints = []; lineCursor = null; rectangleStart = null; rectangleCurrent = null; sketchGesture = null;
+    activeCamera = orthoCamera; controls.enabled = false; grid.visible = false; solidModel.visible = false; datumPlanes.forEach(function (mesh) { mesh.visible = false; }); canvas.classList.add("sketching");
+    document.querySelectorAll("#plane-choices button").forEach(function (button) { button.disabled = true; button.classList.toggle("on", button.dataset.plane === selectedPlane); });
+    $("#plane-status").textContent = PLANE[selectedPlane].label + " sketch plane · view locked normal to plane"; $("#drag-help").textContent = "Flat 2D sketch · select and drag points/edges · Shift adds selection · wheel zooms";
+    editFit(); renderSketches(); drawSketches(); syncPalette();
+  }
+  function finishSketch() {
+    editMode = false; sketchTool = "select"; sketchSelection = []; linePoints = []; lineCursor = null; rectangleStart = null; rectangleCurrent = null; sketchGesture = null; activeCamera = camera; controls.enabled = true; grid.visible = true; solidModel.visible = true; clearGroup(editGrid); canvas.classList.remove("sketching"); datumPlanes.forEach(function (mesh) { mesh.visible = true; });
+    document.querySelectorAll("#plane-choices button").forEach(function (button) { button.disabled = false; }); selectPlane(selectedPlane); $("#drag-help").textContent = "Orbit empty space · drag PCBs · click an origin plane to start a sketch"; renderSketches(); drawSketches(); syncPalette();
   }
   function syncInputs() {
     ["ambient", "pitch"].forEach(function (key) { $("#" + key).value = state[key]; }); $("#snap").checked = state.snap !== false;
@@ -579,8 +761,7 @@
     camera.up.set(0, 0, 1); controls.target.set(0, 0, top / 2); camera.position.set(span * 0.95, -span * 1.15, span * 0.8); camera.near = Math.max(0.05, span / 1000); camera.far = span * 30; camera.updateProjectionMatrix(); wheelGesture.last = -Infinity; wheelGesture.total = 0; controls.update();
   }
   function topView() {
-    var sketch = activeSketch(), z = sketch ? sketch.plane_z : 0, span = Math.max(lastBounds.width, lastBounds.depth, 30);
-    camera.up.set(0, 1, 0); controls.target.set(0, 0, z); camera.position.set(0, 0, z + span * 1.8); camera.near = Math.max(0.05, span / 1000); camera.far = span * 30; camera.updateProjectionMatrix(); controls.update();
+    if (editMode) editFit(); else enterSketch(activeSketch());
   }
   function resize2d() {
     var ratio = Math.min(devicePixelRatio || 1, 2), width = Math.max(1, Math.round(thermalCanvas.clientWidth * ratio)), height = Math.max(1, Math.round(thermalCanvas.clientHeight * ratio));
@@ -594,15 +775,16 @@
     twoView.scale = Math.max(0.25, Math.min((thermalCanvas.width - margin * 2) / Math.max(1, width), (thermalCanvas.height - margin * 2) / Math.max(1, height)));
     twoDirty = true;
   }
-  function fit() { if (viewMode === "2d") fit2d(); else fit3d(); }
+  function fit() { if (editMode) return editFit(); if (viewMode === "2d") fit2d(); else fit3d(); }
   function setView(mode) {
+    if (mode !== "3d" && editMode) finishSketch();
     viewMode = mode === "3d" ? "3d" : "2d"; thermalCanvas.hidden = viewMode !== "2d"; canvas.hidden = viewMode !== "3d";
     $("#view-2d").classList.toggle("on", viewMode === "2d"); $("#view-3d").classList.toggle("on", viewMode === "3d");
     $("#view-2d").setAttribute("aria-pressed", viewMode === "2d" ? "true" : "false"); $("#view-3d").setAttribute("aria-pressed", viewMode === "3d" ? "true" : "false");
     document.querySelectorAll(".thermal-key").forEach(function (node) { node.hidden = viewMode !== "2d"; });
     document.querySelectorAll(".cad-key").forEach(function (node) { node.hidden = viewMode !== "3d"; });
     $("#top").hidden = viewMode !== "3d";
-    $("#drag-help").textContent = viewMode === "2d" ? "Drag boards · drag empty space to pan · scroll to zoom" : "Orbit empty space · drag PCBs · select a sketch tool to draw on its XY plane";
+    $("#drag-help").textContent = viewMode === "2d" ? "Drag boards · drag empty space to pan · scroll to zoom" : "Orbit empty space · drag PCBs · click an origin plane to start a sketch";
     $("#thermal-probe").hidden = true; fit();
   }
   async function saveDesign() {
@@ -635,21 +817,24 @@
   $("#scale-min").addEventListener("input", updateScale); $("#scale-max").addEventListener("input", updateScale);
   ["ambient", "pitch"].forEach(function (key) { $("#" + key).addEventListener("input", function () { state[key] = finite(this.value, defaults[key]); setDirty(); rebuild(false); }); });
   $("#snap").addEventListener("change", function () { state.snap = this.checked; setDirty(); });
+  $("#plane-choices").addEventListener("click", function (event) { if (event.target.dataset.plane) selectPlane(event.target.dataset.plane); });
   $("#new-sketch").onclick = function () {
-    var id = nextId("sketch", state.sketches); state.sketches.push({ id: id, name: "Sketch " + (state.sketches.length + 1), plane_z: 0, geometry: { version: 1, points: [], curves: [], constraints: [] } }); activeSketchId = id; renderSketches(); drawSketches(); setDirty(); status("Empty sketch created · choose Line or Rectangle");
+    var id = nextId("sketch", state.sketches), sketch = { id: id, name: "Sketch " + (state.sketches.length + 1), plane: selectedPlane, plane_z: 0, geometry: { version: 1, points: [], curves: [], constraints: [] } };
+    state.sketches.push(sketch); activeSketchId = id; setDirty(); enterSketch(sketch); status("Empty " + PLANE[selectedPlane].label + " sketch created · choose Line or Rectangle");
   };
   $("#sketches").addEventListener("click", function (event) {
     var card = event.target.closest(".sketch-card"); if (!card) return;
-    if (event.target.classList.contains("remove")) { state.sketches = state.sketches.filter(function (row) { return row.id !== card.dataset.id; }); state.extrusions = state.extrusions.filter(function (row) { return row.sketch !== card.dataset.id; }); if (activeSketchId === card.dataset.id) activeSketchId = state.sketches.length ? state.sketches[0].id : null; setDirty(); syncInputs(); rebuildBodies(); return; }
-    if (event.target.classList.contains("select-sketch")) { activeSketchId = card.dataset.id; cancelTool(); renderSketches(); drawSketches(); }
+    if (event.target.classList.contains("remove")) { if (editMode && activeSketchId === card.dataset.id) finishSketch(); state.sketches = state.sketches.filter(function (row) { return row.id !== card.dataset.id; }); state.extrusions = state.extrusions.filter(function (row) { return row.sketch !== card.dataset.id; }); if (activeSketchId === card.dataset.id) activeSketchId = state.sketches.length ? state.sketches[0].id : null; setDirty(); syncInputs(); rebuildBodies(); return; }
+    if (event.target.classList.contains("select-sketch")) { var sketch = state.sketches.find(function (row) { return row.id === card.dataset.id; }); if (editMode && activeSketchId === card.dataset.id) finishSketch(); else enterSketch(sketch); }
   });
   $("#sketches").addEventListener("input", function (event) {
     var card = event.target.closest(".sketch-card"), sketch = card && state.sketches.find(function (row) { return row.id === card.dataset.id; }); if (!sketch) return;
     if (event.target.dataset.key === "name") sketch.name = event.target.value || sketch.id;
+    else if (event.target.dataset.key === "plane") sketch.plane = sketchPlane(event.target.value);
     else if (event.target.dataset.key === "plane_z") sketch.plane_z = finite(event.target.value, 0);
     else if (event.target.dataset.axis) { var point = OS.point(sketch.geometry, Number(event.target.closest("label").dataset.point)); if (!point) return; var x = event.target.dataset.axis === "x" ? finite(event.target.value, point.x) : point.x, y = event.target.dataset.axis === "y" ? finite(event.target.value, point.y) : point.y; OS.movePoint(sketch.geometry, point.id, x, y); }
     else return;
-    setDirty(); drawSketches(); renderExtrusions(); rebuildBodies();
+    setDirty(); if (editMode && sketch.id === activeSketchId && (event.target.dataset.key === "plane" || event.target.dataset.key === "plane_z")) enterSketch(sketch); drawSketches(); renderExtrusions(); rebuildBodies();
   });
   $("#add-extrusion").onclick = function () {
     var sketch = activeSketch(), compiled = sketch && OS.compile(sketch.geometry); if (!sketch || !compiled || !compiled.closed) { status("Select and close a sketch before extruding", true); return; }
@@ -663,47 +848,65 @@
     if (event.target.classList.contains("enabled")) extrusion.enabled = event.target.checked; else if (event.target.dataset.key === "name") extrusion.name = event.target.value || extrusion.id; else if (event.target.dataset.key === "distance") extrusion.distance = Math.max(0.01, finite(event.target.value, extrusion.distance)); else return;
     setDirty(); rebuildBodies();
   });
-
-  function setTool(tool) {
-    if (!activeSketch()) { status("Create or select a sketch first", true); return; }
-    setView("3d"); topView();
-    drawTool = tool; linePoints = []; rectangleStart = null; controls.enabled = false; canvas.classList.add("sketching");
-    $("#drag-help").textContent = tool === "rectangle" ? "Drag two corners on the active XY plane" : "Click line endpoints · click the first point or press Enter to close";
-    document.querySelectorAll("#sketch-tools [data-tool]").forEach(function (button) { button.classList.toggle("on", button.dataset.tool === tool); });
-  }
-  function cancelTool() {
-    drawTool = null; linePoints = []; rectangleStart = null; controls.enabled = true; canvas.classList.remove("sketching"); $("#drag-help").textContent = "Orbit empty space · drag PCBs · select a sketch tool to draw on its XY plane";
-    document.querySelectorAll("#sketch-tools [data-tool]").forEach(function (button) { button.classList.remove("on"); });
-  }
-  $("#sketch-tools").addEventListener("click", function (event) {
-    var tool = event.target.dataset.tool; if (!tool) return;
-    if (tool === "cancel") return cancelTool();
-    if (tool === "close") { var sketch = activeSketch(); if (!sketch || !OS.closeProfile(sketch.geometry)) { status("The active sketch is not one closeable line chain", true); return; } setDirty(); cancelTool(); renderSketches(); drawSketches(); status("Profile closed · ready to extrude"); return; }
-    setTool(tool);
+  $("#sketch-palette").addEventListener("click", function (event) {
+    var action = event.target.dataset.action; if (!action || event.target.disabled) return;
+    if (action === "finish") return finishSketch();
+    if (action === "undo") return undoSketch();
+    if (action === "redo") return redoSketch();
+    if (action === "close-profile") return sketchMutate("Profile closed · ready to extrude", function (geometry) { return OS.closeProfile(geometry); });
+    if (action === "dimension") return sketchDimension();
+    if (["horizontal", "vertical", "coincident", "collinear", "parallel", "perpendicular", "tangent", "equal", "midpoint", "symmetric", "fixed"].indexOf(action) >= 0) return sketchConstraint(action);
+    if (["arc", "line", "fillet", "remove-fillet", "chamfer", "offset", "mirror-x", "mirror-y", "delete"].indexOf(action) >= 0) return modifySketch(action);
+    sketchTool = action; linePoints = []; lineCursor = null; rectangleStart = null; rectangleCurrent = null; sketchGesture = null; $("#drag-help").textContent = action === "rectangle" ? "Flat 2D sketch · drag two corners" : action === "line-tool" ? "Flat 2D sketch · click connected endpoints · click the start to close · Enter stops" : "Flat 2D sketch · select and drag points/edges · Shift adds selection"; syncPalette(); drawSketches();
   });
 
   var raycaster = new THREE.Raycaster(), pointer = new THREE.Vector2(), drag = null;
-  function pointerRay(event) { var rect = canvas.getBoundingClientRect(); pointer.x = (event.clientX - rect.left) / rect.width * 2 - 1; pointer.y = -(event.clientY - rect.top) / rect.height * 2 + 1; raycaster.setFromCamera(pointer, camera); }
+  function pointerRay(event) { var rect = canvas.getBoundingClientRect(); pointer.x = (event.clientX - rect.left) / rect.width * 2 - 1; pointer.y = -(event.clientY - rect.top) / rect.height * 2 + 1; raycaster.setFromCamera(pointer, activeCamera); }
   function planePoint(z, target) { return raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), -z), target); }
-  function sketchPoint(event) { var sketch = activeSketch(); pointerRay(event); return sketch && planePoint(sketch.plane_z, new THREE.Vector3()); }
+  function sketchPoint(event) { var sketch = activeSketch(); pointerRay(event); var world = sketch && raycaster.ray.intersectPlane(sketchPlane3(sketch), new THREE.Vector3()); return world && worldToLocal(sketch, world); }
+  function sketchTolerance() { return Math.max(0.15, orthoHalf * 2 / Math.max(canvas.clientHeight, 1) * 11); }
+  function snapSketchPoint(point, chain) { var sketch = activeSketch(), existing = OS.physicalPoints(sketch.geometry), tolerance = sketchTolerance(); return OS.snapLinePoint(chain || [], existing, point.x, point.y, state.snap ? 1 : 0, tolerance, tolerance); }
+  function hitSketchPoint(point) { var sketch = activeSketch(), tolerance = sketchTolerance(), best = null; OS.physicalPoints(sketch.geometry).forEach(function (candidate) { var distance = Math.hypot(point.x - candidate.x, point.y - candidate.y); if (distance <= tolerance && (!best || distance < best.distance)) best = { id: candidate.id, distance: distance }; }); return best; }
+  function segmentDistance(point, a, b) { var dx = b[0] - a[0], dy = b[1] - a[1], length = dx * dx + dy * dy, t = length ? Math.max(0, Math.min(1, ((point.x - a[0]) * dx + (point.y - a[1]) * dy) / length)) : 0; return Math.hypot(point.x - a[0] - t * dx, point.y - a[1] - t * dy); }
+  function hitSketchCurve(point) { var sketch = activeSketch(), tolerance = sketchTolerance(), best = null; OS.physicalCurves(sketch.geometry).forEach(function (curve) { var points = curveLocalPoints(sketch, curve), distance = Infinity; for (var i = 1; i < points.length; i += 1) distance = Math.min(distance, segmentDistance(point, points[i - 1], points[i])); if (distance <= tolerance && (!best || distance < best.distance)) best = { id: curve.id, distance: distance }; }); return best; }
   canvas.addEventListener("pointerdown", function (event) {
-    if (drawTool) {
-      var sketch = activeSketch(), point = sketchPoint(event); if (!sketch || !point) return;
-      if (drawTool === "rectangle") { rectangleStart = { x: point.x, y: point.y, pointer: event.pointerId }; canvas.setPointerCapture(event.pointerId); }
-      else {
-        var existing = OS.physicalPoints(sketch.geometry), snap = OS.snapLinePoint(linePoints, existing, point.x, point.y, state.snap ? 1 : 0, 1.5, 1.5), next = [snap.x, snap.y];
-        if (!linePoints.length) linePoints.push(next); else { OS.addLinePath(sketch.geometry, [linePoints[linePoints.length - 1], next], 0.001); linePoints.push(next); if (OS.closed(sketch.geometry)) { setDirty(); cancelTool(); status("Profile closed · ready to extrude"); } }
-        setDirty(); renderSketches(); drawSketches();
+    if (editMode) {
+      var sketch = activeSketch(), local = sketchPoint(event); if (!sketch || !local) return;
+      if (sketchTool === "rectangle") { var rectSnap = snapSketchPoint(local, []); rectangleStart = { x: rectSnap.x, y: rectSnap.y, pointer: event.pointerId }; rectangleCurrent = { x: rectSnap.x, y: rectSnap.y }; canvas.setPointerCapture(event.pointerId); event.preventDefault(); return; }
+      if (sketchTool === "line-tool") {
+        var lineSnap = snapSketchPoint(local, linePoints), next = [lineSnap.x, lineSnap.y];
+        if (!linePoints.length) { linePoints.push(next); lineCursor = null; drawSketches(); }
+        else { var previous = linePoints[linePoints.length - 1]; if (Math.hypot(previous[0] - next[0], previous[1] - next[1]) > 1e-7) { var added = sketchMutate("Line added", function (geometry) { return OS.addLinePath(geometry, [previous, next], 0.001); }); if (added) { linePoints.push(next); if (OS.closed(sketch.geometry)) { sketchTool = "select"; linePoints = []; status("Profile closed · ready to extrude"); syncPalette(); } } } }
+        event.preventDefault(); return;
       }
-      event.preventDefault(); return;
+      var hitPoint = hitSketchPoint(local), hitCurve = hitPoint ? null : hitSketchCurve(local);
+      if (hitPoint) { selectSketchEntity("point", hitPoint.id, event.shiftKey); sketchGesture = { kind: "point", id: hitPoint.id, pointer: event.pointerId, start: local, before: clone(sketch.geometry), moved: false }; }
+      else if (hitCurve) { selectSketchEntity("curve", hitCurve.id, event.shiftKey); sketchGesture = { kind: "curve", id: hitCurve.id, pointer: event.pointerId, start: local, before: clone(sketch.geometry), moved: false }; }
+      else { if (!event.shiftKey) sketchSelection = []; sketchGesture = { kind: "marquee", pointer: event.pointerId, start: local, current: local, extend: event.shiftKey, moved: false }; drawSketches(); }
+      canvas.setPointerCapture(event.pointerId); event.preventDefault(); return;
     }
-    pointerRay(event); var hit = raycaster.intersectObjects(boardsModel.children, true).find(function (candidate) { return candidate.object.userData.draggable; }); if (!hit) return;
+    pointerRay(event); var datum = raycaster.intersectObjects(datumPlanes, false)[0], hit = raycaster.intersectObjects(boardsModel.children, true).find(function (candidate) { return candidate.object.userData.draggable; });
+    if (datum && (!hit || datum.distance <= hit.distance)) { selectPlane(datum.object.userData.datumPlane); event.preventDefault(); return; }
+    if (!hit) return;
     var id = hit.object.userData.instanceId, pose = poseFor(id), point3 = pose && planePoint(pose.z, new THREE.Vector3()); if (!pose || !point3) return;
     drag = { id: id, pointer: event.pointerId, startX: pose.x, startY: pose.y, pointX: point3.x, pointY: point3.y }; controls.enabled = false; canvas.classList.add("dragging"); canvas.setPointerCapture(event.pointerId);
     Object.keys(cards).forEach(function (key) { cards[key].classList.toggle("selected", key === id); }); event.preventDefault();
   });
   canvas.addEventListener("pointermove", function (event) {
-    if (rectangleStart && rectangleStart.pointer === event.pointerId) return;
+    if (editMode) {
+      var sketch = activeSketch(), local = sketchPoint(event); if (!sketch || !local) return;
+      if (rectangleStart && rectangleStart.pointer === event.pointerId) { var rectSnap = snapSketchPoint(local, []); rectangleCurrent = { x: rectSnap.x, y: rectSnap.y }; drawSketches(); event.preventDefault(); return; }
+      if (sketchTool === "line-tool" && linePoints.length && !sketchGesture) { lineCursor = snapSketchPoint(local, linePoints); drawSketches(); return; }
+      if (!sketchGesture || sketchGesture.pointer !== event.pointerId) return;
+      var gesture = sketchGesture; gesture.current = local; gesture.moved = gesture.moved || Math.hypot(local.x - gesture.start.x, local.y - gesture.start.y) > sketchTolerance() * 0.2;
+      if (gesture.kind === "point" || gesture.kind === "curve") {
+        sketch.geometry = clone(gesture.before); var dx = local.x - gesture.start.x, dy = local.y - gesture.start.y;
+        if (state.snap) { dx = Math.round(dx); dy = Math.round(dy); }
+        if (gesture.kind === "point") { var point = OS.point(sketch.geometry, gesture.id), targetX = point.x + dx, targetY = point.y + dy; OS.movePoint(sketch.geometry, gesture.id, targetX, targetY); }
+        else OS.moveCurve(sketch.geometry, gesture.id, dx, dy);
+      }
+      drawSketches(); event.preventDefault(); return;
+    }
     if (!drag || drag.pointer !== event.pointerId) return;
     pointerRay(event); var pose = poseFor(drag.id), point = planePoint(pose.z, new THREE.Vector3()); if (!point) return; var dx = point.x - drag.pointX, dy = point.y - drag.pointY;
     if (state.snap) { dx = Math.round(dx / state.pitch) * state.pitch; dy = Math.round(dy / state.pitch) * state.pitch; }
@@ -711,20 +914,39 @@
   });
   function endPointer(event) {
     if (rectangleStart && rectangleStart.pointer === event.pointerId) {
-      var sketch = activeSketch(), point = sketchPoint(event), start = rectangleStart; rectangleStart = null;
+      var sketch = activeSketch(), point = rectangleCurrent || sketchPoint(event), start = rectangleStart; rectangleStart = null; rectangleCurrent = null;
       if (sketch && point && Math.abs(point.x - start.x) > 0.01 && Math.abs(point.y - start.y) > 0.01) {
         var x0 = Math.min(start.x, point.x), x1 = Math.max(start.x, point.x), y0 = Math.min(start.y, point.y), y1 = Math.max(start.y, point.y);
-        sketch.geometry = OS.fromPolygon([[x0, y0], [x1, y0], [x1, y1], [x0, y1]]); setDirty(); cancelTool(); renderSketches(); drawSketches(); status("Rectangle profile closed · ready to extrude");
+        sketchMutate("Rectangle profile set · ready to extrude", function (geometry) { var replacement = OS.fromPolygon([[x0, y0], [x1, y0], [x1, y1], [x0, y1]]); geometry.version = replacement.version; geometry.points = replacement.points; geometry.curves = replacement.curves; geometry.constraints = replacement.constraints; return true; }); sketchTool = "select"; syncPalette();
       }
+      event.preventDefault(); return;
+    }
+    if (editMode && sketchGesture && sketchGesture.pointer === event.pointerId) {
+      var gesture = sketchGesture, active = activeSketch(); sketchGesture = null;
+      if (gesture.kind === "marquee") { if (gesture.moved) { var ax = Math.min(gesture.start.x, gesture.current.x), ay = Math.min(gesture.start.y, gesture.current.y), bx = Math.max(gesture.start.x, gesture.current.x), by = Math.max(gesture.start.y, gesture.current.y), picked = [];
+          OS.physicalPoints(active.geometry).forEach(function (point) { if (point.x >= ax && point.x <= bx && point.y >= ay && point.y <= by) picked.push({ type: "point", id: point.id }); }); if (!gesture.extend) sketchSelection = []; picked.forEach(function (row) { if (!selectedEntity(row.type, row.id)) sketchSelection.push(row); }); }
+        drawSketches(); syncPalette(); event.preventDefault(); return; }
+      if (gesture.moved) { var solved = OS.solve(active.geometry), compiled = solved && !solved.conflict && OS.compile(active.geometry); if (!compiled) { active.geometry = gesture.before; status("Move reverted: invalid or conflicted sketch", true); drawSketches(); } else { var stack = history(undoBySketch, active.id); stack.push(gesture.before); redoBySketch[active.id] = []; afterSketchChange(gesture.kind === "point" ? "Point moved" : "Edge moved"); } }
       event.preventDefault(); return;
     }
     if (!drag || drag.pointer !== event.pointerId) return; drag = null; controls.enabled = true; canvas.classList.remove("dragging"); setDirty(); rebuild(false);
   }
   canvas.addEventListener("pointerup", endPointer); canvas.addEventListener("pointercancel", endPointer);
-  window.addEventListener("keydown", function (event) { if (event.key === "Escape") cancelTool(); if (event.key === "Enter" && drawTool === "line") $("#sketch-tools [data-tool=close]").click(); });
+  canvas.addEventListener("dblclick", function (event) { if (!editMode || sketchTool !== "select") return; var local = sketchPoint(event), curve = local && hitSketchCurve(local); if (!curve) return; event.preventDefault(); sketchMutate("Vertex inserted", function (geometry) { return !!OS.insertPoint(geometry, curve.id, Math.round(local.x), Math.round(local.y)); }); });
+  canvas.addEventListener("contextmenu", function (event) { if (!editMode) return; var local = sketchPoint(event), point = local && hitSketchPoint(local), curve = point ? null : local && hitSketchCurve(local); if (!point && !curve) return; event.preventDefault(); sketchSelection = [{ type: point ? "point" : "curve", id: point ? point.id : curve.id }]; modifySketch("delete"); });
+  window.addEventListener("keydown", function (event) {
+    if (!editMode) return; var typing = /input|select|textarea/i.test(event.target.tagName || ""); if (typing) return;
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); return event.shiftKey ? redoSketch() : undoSketch(); }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") { event.preventDefault(); return redoSketch(); }
+    if (event.key === "Escape") { if (sketchTool !== "select") { sketchTool = "select"; linePoints = []; lineCursor = null; rectangleStart = null; rectangleCurrent = null; syncPalette(); drawSketches(); } else finishSketch(); }
+    if (event.key === "Enter" && sketchTool === "line-tool") { sketchTool = "select"; linePoints = []; lineCursor = null; syncPalette(); drawSketches(); }
+    if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); modifySketch("delete"); }
+  });
   canvas.addEventListener("wheel", function (event) {
-    event.preventDefault(); event.stopImmediatePropagation(); if (!controls.enabled || drag || drawTool) return;
+    event.preventDefault(); event.stopImmediatePropagation();
     var step = boundedWheelStep(wheelGesture, event.deltaY, event.deltaMode, performance.now(), canvas.clientHeight); if (!step) return;
+    if (editMode) { orthoHalf = Math.max(2, Math.min(2000, orthoHalf * Math.exp(step * 0.0008))); updateOrthoFrustum(); rebuildEditGrid(); drawSketches(); return; }
+    if (!controls.enabled || drag) return;
     var offset = camera.position.clone().sub(controls.target), distance = offset.length(); if (!distance) return;
     var next = Math.max(controls.minDistance, Math.min(controls.maxDistance, distance * Math.exp(step * 0.00043))); camera.position.copy(controls.target).add(offset.multiplyScalar(next / distance)); controls.update();
   }, { capture: true, passive: false });
@@ -798,11 +1020,11 @@
 
   function resize3d() {
     var width = canvas.clientWidth, height = canvas.clientHeight, ratio = renderer.getPixelRatio();
-    if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) { renderer.setSize(width, height, false); camera.aspect = width / Math.max(height, 1); camera.updateProjectionMatrix(); }
+    if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) { renderer.setSize(width, height, false); camera.aspect = width / Math.max(height, 1); camera.updateProjectionMatrix(); updateOrthoFrustum(); }
   }
   function animate() {
     requestAnimationFrame(animate);
-    if (viewMode === "3d") { resize3d(); controls.update(); renderer.render(scene, camera); }
+    if (viewMode === "3d") { resize3d(); if (!editMode) controls.update(); renderer.render(scene, activeCamera); }
     else if (resize2d() || twoDirty) draw2d();
   }
 

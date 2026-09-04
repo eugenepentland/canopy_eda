@@ -70,5 +70,8 @@ assert.equal(thermal.boundedWheelStep(wheelGesture, -120, 0, 1000, 900), -120);
 assert.equal(thermal.boundedWheelStep(wheelGesture, 3, 1, 1020, 900), 48);
 assert.equal(thermal.enabledExtrusionCount({ sketches: [], extrusions: [] }), 0);
 assert.equal(thermal.enabledExtrusionCount({ extrusions: [{ enabled: false }, { enabled: true }] }), 1);
+assert.deepEqual(thermal.sketchWorldPoint("xy", 4, 2, 3, 5), [2, 3, 9]);
+assert.deepEqual(thermal.sketchWorldPoint("xz", 4, 2, 3, 5), [2, -1, 3]);
+assert.deepEqual(thermal.sketchWorldPoint("yz", 4, 2, 3, 5), [9, 2, 3]);
 
-console.log("System CAD: blank sketch extrusions, RDS3 repeated fields, bounded 2D/3D zoom, and coupled thermal screen pass");
+console.log("System CAD: datum planes, explicit extrusions, repeated thermal fields, and bounded 2D/3D zoom pass");

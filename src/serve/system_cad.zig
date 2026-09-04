@@ -297,7 +297,7 @@ pub fn page(
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
             "<title>System Thermal</title><link rel=\"stylesheet\" href=\"/static/system_cad.css\"></head><body>" ++
             "<header><a class=\"back\" id=\"back\">← System</a><div><h1 id=\"title\">System Thermal</h1><p id=\"identity\"></p></div>" ++
-            "<span class=\"kernel\">Sketch + extrude · Zig</span><div class=\"view-switch\" role=\"group\" aria-label=\"Workspace view\"><button id=\"view-2d\" class=\"on\" aria-pressed=\"true\">2D thermal</button><button id=\"view-3d\" aria-pressed=\"false\">3D assembly</button></div><span id=\"save-status\"></span><button id=\"save\">Save design</button><button id=\"top\">Top sketch</button><button id=\"fit\">Fit view</button>" ++
+            "<span class=\"kernel\">Sketch + extrude · Zig</span><div class=\"view-switch\" role=\"group\" aria-label=\"Workspace view\"><button id=\"view-2d\" class=\"on\" aria-pressed=\"true\">2D thermal</button><button id=\"view-3d\" aria-pressed=\"false\">3D assembly</button></div><span id=\"save-status\"></span><button id=\"save\">Save design</button><button id=\"top\">Edit sketch</button><button id=\"fit\">Fit view</button>" ++
             "<button id=\"assembly-json\">Download assembly.json</button><button id=\"step\">Download STEP</button><button id=\"stl\">Download STL</button></header>" ++
             "<main><aside><section><h2>System screening</h2><div class=\"fields\">" ++
             "<label>Ambient <input id=\"ambient\" type=\"number\" min=\"-55\" max=\"125\" step=\"1\"><span>°C</span></label>" ++
@@ -308,13 +308,20 @@ pub fn page(
             "<div id=\"thermal-summary\" class=\"thermal-summary\">Loading board thermal models…</div>" ++
             "<p class=\"hint\">The 2D view paints the same solved board fields as Thermal, shifted by projected fan coverage and mixed-air rise. Drag a PCB or enter its exact pose. This is a system screening model, not CFD.</p></section>" ++
             "<section><h2>Board instances</h2><p class=\"hint\">The review manifest defines board types; assembly.json may repeat them as physical instances.</p><div id=\"boards\"></div></section>" ++
-            "<section><div class=\"section-head\"><h2>Sketches</h2><button id=\"new-sketch\">New sketch</button></div>" ++
-            "<p class=\"hint\">Nothing is generated from the PCBs. Create an XY sketch, draw the profile yourself, then explicitly extrude it.</p>" ++
-            "<div id=\"sketch-tools\" class=\"sketch-tools\"><button data-tool=\"line\">Draw lines</button><button data-tool=\"rectangle\">Rectangle</button><button data-tool=\"close\">Close profile</button><button data-tool=\"cancel\">Cancel tool</button></div>" ++
+            "<section><h2>Origin planes</h2><div id=\"plane-choices\" class=\"plane-choices\"><button data-plane=\"xy\">XY</button><button data-plane=\"xz\">XZ</button><button data-plane=\"yz\">YZ</button></div>" ++
+            "<p id=\"plane-status\" class=\"hint\">XY plane selected. Click a datum plane in the viewport or choose one here.</p></section>" ++
+            "<section><div class=\"section-head\"><h2>Sketches</h2><button id=\"new-sketch\">New sketch on plane</button></div>" ++
+            "<p class=\"hint\">Nothing is generated from the PCBs. Pick an origin plane, create a sketch, and use the same constraint-aware tools as the PCB outline editor.</p>" ++
             "<div id=\"sketches\"></div></section>" ++
             "<section><div class=\"section-head\"><h2>Extrusions</h2><button id=\"add-extrusion\">Extrude selected</button></div><div id=\"model-status\" class=\"dimensions\">Blank workspace · 0 solids</div><div id=\"extrusions\"></div><button id=\"reset\">Reset local draft</button></section>" ++
             "<section><h2>Model boundary</h2><ul><li>PCBs, components, fans and heatsinks are reference geometry only</li><li>Only closed sketches with an explicit enabled extrusion become solids</li><li>Each extrusion remains a separate STEP/STL body</li><li>Current extrusion profiles must be convex; use separate bodies for floors and walls</li><li>No automatic enclosure, lid, boss, cutout, or boolean operation</li></ul></section></aside>" ++
-            "<div id=\"viewport\"><canvas id=\"thermal-canvas\" aria-label=\"System thermal heatmap\"></canvas><canvas id=\"canvas\" hidden></canvas><div id=\"thermal-probe\" hidden></div><div id=\"empty\"></div><div id=\"drag-help\">Drag boards · drag empty space to pan · scroll to zoom</div><div id=\"legend\"><span class=\"thermal-key\" id=\"legend-min\">25 °C</span><i class=\"thermal-key ramp\"></i><span class=\"thermal-key\" id=\"legend-max\">125 °C</span><span class=\"thermal-key\"><i class=\"sink\"></i>Bottom sink</span><span class=\"thermal-key\"><i class=\"fan\"></i>Top fan</span><span class=\"cad-key\" hidden><i class=\"solid\"></i>Authored solid</span><span class=\"cad-key\" hidden><i class=\"sketch\"></i>Sketch</span><span class=\"cad-key\" hidden><i class=\"cool\"></i>PCB reference</span></div></div></main>" ++
+            "<div id=\"viewport\"><canvas id=\"thermal-canvas\" aria-label=\"System thermal heatmap\"></canvas><canvas id=\"canvas\" hidden></canvas><div id=\"sketch-palette\" class=\"sketch-palette\" hidden>" ++
+            "<div class=\"sp-head\"><b id=\"sketch-title\">Sketch</b><span id=\"sketch-dof\">0 DOF</span></div>" ++
+            "<div class=\"sp-group\"><span>Create</span><button data-action=\"select\">Select</button><button data-action=\"rectangle\">Rectangle</button><button data-action=\"line-tool\">Line</button><button data-action=\"dimension\">Dimension</button><button data-action=\"undo\">Undo</button><button data-action=\"redo\">Redo</button></div>" ++
+            "<div class=\"sp-group\"><span>Constrain</span><button data-action=\"horizontal\">H</button><button data-action=\"vertical\">V</button><button data-action=\"coincident\">Coincident</button><button data-action=\"collinear\">Co-linear</button><button data-action=\"parallel\">∥</button><button data-action=\"perpendicular\">⟂</button><button data-action=\"tangent\">Tangent</button><button data-action=\"equal\">Equal</button><button data-action=\"midpoint\">Midpoint</button><button data-action=\"symmetric\">Symmetry</button><button data-action=\"fixed\">Fix</button></div>" ++
+            "<div class=\"sp-group\"><span>Modify</span><button data-action=\"arc\">Arc</button><button data-action=\"line\">Line</button><button data-action=\"fillet\">Fillet</button><button data-action=\"remove-fillet\">Remove fillet</button><button data-action=\"chamfer\">Chamfer</button><button data-action=\"offset\">Offset</button><button data-action=\"mirror-x\">Mirror X</button><button data-action=\"mirror-y\">Mirror Y</button><button data-action=\"delete\">Delete</button></div>" ++
+            "<button class=\"sp-finish sp-repair\" data-action=\"close-profile\">Close profile</button><button class=\"sp-finish\" data-action=\"finish\">Finish sketch</button></div>" ++
+            "<div id=\"thermal-probe\" hidden></div><div id=\"empty\"></div><div id=\"drag-help\">Drag boards · drag empty space to pan · scroll to zoom</div><div id=\"legend\"><span class=\"thermal-key\" id=\"legend-min\">25 °C</span><i class=\"thermal-key ramp\"></i><span class=\"thermal-key\" id=\"legend-max\">125 °C</span><span class=\"thermal-key\"><i class=\"sink\"></i>Bottom sink</span><span class=\"thermal-key\"><i class=\"fan\"></i>Top fan</span><span class=\"cad-key\" hidden><i class=\"solid\"></i>Authored solid</span><span class=\"cad-key\" hidden><i class=\"sketch\"></i>Sketch</span><span class=\"cad-key\" hidden><i class=\"cool\"></i>PCB reference</span></div></div></main>" ++
             "<script>window.CAD_DATA={\"system\":",
     );
     try json_writer.writeScriptString(writer, spec.name);
@@ -394,10 +401,9 @@ fn convexCounterClockwise(profile: []const [2]f64) bool {
 fn extrudeSketch(
     allocator: std.mem.Allocator,
     sketch: anytype,
-    plane_z: f64,
     distance: f64,
 ) ModelRequestError!prismatic.Mesh {
-    const compiled = shape_sketch.compile(allocator, sketch, shape_sketch.default_sagitta_mm) catch |err| switch (err) {
+    const compiled = shape_sketch.compile(allocator, sketch.geometry, shape_sketch.default_sagitta_mm) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidMechanicalDocument,
     };
@@ -414,10 +420,19 @@ fn extrudeSketch(
         profile = points;
     }
     if (!convexCounterClockwise(profile)) return error.InvalidMechanicalDocument;
-    return prismatic.extrudeConvex(allocator, profile, plane_z, plane_z + distance) catch |err| switch (err) {
+    const local_mesh = prismatic.extrudeConvex(allocator, profile, 0, distance) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidMechanicalDocument,
     };
+    errdefer local_mesh.deinit(allocator);
+    const points = try allocator.alloc(prismatic.Point3, local_mesh.points.len);
+    for (local_mesh.points, 0..) |point, index| points[index] = switch (sketch.plane) {
+        .xy => .{ point[0], point[1], sketch.plane_z + point[2] },
+        .xz => .{ point[0], sketch.plane_z - point[2], point[1] },
+        .yz => .{ sketch.plane_z + point[2], point[0], point[1] },
+    };
+    allocator.free(local_mesh.points);
+    return .{ .points = points, .triangles = local_mesh.triangles };
 }
 
 fn modelFromRequest(allocator: std.mem.Allocator, req: *httpz.Request) ModelRequestError!SolidModel {
@@ -441,7 +456,7 @@ fn modelFromRequest(allocator: std.mem.Allocator, req: *httpz.Request) ModelRequ
         const profile = for (parsed.value.sketches) |sketch| {
             if (std.mem.eql(u8, sketch.id, extrusion.sketch)) break sketch;
         } else return error.InvalidMechanicalDocument;
-        const mesh = try extrudeSketch(allocator, profile.geometry, profile.plane_z, extrusion.distance);
+        const mesh = try extrudeSketch(allocator, profile, extrusion.distance);
         errdefer mesh.deinit(allocator);
         const id = try allocator.dupe(u8, extrusion.id);
         errdefer allocator.free(id);
@@ -578,6 +593,12 @@ const extrusion_document =
     "\"curves\":[{\"id\":11,\"kind\":\"line\",\"a\":1,\"b\":2},{\"id\":12,\"kind\":\"line\",\"a\":2,\"b\":3},{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4},{\"id\":14,\"kind\":\"line\",\"a\":4,\"b\":1}],\"constraints\":[]}}]," ++
     "\"extrusions\":[{\"id\":\"floor\",\"name\":\"Authored floor\",\"sketch\":\"floor-profile\",\"distance\":2}]}";
 
+const xz_extrusion_document =
+    "{\"schema\":\"netlisp-mechanical-v2\",\"boards\":[],\"sketches\":[{\"id\":\"wall-profile\",\"name\":\"Wall profile\",\"plane\":\"xz\",\"plane_z\":4,\"geometry\":{" ++
+    "\"version\":1,\"points\":[{\"id\":1,\"x\":-20,\"y\":-15},{\"id\":2,\"x\":20,\"y\":-15},{\"id\":3,\"x\":20,\"y\":15},{\"id\":4,\"x\":-20,\"y\":15}]," ++
+    "\"curves\":[{\"id\":11,\"kind\":\"line\",\"a\":1,\"b\":2},{\"id\":12,\"kind\":\"line\",\"a\":2,\"b\":3},{\"id\":13,\"kind\":\"line\",\"a\":3,\"b\":4},{\"id\":14,\"kind\":\"line\",\"a\":4,\"b\":1}],\"constraints\":[]}}]," ++
+    "\"extrusions\":[{\"id\":\"wall\",\"name\":\"Authored wall\",\"sketch\":\"wall-profile\",\"distance\":2}]}";
+
 test "STL writer emits outward facets for an authored extrusion" {
     const profile = [_][2]f64{ .{ -20, -15 }, .{ 20, -15 }, .{ 20, 15 }, .{ -20, 15 } };
     const mesh = try prismatic.extrudeConvex(std.testing.allocator, &profile, 0, 2);
@@ -609,7 +630,7 @@ test "CAD export endpoint returns only explicitly authored extrusion solids" {
     try std.testing.expect(std.mem.startsWith(u8, stl_request.res.body, "solid floor\n"));
 }
 
-// spec: Web Server - the system CAD workspace's separate 3D assembly view shows imported PCBs as reference geometry and no inferred enclosure; only an authored closed shape-sketch followed by an explicit enabled extrusion creates a preview or STEP/STL solid, while legacy generated-enclosure documents are ignored rather than regenerated
+// spec: Web Server - the system CAD workspace opens as a solved 2D heat-field map with a separate 3D assembly/CAD view, shows imported PCBs as reference geometry without inferring an enclosure, provides clickable XY/XZ/YZ origin datum planes, locks active sketch editing to a flat orthographic plane with the PCB outline editor's selection/constraint/modify palette, and creates preview or STEP/STL solids only from explicit enabled extrusions while ignoring legacy generated-enclosure documents
 test "CAD mesh endpoint is empty for a blank document and extrudes on request" {
     const blank = "{\"schema\":\"netlisp-mechanical-v2\",\"boards\":[],\"sketches\":[],\"extrusions\":[]}";
     var request = httpz.testing.init(.{});
@@ -628,6 +649,26 @@ test "CAD mesh endpoint is empty for a blank document and extrudes on request" {
     try std.testing.expectEqual(@as(usize, 1), bodies.len);
     try std.testing.expectEqualStrings("floor", bodies[0].object.get("id").?.string);
     try std.testing.expectEqual(@as(usize, 8), bodies[0].object.get("mesh").?.object.get("points").?.array.items.len);
+
+    var vertical = httpz.testing.init(.{});
+    defer vertical.deinit();
+    vertical.body(xz_extrusion_document);
+    const vertical_model = try modelFromRequest(vertical.res.arena, vertical.req);
+    defer vertical_model.deinit(vertical.res.arena);
+    const points = vertical_model.bodies[0].mesh.points;
+    try std.testing.expectEqual(prismatic.Point3{ -20, 4, -15 }, points[0]);
+    try std.testing.expectEqual(@as(f64, 2), points[4][1]);
+
+    const yz_document = try std.mem.replaceOwned(u8, std.testing.allocator, xz_extrusion_document, "\"xz\"", "\"yz\"");
+    defer std.testing.allocator.free(yz_document);
+    var side = httpz.testing.init(.{});
+    defer side.deinit();
+    side.body(yz_document);
+    const side_model = try modelFromRequest(side.res.arena, side.req);
+    defer side_model.deinit(side.res.arena);
+    const side_points = side_model.bodies[0].mesh.points;
+    try std.testing.expectEqual(prismatic.Point3{ 4, -20, -15 }, side_points[0]);
+    try std.testing.expectEqual(@as(f64, 6), side_points[4][0]);
 }
 
 test "system CAD page starts from sketch tools without enclosure generators" {
@@ -646,6 +687,9 @@ test "system CAD page starts from sketch tools without enclosure generators" {
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"thermal-canvas\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, ">2D thermal</button>") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "id=\"top\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "data-plane=\"xz\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "data-action=\"fillet\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "data-action=\"perpendicular\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "Extrude selected") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "/static/shape_sketch.js") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.res.body, "auto-bosses") == null);
