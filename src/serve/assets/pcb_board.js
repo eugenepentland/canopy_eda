@@ -11955,6 +11955,50 @@ function apPresetApply(n){
  // overlay, so pointermove keeps measuring after the press.
  var rulerMode=false,rulerDraw=null,rgRuler=null;
  var rulerBtn=document.getElementById("pcb-ruler-btn");
+ var RULER_CAM_CELL=2,rulerCamCache=null;
+ function rulerSegNearest(m,x1,y1,x2,y2){var dx=x2-x1,dy=y2-y1,l2=dx*dx+dy*dy;
+  var t=l2?((m.x-x1)*dx+(m.y-y1)*dy)/l2:0;t=Math.max(0,Math.min(1,t));
+  var x=x1+t*dx,y=y1+t*dy;return {x:x,y:y,d:Math.hypot(m.x-x,m.y-y)};}
+ function rulerCircleNearest(m,cx,cy,r){var dx=m.x-cx,dy=m.y-cy,d=Math.hypot(dx,dy);
+  if(d<1e-12)return {x:cx+r,y:cy,d:r};return {x:cx+dx*r/d,y:cy+dy*r/d,d:Math.abs(d-r)};}
+ function rulerCapsuleNearest(m,f){var q=rulerSegNearest(m,f.x1,f.y1,f.x2,f.y2),dx=m.x-q.x,dy=m.y-q.y,d=Math.hypot(dx,dy);
+  if(d<1e-12){dx=-(f.y2-f.y1);dy=f.x2-f.x1;d=Math.hypot(dx,dy);if(d<1e-12)return rulerCircleNearest(m,f.x1,f.y1,f.r);}
+  return {x:q.x+dx*f.r/d,y:q.y+dy*f.r/d,d:Math.abs(d-f.r)};}
+ function rulerAngleNorm(a){var t=Math.PI*2;a%=t;return a<0?a+t:a;}
+ function rulerArcNearest(m,f){var a=Math.atan2(m.y-f.cy,m.x-f.cx),a0=Math.atan2(f.y1-f.cy,f.x1-f.cx),a1=Math.atan2(f.y2-f.cy,f.x2-f.cx);
+  var span=f.cw?rulerAngleNorm(a1-a0):rulerAngleNorm(a0-a1),rel=f.cw?rulerAngleNorm(a-a0):rulerAngleNorm(a0-a);
+  var q;if(rel<=span+1e-10)q={x:f.cx+f.r*Math.cos(a),y:f.cy+f.r*Math.sin(a)};
+  else{var d0=Math.hypot(m.x-f.x1,m.y-f.y1),d1=Math.hypot(m.x-f.x2,m.y-f.y2);q=d0<=d1?{x:f.x1,y:f.y1}:{x:f.x2,y:f.y2};}
+  var dx=m.x-q.x,dy=m.y-q.y,d=Math.hypot(dx,dy);if(d<1e-12){dx=q.x-f.cx;dy=q.y-f.cy;d=Math.hypot(dx,dy)||1;}
+  return {x:q.x+dx*f.hw/d,y:q.y+dy*f.hw/d,d:Math.abs(Math.hypot(m.x-q.x,m.y-q.y)-f.hw)};}
+ function rulerFeatureNearest(m,f){if(f.kind==="line")return rulerSegNearest(m,f.x1,f.y1,f.x2,f.y2);
+  if(f.kind==="circle")return rulerCircleNearest(m,f.cx,f.cy,f.r);
+  if(f.kind==="capsule")return rulerCapsuleNearest(m,f);
+  if(f.kind==="arc")return rulerArcNearest(m,f);return null;}
+ function rulerCamFeatures(){var src=PCB.cam;if(rulerCamCache&&rulerCamCache.source===src)return rulerCamCache;
+  var features=[],grid=Object.create(null);
+  function add(f,x0,y0,x1,y1){f.i=features.length;features.push(f);
+   var ix0=Math.floor(x0/RULER_CAM_CELL),ix1=Math.floor(x1/RULER_CAM_CELL),iy0=Math.floor(y0/RULER_CAM_CELL),iy1=Math.floor(y1/RULER_CAM_CELL);
+   for(var iy=iy0;iy<=iy1;iy++)for(var ix=ix0;ix<=ix1;ix++){var k=ix+","+iy;(grid[k]||(grid[k]=[])).push(f);}}
+  function line(L,x1,y1,x2,y2){if(![x1,y1,x2,y2].every(isFinite))return;add({kind:"line",layer:L,x1:x1,y1:y1,x2:x2,y2:y2},Math.min(x1,x2),Math.min(y1,y2),Math.max(x1,x2),Math.max(y1,y2));}
+  function circle(L,cx,cy,r){if(![cx,cy,r].every(isFinite)||!(r>0))return;add({kind:"circle",layer:L,cx:cx,cy:cy,r:r},cx-r,cy-r,cx+r,cy+r);}
+  function capsule(L,x1,y1,x2,y2,r){if(![x1,y1,x2,y2,r].every(isFinite)||!(r>0))return;
+   add({kind:"capsule",layer:L,x1:x1,y1:y1,x2:x2,y2:y2,r:r},Math.min(x1,x2)-r,Math.min(y1,y2)-r,Math.max(x1,x2)+r,Math.max(y1,y2)+r);}
+  (src&&src.layers||[]).forEach(function(L){(L.ops||[]).forEach(function(o){if(!o||!o.length)return;
+   if(o[0]==="f"){var x=+o[1],y=+o[2],shape=+o[3],w=+o[4],h=+o[5];if(!(w>0)||!(h>0))return;
+    if(shape===0)circle(L,x,y,w/2);
+    else if(shape===1){var hw=w/2,hh=h/2;line(L,x-hw,y-hh,x+hw,y-hh);line(L,x+hw,y-hh,x+hw,y+hh);line(L,x+hw,y+hh,x-hw,y+hh);line(L,x-hw,y+hh,x-hw,y-hh);}
+    else if(w>=h)capsule(L,x-(w-h)/2,y,x+(w-h)/2,y,h/2);else capsule(L,x,y-(h-w)/2,x,y+(h-w)/2,w/2);}
+   else if(o[0]==="l")capsule(L,+o[1],+o[2],+o[3],+o[4],+o[5]/2);
+   else if(o[0]==="a"){var x1=+o[1],y1=+o[2],x2=+o[3],y2=+o[4],cx=+o[5],cy=+o[6],hw=+o[7]/2,r=Math.hypot(x1-cx,y1-cy);
+    if([x1,y1,x2,y2,cx,cy,hw,r].every(isFinite)&&hw>0&&r>0)add({kind:"arc",layer:L,x1:x1,y1:y1,x2:x2,y2:y2,cx:cx,cy:cy,hw:hw,r:r,cw:!!o[8]},cx-r-hw,cy-r-hw,cx+r+hw,cy+r+hw);}
+   else if(o[0]==="r"){var pts=o[2]||[];for(var i=0,j=pts.length-1;i<pts.length;j=i++)line(L,+pts[j][0],+pts[j][1],+pts[i][0],+pts[i][1]);}});});
+  rulerCamCache={source:src,features:features,grid:grid};return rulerCamCache;}
+ function rulerCamSnap(m){if(!PHYSICAL_REVIEW||!CAM_REVIEW||!camPayloadReady())return null;
+  var sm=svgMetricsGet(),limit=12*(vb.w/Math.max(sm.cw,1))/S,c=rulerCamFeatures(),span=Math.ceil(limit/RULER_CAM_CELL),ix=Math.floor(m.x/RULER_CAM_CELL),iy=Math.floor(m.y/RULER_CAM_CELL),seen=Object.create(null),best=null;
+  for(var yy=iy-span;yy<=iy+span;yy++)for(var xx=ix-span;xx<=ix+span;xx++){var fs=c.grid[xx+","+yy]||[];
+   for(var n=0;n<fs.length;n++){var f=fs[n];if(seen[f.i]||!camLayerVisible(f.layer))continue;seen[f.i]=1;var q=rulerFeatureNearest(m,f);if(q&&q.d<=limit&&(!best||q.d<best.d))best=q;}}
+  return best;}
  function rulerReviewPost(a,b){if(!PHYSICAL_REVIEW||window.parent===window)return;
   var msg={type:"netlisp-pcb-measure-state",design:PCB.name,enabled:rulerMode};
   if(a&&b){msg.dxMm=b.x-a.x;msg.dyMm=b.y-a.y;msg.distanceMm=Math.hypot(msg.dxMm,msg.dyMm);}
@@ -11975,17 +12019,18 @@ function apPresetApply(n){
  // whole gesture is retired.
  function rulerClear(){if(rgRuler&&rgRuler.parentNode)rgRuler.parentNode.removeChild(rgRuler);rgRuler=null;}
  function rulerLen(mm){return PHYSICAL_REVIEW?mm.toFixed(3)+" mm ("+(mm/0.0254).toFixed(1)+" mil)":fmtLen2(mm);}
+ function rulerPointRadius(){var sm=svgMetricsGet();return 2*Math.max(vb.w/Math.max(sm.cw,1),vb.h/Math.max(sm.ch,1));}
  function rulerDrawNow(a,b,state){rulerClear();rgRuler=el("g",{});gU.appendChild(rgRuler);
-  var dx=b.x-a.x,dy=b.y-a.y,dist=Math.hypot(dx,dy);
+  var dx=b.x-a.x,dy=b.y-a.y,dist=Math.hypot(dx,dy),pointRadius=rulerPointRadius();
   rgRuler.appendChild(el("line",{"class":"pcb-ruler-line",x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1)}));
-  rgRuler.appendChild(el("circle",{"class":"pcb-ruler-point",cx:X(a.x).toFixed(1),cy:Y(a.y).toFixed(1),r:3}));
-  rgRuler.appendChild(el("circle",{"class":"pcb-ruler-point",cx:X(b.x).toFixed(1),cy:Y(b.y).toFixed(1),r:3}));
+  rgRuler.appendChild(el("circle",{"class":"pcb-ruler-point",cx:X(a.x).toFixed(1),cy:Y(a.y).toFixed(1),r:pointRadius.toFixed(2)}));
+  rgRuler.appendChild(el("circle",{"class":"pcb-ruler-point",cx:X(b.x).toFixed(1),cy:Y(b.y).toFixed(1),r:pointRadius.toFixed(2)}));
   // dx / dy guide legs
   rgRuler.appendChild(el("line",{"class":"pcb-ruler-line",x1:X(a.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(a.y).toFixed(1),opacity:0.5}));
   rgRuler.appendChild(el("line",{"class":"pcb-ruler-line",x1:X(b.x).toFixed(1),y1:Y(a.y).toFixed(1),x2:X(b.x).toFixed(1),y2:Y(b.y).toFixed(1),opacity:0.5}));
   var lt=el("text",{"class":"pcb-ruler-lbl",x:(X(b.x)+8).toFixed(1),y:(Y(b.y)-6).toFixed(1)});
   lt.textContent=state&&state.ref?((state.axis==="x"?"X":"Y")+" = "+rulerLen(Math.abs(state.axis==="x"?dx:dy))+(state.target?" · release to set":" · snap to edge")):
-   ("d="+rulerLen(dist)+"  dx="+rulerLen(Math.abs(dx))+"  dy="+rulerLen(Math.abs(dy)));
+   ("d="+rulerLen(dist)+"  dx="+rulerLen(Math.abs(dx))+"  dy="+rulerLen(Math.abs(dy))+(state&&state.snap?" · edge":""));
   rgRuler.appendChild(lt);
   // Mirror the measurement into the status bar's delta segment.
   stSet("st-dxdy","d "+fmtLen2(dist)+"  dx "+fmtLen2(Math.abs(dx))+"  dy "+fmtLen2(Math.abs(dy)));
@@ -12127,12 +12172,12 @@ function apPresetApply(n){
  // phase, and swallows the gesture only while in ruler mode.
  svg.addEventListener("pointerdown",function(ev){if(!rulerMode||ev.button!==0)return;
   ev.stopPropagation();ev.preventDefault();try{svg.setPointerCapture(ev.pointerId);}catch(e){}
-  var m=mm(ev),p=!RO&&selRef&&partByRef(selRef),a=p?{x:p.x,y:p.y}:m;rulerDraw={a:a,b:a,ref:p&&p.ref||null,axis:null,target:null,cursor:m};rulerDrawNow(a,a,rulerDraw);},true);
+  var m=mm(ev),p=!RO&&selRef&&partByRef(selRef),snap=p?null:rulerCamSnap(m),a=p?{x:p.x,y:p.y}:(snap||m);rulerDraw={a:a,b:a,ref:p&&p.ref||null,axis:null,target:null,cursor:m,snap:!!snap};rulerDrawNow(a,a,rulerDraw);},true);
  svg.addEventListener("pointermove",function(ev){if(!rulerMode||!rulerDraw)return;
   ev.stopPropagation();var m=mm(ev);rulerDraw.cursor=m;
   if(rulerDraw.ref){var dx=m.x-rulerDraw.a.x,dy=m.y-rulerDraw.a.y,axis=Math.abs(dx)>=Math.abs(dy)?"x":"y",target=dimensionEdgeAt(m,axis);rulerDraw.axis=axis;rulerDraw.target=target;
    rulerDraw.b=axis==="x"?{x:target?target.coord:m.x,y:rulerDraw.a.y}:{x:rulerDraw.a.x,y:target?target.coord:m.y};}
-  else rulerDraw.b=m;rulerDrawNow(rulerDraw.a,rulerDraw.b,rulerDraw);},true);
+  else{var snap=rulerCamSnap(m);rulerDraw.b=snap||m;rulerDraw.snap=!!snap;}rulerDrawNow(rulerDraw.a,rulerDraw.b,rulerDraw);},true);
  svg.addEventListener("pointerup",function(ev){if(!rulerMode||!rulerDraw)return;
   ev.stopPropagation();try{svg.releasePointerCapture(ev.pointerId);}catch(e){}
   var done=rulerDraw;rulerDraw=null;if(done.ref&&done.target)openPartDimensionDialog(done);

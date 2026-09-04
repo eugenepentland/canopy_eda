@@ -188,6 +188,11 @@ command = ["node", "--check", "src/serve/assets/pcb_board.js"]
 inputs = ["src/serve/assets/pcb_board.js"]
 
 [[external]]
+name = "gerber-measure-snap-js-test"
+command = ["node", "scripts/gerber_measure_snap_test.mjs"]
+inputs = ["src/serve/assets/pcb_board.js", "scripts/gerber_measure_snap_test.mjs"]
+
+[[external]]
 name = "pcb-model-sprites-js-syntax"
 command = ["node", "--check", "src/serve/assets/pcb_model_sprites.js"]
 inputs = ["src/serve/assets/pcb_model_sprites.js"]

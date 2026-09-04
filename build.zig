@@ -490,7 +490,7 @@ fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step) void {
         // gates here were decorative. Nothing in this tree could have noticed,
         // because a gate that never fires looks exactly like one that cannot.
         &.{"scripts/check_external_gates_armed.sh"},
-        // The three JavaScript unit-test runners. Each was declared as an
+        // JavaScript unit-test runners. Each was declared as an
         // external and therefore ran nowhere — which put shape_sketch.test.js
         // back in exactly the state DRIFT-INFRA-003 described, "a unit test
         // wired to NOTHING". All three exit 0 with a pass line today.
@@ -498,6 +498,7 @@ fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step) void {
         &.{ "node", "src/serve/assets/pcb_3d_surface.test.js" },
         &.{ "node", "src/serve/assets/system_cad.test.js" },
         &.{ "node", "scripts/test_pcb_region.js" },
+        &.{ "node", "scripts/gerber_measure_snap_test.mjs" },
     };
     for (checks) |argv| {
         const run = b.addSystemCommand(argv);

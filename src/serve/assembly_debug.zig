@@ -1393,11 +1393,12 @@ test "page HTML is read-only and carries embed, data, and focus assets" {
     try std.testing.expect(std.mem.indexOf(u8, js, "frame.style.transform") == null);
 }
 
-// spec: Web Server - Assembly exposes a read-only Gerber ruler that measures in world millimetres, reports fine mm and mil values, and remains available in frozen release pages
+// spec: Web Server - Assembly exposes a read-only Gerber ruler that snaps both endpoints to visible exact artwork edges, measures in world millimetres, reports fine mm and mil values, uses compact endpoint dots, and remains available in frozen release pages
 test "assembly measure tool drives the read-only board ruler" {
     const shell_js = @embedFile("assets/assembly_debug.js");
     const board_js = @embedFile("assets/pcb_board.js");
     const css = @embedFile("assets/assembly_debug.css");
+    const layout_css = @embedFile("assets/pcb_layout.css");
     const Check = struct { source: []const u8, marker: []const u8 };
     const checks = [_]Check{
         .{ .source = shell_js, .marker = "frame.contentWindow.PCBReviewMeasureMode" },
@@ -1407,6 +1408,11 @@ test "assembly measure tool drives the read-only board ruler" {
         .{ .source = board_js, .marker = "window.PCBReviewMeasureMode=rulerArm" },
         .{ .source = board_js, .marker = "type:\"netlisp-pcb-measure-state\"" },
         .{ .source = board_js, .marker = "var m=mm(ev),p=!RO&&selRef&&partByRef(selRef)" },
+        .{ .source = board_js, .marker = "function rulerCamSnap(m)" },
+        .{ .source = board_js, .marker = "snap=p?null:rulerCamSnap(m)" },
+        .{ .source = board_js, .marker = "rulerDraw.b=snap||m" },
+        .{ .source = board_js, .marker = "function rulerPointRadius()" },
+        .{ .source = layout_css, .marker = ".pcb-ruler-point{fill:#001023;stroke:#ffd33d;stroke-width:1.2;vector-effect:non-scaling-stroke" },
         .{ .source = css, .marker = ".measure-status[data-state=\"active\"]" },
     };
     for (checks) |check| try std.testing.expect(std.mem.indexOf(u8, check.source, check.marker) != null);

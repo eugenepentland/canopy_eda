@@ -8041,13 +8041,13 @@ test "the ruler's drag state survives the per-frame overlay redraw" {
     // pointerup / rulerArm(false).
     try std.testing.expect(std.mem.indexOf(u8, js, "function rulerClear(){if(rgRuler&&rgRuler.parentNode)rgRuler.parentNode.removeChild(rgRuler);rgRuler=null;}") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function rulerClear(){if(rgRuler&&rgRuler.parentNode)rgRuler.parentNode.removeChild(rgRuler);rgRuler=null;rulerDraw=null;}") == null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "else rulerDraw.b=m;rulerDrawNow(rulerDraw.a,rulerDraw.b,rulerDraw);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "else{var snap=rulerCamSnap(m);rulerDraw.b=snap||m;rulerDraw.snap=!!snap;}rulerDrawNow(rulerDraw.a,rulerDraw.b,rulerDraw);") != null);
 }
 
 // spec: Web Server - With one footprint selected, D authors a persistent driving dimension from that footprint origin to a perpendicular straight outline edge
 test "D drives a selected footprint origin from a stable outline edge" {
     const js = @embedFile("assets/pcb_board.js");
-    try std.testing.expect(std.mem.indexOf(u8, js, "a=p?{x:p.x,y:p.y}:m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "a=p?{x:p.x,y:p.y}:(snap||m)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function dimensionEdgeAt(m,axis)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "d={ref:part.ref,axis:state.axis,edge_id:edge.id,offset:sign*n*unit}") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function outlineGeomDrop(){outlineGeomRev++;outlineFilletCache=null;boardShapeCache=null;partDimensionsApply();}") != null);

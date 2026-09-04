@@ -662,3 +662,8 @@ matters when the person re-recording is the author of the change.
 - **friction:** The preceding BOM-grouping feedback entry understated that release's test count as 1,202 because it counted only the final two shard summaries; the complete log contains eight passing shard summaries totaling 4,750 tests.
 - **idea:** Preserve the test/build-green candidate and retry only `pcb_editor_perf` once when it alone fails, recording both timing samples before deciding whether to discard the candidate.
 - **status:** open
+
+## 2026-09-04 · codex · Gerber ruler edge snapping
+- **blocker:** Three unchanged exact-commit preparations passed all 72 Guardian checks, all 4,782 tests, and ReleaseSafe compilation, then discarded the candidate on unrelated `pcb_editor_perf` outliers. The runs respectively failed at 231.4 ms GPU, by 0.8 ms on one Canvas p95, and at 239.6 ms GPU; this left the tested ruler branch unmerged after roughly ten minutes of repeated green build/test work plus 146 seconds queued behind the shared gate.
+- **idea:** Preserve a candidate whose Guardian, tests, and build passed, then perform one bounded serialized `pcb_editor_perf` retry against that exact stripped binary before discarding it. This recurring failure mode currently forces the entire release preparation to repeat even though the browser stage already has the only artifact it needs.
+- **status:** open
