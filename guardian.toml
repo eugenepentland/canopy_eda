@@ -1221,14 +1221,17 @@ parity_test = "returns the same ladder as the layout-progress endpoint"
 [[twin]]
 name = "pcb-png"
 surfaces = ["http:/api/pcb-png", "mcp:get_pcb_layout_image"]
+parity_test = "decodes to the same PNG the pcb-png endpoint serves"
 
 [[twin]]
 name = "diagnose-net"
 surfaces = ["http:/api/pcb-route-analyze", "mcp:diagnose_net"]
+parity_test = "returns the same per-net analysis as the pcb-route-analyze endpoint"
 
 [[twin]]
 name = "layout-match"
 surfaces = ["http:/api/layout-match", "mcp:compare_layout_to_starred"]
+parity_test = "returns the same score as the layout-match endpoint"
 
 [[twin]]
 name = "kicad-sch-export"

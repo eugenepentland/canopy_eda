@@ -7723,6 +7723,9 @@ is what makes the predicate exact rather than approximately right.
 - The get_layout_progress MCP tool and the layout-progress endpoint share one implementation, so both report the same completion ladder
 - The route_pcb MCP tool and the pcb-route endpoint route the same poses to the same copper, reporting the same connectivity, track, via and DRC counts
 - The preview_module MCP tool and the standalone module page instantiate a module the same way, so both draw the same instances and nets and both refuse a module whose parameters have no defaults
+- The get_pcb_layout_image MCP tool and the pcb-png endpoint render one board through one renderer, so the tool's base64 payload decodes to the endpoint's exact PNG bytes
+- The diagnose_net MCP tool and the pcb-route-analyze endpoint run one diagnosis, so a named net reads identically on both surfaces
+- The compare_layout_to_starred MCP tool and the layout-match endpoint share one scorer, so both report the same agreement against the starred layout
 - completeness-waiver: concurrent access (httpz owns request threading and each handler answers from its own response arena; the two pieces of state that really are shared — the live scene graph and a design's layout sidecar — are specified where they live, under the push and layout-backfill sections, rather than restated per endpoint)
 
 ## fab_readiness

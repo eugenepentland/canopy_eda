@@ -27,6 +27,8 @@ const mcp_tools = @import("mcp_tools.zig");
 const pcb_describe = @import("pcb_describe.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const modules_page = @import("modules.zig");
+const layout_match = @import("layout_match.zig");
+const route_analyze_api = @import("route_analyze_api.zig");
 
 const Server = serve_root.Server;
 const testing = std.testing;
@@ -358,4 +360,72 @@ test "preview_module and the standalone module page resolve one module identical
     const bare_tool = try mcpCall(alloc, project, "preview_module", "{\"module\":\"twinarg\"}");
     try testing.expect(!bare_tool.ok);
     try testing.expect(std.mem.indexOf(u8, bare_tool.body, "\"ok\":false") != null);
+}
+
+// spec: Web Server - The get_pcb_layout_image MCP tool and the pcb-png endpoint render one board through one renderer, so the tool's base64 payload decodes to the endpoint's exact PNG bytes
+test "get_pcb_layout_image decodes to the same PNG the pcb-png endpoint serves" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp, .routed);
+
+    const http = try httpCall(alloc, project, pcb_layout_page.pcbPngApi, "twinfx", &.{}, null);
+    try testing.expectEqual(@as(u16, 200), http.status);
+    const tool = try mcpCall(alloc, project, "get_pcb_layout_image", "{\"name\":\"twinfx\"}");
+    try testing.expect(tool.ok);
+
+    // The tool's only framing is base64 (the CLI layer emits it as an image
+    // content block); strip it and the two surfaces must be the same picture.
+    const dec = std.base64.standard.Decoder;
+    const raw = try alloc.alloc(u8, try dec.calcSizeForSlice(tool.body));
+    try dec.decode(raw, tool.body);
+    try testing.expectEqualSlices(u8, http.body, raw);
+    try testing.expectEqualSlices(u8, "\x89PNG", raw[0..4]);
+}
+
+// spec: Web Server - The diagnose_net MCP tool and the pcb-route-analyze endpoint run one diagnosis, so a named net reads identically on both surfaces
+test "diagnose_net returns the same per-net analysis as the pcb-route-analyze endpoint" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp, .routed);
+
+    const http = try httpCall(alloc, project, route_analyze_api.pcbRouteAnalyzeApi, "twinfx", &.{}, "{\"net\":\"SIG\"}");
+    try testing.expectEqual(@as(u16, 200), http.status);
+    const tool = try mcpCall(alloc, project, "diagnose_net", "{\"name\":\"twinfx\",\"net\":\"SIG\"}");
+    try testing.expect(tool.ok);
+    try testing.expectEqualStrings(http.body, tool.body);
+    try testing.expect(std.mem.indexOf(u8, http.body, "\"net\":\"SIG\"") != null);
+
+    // A net neither surface can find is a refusal on both, not a 200 on one of
+    // them: the endpoint answers 404 and the tool flags its result an error.
+    const gone = try httpCall(alloc, project, route_analyze_api.pcbRouteAnalyzeApi, "twinfx", &.{}, "{\"net\":\"NOPE\"}");
+    try testing.expectEqual(@as(u16, 404), gone.status);
+    const gone_tool = try mcpCall(alloc, project, "diagnose_net", "{\"name\":\"twinfx\",\"net\":\"NOPE\"}");
+    try testing.expect(!gone_tool.ok);
+}
+
+// spec: Web Server - The compare_layout_to_starred MCP tool and the layout-match endpoint share one scorer, so both report the same agreement against the starred layout
+test "compare_layout_to_starred returns the same score as the layout-match endpoint" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp, .routed);
+
+    const http = try httpCall(alloc, project, layout_match.layoutMatchApi, "twinfx", &.{}, null);
+    try testing.expectEqual(@as(u16, 200), http.status);
+    const tool = try mcpCall(alloc, project, "compare_layout_to_starred", "{\"name\":\"twinfx\"}");
+    try testing.expect(tool.ok);
+    try testing.expectEqualStrings(http.body, tool.body);
+    try testing.expect(std.mem.indexOf(u8, http.body, "\"starred\":\"routed\"") != null);
+    try testing.expect(std.mem.indexOf(u8, http.body, "\"coverage\":") != null);
 }
