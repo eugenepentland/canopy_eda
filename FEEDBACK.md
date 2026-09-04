@@ -656,3 +656,9 @@ matters when the person re-recording is the author of the change.
 - **blocker:** `prepare-release.sh` passed the 72-check Guardian run, all 1,202 Zig tests, and the ReleaseSafe build, then discarded the candidate because one unrelated Barracuda GPU zoom-in sample measured 235.6 ms against the 150 ms p95 / 160 ms maximum limits. Repository policy therefore prevented merging a two-file BOM serializer change even though its focused regression and whole-suite compile passed.
 - **idea:** Implement the already-requested bounded retry against the exact built candidate when only `pcb_editor_perf` fails; this recurrence cost 216 seconds in the shared gate queue plus roughly three minutes of otherwise-green release work and left a completed feature branch undeployed.
 - **status:** open
+
+## 2026-09-04 · codex · fabrication centroid unit columns
+- **blocker:** After rebasing the BOM branch and adding centroid unit headers, a second exact-commit release passed all 72 Guardian checks, all 4,750 Zig tests, and ReleaseSafe compilation, then discarded the candidate on a 70.2 ms Canvas zoom-in frame against the unrelated 45 ms p95 / 55 ms maximum limits; every GPU metric passed. This stranded the finished fab-export changes again after 192 seconds of queueing and roughly three minutes of green build/test work.
+- **friction:** The preceding BOM-grouping feedback entry understated that release's test count as 1,202 because it counted only the final two shard summaries; the complete log contains eight passing shard summaries totaling 4,750 tests.
+- **idea:** Preserve the test/build-green candidate and retry only `pcb_editor_perf` once when it alone fails, recording both timing samples before deciding whether to discard the candidate.
+- **status:** open
