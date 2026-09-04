@@ -121,7 +121,7 @@ pub fn centroidCsv(
     frame: Frame,
     dnp: DnpMode,
 ) std.Io.Writer.Error!void {
-    try w.writeAll("Designator,Val,Package,Mid X,Mid Y,Rotation,Layer\n");
+    try w.writeAll("Designator,Val,Package,Mid X (mm),Mid Y (mm),Rotation,Layer\n");
     for (parts, 0..) |p, i| {
         if (i >= instances.len or !assemblyPopulated(instances[i], dnp)) continue;
         try writeCsvField(w, p.ref_des);
@@ -138,7 +138,7 @@ pub fn centroidCsv(
         // `F.Cu`/`B.Cu`: those are the words every assembler's pick-and-place
         // importer expects in a centroid file. They mean the same two faces
         // the table calls `Side.front` / `Side.back` (`board_layers.Side`).
-        try w.print(",{d:.3}mm,{d:.3}mm,{d:.0},{s}\n", .{
+        try w.print(",{d:.3},{d:.3},{d:.0},{s}\n", .{
             c[0],
             c[1],
             @mod(360.0 - p.rot, 360.0),
@@ -148,36 +148,95 @@ pub fn centroidCsv(
 }
 
 /// Write the revision-release BOM from the exact flattened instance array used
-/// by the centroid. One row per populated designator keeps its reference set
-/// unambiguous even when separate sub-blocks both author a local `C1`.
+/// by the centroid. Sourceable parts sharing a normalized MPN occupy one row;
+/// parts without an MPN use component/value/footprint as a conservative
+/// fallback so unrelated unspecified parts do not collapse together.
 pub fn assemblyBomCsv(
     w: *std.Io.Writer,
     instances: []const export_kicad.FlatInstance,
     dnp: DnpMode,
 ) std.Io.Writer.Error!void {
     try w.writeAll("Qty,References,Component,Value,Footprint,MPN,Manufacturer,DNP\r\n");
-    for (instances) |instance| {
+    for (instances, 0..) |instance, instance_index| {
         if (!assemblyPopulated(instance, dnp)) continue;
-        try w.writeAll("1,");
-        try writeCsvField(w, instance.ref_des);
-        try w.writeByte(',');
+
+        // The first populated instance for a group owns its row. Keeping that
+        // order makes the output deterministic without allocating a second
+        // copy of the BOM solely to sort or group it.
+        var already_written = false;
+        for (instances[0..instance_index]) |prior| {
+            if (assemblyPopulated(prior, dnp) and sameBomGroup(prior, instance)) {
+                already_written = true;
+                break;
+            }
+        }
+        if (already_written) continue;
+
+        var quantity: usize = 0;
+        var dnp_quantity: usize = 0;
+        var manufacturer = bomProperty(instance, "manufacturer");
+        for (instances) |candidate| {
+            if (!assemblyPopulated(candidate, dnp) or !sameBomGroup(instance, candidate)) continue;
+            quantity += 1;
+            dnp_quantity += @intFromBool(candidate.dnp);
+            if (manufacturer.len == 0) manufacturer = bomProperty(candidate, "manufacturer");
+        }
+
+        try w.print("{d},\"", .{quantity});
+        var first_ref = true;
+        for (instances) |candidate| {
+            if (!assemblyPopulated(candidate, dnp) or !sameBomGroup(instance, candidate)) continue;
+            if (!first_ref) try w.writeAll(", ");
+            for (candidate.ref_des) |ch| {
+                if (ch == '"') try w.writeAll("\"\"") else try w.writeByte(ch);
+            }
+            first_ref = false;
+        }
+        try w.writeAll("\",");
         try writeCsvField(w, instance.component);
         try w.writeByte(',');
         try writeCsvField(w, instance.value);
         try w.writeByte(',');
         try writeCsvField(w, instance.footprint);
-        var mpn: []const u8 = "";
-        var manufacturer: []const u8 = "";
-        for (instance.properties) |property| {
-            if (std.ascii.eqlIgnoreCase(property.key, "mpn")) mpn = property.value;
-            if (std.ascii.eqlIgnoreCase(property.key, "manufacturer")) manufacturer = property.value;
-        }
         try w.writeByte(',');
-        try writeCsvField(w, mpn);
+        try writeCsvField(w, bomProperty(instance, "mpn"));
         try w.writeByte(',');
         try writeCsvField(w, manufacturer);
-        try w.print(",{s}\r\n", .{if (instance.dnp) "yes" else "no"});
+        const dnp_label = if (dnp_quantity == 0)
+            "no"
+        else if (dnp_quantity == quantity)
+            "yes"
+        else
+            "mixed";
+        try w.print(",{s}\r\n", .{dnp_label});
     }
+}
+
+fn bomProperty(instance: export_kicad.FlatInstance, wanted: []const u8) []const u8 {
+    for (instance.properties) |property| {
+        if (std.ascii.eqlIgnoreCase(property.key, wanted)) {
+            return std.mem.trim(u8, property.value, " \t\r\n");
+        }
+    }
+    return "";
+}
+
+fn sameBomText(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(
+        std.mem.trim(u8, a, " \t\r\n"),
+        std.mem.trim(u8, b, " \t\r\n"),
+    );
+}
+
+fn sameBomGroup(a: export_kicad.FlatInstance, b: export_kicad.FlatInstance) bool {
+    const a_mpn = bomProperty(a, "mpn");
+    const b_mpn = bomProperty(b, "mpn");
+    if (a_mpn.len > 0 or b_mpn.len > 0) {
+        return a_mpn.len > 0 and b_mpn.len > 0 and std.ascii.eqlIgnoreCase(a_mpn, b_mpn);
+    }
+    return sameBomText(a.component, b.component) and
+        sameBomText(a.value, b.value) and
+        sameBomText(a.footprint, b.footprint);
 }
 
 /// One hole for the Excellon writer: position (mm) + tool diameter (mm). A
@@ -337,7 +396,7 @@ fn writeCsvField(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
 const testing = std.testing;
 const geometry = @import("placement/geometry.zig");
 
-// spec: export_fab - the centroid CSV lists each part's pose with its board side
+// spec: export_fab - the centroid CSV labels coordinate units in its headers and lists each part's unitless-numeric pose with its board side
 test "centroidCsv emits one side-aware row per part" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -356,8 +415,10 @@ test "centroidCsv emits one side-aware row per part" {
     // CW-positive placement angle comes out CCW-positive (90→270).
     try centroidCsv(&aw.writer, &parts, &instances, .{ .ox = 0, .oy = 20 }, .drop);
     const out = aw.written();
-    try testing.expect(std.mem.indexOf(u8, out, "U1,STM32,LQFP-48,10.000mm,15.000mm,270,Top") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "C1,100nF,C_0402,1.000mm,18.000mm,0,Bottom") != null);
+    try testing.expect(std.mem.startsWith(u8, out, "Designator,Val,Package,Mid X (mm),Mid Y (mm),Rotation,Layer\n"));
+    try testing.expect(std.mem.indexOf(u8, out, "U1,STM32,LQFP-48,10.000,15.000,270,Top") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "C1,100nF,C_0402,1.000,18.000,0,Bottom") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "mm,") == null);
 }
 
 // spec: export_fab - the centroid CSV drops DNP parts by default and keeps them under keep_dnp
@@ -386,6 +447,52 @@ test "centroidCsv excludes DNP parts unless keep_dnp is set" {
     try centroidCsv(&keep.writer, &parts, &instances, .{ .ox = 0, .oy = 10 }, .keep);
     try testing.expect(std.mem.indexOf(u8, keep.written(), "U1,") != null);
     try testing.expect(std.mem.indexOf(u8, keep.written(), "R_OPT,") != null);
+}
+
+// spec: export_fab - the fabrication BOM groups normalized MPNs into quantity rows and uses component identity only when MPN is absent
+test "assemblyBomCsv groups rows by normalized MPN" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+
+    const r1_properties = [_]env.Property{
+        .{ .key = "mpn", .value = "RC0402-10K" },
+    };
+    const r2_properties = [_]env.Property{
+        .{ .key = "MPN", .value = "  rc0402-10k  " },
+        .{ .key = "Manufacturer", .value = "Yageo" },
+    };
+    const dnp_properties = [_]env.Property{
+        .{ .key = "mpn", .value = "RC0402-10K" },
+    };
+    const instances = [_]export_kicad.FlatInstance{
+        .{ .ref_des = "R1", .component = "res", .value = "10k", .footprint = "0402", .uuid = "", .properties = &r1_properties },
+        .{ .ref_des = "R2", .component = "res", .value = "12k", .footprint = "0402", .uuid = "", .properties = &r2_properties },
+        .{ .ref_des = "C1", .component = "cap", .value = "100n", .footprint = "0402", .uuid = "", .properties = &.{} },
+        .{ .ref_des = "C2", .component = "CAP", .value = "100N", .footprint = "0402", .uuid = "", .properties = &.{} },
+        .{ .ref_des = "C3", .component = "cap", .value = "1u", .footprint = "0402", .uuid = "", .properties = &.{} },
+        .{ .ref_des = "R_OPT", .component = "res", .value = "10k", .footprint = "0402", .uuid = "", .properties = &dnp_properties, .dnp = true },
+    };
+
+    var drop: std.Io.Writer.Allocating = .init(alloc);
+    try assemblyBomCsv(&drop.writer, &instances, .drop);
+    try testing.expectEqualStrings(
+        "Qty,References,Component,Value,Footprint,MPN,Manufacturer,DNP\r\n" ++
+            "2,\"R1, R2\",res,10k,0402,RC0402-10K,Yageo,no\r\n" ++
+            "2,\"C1, C2\",cap,100n,0402,,,no\r\n" ++
+            "1,\"C3\",cap,1u,0402,,,no\r\n",
+        drop.written(),
+    );
+
+    // Keeping DNP parts still produces one MPN row and makes the mixed
+    // population status explicit instead of silently inheriting R1's value.
+    var keep: std.Io.Writer.Allocating = .init(alloc);
+    try assemblyBomCsv(&keep.writer, &instances, .keep);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        keep.written(),
+        "3,\"R1, R2, R_OPT\",res,10k,0402,RC0402-10K,Yageo,mixed\r\n",
+    ) != null);
 }
 
 // spec: export_fab - fab writers share one y-up frame derived from the board outline
