@@ -23,6 +23,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const json_writer = @import("json_writer.zig");
 const optimizer = @import("placement/optimizer.zig");
 const router = @import("placement/router.zig");
 const outline = @import("placement/outline.zig");
@@ -342,16 +343,10 @@ fn sessionResponse(arena: std.mem.Allocator, names: []const []const u8) ![]const
     return aw.written();
 }
 
-/// A JSON string literal, escaping only `"`/`\` (net names are identifiers).
-fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    try w.writeByte('"');
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        else => try w.writeByte(c),
-    };
-    try w.writeByte('"');
-}
+/// A JSON string literal. Net names come from design source, so they are
+/// escaped by the canonical writer rather than by a local `"`/`\`-only loop
+/// that let a control byte through raw and produced invalid JSON.
+const writeJsonStr = json_writer.writeScriptString;
 
 // ── Probe geometry ───────────────────────────────────────────────────────────
 // Engine-exact copies of drc.zig's private pair-distance helpers (points bundled

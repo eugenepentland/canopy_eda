@@ -949,8 +949,8 @@ src/export_gerber.zig::planSilk | fn planSilk( arena: std.mem.Allocator, placeme
 src/export_gerber.zig::plated value
 src/export_gerber.zig::plated_drill_suffix value
 src/export_gerber.zig::top_mask value
-src/export_gerber.zig::writeJobFile | fn writeJobFile( w: *std.Io.Writer, placement: optimizer.Placement, files: []const LayerFile, name_prefix: []const u8, ) std.Io.Writer.Error!void
-src/export_gerber.zig::writeJobFileSized | fn writeJobFileSized( w: *std.Io.Writer, placement: optimizer.Placement, files: []const LayerFile, name_prefix: []const u8, geometry_spec: JobGeometry, ) std.Io.Writer.Error!void
+src/export_gerber.zig::writeJobFile | fn writeJobFile( w: *std.Io.Writer, placement: optimizer.Placement, files: []const LayerFile, name_prefix: []const u8, ) json_writer.WriteError!void
+src/export_gerber.zig::writeJobFileSized | fn writeJobFileSized( w: *std.Io.Writer, placement: optimizer.Placement, files: []const LayerFile, name_prefix: []const u8, geometry_spec: JobGeometry, ) json_writer.WriteError!void
 src/export_gerber.zig::writeLayer | fn writeLayer( w: *std.Io.Writer, arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, texts: []const font.BoardText, frame: export_fab.Frame, layer: Layer, meta: Meta, ) Error!void
 src/export_gerber.zig::writePanelVscore | fn writePanelVscore( w: *std.Io.Writer, arena: std.mem.Allocator, panel: *const panelize.Plan, meta: Meta, ) Error!void
 src/export_kicad.zig::BundleOptions struct_
@@ -1332,6 +1332,7 @@ src/json_writer.zig::writeEscaped | fn writeEscaped(w: anytype, s: []const u8) W
 src/json_writer.zig::writeField | fn writeField(w: anytype, key: []const u8, value: []const u8) WriteError!void
 src/json_writer.zig::writeScriptString | fn writeScriptString(w: anytype, s: []const u8) !void
 src/json_writer.zig::writeString | fn writeString(w: anytype, s: []const u8) WriteError!void
+src/json_writer.zig::writeStringOom | fn writeStringOom(w: anytype, value: []const u8) std.mem.Allocator.Error!void
 src/kicad_pcb/board_state.zig::BoardFp struct_
 src/kicad_pcb/board_state.zig::PadAssign struct_
 src/kicad_pcb/experiment.zig::CandidateScore struct_
@@ -4889,7 +4890,7 @@ src/serve/route_review.zig::saveCachedReplay | fn saveCachedReplay(alloc: std.me
 src/serve/route_review.zig::writeDesignBoundsAndOutline | fn writeDesignBoundsAndOutline(w: *std.Io.Writer, placement: optimizer.Placement) HandlerError!void
 src/serve/route_review.zig::writeDesignReviewJson | fn writeDesignReviewJson( arena: std.mem.Allocator, w: *std.Io.Writer, name: []const u8, placement: optimizer.Placement, replay: DesignReplay, ) HandlerError!void
 src/serve/route_review.zig::writeFinal | fn writeFinal( w: *std.Io.Writer, placement: optimizer.Placement, routed: router.RouteResult, violations: []const drc.Violation, ) HandlerError!void
-src/serve/route_review.zig::writeJsonString | fn writeJsonString(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void
+src/serve/route_review.zig::writeJsonString value
 src/serve/route_review.zig::writeNetClasses | fn writeNetClasses(w: *std.Io.Writer, placement: optimizer.Placement) HandlerError!void
 src/serve/route_review.zig::writeNets | fn writeNets(w: *std.Io.Writer, placement: optimizer.Placement) HandlerError!void
 src/serve/route_review.zig::writeParts | fn writeParts(arena: std.mem.Allocator, w: *std.Io.Writer, placement: optimizer.Placement) HandlerError!void

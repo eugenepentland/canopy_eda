@@ -16,6 +16,7 @@ const optimizer = @import("../placement/optimizer.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const numeric = @import("../numeric.zig");
+const json_writer = @import("../json_writer.zig");
 const lib_limits = @import("../lib_limits.zig");
 // ── Constants ─────────────────────────────────────────────────────
 const http_not_found: u16 = 404;
@@ -492,16 +493,11 @@ fn writePtsJson(w: anytype, pts: []const Point) HandlerError!void {
     try w.writeAll("]");
 }
 
-/// Write `s` as a minimally-escaped JSON string (quotes + backslashes).
-fn writeJsonStr(w: anytype, s: []const u8) HandlerError!void {
-    try w.writeByte('"');
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        else => try w.writeByte(c),
-    };
-    try w.writeByte('"');
-}
+/// Pad ids, pad types and shape names reach the footprint editor in the
+/// browser, so they take the script-context escaper. The local loop this
+/// replaces escaped only `"` and `\`, leaving a control byte to produce
+/// invalid JSON and `<` to close a script element.
+const writeJsonStr = json_writer.writeScriptString;
 
 // ── Board-side footprint extraction (old-vs-new compare) ────────────────
 // The sync preview's swap rows offer an "old vs new" comparison: the NEW
