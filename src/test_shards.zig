@@ -351,6 +351,7 @@ pub const shards: []const []const []const u8 = &.{
         "leak_tests.placement.test.",
         "leak_tests.render.test.",
         "module_metadata.test.",
+        "pad_neck_shape.test.",
         "placement.bypass_intent.test.",
         "placement.bypass_open.test.",
         "placement.congestion.test.",

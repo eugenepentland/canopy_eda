@@ -48,6 +48,7 @@ const drc = @import("../placement/drc.zig");
 const drc_rules = @import("drc_rules.zig");
 const fab_readiness = @import("../fab_readiness.zig");
 const topo_lower = @import("../placement/topo_lower.zig");
+const pad_neck_shape = @import("../pad_neck_shape.zig");
 
 /// A lowered plan: the router options plus whether an authored plan applied
 /// and how many selector warnings resolution produced (for result reporting).
@@ -406,7 +407,86 @@ pub fn finishLoweredCandidate(
     // ratchet sitting behind each gate turns any rule its removals trip into a
     // whole net dropped. It also buys back the per-pass whole-board scans.
     if (converged.cancelled or routeStopped(options)) return converged;
-    return pruneGateTopology(alloc, placement, params, converged, options);
+    const pruned = try pruneGateTopology(alloc, placement, params, converged, options);
+    // A DRC gate can drop a normally finished net and let the residual ladder
+    // reconnect it with a plain centreline. That late rescue happens after the
+    // router's own pad-neck/output adapter, so make the final assembled board
+    // pass the same seam once more. Caller-owned retained copper is immutable.
+    const mutable = try alloc.alloc(bool, placement.nets.len);
+    for (mutable, 0..) |*slot, net_i| {
+        const in_scope = options.selected_nets.len == 0 or
+            (net_i < options.selected_nets.len and options.selected_nets[net_i]);
+        slot.* = in_scope and !retainedNetCopper(options, net_i);
+    }
+    const tapered = try pad_neck_shape.finishExactRfTapers(alloc, placement, mutable, pruned);
+
+    // This seam is deliberately after the route gate, so it must uphold that
+    // gate's contract itself. A pad flare that cannot clear a neighbouring
+    // ground land falls back to the already-proven uniform route, exactly as
+    // the hand router's taper fitter does; a geometry overlay must never turn
+    // a green routed board red on persistence.
+    const bad = try alloc.alloc(bool, placement.nets.len);
+    @memset(bad, false);
+    const findings = try ratchetFindings(alloc, placement, params, tapered, options);
+    for (findings) |finding| {
+        if (finding.severity != .err and finding.kind != .implicit_junction) continue;
+        const candidates = candidateNets(placement, options, finding);
+        for (candidates.items[0..candidates.len]) |net_i| {
+            if (mutable[net_i]) bad[net_i] = true;
+        }
+    }
+    const zones = try route_close.userZones(alloc, placement, options.existing_zones);
+    const tally = try fab_readiness.routableTally(alloc, placement, .{
+        .tracks = tapered.tracks,
+        .arcs = tapered.arcs,
+        .rf_paths = tapered.rf_port_outcomes,
+        .vias = tapered.vias,
+        .zones = zones,
+    });
+    for (tally.open) |name| {
+        if (netIndexOf(placement, name)) |net_i| {
+            if (mutable[net_i]) bad[net_i] = true;
+        }
+    }
+    if (!anyTrue(bad)) return tapered;
+    return rollbackTaperNets(alloc, bad, pruned, tapered);
+}
+
+fn rollbackTaperNets(
+    alloc: std.mem.Allocator,
+    bad: []const bool,
+    baseline: router.RouteResult,
+    candidate: router.RouteResult,
+) std.mem.Allocator.Error!router.RouteResult {
+    var tracks: std.ArrayList(router.Track) = .empty;
+    var vias: std.ArrayList(router.Via) = .empty;
+    var arcs: std.ArrayList(router.Arc) = .empty;
+    var sharp: std.ArrayList(router.SharpBend) = .empty;
+    var outcomes: std.ArrayList(rf_port_report.Outcome) = .empty;
+    for (candidate.tracks) |track| if (!selectedNet(bad, track.net)) try tracks.append(alloc, track);
+    for (baseline.tracks) |track| if (selectedNet(bad, track.net)) try tracks.append(alloc, track);
+    for (candidate.vias) |via| if (!selectedNet(bad, via.net)) try vias.append(alloc, via);
+    for (baseline.vias) |via| if (selectedNet(bad, via.net)) try vias.append(alloc, via);
+    for (candidate.arcs) |arc| if (!selectedNet(bad, arc.net)) try arcs.append(alloc, arc);
+    for (baseline.arcs) |arc| if (selectedNet(bad, arc.net)) try arcs.append(alloc, arc);
+    for (candidate.sharp_bends) |bend| if (!selectedNet(bad, bend.net)) try sharp.append(alloc, bend);
+    for (baseline.sharp_bends) |bend| if (selectedNet(bad, bend.net)) try sharp.append(alloc, bend);
+    for (candidate.rf_port_outcomes) |outcome| if (!selectedNet(bad, outcome.net)) try outcomes.append(alloc, outcome);
+    // The baseline path is the geometry the route gate already proved. It may
+    // also own a compact under-nominal edit handle; dropping that metadata
+    // would expose the handle as fabricated copper and create a false width
+    // error even though the rollback restored the original board.
+    for (baseline.rf_port_outcomes) |outcome| if (selectedNet(bad, outcome.net)) try outcomes.append(alloc, outcome);
+    var out = candidate;
+    out.tracks = try tracks.toOwnedSlice(alloc);
+    out.vias = try vias.toOwnedSlice(alloc);
+    out.arcs = try arcs.toOwnedSlice(alloc);
+    out.sharp_bends = try sharp.toOwnedSlice(alloc);
+    out.rf_port_outcomes = try outcomes.toOwnedSlice(alloc);
+    out.routed = baseline.routed;
+    out.total = baseline.total;
+    out.failed = baseline.failed;
+    return out;
 }
 
 fn finishLoweredResidual(

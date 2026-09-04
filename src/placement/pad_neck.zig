@@ -609,6 +609,7 @@ fn rfEndpointProfile(
     point: [2]f64,
     layer: u8,
     nominal: f64,
+    minimum: f64,
     direction: [2]f64,
 ) ?Profile {
     var found = false;
@@ -619,7 +620,12 @@ fn rfEndpointProfile(
         const span = launchSpan(pad, direction);
         if (!(span > 0)) continue;
         found = true;
-        width = @max(width, span);
+        // A near-corner crossing can have an arbitrarily tiny incidental
+        // chord through an otherwise substantial land. The hand router uses
+        // the land's narrow physical dimension in that case; generated routes
+        // must apply the identical floor instead of pinching below fab width.
+        const pad_width = 2 * @min(pad.half_w, pad.half_h);
+        width = @max(width, @max(span, pad_width));
         land = @max(land, boxRayHalfExtent(pad, direction));
     }
     for (copper.vias) |via| {
@@ -629,6 +635,7 @@ fn rfEndpointProfile(
         width = @max(width, via.dia);
         land = @max(land, via.dia / 2);
     }
+    width = @max(width, minimum);
     if (!found or @abs(width - nominal) <= eps) return null;
     return .{ .width = width, .land = land, .taper = nominal * rf_taper_widths };
 }
@@ -1133,7 +1140,7 @@ pub fn shapeGeneratedTracks(
         ))
             .{ .width = neck, .land = neck_len, .taper = taper_len }
         else if (controlled_impedance)
-            rfEndpointProfile(.{ .pads = pads, .vias = vias, .net = track.net }, .{ track.x1, track.y1 }, track.layer, nominal, direction)
+            rfEndpointProfile(.{ .pads = pads, .vias = vias, .net = track.net }, .{ track.x1, track.y1 }, track.layer, nominal, placement.rules.design.min_width, direction)
         else
             null;
         const end: ?Profile = if (authored and endpointNeedsNeck(
@@ -1146,7 +1153,7 @@ pub fn shapeGeneratedTracks(
         ))
             .{ .width = neck, .land = neck_len, .taper = taper_len }
         else if (controlled_impedance)
-            rfEndpointProfile(.{ .pads = pads, .vias = vias, .net = track.net }, .{ track.x2, track.y2 }, track.layer, nominal, direction)
+            rfEndpointProfile(.{ .pads = pads, .vias = vias, .net = track.net }, .{ track.x2, track.y2 }, track.layer, nominal, placement.rules.design.min_width, direction)
         else
             null;
         if (start == null and end == null) {

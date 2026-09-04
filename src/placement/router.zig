@@ -2346,7 +2346,7 @@ fn finishRoute(run: RouteFinish) std.mem.Allocator.Error!RouteRun {
         var partial = board;
         partial.preserve_vias = true; // no fill raster here to re-judge a barrel by
         try route_cleanup.cancelGloss(partial);
-        return assembleRouteRun(run);
+        return assembleRouteRun(run, &.{});
     }
     const escape_marks = [2]usize{ run.tracks.items.len, run.vias.items.len };
     if (timing) |t| t.begin(.escape_stubs);
@@ -2452,6 +2452,12 @@ fn finishRoute(run: RouteFinish) std.mem.Allocator.Error!RouteRun {
     var final_board = post_stitch_board;
     final_board.preserve_vias = true;
     try route_cleanup.pruneDeadCopper(final_board);
+    // Capture fallback RF profiles while every pad-neck slice still exists.
+    // The final gloss below is allowed to collapse those slices against pad
+    // copper, which destroys the width stations needed to reconstruct a full
+    // two-sided taper after the fact.
+    const rf_trials_before_gloss = try rf_port_report.collectOrdered(arena, &run.ctx.rf.port_outcomes, run.placement.nets.len);
+    const rf_fallbacks = try @import("rf_taper_paths.zig").exactFallbacks(arena, run.placement, run.tracks.items, rf_trials_before_gloss);
     // THE LAST PASS. Every seam above has now emitted its final copper, and
     // each of them rebuilds runs the others already finished with: an escape ray
     // re-drawn over a comb the merge just consolidated, a neck shaped onto a
@@ -2464,19 +2470,20 @@ fn finishRoute(run: RouteFinish) std.mem.Allocator.Error!RouteRun {
     // putting it here cannot undo the escape rays `pad_escape` deliberately
     // draws last (it re-straightens nothing) nor the necks `pad_neck` just cut.
     try route_cleanup.finalGloss(final_board);
+    try @import("rf_taper_paths.zig").compactFallbackHandles(arena, run.tracks, rf_fallbacks);
     var outcome_it = run.ctx.rf.port_outcomes.valueIterator();
     while (outcome_it.next()) |outcome| {
         for (run.tracks.items) |track| outcome.physical.retained_tracks += @intFromBool(track.net == outcome.net);
     }
     copperCompacted(run.ctx);
     if (timing) |t| t.end(.cleanup);
-    return assembleRouteRun(run);
+    return assembleRouteRun(run, rf_fallbacks);
 }
 
 /// Assemble the compact result shared by a normally cleaned board and a
 /// cooperatively stopped partial board. RF bend discipline ran inline, so its
 /// metadata remains valid even when a deadline skips the cosmetic finish tail.
-fn assembleRouteRun(run: RouteFinish) std.mem.Allocator.Error!RouteRun {
+fn assembleRouteRun(run: RouteFinish, rf_fallbacks: []const rf_port_report.Outcome) std.mem.Allocator.Error!RouteRun {
     const arena = run.ctx.arena;
     const timing = run.ctx.timing;
     var arcs: std.ArrayList(Arc) = .empty;
@@ -2487,7 +2494,9 @@ fn assembleRouteRun(run: RouteFinish) std.mem.Allocator.Error!RouteRun {
         try sharp.appendSlice(arena, s.sharp);
     }
     const rf_trials = try rf_port_report.collectOrdered(arena, &run.ctx.rf.port_outcomes, run.placement.nets.len);
-    const rf_outcomes = try @import("rf_taper_paths.zig").withExactFallbacks(arena, run.placement, run.tracks.items, rf_trials);
+    var rf_outcomes: std.ArrayList(rf_port_report.Outcome) = .empty;
+    try rf_outcomes.appendSlice(arena, rf_trials);
+    try rf_outcomes.appendSlice(arena, rf_fallbacks);
     try recordPostPass(.complete, run.progress, run.tracks.items, run.vias.items);
     if (timing) |t| t.end(.finish_total);
 
@@ -2496,7 +2505,7 @@ fn assembleRouteRun(run: RouteFinish) std.mem.Allocator.Error!RouteRun {
         .vias = try run.vias.toOwnedSlice(arena),
         .arcs = try arcs.toOwnedSlice(arena),
         .sharp_bends = try sharp.toOwnedSlice(arena),
-        .rf_port_outcomes = rf_outcomes,
+        .rf_port_outcomes = try rf_outcomes.toOwnedSlice(arena),
         .routed = run.progress.routed,
         .total = run.progress.total,
         .failed = try run.progress.failed.toOwnedSlice(arena),
