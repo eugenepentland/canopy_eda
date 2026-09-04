@@ -734,6 +734,7 @@ one-board anecdote.
 - a board with no saved layout is reported but kept out of the corpus score, since its fallback placement is neither blessed nor stable
 - the corpus results serialise to JSON so a driver can record them in the benchmark ledger
 - the JSON per-board row names the oracle's still-open nets, sorted, so a completion change reads net by net
+- the JSON board name is escaped like every other string in the row, so a design filename carrying a quote still yields a parseable ledger
 - trace totals separate completed-net copper from partial copper left by open nets, and JSON reports per-net trace/via totals so runs with unlike completion can be compared on common nets
 - --route-space field selects the signed-margin path director while lattice remains the default
 - degree-two direction changes are bends and a short segment trapped between two bends is a micro-jog
@@ -6629,6 +6630,7 @@ are never touched.
 - the design replay honors the authored plan's allowed-layers restriction
 - the design replay freezes accepted local sub-circuit copper in its first timeline frame before whole-board routing decisions
 - the design replay JSON carries design mode, empty zones, and placement bounds
+- the shared routing-surface string writer escapes a control byte instead of dropping it, so a net name survives the round trip intact
 - the design replay JSON labels each net with its class name and priority
 - the design replay JSON carries the deterministic routing score and its formula version
 - a design replay saved to the project cache is read back verbatim
@@ -7721,6 +7723,7 @@ is what makes the predicate exact rather than approximately right.
 - The session parse copies every string out of the payload buffer so a loaded board survives the buffer being reused
 - The WASM DRC session probe enforces an RF net's declared keepout halo, so the mid-drag gate refuses the copper the full check flags
 - The WASM DRC session probe reads each net's class identity, waiving the keepout halo between one class's own members and inside a pad-escape zone
+- The shared DRC JSON writer escapes a violation's names for the page's script blob, so a net named </script> cannot close the element
 - completeness-waiver: concurrent access (httpz owns request threading and each handler answers from its own response arena; the two pieces of state that really are shared — the live scene graph and a design's layout sidecar — are specified where they live, under the push and layout-backfill sections, rather than restated per endpoint)
 
 ## fab_readiness

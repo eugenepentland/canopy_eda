@@ -30,6 +30,7 @@ const push = @import("../kicad_sch_push.zig");
 const explain = @import("../kicad_sch_push_reason.zig").explain;
 const mcp_tools = @import("mcp_tools.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
+const urlcodec = @import("urlcodec.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 
@@ -176,7 +177,7 @@ pub fn syncKicadSchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         res.body = err_not_found;
         return;
     };
-    const name = try urlDecodeAlloc(res.arena, name_raw);
+    const name = try urlcodec.decodeAlloc(res.arena, name_raw);
     const dry_run = queryFlag(req, "dry_run");
     const opts = push.Options{ .dry_run = dry_run, .force = queryFlag(req, "force") };
 
@@ -221,13 +222,6 @@ fn queryFlag(req: *httpz.Request, key: []const u8) bool {
     const q = req.query() catch return false;
     const v = q.get(key) orelse return false;
     return std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true");
-}
-
-/// Percent-decode a path param. httpz hands `:params` over verbatim, so every
-/// filesystem-facing use decodes first.
-fn urlDecodeAlloc(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]u8 {
-    const buf = try allocator.dupe(u8, raw);
-    return std.Uri.percentDecodeInPlace(buf);
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────

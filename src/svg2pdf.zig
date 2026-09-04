@@ -27,6 +27,11 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const escape = @import("escape.zig");
+
+/// Expand the entity set `escape.writeXml` produces — the exact inverse of the
+/// escaper the SVG this module reads was written with.
+const decodeEntities = escape.decodeXmlAlloc;
 
 // ── Display list ──────────────────────────────────────────────────────────
 
@@ -1056,36 +1061,6 @@ fn hexByte(s: []const u8) ?u8 {
     const hi = hexDigit(s[0]) orelse return null;
     const lo = hexDigit(s[1]) orelse return null;
     return hi * 16 + lo;
-}
-
-/// Expand the entity set `escape.writeXml` produces. An unrecognised `&…;` run
-/// is copied through verbatim: text content is design-derived and must survive
-/// translation, not become an error.
-fn decodeEntities(gpa: Allocator, s: []const u8) Allocator.Error![]const u8 {
-    const table = [_]struct { name: []const u8, ch: u8 }{
-        .{ .name = "&amp;", .ch = '&' },
-        .{ .name = "&lt;", .ch = '<' },
-        .{ .name = "&gt;", .ch = '>' },
-        .{ .name = "&quot;", .ch = '"' },
-        .{ .name = "&#39;", .ch = '\'' },
-    };
-    var out: std.ArrayList(u8) = .empty;
-    try out.ensureTotalCapacity(gpa, s.len);
-    var i: usize = 0;
-    scan: while (i < s.len) {
-        if (s[i] == '&') {
-            for (table) |e| {
-                if (std.mem.startsWith(u8, s[i..], e.name)) {
-                    out.appendAssumeCapacity(e.ch);
-                    i += e.name.len;
-                    continue :scan;
-                }
-            }
-        }
-        out.appendAssumeCapacity(s[i]);
-        i += 1;
-    }
-    return out.toOwnedSlice(gpa);
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────

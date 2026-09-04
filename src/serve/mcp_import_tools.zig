@@ -21,9 +21,7 @@ const optionalBool = mcp_tools.optionalBool;
 const missingArg = mcp_tools.missingArg;
 const AllocatingWriter = @import("../allocating_writer.zig").AllocatingWriter;
 
-fn writeJsonString(w: anytype, value: []const u8) std.mem.Allocator.Error!void {
-    json_writer.writeString(w, value) catch return error.OutOfMemory;
-}
+const writeJsonString = json_writer.writeStringOom;
 
 /// Board files can be large (a routed board is tens of MB); cap the read the
 /// same as the importer's own `importBoard`.

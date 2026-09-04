@@ -11,6 +11,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const layout = @import("layout.zig");
 const rb = @import("../render_block_types.zig");
+const escape = @import("../escape.zig");
 const numeric = @import("../numeric.zig");
 
 const Allocator = std.mem.Allocator;
@@ -577,15 +578,7 @@ fn truncate(arena: Allocator, text: []const u8, max: usize) Allocator.Error![]co
     return std.fmt.allocPrint(arena, "{s}\u{2026}", .{text[0..end]});
 }
 
-fn writeEscaped(w: *Writer, text: []const u8) Writer.Error!void {
-    for (text) |c| switch (c) {
-        '&' => try w.writeAll("&amp;"),
-        '<' => try w.writeAll("&lt;"),
-        '>' => try w.writeAll("&gt;"),
-        '"' => try w.writeAll("&quot;"),
-        else => try w.writeByte(c),
-    };
-}
+const writeEscaped = escape.writeXml;
 
 // ── tests ──────────────────────────────────────────────────────────────
 

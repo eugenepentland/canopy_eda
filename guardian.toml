@@ -1109,10 +1109,33 @@ fragments = ["percentDecodeInPlace"]
 allow = ["src/serve/urlcodec.zig"]
 reason = "private URL-decode wrapper - 6 byte-identical copies + 1 hand-rolled loop; fold into one urlcodec module"
 
+# `allow` names the owner plus eleven files whose `writeJson…` is NOT a string
+# escaper. The fragment is a DEFINITION spelling and cannot tell a private
+# escaper from a report emitter that opens with the same three words. Audited
+# 2026-09-04, when the eight real escapers folded into json_writer (drc_session,
+# export_gerber, serve/drc_json, serve/footprint_preview, serve/route_review and
+# the three mcp_*_tools wrappers); what is left below is a document-, object- or
+# response-level emitter whose own free strings ALREADY go through json_writer,
+# or which writes no runtime string at all. Each carries a `not the
+# json-escaper-def idiom:` note at its definition saying which. Re-audit an
+# entry rather than adding one: a new private escaper still has to fold.
 [[idiom]]
 name = "json-escaper-def"
 fragments = ["fn writeJson"]
-allow = ["src/json_writer.zig"]
+allow = [
+  "src/json_writer.zig",
+  "src/bench_route.zig",
+  "src/board_theme.zig",
+  "src/fab_preview.zig",
+  "src/fab_readiness.zig",
+  "src/kicad_pcb/inspect.zig",
+  "src/placement/progress.zig",
+  "src/render_json.zig",
+  "src/serve/component_info.zig",
+  "src/serve/diag_format.zig",
+  "src/serve/mcp_routability.zig",
+  "src/serve/ward_auth.zig",
+]
 reason = "private JSON string writer - 24 escapers in 7 incompatible tiers, one lossy; route through json_writer"
 
 [[idiom]]

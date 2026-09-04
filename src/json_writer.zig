@@ -77,6 +77,15 @@ pub fn writeScriptString(w: anytype, s: []const u8) !void {
     try w.writeByte('"');
 }
 
+/// `writeString` onto a writer whose only failure mode is allocation (the MCP
+/// handlers' `AllocatingWriter`), narrowed to `Allocator.Error` so a handler
+/// signature stays `Allocator.Error!…` rather than widening to `WriteError`.
+/// Three byte-identical private copies of exactly this wrapper used to live in
+/// serve/mcp_{notes,parts,import}_tools.zig.
+pub fn writeStringOom(w: anytype, value: []const u8) std.mem.Allocator.Error!void {
+    writeString(w, value) catch return error.OutOfMemory;
+}
+
 /// Write `"key":"value"` with proper escaping on `value`. The key is written
 /// verbatim, since our keys are always ASCII identifiers.
 pub fn writeField(w: anytype, key: []const u8, value: []const u8) WriteError!void {

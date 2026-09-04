@@ -17,9 +17,7 @@ const optionalU64 = mcp_tools.optionalU64;
 const missingArg = mcp_tools.missingArg;
 const AllocatingWriter = @import("../allocating_writer.zig").AllocatingWriter;
 
-fn writeJsonString(w: anytype, value: []const u8) std.mem.Allocator.Error!void {
-    json_writer.writeString(w, value) catch return error.OutOfMemory;
-}
+const writeJsonString = json_writer.writeStringOom;
 
 // ── Library component requirements ────────────────────────────────────
 

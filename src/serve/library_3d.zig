@@ -15,15 +15,8 @@ const ast = @import("../sexpr/ast.zig");
 const serve_root = @import("../serve.zig");
 const lib_limits = @import("../lib_limits.zig");
 const navbar = @import("navbar.zig");
+const urlcodec = @import("urlcodec.zig");
 const Server = serve_root.Server;
-
-/// Percent-decode a URL path param. httpz returns params verbatim, so a
-/// footprint whose name embeds a reserved char (a comma → `%2C`, e.g.
-/// `74ahct1g125gm,132`) arrives encoded; decode before resolving it to a file.
-fn urlDecode(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]u8 {
-    const buf = try allocator.dupe(u8, raw);
-    return std.Uri.percentDecodeInPlace(buf);
-}
 
 const max_model_bytes: usize = 64 * 1024 * 1024;
 const max_body_bytes: usize = 16 * 1024;
@@ -80,7 +73,7 @@ pub fn modelFileApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
 
 fn serveModelFile(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const footprint_raw = req.param(param_footprint) orelse return notFound(res);
-    const footprint = urlDecode(req.arena, footprint_raw) catch return notFound(res);
+    const footprint = urlcodec.decodeAlloc(req.arena, footprint_raw) catch return notFound(res);
     if (!isSafeFootprint(footprint)) return notFound(res);
     const model_name = resolveModelName(req.arena, ctx.project_dir, footprint) orelse return notFound(res);
     const path = std.fmt.allocPrint(req.arena, "{s}/lib/models/{s}", .{ ctx.project_dir, model_name }) catch return notFound(res);
@@ -250,7 +243,7 @@ fn sourceHeaders(res: *httpz.Response, allocator: std.mem.Allocator, source: Spr
 /// exactly that version once and POST it back for later assembly loads.
 fn modelSpriteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const footprint_raw = req.param(param_footprint) orelse return notFound(res);
-    const footprint = urlDecode(req.arena, footprint_raw) catch return notFound(res);
+    const footprint = urlcodec.decodeAlloc(req.arena, footprint_raw) catch return notFound(res);
     if (!isSafeFootprint(footprint)) return notFound(res);
     const source = spriteSource(req.arena, ctx.project_dir, footprint) orelse return notFound(res);
     try sourceHeaders(res, req.arena, source);
@@ -279,7 +272,7 @@ fn queryFloat(req: *httpz.Request, key: []const u8) ?f64 {
 fn saveModelSpriteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     const footprint_raw = req.param(param_footprint) orelse return badRequest(res, "missing footprint");
-    const footprint = urlDecode(req.arena, footprint_raw) catch return badRequest(res, "invalid footprint");
+    const footprint = urlcodec.decodeAlloc(req.arena, footprint_raw) catch return badRequest(res, "invalid footprint");
     if (!isSafeFootprint(footprint)) return badRequest(res, "invalid footprint");
     const png = req.body() orelse return badRequest(res, "missing body");
     if (png.len > max_sprite_bytes or !std.mem.startsWith(u8, png, png_signature)) return badRequest(res, "invalid PNG");
@@ -320,7 +313,7 @@ pub fn viewerPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     // re-emitting into the model-file URL; `footprint` is decoded for display,
     // config lookups, and pad parsing (so commas etc. resolve to the right file).
     const footprint_url = req.param(param_footprint) orelse return notFound(res);
-    const footprint = urlDecode(req.arena, footprint_url) catch return notFound(res);
+    const footprint = urlcodec.decodeAlloc(req.arena, footprint_url) catch return notFound(res);
     if (!isSafeFootprint(footprint)) return notFound(res);
 
     const model_name = resolveModelName(req.arena, ctx.project_dir, footprint);
@@ -605,7 +598,7 @@ pub fn saveTransformApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
 
     // Decode `%2C`-style escapes so the config key matches the footprint name
     // (e.g. `74ahct1g125gm,132`) the KiCad sync looks up.
-    const footprint = urlDecode(aa, footprint_raw) catch return badRequest(res, "invalid footprint");
+    const footprint = urlcodec.decodeAlloc(aa, footprint_raw) catch return badRequest(res, "invalid footprint");
     if (!isSafeFootprint(footprint)) return badRequest(res, "invalid footprint");
 
     const parsed = std.json.parseFromSliceLeaky(std.json.Value, aa, body, .{}) catch return badRequest(res, "invalid JSON");
@@ -876,7 +869,7 @@ test "isSafeFootprint rejects traversal and markup while accepting real footprin
     // written into the viewer page (reflected XSS). Both halves are now closed
     // by this ONE predicate, gating all five entry points — so a weakened
     // predicate reopens both at once, and this test is the only thing that
-    // would notice. `urlDecode` runs BEFORE it at every call site, so the
+    // would notice. `urlcodec.decodeAlloc` runs BEFORE it at every call site, so the
     // inputs below are the decoded forms an attacker actually lands.
 
     // Traversal — the read half.
@@ -908,7 +901,7 @@ test "isSafeFootprint rejects traversal and markup while accepting real footprin
     try std.testing.expect(isSafeFootprint(long[0..128]));
 
     // Real library names must still resolve, including the two reserved chars
-    // that only arrive here because urlDecode ran first: a part number with a
+    // that only arrive here because urlcodec.decodeAlloc ran first: a part number with a
     // comma (`74ahct1g125gm,132`) and the `#` KiCad uses in generated names.
     try std.testing.expect(isSafeFootprint("74ahct1g125gm,132"));
     try std.testing.expect(isSafeFootprint("R_0402_1005Metric"));

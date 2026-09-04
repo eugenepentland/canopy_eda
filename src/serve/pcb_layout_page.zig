@@ -7677,7 +7677,7 @@ fn writePlacementControls(w: *std.Io.Writer, p: optimizer.Placement, name: []con
     try w.print("{d:.1}</span>", .{p.breakdown.objective});
     try w.writeAll("<span class=\"delta\" id=\"sc-obj-d\"></span></div>" ++
         "<div class=\"placement-actions\"><a class=\"btn primary\" id=\"pcb-regen\" href=\"/pcb-layout/");
-    try writeAttr(w, name);
+    try writeEscaped(w, name);
     try w.writeAll("?regen=1\" title=\"Re-run the optimizer and watch it converge live\">Regenerate placement</a>" ++
         "<button class=\"btn\" id=\"pcb-routeplan\" style=\"display:none\" " ++
         "title=\"Autoroute the placement on screen as a temporary plan\">⚡ Route plan</button></div></section>");
@@ -7727,7 +7727,7 @@ fn writeScorebar(w: *std.Io.Writer, p: optimizer.Placement, name: []const u8, sr
     // lives in the Sub-circuits pane with the saved-layouts history it seeds from.
     try w.writeAll(bar_grp);
     try w.writeAll("<a class=\"btn\" id=\"pcb-regen\" href=\"/pcb-layout/");
-    try writeAttr(w, name);
+    try writeEscaped(w, name);
     try w.writeAll("?regen=1\" title=\"Re-run the optimizer and watch it converge live\">Regenerate</a>");
     // Route the seed on screen. Hidden until the client sees an UNSAVED board
     // (PCB.src cache/fresh) — the state a Rough/Regenerate run lands in, where
@@ -8110,7 +8110,7 @@ const LayoutsPanelCtx = struct { name: []const u8, sub: ?[]const u8 = null };
 /// name carrying `&`, `#` or `%` can't break out of the attribute it lands in.
 fn writeLayoutHref(w: *std.Io.Writer, design: []const u8, layout: []const u8) std.Io.Writer.Error!void {
     try w.writeAll("/pcb-layout/");
-    try writeAttr(w, design);
+    try writeEscaped(w, design);
     try w.writeAll("?layout=");
     for (layout) |c| {
         const unreserved = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
@@ -8169,10 +8169,10 @@ fn writeLayoutsPanel(w: *std.Io.Writer, alloc: std.mem.Allocator, pd: PanelData)
     // with Load/Save; the complete management list remains one disclosure away.
     try w.writeAll("<details class=\"saved-all\"><summary>All versions</summary><div class=\"lay-tools\">");
     try w.writeAll("<a class=\"btn\" id=\"pcb-rough\" href=\"/pcb-layout/");
-    try writeAttr(w, ctx.name);
+    try writeEscaped(w, ctx.name);
     if (ctx.sub) |sub| {
         try w.writeAll("?sub=");
-        try writeAttr(w, sub);
+        try writeEscaped(w, sub);
         try w.writeAll("&amp;remaining=1\"");
     } else try w.writeAll("?remaining=1\"");
     try w.writeAll(" title=\"Keep every part the ★ (or last auto) layout already places and rough-place only new parts\">Rough remaining</a>");
@@ -8188,7 +8188,7 @@ fn writeLayoutsPanel(w: *std.Io.Writer, alloc: std.mem.Allocator, pd: PanelData)
         // in BOARD_JS rewrites its `.lay-score` + `.lay-d` in place — both still
         // found by querySelector). The `def` class highlights the sync default.
         try w.writeAll(if (L.default) "<div class=\"lay-row def\" data-lay-row=\"" else "<div class=\"lay-row\" data-lay-row=\"");
-        try writeAttr(w, L.name);
+        try writeEscaped(w, L.name);
         try w.writeAll("\"><div class=\"lay-top\"><span class=\"lay-kind ");
         try w.writeAll(if (std.mem.eql(u8, L.kind, kind_manual)) "k-man\">manual" else "k-auto\">auto");
         // The name is the layout's permalink: `?layout=<name>` renders exactly
@@ -8215,7 +8215,7 @@ fn writeLayoutsPanel(w: *std.Io.Writer, alloc: std.mem.Allocator, pd: PanelData)
         try w.writeAll("</span><span class=\"lay-actions\"><button class=\"btn lay-star");
         if (L.default) try w.writeAll(" on");
         try w.writeAll("\" data-lay-default=\"");
-        try writeAttr(w, L.name);
+        try writeEscaped(w, L.name);
         try w.writeAll("\" title=\"");
         try w.writeAll(if (L.default)
             "Default layout — the KiCad sync seeds new parts (placement + GND vias) from this. Click to clear."
@@ -8224,11 +8224,11 @@ fn writeLayoutsPanel(w: *std.Io.Writer, alloc: std.mem.Allocator, pd: PanelData)
         try w.writeAll("\">");
         try w.writeAll(if (L.default) "★" else "☆");
         try w.writeAll("</button><button class=\"btn lay-go\" data-lay-load=\"");
-        try writeAttr(w, L.name);
+        try writeEscaped(w, L.name);
         try w.writeAll("\">Load</button><button class=\"btn lay-rename\" title=\"Rename\" data-lay-rename=\"");
-        try writeAttr(w, L.name);
+        try writeEscaped(w, L.name);
         try w.writeAll("\">Rename</button><button class=\"btn lay-del\" title=\"Delete\" data-lay-del=\"");
-        try writeAttr(w, L.name);
+        try writeEscaped(w, L.name);
         try w.writeAll("\">✕</button></span></div></div>");
     }
     try w.writeAll("</div></details></div>");
@@ -8614,7 +8614,7 @@ fn writeEmbedBar(w: *std.Io.Writer, module_source: []const u8) std.Io.Writer.Err
     {
         try w.writeAll("<a class=\"btn\" target=\"_top\" title=\"Open the module's own PCB page — " ++
             "its spec panel saves the layout into lib/modules, so every design using it picks the change up\" href=\"/pcb-layout/");
-        try writeAttr(w, module_source);
+        try writeEscaped(w, module_source);
         try w.writeAll("\">Edit module layout →</a>");
     }
     try w.writeAll("<span class=\"score\" id=\"sc-obj\">objective …</span><span class=\"delta\" id=\"sc-obj-d\"></span>");
@@ -8682,7 +8682,7 @@ fn writeEmbedRoute(
             try w.writeAll(" · missing: ");
             for (r.failed, 0..) |fname, i| {
                 if (i > 0) try w.writeAll(", ");
-                try writeHtmlText(w, fname);
+                try writeEscaped(w, fname);
             }
         }
         try w.writeAll("</span>");
@@ -8799,7 +8799,7 @@ fn writeSidebar(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placem
     try w.writeAll("<div class=\"side-pane\" id=\"side-props\" hidden>");
     try w.writeAll(alignment_tools_html);
     try w.writeAll("<div id=\"prop-body\" class=\"prop-body\" data-schbase=\"");
-    try writeAttr(w, sch_base);
+    try writeEscaped(w, sch_base);
     try w.print(
         "\"><div class=\"prop-empty\">Click a part on the board to see its properties." ++
             "<br><span class=\"prop-empty-n\">{d} components</span></div>",
@@ -10202,16 +10202,6 @@ fn isGroundNet(name: []const u8) bool {
 
 const writeEscaped = escape.writeXml;
 
-fn writeAttr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    for (s) |c| switch (c) {
-        '&' => try w.writeAll("&amp;"),
-        '<' => try w.writeAll("&lt;"),
-        '>' => try w.writeAll("&gt;"),
-        '"' => try w.writeAll("&quot;"),
-        else => try w.writeByte(c),
-    };
-}
-
 /// Percent-encode a layout name for use as a query-parameter value. This
 /// mirrors JavaScript's encodeURIComponent so a named layout remains one
 /// query value even when it contains spaces or reserved punctuation.
@@ -10221,17 +10211,6 @@ fn writeUrlEncoded(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
             (c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or c == '~';
         if (safe) try w.writeByte(c) else try w.print("%{X:0>2}", .{c});
     }
-}
-
-/// Emit `s` as HTML text content: `&`, `<`, `>` escaped, nothing else — for
-/// interpolating net/ref names into server-rendered markup.
-fn writeHtmlText(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    for (s) |c| switch (c) {
-        '&' => try w.writeAll("&amp;"),
-        '<' => try w.writeAll("&lt;"),
-        '>' => try w.writeAll("&gt;"),
-        else => try w.writeByte(c),
-    };
 }
 
 // ── Courtyard editor modal ───────────────────────────────────────────────

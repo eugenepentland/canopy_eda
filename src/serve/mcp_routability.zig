@@ -80,6 +80,10 @@ pub fn mcpRoutabilityPreflight(
 /// `{"name":…,"findings":[…],"counts":{…}}` — every finding with its
 /// measurements, plus a per-rule tally so a caller can see at a glance whether
 /// the board has one situation or fifty.
+///
+// not the json-escaper-def idiom: this is the document emitter, not a
+/// string escaper — every free string goes through `pcb_layout_page.writeJsonStr`,
+/// which is `json_writer.writeScriptString`.
 fn writeJson(
     w: *std.Io.Writer,
     name: []const u8,

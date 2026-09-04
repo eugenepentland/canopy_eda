@@ -18,6 +18,7 @@
 //! centroid CSV stack exactly in CAM.
 
 const std = @import("std");
+const json_writer = @import("json_writer.zig");
 const optimizer = @import("placement/optimizer.zig");
 const outline = @import("placement/outline.zig");
 const router = @import("placement/router.zig");
@@ -245,7 +246,7 @@ pub fn writeJobFile(
     placement: optimizer.Placement,
     files: []const LayerFile,
     name_prefix: []const u8,
-) std.Io.Writer.Error!void {
+) json_writer.WriteError!void {
     const r = export_fab.outlineRect(placement);
     return writeJobFileSized(w, placement, files, name_prefix, .{ .width_mm = r.w, .height_mm = r.h });
 }
@@ -258,7 +259,7 @@ pub fn writeJobFileSized(
     files: []const LayerFile,
     name_prefix: []const u8,
     geometry_spec: JobGeometry,
-) std.Io.Writer.Error!void {
+) json_writer.WriteError!void {
     const rules = placement.rules;
     // `LayerNumber` counts the COPPER FILES THIS PACKAGE ACTUALLY SHIPS, not a
     // second reading of the stackup rules: the two used to be independent
@@ -311,16 +312,12 @@ pub fn writeJobFileSized(
     try w.writeAll("\n  ]\n}\n");
 }
 
-/// Minimal JSON string writer for the job file (quotes + backslash escaping).
-fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    try w.writeByte('"');
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        else => try w.writeByte(c),
-    };
-    try w.writeByte('"');
-}
+/// The job file's JSON strings. A `.gbrjob` is read by CAM tooling, never by a
+/// browser, so this is the tool-facing `writeString` rather than the
+/// script-context escaper — but it is still the canonical one: the local loop
+/// it replaces escaped only `"` and `\`, so a control byte in a design name
+/// reached the file raw and made the JSON unparseable.
+const writeJsonStr = json_writer.writeString;
 
 /// The X2 file attributes one emitted layer carries beyond what its geometry
 /// determines.

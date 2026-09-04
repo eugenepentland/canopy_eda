@@ -37,6 +37,11 @@ pub const Request = struct {
 };
 
 /// Write the ordered CAM-preview JSON for one solved fabrication view.
+///
+// not the json-escaper-def idiom: this and `writeJsonWithEdge` are the
+/// document emitters, not string escapers — their free strings go through
+/// `json.writeString`, and the layer/drill names they interpolate are
+/// generated suffixes, never design text.
 pub fn writeJson(
     w: *std.Io.Writer,
     arena: std.mem.Allocator,

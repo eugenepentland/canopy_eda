@@ -89,6 +89,10 @@ fn siblingProjectPath(arena: std.mem.Allocator, board_path: []const u8) std.mem.
 
 /// Emit the normalized report. `.nets` adds one compact metric row per net;
 /// summary/layer/rule data is always present.
+///
+// not the json-escaper-def idiom: this is the report emitter, not a string
+/// escaper — every free string goes through `json_writer.writeString` (the
+/// tool-facing half: this report is read by the CLI and by MCP, not by a page).
 pub fn writeJson(
     arena: std.mem.Allocator,
     writer: anytype,

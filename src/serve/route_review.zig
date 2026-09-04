@@ -24,6 +24,7 @@ const router = @import("../placement/router.zig");
 const route_score = @import("../placement/route_score.zig");
 const drc = @import("../placement/drc.zig");
 const drc_rules = @import("drc_rules.zig");
+const json_writer = @import("../json_writer.zig");
 const fab_readiness = @import("../fab_readiness.zig");
 const env_mod = @import("../eval/env.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
@@ -924,26 +925,38 @@ fn writeNetIndices(
     try w.writeByte(']');
 }
 
-/// Emit `value` as a JSON string literal (quotes + control-char escaping) —
-/// shared so every routing surface encodes net/design names identically.
-pub fn writeJsonString(w: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
-    try w.writeByte('"');
-    for (value) |byte| switch (byte) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        else => if (byte >= 0x20) try w.writeByte(byte),
-    };
-    try w.writeByte('"');
-}
+/// Emit `value` as a JSON string literal — shared so every routing surface
+/// (this module, `route_live`, `route_session_api`) encodes net/design names
+/// identically. Script-context because those payloads reach the browser.
+///
+/// The loop this replaces DROPPED every byte below 0x20 instead of escaping
+/// it, so a net name carrying one was silently shortened and no longer matched
+/// the name the server routes by; it also passed `<` through, which a page
+/// blob cannot afford.
+pub const writeJsonString = json_writer.writeScriptString;
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
 const geometry = @import("../placement/geometry.zig");
 const export_kicad = @import("../export_kicad.zig");
+
+// spec: serve/route-review - the shared routing-surface string writer escapes a control byte instead of dropping it, so a net name survives the round trip intact
+test "writeJsonString keeps every byte of a net name" {
+    // The loop this replaced ended `else => if (byte >= 0x20) try w.writeByte(byte)`:
+    // a byte below 0x20 was silently DISCARDED, so the name the review panel
+    // showed (and keyed its per-net rows by) was not the name the router routes.
+    // It also passed `<` through, and these payloads reach the browser.
+    const name = "VBUS\x01<A>";
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeJsonString(&aw.writer, name);
+
+    try testing.expectEqualStrings("\"VBUS\\u0001\\u003cA>\"", aw.written());
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings(name, parsed.value.string);
+}
 
 // spec: serve/route-review - the replay final payload carries solver RF paths so adopting it preserves custom taper polygons
 test "replay final carries solver RF paths for adoption" {

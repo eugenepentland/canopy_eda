@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const board_layers = @import("../board_layers.zig");
+const json_writer = @import("../json_writer.zig");
 const drc = @import("../placement/drc.zig");
 const optimizer = @import("../placement/optimizer.zig");
 
@@ -263,20 +264,14 @@ fn writeParty(w: *std.Io.Writer, key: []const u8, p: Party) std.Io.Writer.Error!
     try w.writeAll("}");
 }
 
-/// Minimal JSON string escaping — net names and ref-des come from user source,
-/// so a quote or backslash in one must not break the payload.
-fn writeJsonStr(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
-    try w.writeAll("\"");
-    for (s) |ch| switch (ch) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        else => if (ch < 0x20) try w.print("\\u{x:0>4}", .{ch}) else try w.writeByte(ch),
-    };
-    try w.writeAll("\"");
-}
+/// Net names, ref-des, pad numbers and note text come from user source, and
+/// `writeViolation` output is emitted into the PCB page's `<script>const
+/// PCB=…</script>` blob (as well as /api/pcb-drc and /api/pcb-describe). The
+/// SCRIPT-context escaper is therefore the required one: the local loop this
+/// replaces escaped `"`, `\` and the control bytes but NOT `<`, so a design
+/// that named a net `</script>` closed the element and every board script
+/// after it stopped running.
+const writeJsonStr = json_writer.writeScriptString;
 
 /// JSON has no NaN or infinity literals. Preserve the absence of a finite
 /// measurement as `null`; every DRC consumer already renders null as `?`.
@@ -479,6 +474,41 @@ test "the violation JSON names the nets and pads a violation is between" {
     defer stale.deinit();
     try writeViolation(&stale.writer, v, .{});
     try std.testing.expect(std.mem.indexOf(u8, stale.written(), "\"a\":") == null);
+}
+
+// spec: Web Server - The shared DRC JSON writer escapes a violation's names for the page's script blob, so a net named </script> cannot close the element
+test "a violation's names are script-safe in the page blob" {
+    // `writeViolation` output is spliced into `<script>const PCB=…</script>` on
+    // the /pcb-layout page. The private escaper this file used to carry handled
+    // quotes, backslashes and control bytes but passed `<` through, so a design
+    // free to name its own nets could terminate the element and kill every
+    // board script after it. Net names and ref-des come from user source.
+    const nets = [_]optimizer.FlatNet{.{ .name = "</script><img src=x onerror=alert(1)>", .pins = &.{} }};
+    const parts = [_]optimizer.Part{
+        .{ .ref_des = "U<1", .kind = .hub, .hw = 1, .hh = 1, .pads = &.{}, .fallback = false },
+    };
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeViolation(&aw.writer, .{
+        .x = 1,
+        .y = 2,
+        .gap = 0.08,
+        .clearance = 0.15,
+        .kind = .track_pad,
+        .who = .{ .net_a = 0, .part_a = 0, .pad_a = "1" },
+    }, .{ .nets = &nets, .parts = &parts });
+    const out = aw.written();
+
+    // Nothing an HTML parser reads as a tag survives…
+    try std.testing.expect(std.mem.indexOfScalar(u8, out, '<') == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\\u003c/script>") != null);
+
+    // …and the escape is transparent to JSON: the viewer reads the exact name.
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out, .{});
+    defer parsed.deinit();
+    const a = parsed.value.object.get("a").?.object;
+    try std.testing.expectEqualStrings(nets[0].name, a.get("net").?.string);
+    try std.testing.expectEqualStrings(parts[0].ref_des, a.get("ref").?.string);
 }
 
 // spec: Web Server - The DRC policy drawer sections its checks from one server-shipped grouping table that covers every violation kind exactly once

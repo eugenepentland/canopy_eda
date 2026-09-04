@@ -11,6 +11,7 @@ const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
 const paths = @import("../paths.zig");
 const evaluator_mod = @import("../eval/evaluator.zig");
+const escape = @import("../escape.zig");
 
 const max_source_bytes: usize = 10 * 1024 * 1024;
 
@@ -133,6 +134,9 @@ pub fn formatText(allocator: std.mem.Allocator, d: Diagnostic) (std.mem.Allocato
 /// Write the diagnostic as a JSON object:
 /// `{"file":…,"line":N,"col":N,"message":…,"source_line":…}`. Callers pass
 /// ArrayList writers, so the error surface is allocation only.
+///
+// not the json-escaper-def idiom: this is the object emitter, not a string
+/// escaper — all three of its strings go through `json_writer.writeString`.
 pub fn writeJson(w: anytype, d: Diagnostic) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     try w.writeAll("{\"file\":");
     try json_writer.writeString(w, d.file);
@@ -187,15 +191,7 @@ pub fn renderErrorPage(
     return buf.toOwnedSlice();
 }
 
-fn writeHtmlEscaped(w: anytype, s: []const u8) !void {
-    for (s) |c| switch (c) {
-        '&' => try w.writeAll("&amp;"),
-        '<' => try w.writeAll("&lt;"),
-        '>' => try w.writeAll("&gt;"),
-        '"' => try w.writeAll("&quot;"),
-        else => try w.writeByte(c),
-    };
-}
+const writeHtmlEscaped = escape.writeXml;
 
 // spec: serve/diag_format - caretLine pads to the 1-based column (preserving tabs) and ends with a caret
 test "caretLine aligns under the failing column" {
@@ -309,7 +305,12 @@ test "design load failure identifies the imported module and source location" {
         return error.TestExpectedDiagnostic;
     defer allocator.free(html);
     try std.testing.expect(std.mem.indexOf(u8, html, "Build error — demo") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "cannot import 'broken-module'") != null);
+    // The page escapes with `escape.writeXml`, which entity-escapes `'` along
+    // with `& < > "` so one helper is safe in text nodes and in both quote
+    // styles. The diagnostic's own quotes therefore arrive as `&#39;` — the
+    // browser renders them as apostrophes, and a message that ever carried
+    // markup cannot break out of a single-quoted attribute either.
+    try std.testing.expect(std.mem.indexOf(u8, html, "cannot import &#39;broken-module&#39;") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "src/demo.sexp:1:9") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "(import broken-module)") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "<span class=\"caret\">") != null);
