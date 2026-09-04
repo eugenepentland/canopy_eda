@@ -2500,8 +2500,8 @@ test "PCB frame benchmark carries human-readable dwell points outside movement p
     try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, "if(PHYSICAL_REVIEW)return false;       // measured A/B") != null);
 }
 
-// spec: Web Server - The panel export controls independently size every rail side and select its NPTH tooling hole and top-copper fiducial dimensions
-test "panel export controls expose per-side rails tooling holes and fiducials" {
+// spec: Web Server - The panel export controls independently size every rail side and selects pairs of NPTH tooling holes and top-copper fiducials near both ends of each enabled side
+test "panel export controls expose paired per-side rail tooling holes and fiducials" {
     const markers = [_][]const u8{
         "panel_rail_top=",
         "panel_rail_right=",
@@ -2512,6 +2512,11 @@ test "panel export controls expose per-side rails tooling holes and fiducials" {
         "panel_fiducial_mask=",
         "fab-panel-tooling-",
         "fab-panel-fiducial-",
+        "> 2 holes</label>",
+        "> 2 fiducials</label>",
+        "tooling:[[pw/8,top/2],[7*pw/8,top/2]]",
+        "fiducial:[[pw/4,top/2],[3*pw/4,top/2]]",
+        "toolingCount+\" tooling holes · \"+fiducialCount+\" fiducials\"",
         "Set any rail width to 0 to omit that side.",
     };
     for (markers) |marker| try std.testing.expect(std.mem.indexOf(u8, pcb_board_js, marker) != null);

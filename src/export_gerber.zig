@@ -3848,8 +3848,8 @@ test "routed panel Gerber preserves rounded corners as native arcs" {
     try testing.expectEqual(@as(usize, 8), std.mem.count(u8, edge.written(), "G02"));
 }
 
-// spec: export_gerber - selected rail fiducials emit global top-copper pads with larger top-mask openings and stay absent from bottom layers
-test "panel rail fiducials emit top copper and mask flashes only" {
+// spec: export_gerber - each selected rail side emits two global top-copper fiducials near its ends with larger top-mask openings and no bottom-layer flashes
+test "panel rail fiducial pairs emit top copper and mask flashes only" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
@@ -3863,16 +3863,20 @@ test "panel rail fiducials emit top copper and mask flashes only" {
     var top_copper: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&top_copper.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, .{ .function = "Copper,L1,Top", .panel = &panel });
     try testing.expect(std.mem.indexOf(u8, top_copper.written(), "%TA.AperFunction,FiducialPad,Global*%") != null);
-    try testing.expect(std.mem.indexOf(u8, top_copper.written(), "X20000000Y17500000D03*") != null);
+    try testing.expect(std.mem.indexOf(u8, top_copper.written(), "X7500000Y17500000D03*") != null);
+    try testing.expect(std.mem.indexOf(u8, top_copper.written(), "X22500000Y17500000D03*") != null);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, top_copper.written(), "D03*"));
 
     var top_mask: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&top_mask.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .mask = .top }, .{ .function = "Soldermask,Top", .panel = &panel });
     try testing.expect(std.mem.indexOf(u8, top_mask.written(), "%ADD10C,2.000000*%") != null);
-    try testing.expect(std.mem.indexOf(u8, top_mask.written(), "X20000000Y17500000D03*") != null);
+    try testing.expect(std.mem.indexOf(u8, top_mask.written(), "X7500000Y17500000D03*") != null);
+    try testing.expect(std.mem.indexOf(u8, top_mask.written(), "X22500000Y17500000D03*") != null);
 
     var bottom_copper: std.Io.Writer.Allocating = .init(arena);
     try writeLayer(&bottom_copper.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .bottom }, .{ .function = "Copper,L4,Bot", .panel = &panel });
-    try testing.expect(std.mem.indexOf(u8, bottom_copper.written(), "X20000000Y17500000D03*") == null);
+    try testing.expect(std.mem.indexOf(u8, bottom_copper.written(), "X7500000Y17500000D03*") == null);
+    try testing.expect(std.mem.indexOf(u8, bottom_copper.written(), "X22500000Y17500000D03*") == null);
 }
 
 // spec: export_gerber - a V-score panel ships its score centre lines as an explicit fabrication drawing

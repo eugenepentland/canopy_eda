@@ -19,7 +19,7 @@ pub const MouseBites = struct {
 };
 
 /// One independently configurable panel rail. A zero width disables the rail;
-/// tooling holes and fiducials may be selected only on a positive-width rail.
+/// selected tooling holes and fiducials are paired near both rail ends.
 pub const RailSide = struct {
     width_mm: f64 = 5.0,
     tooling_hole: bool = false,
@@ -236,12 +236,12 @@ fn validateRailFeatureSpan(rails: Rails, width: f64, height: f64) Error!void {
 }
 
 fn validateSideSpan(side: RailSide, span: f64, rails: Rails) Error!void {
-    const nearest_end = span / 3;
-    if (side.tooling_hole and nearest_end < rails.tooling_diameter_mm / 2 + rail_feature_edge_clearance_mm)
+    const slot = span / 8;
+    if (side.tooling_hole and slot < rails.tooling_diameter_mm / 2 + rail_feature_edge_clearance_mm)
         return error.InvalidRailFeature;
-    if (side.fiducial and nearest_end < rails.fiducial_mask_diameter_mm / 2 + rail_feature_edge_clearance_mm)
+    if (side.fiducial and 2 * slot < rails.fiducial_mask_diameter_mm / 2 + rail_feature_edge_clearance_mm)
         return error.InvalidRailFeature;
-    if (side.tooling_hole and side.fiducial and nearest_end < (rails.tooling_diameter_mm + rails.fiducial_mask_diameter_mm) / 2 + rail_feature_spacing_mm)
+    if (side.tooling_hole and side.fiducial and slot < (rails.tooling_diameter_mm + rails.fiducial_mask_diameter_mm) / 2 + rail_feature_spacing_mm)
         return error.InvalidRailFeature;
 }
 
@@ -350,8 +350,8 @@ fn appendRoundedCorners(out: *std.ArrayList(Segment), arena: std.mem.Allocator, 
 }
 
 const RailAnchors = struct {
-    tooling: [2]f64,
-    fiducial: [2]f64,
+    tooling: [2][2]f64,
+    fiducial: [2][2]f64,
 };
 
 fn appendRailFeatures(
@@ -363,20 +363,20 @@ fn appendRailFeatures(
     height: f64,
 ) !void {
     try appendRailSide(holes, fiducials, arena, rails.bottom, rails.tooling_diameter_mm, .{
-        .tooling = .{ width / 3, rails.bottom.width_mm / 2 },
-        .fiducial = .{ 2 * width / 3, rails.bottom.width_mm / 2 },
+        .tooling = .{ .{ width / 8, rails.bottom.width_mm / 2 }, .{ 7 * width / 8, rails.bottom.width_mm / 2 } },
+        .fiducial = .{ .{ width / 4, rails.bottom.width_mm / 2 }, .{ 3 * width / 4, rails.bottom.width_mm / 2 } },
     });
     try appendRailSide(holes, fiducials, arena, rails.top, rails.tooling_diameter_mm, .{
-        .tooling = .{ width / 3, height - rails.top.width_mm / 2 },
-        .fiducial = .{ 2 * width / 3, height - rails.top.width_mm / 2 },
+        .tooling = .{ .{ width / 8, height - rails.top.width_mm / 2 }, .{ 7 * width / 8, height - rails.top.width_mm / 2 } },
+        .fiducial = .{ .{ width / 4, height - rails.top.width_mm / 2 }, .{ 3 * width / 4, height - rails.top.width_mm / 2 } },
     });
     try appendRailSide(holes, fiducials, arena, rails.left, rails.tooling_diameter_mm, .{
-        .tooling = .{ rails.left.width_mm / 2, height / 3 },
-        .fiducial = .{ rails.left.width_mm / 2, 2 * height / 3 },
+        .tooling = .{ .{ rails.left.width_mm / 2, height / 8 }, .{ rails.left.width_mm / 2, 7 * height / 8 } },
+        .fiducial = .{ .{ rails.left.width_mm / 2, height / 4 }, .{ rails.left.width_mm / 2, 3 * height / 4 } },
     });
     try appendRailSide(holes, fiducials, arena, rails.right, rails.tooling_diameter_mm, .{
-        .tooling = .{ width - rails.right.width_mm / 2, height / 3 },
-        .fiducial = .{ width - rails.right.width_mm / 2, 2 * height / 3 },
+        .tooling = .{ .{ width - rails.right.width_mm / 2, height / 8 }, .{ width - rails.right.width_mm / 2, 7 * height / 8 } },
+        .fiducial = .{ .{ width - rails.right.width_mm / 2, height / 4 }, .{ width - rails.right.width_mm / 2, 3 * height / 4 } },
     });
 }
 
@@ -388,14 +388,14 @@ fn appendRailSide(
     tooling_diameter_mm: f64,
     anchors: RailAnchors,
 ) !void {
-    if (side.tooling_hole) try holes.append(arena, .{
-        .x = anchors.tooling[0],
-        .y = anchors.tooling[1],
+    if (side.tooling_hole) for (anchors.tooling) |point| try holes.append(arena, .{
+        .x = point[0],
+        .y = point[1],
         .diameter = tooling_diameter_mm,
     });
-    if (side.fiducial) try fiducials.append(arena, .{
-        .x = anchors.fiducial[0],
-        .y = anchors.fiducial[1],
+    if (side.fiducial) for (anchors.fiducial) |point| try fiducials.append(arena, .{
+        .x = point[0],
+        .y = point[1],
     });
 }
 
@@ -462,7 +462,7 @@ test "a V-score panel has zero board gaps and full-span score guides" {
     try std.testing.expectEqual(@as(usize, 0), p.features.npth_holes.len);
 }
 
-test "asymmetric rails place tooling holes and fiducials only on selected sides" {
+test "asymmetric rails place paired tooling holes and fiducials only on selected sides" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const p = try plan(arena_state.allocator(), sourceFor(testPlacement()), .{
@@ -480,10 +480,45 @@ test "asymmetric rails place tooling holes and fiducials only on selected sides"
     try std.testing.expectApproxEqAbs(@as(f64, 40), p.width_mm, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 20), p.height_mm, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 16), p.frames[0].oy, 1e-9);
-    try std.testing.expectEqual(@as(usize, 1), p.features.npth_holes.len);
+    try std.testing.expectEqual(@as(usize, 2), p.features.npth_holes.len);
     try std.testing.expectApproxEqAbs(@as(f64, 3), p.features.npth_holes[0].y, 1e-9);
-    try std.testing.expectEqual(@as(usize, 1), p.features.fiducials.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 5), p.features.npth_holes[0].x, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 35), p.features.npth_holes[1].x, 1e-9);
+    try std.testing.expectEqual(@as(usize, 2), p.features.fiducials.len);
     try std.testing.expectApproxEqAbs(@as(f64, 18), p.features.fiducials[0].y, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 10), p.features.fiducials[0].x, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 30), p.features.fiducials[1].x, 1e-9);
+}
+
+test "opposite rail selections create four or eight tooling holes and fiducials" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const horizontal = try plan(arena, sourceFor(testPlacement()), .{
+        .rows = 1,
+        .columns = 2,
+        .method = .v_score,
+        .gap_mm = 0,
+        .rails = .{
+            .top = .{ .tooling_hole = true, .fiducial = true },
+            .right = .{ .width_mm = 0 },
+            .bottom = .{ .tooling_hole = true, .fiducial = true },
+            .left = .{ .width_mm = 0 },
+        },
+    });
+    try std.testing.expectEqual(@as(usize, 4), horizontal.features.npth_holes.len);
+    try std.testing.expectEqual(@as(usize, 4), horizontal.features.fiducials.len);
+
+    const all_sides = RailSide{ .tooling_hole = true, .fiducial = true };
+    const all = try plan(arena, sourceFor(testPlacement()), .{
+        .rows = 2,
+        .columns = 2,
+        .method = .v_score,
+        .gap_mm = 0,
+        .rails = .{ .top = all_sides, .right = all_sides, .bottom = all_sides, .left = all_sides },
+    });
+    try std.testing.expectEqual(@as(usize, 8), all.features.npth_holes.len);
+    try std.testing.expectEqual(@as(usize, 8), all.features.fiducials.len);
 }
 
 test "a routed rounded-rectangle panel retains native corner arcs" {

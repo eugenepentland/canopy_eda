@@ -12453,9 +12453,16 @@ function fabPanelPreview(){
  if(fabPanel.method==="v_score"){
   for(var c=0;c<=cols;c++){var sx=left+c*shape.w;if(sx>0&&sx<pw)fabPanelPreviewNode(svg,"line",{x1:sx,y1:0,x2:sx,y2:ph,stroke:"#e3b341","stroke-width":Math.max(.12,pad*.05),"stroke-dasharray":Math.max(.5,pad*.3)+" "+Math.max(.35,pad*.2)});}
   for(var r=0;r<=rows;r++){var sy=top+r*shape.h;if(sy>0&&sy<ph)fabPanelPreviewNode(svg,"line",{x1:0,y1:sy,x2:pw,y2:sy,stroke:"#e3b341","stroke-width":Math.max(.12,pad*.05),"stroke-dasharray":Math.max(.5,pad*.3)+" "+Math.max(.35,pad*.2)});}}
- var sides={Top:[pw/3,top/2,2*pw/3,top/2],Right:[pw-right/2,2*ph/3,pw-right/2,ph/3],Bottom:[pw/3,ph-bottom/2,2*pw/3,ph-bottom/2],Left:[left/2,2*ph/3,left/2,ph/3]};
- Object.keys(sides).forEach(function(side){var p=sides[side];if(fabPanelRailEnabled(side)&&fabPanel["tooling"+side])fabPanelPreviewFeature(svg,p[0],p[1],Math.max(.01,+fabPanel.toolingDiameter||0),"hole");if(fabPanelRailEnabled(side)&&fabPanel["fiducial"+side])fabPanelPreviewFeature(svg,p[2],p[3],Math.max(.01,+fabPanel.fiducialDiameter||0),"fiducial");});
- status.textContent=cols+" × "+rows+" boards · "+pw.toFixed(1)+" × "+ph.toFixed(1)+" mm · "+(fabPanel.method==="v_score"?"V-score":"routed");}
+ var sides={
+  Top:{tooling:[[pw/8,top/2],[7*pw/8,top/2]],fiducial:[[pw/4,top/2],[3*pw/4,top/2]]},
+  Right:{tooling:[[pw-right/2,ph/8],[pw-right/2,7*ph/8]],fiducial:[[pw-right/2,ph/4],[pw-right/2,3*ph/4]]},
+  Bottom:{tooling:[[pw/8,ph-bottom/2],[7*pw/8,ph-bottom/2]],fiducial:[[pw/4,ph-bottom/2],[3*pw/4,ph-bottom/2]]},
+  Left:{tooling:[[left/2,ph/8],[left/2,7*ph/8]],fiducial:[[left/2,ph/4],[left/2,3*ph/4]]}};
+ var toolingCount=0,fiducialCount=0;
+ Object.keys(sides).forEach(function(side){if(!fabPanelRailEnabled(side))return;
+  if(fabPanel["tooling"+side])sides[side].tooling.forEach(function(p){toolingCount++;fabPanelPreviewFeature(svg,p[0],p[1],Math.max(.01,+fabPanel.toolingDiameter||0),"hole");});
+  if(fabPanel["fiducial"+side])sides[side].fiducial.forEach(function(p){fiducialCount++;fabPanelPreviewFeature(svg,p[0],p[1],Math.max(.01,+fabPanel.fiducialDiameter||0),"fiducial");});});
+ status.textContent=cols+" × "+rows+" boards · "+pw.toFixed(1)+" × "+ph.toFixed(1)+" mm · "+(fabPanel.method==="v_score"?"V-score":"routed")+" · "+toolingCount+" tooling holes · "+fiducialCount+" fiducials";}
 function fabZipUrl(rep){
  var q=fabq();
  var add=function(k,v){q+=q?"&":"?";q+=k+"="+encodeURIComponent(v);};
@@ -12528,7 +12535,7 @@ function fabRenderReport(rep){
  if((!rep.errors||!rep.errors.length)&&(!rep.warnings||!rep.warnings.length))
  h+='<div class="fab-sec ok">Board is fab-ready.</div>';
  if(fabExportKind==="fabrication"){
-  var railRow=function(side,label){var cap=side.charAt(0).toUpperCase()+side.slice(1);return '<div class="fab-rail-side" id="fab-panel-rail-row-'+side+'"><strong>'+label+'</strong><span><input id="fab-panel-rail-'+side+'" type="number" min="0" max="30" step="0.1" value="'+fabPanel['rail'+cap]+'"> mm</span><label><input id="fab-panel-tooling-'+side+'" type="checkbox"'+(fabPanel['tooling'+cap]?' checked':'')+'> Hole</label><label><input id="fab-panel-fiducial-'+side+'" type="checkbox"'+(fabPanel['fiducial'+cap]?' checked':'')+'> Fiducial</label></div>';};
+  var railRow=function(side,label){var cap=side.charAt(0).toUpperCase()+side.slice(1);return '<div class="fab-rail-side" id="fab-panel-rail-row-'+side+'"><strong>'+label+'</strong><span><input id="fab-panel-rail-'+side+'" type="number" min="0" max="30" step="0.1" value="'+fabPanel['rail'+cap]+'"> mm</span><label><input id="fab-panel-tooling-'+side+'" type="checkbox"'+(fabPanel['tooling'+cap]?' checked':'')+'> 2 holes</label><label><input id="fab-panel-fiducial-'+side+'" type="checkbox"'+(fabPanel['fiducial'+cap]?' checked':'')+'> 2 fiducials</label></div>';};
   h+='<fieldset class="fab-panel"><legend><label><input type="checkbox" id="fab-panel-enable"'+(fabPanel.enabled?' checked':'')+'> Panelize Gerbers and drills</label></legend>'+
    '<div class="fab-panel-grid" id="fab-panel-fields"'+(fabPanel.enabled?'':' hidden')+'>'+
    '<div class="fab-panel-preview"><div class="fab-panel-preview-head"><strong>Panel preview</strong><span id="fab-panel-preview-status"></span></div><svg id="fab-panel-preview-svg" role="img" aria-label="Live panel outline preview" preserveAspectRatio="xMidYMid meet"></svg><div class="fab-panel-preview-legend"><span class="board">Board outline</span><span class="rail">Rail / routing gap</span><span class="feature">Rail feature</span></div></div>'+
@@ -12543,7 +12550,7 @@ function fabRenderReport(rep){
    '<label>Hole diameter <span><input id="fab-panel-tooling-diameter" type="number" min="1" max="6" step="0.1" value="'+fabPanel.toolingDiameter+'"> mm</span></label>'+
    '<label>Fiducial copper <span><input id="fab-panel-fiducial-diameter" type="number" min="0.5" max="3" step="0.1" value="'+fabPanel.fiducialDiameter+'"> mm</span></label>'+
    '<label>Fiducial mask <span><input id="fab-panel-fiducial-mask" type="number" min="0.5" max="5" step="0.1" value="'+fabPanel.fiducialMask+'"> mm</span></label></div>'+
-   '<div class="fab-panel-note">Set any rail width to 0 to omit that side. Selected holes are NPTH; fiducials are bare top-copper pads with mask openings. Routed panels support rounded corners; V-score requires square corners and zero gap. Panel-specific BOM and centroid CSVs are included. Confirm the generated panel drawing with your fabricator.</div></fieldset>';}
+   '<div class="fab-panel-note">Set any rail width to 0 to omit that side. Each selected side adds two NPTH tooling holes and two top-copper fiducials near its ends. Routed panels support rounded corners; V-score requires square corners and zero gap. Panel-specific BOM and centroid CSVs are included. Confirm the generated panel drawing with your fabricator.</div></fieldset>';}
  var s=rep.stats||{};
  h+='<div class="fab-stats">'+(s.parts||0)+' parts · '+
   (s.connected_nets||0)+'/'+(s.routable_nets||0)+' routable nets connected · '+

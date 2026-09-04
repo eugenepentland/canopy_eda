@@ -109,6 +109,6 @@ test "panel query parses independent rail sides and their selected features" {
     try std.testing.expectApproxEqAbs(@as(f64, 0), result.options.rails.right.width_mm, 1e-9);
     try std.testing.expect(result.options.rails.top.tooling_hole);
     try std.testing.expect(result.options.rails.bottom.fiducial);
-    try std.testing.expectEqual(@as(usize, 1 + 4 * 5), result.features.npth_holes.len);
-    try std.testing.expectEqual(@as(usize, 1), result.features.fiducials.len);
+    try std.testing.expectEqual(@as(usize, 2 + 4 * 5), result.features.npth_holes.len);
+    try std.testing.expectEqual(@as(usize, 2), result.features.fiducials.len);
 }

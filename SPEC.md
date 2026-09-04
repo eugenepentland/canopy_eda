@@ -5024,7 +5024,7 @@ Public functions: planLayers, writeLayer
 - the edge layer closes the board outline; silk exports authored footprint artwork without synthesizing component ref-des text
 - panel export repeats every fabrication layer in one shared array frame and replaces the source outline with the panel profile
 - routed panels preserve rounded board corners as native profile arcs while tabs interrupt only straight edges
-- selected rail fiducials emit global top-copper pads with larger top-mask openings and stay absent from bottom layers
+- each selected rail side emits two global top-copper fiducials near its ends with larger top-mask openings and no bottom-layer flashes
 - a V-score panel ships its score centre lines as an explicit fabrication drawing
 - Four L corners bound each isolated flattened sub-circuit, and its fixed-size horizontal label first tries a corner-near slot on the top or bottom edge
 - overlapping same-face sub-circuit bounds each keep their own four-corner envelope instead of merging
@@ -7007,7 +7007,7 @@ is what makes the predicate exact rather than approximately right.
 - The panel export disables V-score for rounded, curved, or non-rectangular outlines, selects routed tabs instead, and explains the constraint before export
 - The panel export groups rail presence into one top-and-bottom toggle and one left-and-right toggle while preserving each side's configured width and features
 - The panel export shows a live dimensioned preview that repeats the actual board outline inside its configured rails and marks scores, tooling holes and fiducials
-- The panel export controls independently size every rail side and select its NPTH tooling hole and top-copper fiducial dimensions
+- The panel export controls independently size every rail side and selects pairs of NPTH tooling holes and top-copper fiducials near both ends of each enabled side
 - The Full archive control runs the ordinary fab-readiness confirmation flow, posts the same analytic full-board STEP recipe as the 3D tab, and downloads the complete design archive
 - A failed Full archive download identifies the archive and displays the server's actual rejection reason
 - The DRC reconcile session answers only for a board whose non-copper inputs are unchanged
