@@ -6115,6 +6115,7 @@ Public functions: runSyncPlan, syncKicadPcbApi
 - a stale board pad is cleared only when the design nets that signal on another pad the board footprint actually has
 - formatBackupStamp renders epoch seconds as a sortable filesystem-safe stamp
 - writeFileAtomic rolls a timestamped board backup and prunes beyond MAX_BOARD_BACKUPS
+- a board write leaves no staging sibling beside the board, so a concurrent sync cannot inherit a half-written file under a predictable name
 - placement guard reports moved, rotated, or side-flipped footprints and exempts adds/removes
 - placement guard passes when every existing footprint keeps its pose
 - computeGroupAnchors matches a group's anchor to the board through the same relink tiers the differ uses
@@ -6948,6 +6949,34 @@ reader's regression test sizes its fixture off it.
 - completeness-waiver: integer overflow (the three cap values are comptime `usize` literals ~1e6, six orders of magnitude inside the type; `synthPinoutSource`'s row counter is bounded by `min_bytes`, which the allocator would refuse long before the counter could wrap)
 - completeness-waiver: panic-free (the caps are comptime declarations, and the one runtime path — `synthPinoutSource` — returns `Allocator.Error` rather than panicking, so an exhausted allocator surfaces as an error to the caller)
 
+## infra/process-allocator
+
+The one place this tree names a global allocator. Every server handler runs on a
+per-request arena that is released when the response is written, so state that
+must outlive the response — the live scene-graph slot, the per-design version
+counters, the background PCB-regen jobs, the page/summary/module/DRC-rule
+caches, the plugin-token table, the route sessions, and the fill and impedance
+memos — cannot be allocated from it. Handing a long-lived store a request arena
+is how the 11.7 GB server RSS leak happened, so the decision "this memory
+outlives the request" is made once here and imported, rather than re-made by
+each handler that reaches for `std.heap.page_allocator` inline.
+
+It is a boundary marker, not an abstraction: `durable` memory is never reclaimed
+by scope exit, so every store built on it still has to free what it replaces or
+bound what it retains, and a caller that can do neither wants its caller's
+allocator threaded down instead.
+
+- durable memory survives the teardown of a request arena allocated beside it
+
+- completeness-waiver: empty inputs (the module declares one allocator and takes no input of its own; a zero-length allocation is the underlying allocator's contract, unchanged by naming it here)
+- completeness-waiver: large inputs (a size cap belongs to each store that allocates — the caches' own byte budgets and entry limits — not to the allocator they share)
+- completeness-waiver: unauthorized access (a declaration that grants no file, network, or user capability; permissions are decided at the routes that use the stores)
+- completeness-waiver: i/o failure (nothing here performs I/O)
+- completeness-waiver: concurrent access (`page_allocator` is thread-safe by construction — every allocation is its own mmap — and each store carries its own mutex for the data structure it guards)
+- completeness-waiver: malformed encoding (no bytes are parsed or decoded here)
+- completeness-waiver: integer overflow (no arithmetic; size arithmetic stays inside the allocator's own checked path)
+- completeness-waiver: panic-free (allocation failure reaches callers as `error.OutOfMemory` from the standard allocator interface, which this only re-exports)
+
 ## infra/atomic-write
 
 The one place a file is replaced rather than rewritten in place. A truncating
@@ -6972,6 +7001,7 @@ and that ordering belongs to the caller.
 - an oversized body larger than the staging buffer lands whole
 - a staged write abandoned before commit, or stopped by a write error, leaves the previous file contents intact
 - neither a committed nor an abandoned write leaves a temporary file behind
+- a staged write's chmod applies to the file the commit publishes, so a read-only target is never visible at the default mode
 - write and commit on a Staged whose begin never succeeded return NotStaged with no panic
 - two concurrent writers staging one target use distinct temporaries and the later commit wins whole
 

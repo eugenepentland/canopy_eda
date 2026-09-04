@@ -11,6 +11,7 @@
 const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
+const process_alloc = @import("../infra/process_alloc.zig");
 const escape = @import("../escape.zig");
 const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
@@ -303,7 +304,7 @@ fn appendParamList(
 // hits dupe back into the request arena. The fingerprint scan is ~52 stat()s
 // (~1 ms) versus the ~18 ms read+parse it replaces.
 
-const page = std.heap.page_allocator;
+const page = process_alloc.durable;
 
 const ModuleDirStamp = struct {
     count: usize = 0,

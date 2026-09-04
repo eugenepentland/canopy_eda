@@ -19,6 +19,7 @@ const pour = @import("../placement/pour.zig");
 const drc_json = @import("drc_json.zig");
 const paths = @import("../paths.zig");
 const infra_fs = @import("../infra/fs.zig");
+const process_alloc = @import("../infra/process_alloc.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const HandlerError = @import("pcb_layout_page.zig").HandlerError;
@@ -135,7 +136,7 @@ const RulesCache = struct {
     const max_entries: usize = 64;
 
     mutex: infra_fs.Mutex = .{},
-    backing: std.mem.Allocator = std.heap.page_allocator,
+    backing: std.mem.Allocator = process_alloc.durable,
     entries: std.ArrayList(Entry) = .empty,
 
     fn get(self: *RulesCache, path: []const u8, mtime: i128, size: u64) ?Sidecar {

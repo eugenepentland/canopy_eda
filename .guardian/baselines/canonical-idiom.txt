@@ -58,9 +58,3 @@ canonical-idiom|subblock-leaf-split|src/serve/route_plan.zig
 canonical-idiom|subblock-leaf-split|src/serve/saved_anchor_migration.zig
 canonical-idiom|subblock-leaf-split|src/serve/sync.zig
 canonical-idiom|subblock-leaf-split|src/subcircuit_silkscreen.zig
-canonical-idiom|tmp-rename-write|src/infra/fs.zig
-canonical-idiom|tmp-rename-write|src/kicad_sch_push.zig
-canonical-idiom|tmp-rename-write|src/serve/board_backup.zig
-canonical-idiom|tmp-rename-write|src/serve/library.zig
-canonical-idiom|tmp-rename-write|src/serve/library_3d.zig
-canonical-idiom|tmp-rename-write|src/serve/sync.zig

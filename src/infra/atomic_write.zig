@@ -67,6 +67,9 @@ pub const InitError = infra_fs.AtomicFile.InitError;
 pub const WriteError = infra_fs.File.WriteError || StageError;
 /// The final flush or the rename failed. The target still holds its old bytes.
 pub const CommitError = infra_fs.AtomicFile.FinishError || StageError;
+/// Setting the staged file's permissions failed. The target has not been
+/// touched, and the staged bytes are still committable at the default mode.
+pub const ChmodError = std.Io.File.SetPermissionsError || StageError;
 
 /// Everything `writeFile` can fail with.
 pub const Error = InitError || WriteError || CommitError;
@@ -106,6 +109,21 @@ pub const Staged = struct {
             // The generic writer erases the cause; `file_writer.err` kept it.
             error.WriteFailed => return af.file_writer.err.?,
         };
+    }
+
+    /// Set the permissions the target will have once `commit` renames the
+    /// temporary over it.
+    ///
+    /// It applies to the TEMPORARY, before publication, which is the only order
+    /// that works for a read-only target: the mode has to be in place when the
+    /// file becomes visible, and a read-only file cannot be chmod'd into
+    /// existence afterwards without a window at the default mode. Replacing an
+    /// already read-only target still works, because rename needs write
+    /// permission on the directory, not on the file it overwrites.
+    pub fn chmod(self: *Staged, permissions: std.Io.File.Permissions) ChmodError!void {
+        const af = if (self.af) |*a| a else return error.NotStaged;
+        const staged_file = infra_fs.File{ .f = af.inner.file };
+        try staged_file.chmod(permissions);
     }
 
     /// Flush, fsync, then rename the temporary over the target. On any failure
@@ -358,4 +376,39 @@ test "two concurrent writers staging one target use distinct temporaries and the
         try tmp.dir.readFileAlloc(std.testing.io, "design.sexp", arena, .limited64(1024)),
     );
     try std.testing.expectEqual(@as(usize, 1), try countEntriesForTest(tmp.dir));
+}
+
+// spec: infra/atomic-write - a staged write's chmod applies to the file the commit publishes, so a read-only target is never visible at the default mode
+test "a staged write's chmod applies to the file the commit publishes" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var aa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer aa.deinit();
+    const arena = aa.allocator();
+
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena);
+    const path = try pathInForTest(arena, root, "source.sexp");
+
+    const read_only = std.Io.File.Permissions.default_file.setReadOnly(true);
+    var staged: Staged = .{};
+    defer staged.abandon();
+    try staged.begin(path);
+    try staged.write("(design-block \"published read-only\")");
+    // Before publication, not after: a read-only file cannot be chmod'd into
+    // existence afterwards without a window at the default mode.
+    try staged.chmod(read_only);
+    try staged.commit();
+
+    const published = try tmp.dir.statFile(std.testing.io, "source.sexp", .{});
+    try std.testing.expect(published.permissions.readOnly());
+    try std.testing.expectEqualStrings(
+        "(design-block \"published read-only\")",
+        try tmp.dir.readFileAlloc(std.testing.io, "source.sexp", arena, .limited64(1024)),
+    );
+
+    // A `chmod` on a transaction that never began is the same misuse `write`
+    // and `commit` report, not a panic.
+    var never: Staged = .{};
+    defer never.abandon();
+    try std.testing.expectError(error.NotStaged, never.chmod(read_only));
 }

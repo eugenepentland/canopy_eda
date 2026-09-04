@@ -1144,11 +1144,25 @@ fragments = ["\"&amp;\""]
 allow = ["src/escape.zig"]
 reason = "hand-rolled XML/HTML entity table - 9 copies with 4 character sets incl. an attribute writer missing the quote; call escape.writeXml"
 
+# The detector's fragment is `.rename(`, which cannot tell a hand-rolled
+# tmp+rename WRITE from an honest MOVE. Four private writers were folded into
+# `src/infra/atomic_write.zig` on 2026-09-04 (board_backup, library_3d,
+# serve/sync's read-only source copy, and kicad_sch_push's two-phase staging);
+# the four allowed files are the ones that are not private writers at all:
+#   * infra/atomic_write.zig — the shared writer itself.
+#   * infra/fs.zig — `Dir.rename`/`Dir.renameTo`, the tree's ONE rename
+#     primitive, bound to the `currentIo()` capability. atomic_write is built on
+#     it; a second untraced rename path is exactly what this idiom forbids.
+#   * serve/vfs.zig — `move_file`, a move rather than a write.
+#   * serve/library.zig — the library soft-delete moves
+#     `lib/<subdir>/<name>.sexp` into `lib/<subdir>/.deleted/`. It writes no
+#     bytes, so there is nothing to stage; routing a move through a writer would
+#     mean reading and re-writing the file it is trying not to touch.
 [[idiom]]
 name = "tmp-rename-write"
 fragments = [".rename("]
-allow = ["src/infra/atomic_write.zig", "src/serve/vfs.zig"]
-reason = "private atomic-write (tmp+rename) - 8 implementations while the design .sexp itself is written non-atomically; one shared writer (vfs move_file is a legitimate rename)"
+allow = ["src/infra/atomic_write.zig", "src/infra/fs.zig", "src/serve/library.zig", "src/serve/vfs.zig"]
+reason = "private atomic-write (tmp+rename) - one shared writer; a bare move (vfs move_file, library soft-delete) and the fs.zig rename primitive it is built on are not writers"
 
 # ── [[idiom]]: lib-file read caps that diverge from the class limit (DETECTOR)
 # `src/lib_limits.zig` OWNS the read cap for netlisp's own `lib/` source files:

@@ -20,6 +20,7 @@ const env_mod = @import("../eval/env.zig");
 const eval_modules = @import("../eval/modules.zig");
 const erc_mod = @import("../erc.zig");
 const log = @import("../infra/log.zig");
+const process_alloc = @import("../infra/process_alloc.zig");
 const bom = @import("../bom.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 const Node = @import("../sexpr/ast.zig").Node;
@@ -1835,7 +1836,7 @@ fn countNets(block: *const env_mod.DesignBlock) usize {
 // stored copy lives in page_allocator (the request arena dies per response);
 // hits dupe back into the request arena. Bounded by the design-file count.
 
-const page = std.heap.page_allocator;
+const page = process_alloc.durable;
 
 const SummaryCacheEntry = struct {
     summary: DesignSummary,

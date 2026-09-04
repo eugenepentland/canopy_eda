@@ -11,6 +11,7 @@ const std = @import("std");
 const httpz = @import("httpz");
 const clock = @import("../infra/clock.zig");
 const infra_fs = @import("../infra/fs.zig");
+const process_alloc = @import("../infra/process_alloc.zig");
 const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 const optimizer = @import("../placement/optimizer.zig");
@@ -45,7 +46,7 @@ const max_sessions: usize = 4;
 const idle_secs: i64 = 15 * 60;
 /// The durable allocator every persistent session structure uses. Request
 /// arenas die with the response; session state must not.
-const durable = std.heap.page_allocator;
+const durable = process_alloc.durable;
 
 // Shared literals (extracted so no message/fragment token repeats inline).
 const err_missing_name = "missing design name";

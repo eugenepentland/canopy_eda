@@ -7,6 +7,7 @@ const std = @import("std");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
+const process_alloc = @import("../infra/process_alloc.zig");
 const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const env_mod = @import("../eval/env.zig");
@@ -40,7 +41,7 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error || error
 // return before reaching here), so per-name replacement needs no separate
 // eviction policy.
 
-const page = std.heap.page_allocator;
+const page = process_alloc.durable;
 
 const HtmlCacheEntry = struct {
     html: []const u8,
