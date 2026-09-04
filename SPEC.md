@@ -219,6 +219,7 @@ candidate for deployment.
 - RF pad adaptation tests remain claimed by the shard manifest
 - The live sub-circuit Stamp endpoint regression remains claimed by the shard manifest
 - The saved-pose identity tests remain claimed by the shard manifest
+- Panelization export tests remain claimed by the shard manifest
 - Bridges every test-bearing module into the shard import graph so filters alone decide a shard's contents
 - Rejects a shard filter that no longer names a test in the tree
 - Pins every gated full-test invocation with `--seed=1` so an unchanged tree's test run is a cache hit
@@ -4977,6 +4978,7 @@ Public functions: Package.add, Package.addNamed, centroidCsv, excellonDrill, fra
 - each Excellon file declares its X2 file function, naming its plating and the copper span it drills through
 - every hole is drilled by exactly one Excellon tool, even when its diameter sits inside two tool buckets
 - the Excellon tool lookup partitions diameters, giving each hole exactly one owning tool
+- panel Excellon repeats board drills in every panel frame and adds routed-tab mouse-bites only to NPTH
 
 ## export_gerber
 
@@ -5019,6 +5021,8 @@ Public functions: planLayers, writeLayer
 - a layer omits %TF.CreationDate unless the caller supplies one, so the writer stays byte-reproducible and only a served package is stamped
 - copper apertures carry their X2 %TA.AperFunction (SMD pad, component pad, via land, conductor) and the profile is classified, while openings and clearances stay unclassified
 - the edge layer closes the board outline; silk exports authored footprint artwork without synthesizing component ref-des text
+- panel export repeats every fabrication layer in one shared array frame and replaces the source outline with the panel profile
+- a V-score panel ships its score centre lines as an explicit fabrication drawing
 - Four L corners bound each isolated flattened sub-circuit, and its fixed-size horizontal label first tries a corner-near slot on the top or bottom edge
 - overlapping same-face sub-circuit bounds each keep their own four-corner envelope instead of merging
 - chained overlapping sub-circuits keep one independent corner envelope per member instead of merging transitively

@@ -105,6 +105,7 @@ test {
     _ = @import("exit.zig");
     _ = @import("export_fab.zig");
     _ = @import("export_gerber.zig");
+    _ = @import("panelize.zig");
     _ = @import("export_kicad.zig");
     _ = @import("export_kicad_footprint.zig");
     _ = @import("export_kicad_netlist.zig");

@@ -12370,6 +12370,7 @@ function focusPart(want,keepPane){
 // exact revision/report just reviewed; remaining findings add an explicit
 // waiver. A stale token cannot download a changed board.
 var fabExportKind="fabrication";
+var fabPanel={enabled:false,rows:2,columns:2,method:"routed",gap:2,rail:5,tab:3,bite:0.5};
 function fabZipUrl(rep){
  var q=fabq();
  var add=function(k,v){q+=q?"&":"?";q+=k+"="+encodeURIComponent(v);};
@@ -12378,6 +12379,10 @@ function fabZipUrl(rep){
  return (fabExportKind==="archive"?"/api/design-archive/":"/api/pcb-gerbers/")+encodeURIComponent(PCB.name)+q;}
 function fabq(){var fields=[];
  var layout=curLayout||PCB.shown_layout;if(layout)fields.push("layout="+encodeURIComponent(layout));
+ if(fabExportKind==="fabrication"&&fabPanel.enabled){
+  fields.push("panel=1","panel_rows="+fabPanel.rows,"panel_columns="+fabPanel.columns,
+   "panel_method="+fabPanel.method,"panel_gap="+fabPanel.gap,"panel_rail="+fabPanel.rail,
+   "panel_tab="+fabPanel.tab,"panel_bite="+fabPanel.bite);}
  return fields.length?"?"+fields.join("&"):"";}
 function fabDownload(rep){
  var go=document.getElementById("fab-go"),refreshed=false;if(go)go.disabled=true;
@@ -12432,7 +12437,18 @@ function fabRenderReport(rep){
  if(!rep.internal_checks_complete)
   h+='<div class="fab-blocked">DRC findings can be accepted, but export remains disabled until the non-waivable release-evidence blockers above are resolved.</div>';
  if((!rep.errors||!rep.errors.length)&&(!rep.warnings||!rep.warnings.length))
-  h+='<div class="fab-sec ok">Board is fab-ready.</div>';
+ h+='<div class="fab-sec ok">Board is fab-ready.</div>';
+ if(fabExportKind==="fabrication"){
+  h+='<fieldset class="fab-panel"><legend><label><input type="checkbox" id="fab-panel-enable"'+(fabPanel.enabled?' checked':'')+'> Panelize Gerbers and drills</label></legend>'+
+   '<div class="fab-panel-grid" id="fab-panel-fields"'+(fabPanel.enabled?'':' hidden')+'>'+
+   '<label>Columns <input id="fab-panel-columns" type="number" min="1" max="100" step="1" value="'+fabPanel.columns+'"></label>'+
+   '<label>Rows <input id="fab-panel-rows" type="number" min="1" max="100" step="1" value="'+fabPanel.rows+'"></label>'+
+   '<label>Separation <select id="fab-panel-method"><option value="routed"'+(fabPanel.method==='routed'?' selected':'')+'>Routed tabs + mouse bites</option><option value="v_score"'+(fabPanel.method==='v_score'?' selected':'')+'>V-score</option></select></label>'+
+   '<label>Board gap <span><input id="fab-panel-gap" type="number" min="0" max="20" step="0.1" value="'+fabPanel.gap+'"> mm</span></label>'+
+   '<label>Rails <span><input id="fab-panel-rail" type="number" min="0" max="30" step="0.1" value="'+fabPanel.rail+'"> mm</span></label>'+
+   '<label class="fab-routed-field">Tab width <span><input id="fab-panel-tab" type="number" min="1" step="0.1" value="'+fabPanel.tab+'"> mm</span></label>'+
+   '<label class="fab-routed-field">Mouse bites <span><input id="fab-panel-bite" type="number" min="0.2" max="1" step="0.05" value="'+fabPanel.bite+'"> mm</span></label></div>'+
+   '<div class="fab-panel-note">Rectangular outlines only. V-score forces zero gap; routed panels emit tabbed profiles and NPTH mouse-bites. Confirm the generated panel drawing with your fabricator.</div></fieldset>';}
  var s=rep.stats||{};
  h+='<div class="fab-stats">'+(s.parts||0)+' parts · '+
   (s.connected_nets||0)+'/'+(s.routable_nets||0)+' routable nets connected · '+
@@ -12446,6 +12462,16 @@ function fabOpenModal(rep){
  var body=document.getElementById("fab-body"),go=document.getElementById("fab-go"),
   title=document.getElementById("fab-title");
  body.innerHTML=fabRenderReport(rep);
+ var panelEnable=document.getElementById("fab-panel-enable"),panelFields=document.getElementById("fab-panel-fields");
+ function panelSyncMethod(){var method=document.getElementById("fab-panel-method"),gap=document.getElementById("fab-panel-gap");
+  if(!method)return;fabPanel.method=method.value;var scored=method.value==="v_score";
+  if(gap){gap.disabled=scored;if(scored){gap.value="0";fabPanel.gap=0;}else if(Number(gap.value)<1){gap.value="2";fabPanel.gap=2;}}
+  body.querySelectorAll(".fab-routed-field").forEach(function(el){el.hidden=scored;});}
+ if(panelEnable)panelEnable.addEventListener("change",function(){fabPanel.enabled=panelEnable.checked;if(panelFields)panelFields.hidden=!fabPanel.enabled;});
+ var panelMethod=document.getElementById("fab-panel-method");if(panelMethod)panelMethod.addEventListener("change",panelSyncMethod);
+ [["fab-panel-rows","rows"],["fab-panel-columns","columns"],["fab-panel-gap","gap"],["fab-panel-rail","rail"],["fab-panel-tab","tab"],["fab-panel-bite","bite"]].forEach(function(pair){
+  var el=document.getElementById(pair[0]);if(el)el.addEventListener("change",function(){var n=Number(el.value);if(Number.isFinite(n))fabPanel[pair[1]]=n;});});
+ panelSyncMethod();
  var hasErr=rep.errors&&rep.errors.length,hasWarn=rep.needs_waiver,drcAck=document.getElementById("fab-drc-ack");
  var what=fabExportKind==="archive"?"Complete design archive":"Fabrication release";
  title.textContent=hasErr?what+" — problems found":hasWarn?what+" — waiver required":what+" — ready to confirm";

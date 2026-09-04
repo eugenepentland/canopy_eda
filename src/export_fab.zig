@@ -259,6 +259,15 @@ pub const DrillFile = struct {
     copper_layers: u8,
 };
 
+/// An additional already-framed NPTH hit, used for panel mouse-bites.
+pub const DrillHole = struct { x: f64, y: f64, diameter: f64 };
+
+/// Repetition frames and panel-only holes for an Excellon panel export.
+pub const DrillRepeat = struct {
+    frames: []const Frame,
+    extra_npth: []const DrillHole = &.{},
+};
+
 /// Half-width of an Excellon tool bucket: two diameters closer than this
 /// share one tool (0.01 mm resolution).
 const tool_bucket_mm: f64 = 0.005;
@@ -300,34 +309,51 @@ pub fn excellonDrill(
     file: DrillFile,
     frame: Frame,
 ) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
+    return excellonDrillRepeated(w, alloc, parts, vias, file, .{ .frames = &.{frame} });
+}
+
+/// Panel form of `excellonDrill`: repeat every board hit through each frame
+/// and append panel-only NPTH hits (mouse-bites) in panel coordinates.
+pub fn excellonDrillRepeated(
+    w: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    parts: []const optimizer.Part,
+    vias: []const router.Via,
+    file: DrillFile,
+    repeat: DrillRepeat,
+) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
     const plated = file.class == .plated;
     var holes: std.ArrayList(Hole) = .empty;
-    for (parts) |p| {
-        for (p.pads) |pad| {
-            if (pad.drill <= 0) continue;
-            const want = if (plated) (pad.thru and !pad.npth) else pad.npth;
-            if (!want) continue;
-            if (pad.isSlot()) {
-                // The two slot-end arc centres, at the pad's world pose.
-                const e1 = optimizer.worldPadCenter(&p, pad.x + pad.slot_half[0], pad.y + pad.slot_half[1]);
-                const e2 = optimizer.worldPadCenter(&p, pad.x - pad.slot_half[0], pad.y - pad.slot_half[1]);
-                const f1 = frame.pt(e1[0], e1[1]);
-                const f2 = frame.pt(e2[0], e2[1]);
-                try holes.append(alloc, .{ .x = f1[0], .y = f1[1], .x2 = f2[0], .y2 = f2[1], .d = pad.drill, .slot = true });
-            } else {
-                const c = optimizer.worldPadCenter(&p, pad.x, pad.y);
-                const f = frame.pt(c[0], c[1]);
-                try holes.append(alloc, .{ .x = f[0], .y = f[1], .d = pad.drill });
+    for (repeat.frames) |frame| {
+        for (parts) |p| {
+            for (p.pads) |pad| {
+                if (pad.drill <= 0) continue;
+                const want = if (plated) (pad.thru and !pad.npth) else pad.npth;
+                if (!want) continue;
+                if (pad.isSlot()) {
+                    // The two slot-end arc centres, at the pad's world pose.
+                    const e1 = optimizer.worldPadCenter(&p, pad.x + pad.slot_half[0], pad.y + pad.slot_half[1]);
+                    const e2 = optimizer.worldPadCenter(&p, pad.x - pad.slot_half[0], pad.y - pad.slot_half[1]);
+                    const f1 = frame.pt(e1[0], e1[1]);
+                    const f2 = frame.pt(e2[0], e2[1]);
+                    try holes.append(alloc, .{ .x = f1[0], .y = f1[1], .x2 = f2[0], .y2 = f2[1], .d = pad.drill, .slot = true });
+                } else {
+                    const c = optimizer.worldPadCenter(&p, pad.x, pad.y);
+                    const f = frame.pt(c[0], c[1]);
+                    try holes.append(alloc, .{ .x = f[0], .y = f[1], .d = pad.drill });
+                }
+            }
+        }
+        if (plated) {
+            for (vias) |v| {
+                if (v.drill <= 0) continue;
+                const f = frame.pt(v.x, v.y);
+                try holes.append(alloc, .{ .x = f[0], .y = f[1], .d = v.drill });
             }
         }
     }
-    if (plated) {
-        for (vias) |v| {
-            if (v.drill <= 0) continue;
-            const f = frame.pt(v.x, v.y);
-            try holes.append(alloc, .{ .x = f[0], .y = f[1], .d = v.drill });
-        }
-    }
+    if (!plated) for (repeat.extra_npth) |h|
+        try holes.append(alloc, .{ .x = h.x, .y = h.y, .d = h.diameter });
 
     // Distinct diameters (0.01 mm buckets), ascending — one Excellon tool each.
     var dias: std.ArrayList(f64) = .empty;
@@ -525,6 +551,29 @@ test "frameFor puts the origin at the outline's bottom-left corner" {
     const auto = outlineRect(p);
     try testing.expectApproxEqAbs(@as(f64, 2 - auto_outline_margin_mm), auto.minx, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 10 + 2 * auto_outline_margin_mm), auto.w, 1e-9);
+}
+
+// spec: export_fab - panel Excellon repeats board drills in every panel frame and adds routed-tab mouse-bites only to NPTH
+test "panel Excellon repeats board holes and adds NPTH mouse-bites" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const alloc = arena_inst.allocator();
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1, .h = 1, .thru = true, .drill = 0.6 }};
+    const parts = [_]optimizer.Part{.{ .ref_des = "J1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 2, .y = 3 }};
+    const frames = [_]Frame{ .{ .ox = 0, .oy = 10 }, .{ .ox = -20, .oy = 10 } };
+
+    var plated: std.Io.Writer.Allocating = .init(alloc);
+    try excellonDrillRepeated(&plated.writer, alloc, &parts, &.{}, .{ .class = .plated, .copper_layers = 2 }, .{ .frames = &frames });
+    try testing.expect(std.mem.indexOf(u8, plated.written(), "X2.000Y7.000") != null);
+    try testing.expect(std.mem.indexOf(u8, plated.written(), "X22.000Y7.000") != null);
+
+    var non_plated: std.Io.Writer.Allocating = .init(alloc);
+    try excellonDrillRepeated(&non_plated.writer, alloc, &parts, &.{}, .{ .class = .non_plated, .copper_layers = 2 }, .{
+        .frames = &frames,
+        .extra_npth = &.{.{ .x = 5, .y = 6, .diameter = 0.5 }},
+    });
+    try testing.expect(std.mem.indexOf(u8, non_plated.written(), "T1C0.500") != null);
+    try testing.expect(std.mem.indexOf(u8, non_plated.written(), "X5.000Y6.000") != null);
 }
 
 // spec: export_fab - the Excellon writer splits plated pads + vias from non-plated holes and groups tools by diameter

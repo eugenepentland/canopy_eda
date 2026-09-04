@@ -47,6 +47,7 @@ const fab_release = @import("fab_release.zig");
 const font = @import("font5x7.zig");
 const json_writer = @import("json_writer.zig");
 const optimizer = @import("placement/optimizer.zig");
+const panelize = @import("panelize.zig");
 const router = @import("placement/router.zig");
 const sidecar_store = @import("layout_sidecar_store.zig");
 const sidecar_types = @import("layout_sidecar_types.zig");
@@ -197,6 +198,9 @@ pub const Board = struct {
     texts: []const font.BoardText,
     copper: export_gerber.Copper,
     frame: export_fab.Frame,
+    /// Export-only panel plan. Null preserves the byte-for-byte single-board
+    /// package path.
+    panel: ?*const panelize.Plan = null,
 };
 
 /// The evidence members that travel with the CAM files.
@@ -236,23 +240,54 @@ pub fn compose(
     const stamped = try export_gerber.creationDate(arena, clock.timestamp());
     for (layers) |f| {
         var aw: std.Io.Writer.Allocating = .init(arena);
-        try export_gerber.writeLayer(&aw.writer, arena, board.placement, board.copper, fab_texts, board.frame, f.layer, .{ .function = f.function, .created = stamped });
+        try export_gerber.writeLayer(&aw.writer, arena, board.placement, board.copper, fab_texts, board.frame, f.layer, .{ .function = f.function, .created = stamped, .panel = board.panel });
         if (f.exact_name) try pkg.addNamed(f.suffix, aw.written()) else try pkg.add(f.suffix, aw.written());
     }
+    if (board.panel) |panel| if (panel.options.method == .v_score) {
+        var vw: std.Io.Writer.Allocating = .init(arena);
+        try export_gerber.writePanelVscore(&vw.writer, arena, panel, .{ .function = "Other,Drawing", .created = stamped });
+        try pkg.add("V-CUT.gbr", vw.written());
+    };
     // The Gerber Job File ties the package together (board size, layer count,
     // per-file FileFunction). Its Path fields match the entry names above.
     var jbw: std.Io.Writer.Allocating = .init(arena);
-    try export_gerber.writeJobFile(&jbw.writer, board.placement, layers, pkg.prefix);
+    if (board.panel) |panel|
+        try export_gerber.writeJobFileSized(&jbw.writer, board.placement, layers, pkg.prefix, .{
+            .width_mm = panel.width_mm,
+            .height_mm = panel.height_mm,
+            .extras = if (panel.options.method == .v_score) &.{.{ .suffix = "V-CUT.gbr", .function = "Other,Drawing" }} else &.{},
+        })
+    else
+        try export_gerber.writeJobFile(&jbw.writer, board.placement, layers, pkg.prefix);
     try pkg.add(export_gerber.job_file_suffix, jbw.written());
     // The drill headers declare the span they drill through, which is the
     // same copper count the job file reports and the layer table generated.
     const copper_layers = board.placement.rules.layerStack().stackCount();
     var pth: std.Io.Writer.Allocating = .init(arena);
-    try export_fab.excellonDrill(&pth.writer, arena, board.placement.parts, board.routed.vias, .{ .class = .plated, .copper_layers = copper_layers }, board.frame);
+    const drill_frames = if (board.panel) |panel| panel.frames else &.{board.frame};
+    var panel_holes: []const export_fab.DrillHole = &.{};
+    if (board.panel) |panel| {
+        const allocated = try arena.alloc(export_fab.DrillHole, panel.mouse_bites.len);
+        for (panel.mouse_bites, allocated) |source, *dest| dest.* = .{
+            .x = source.x,
+            .y = source.y,
+            .diameter = source.diameter,
+        };
+        panel_holes = allocated;
+    }
+    try export_fab.excellonDrillRepeated(&pth.writer, arena, board.placement.parts, board.routed.vias, .{ .class = .plated, .copper_layers = copper_layers }, .{ .frames = drill_frames });
     try pkg.add(export_gerber.plated_drill_suffix, pth.written());
     var npth: std.Io.Writer.Allocating = .init(arena);
-    try export_fab.excellonDrill(&npth.writer, arena, board.placement.parts, board.routed.vias, .{ .class = .non_plated, .copper_layers = copper_layers }, board.frame);
+    try export_fab.excellonDrillRepeated(&npth.writer, arena, board.placement.parts, board.routed.vias, .{ .class = .non_plated, .copper_layers = copper_layers }, .{ .frames = drill_frames, .extra_npth = panel_holes });
     try pkg.add(export_gerber.non_plated_drill_suffix, npth.written());
+    if (board.panel) |panel| {
+        var pw: std.Io.Writer.Allocating = .init(arena);
+        try pw.writer.print(
+            "{{\n  \"rows\": {d},\n  \"columns\": {d},\n  \"method\": \"{s}\",\n  \"board_gap_mm\": {d:.3},\n  \"rail_mm\": {d:.3},\n  \"tab_width_mm\": {d:.3},\n  \"mouse_bite_diameter_mm\": {d:.3},\n  \"mouse_bite_pitch_mm\": {d:.3},\n  \"panel_width_mm\": {d:.3},\n  \"panel_height_mm\": {d:.3},\n  \"board_count\": {d},\n  \"assembly_outputs\": \"single-board reference; multiply BOM quantities and generate an assembly-house-specific panel centroid before PCBA\"\n}}\n",
+            .{ panel.options.rows, panel.options.columns, @tagName(panel.options.method), panel.options.gap_mm, panel.options.rail_mm, panel.options.tab_mm, panel.options.mouse_bites.diameter_mm, panel.options.mouse_bites.pitch_mm, panel.width_mm, panel.height_mm, panel.frames.len },
+        );
+        try pkg.add("panelization.json", pw.written());
+    }
     var cw: std.Io.Writer.Allocating = .init(arena);
     try export_fab.centroidCsv(&cw.writer, board.placement.parts, board.placement.instances, board.frame, parts.dnp);
     try pkg.add("centroid.csv", cw.written());

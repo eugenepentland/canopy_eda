@@ -83,6 +83,7 @@ pub const shards: []const []const []const u8 = &.{
         "infra.fs.test.",
         "layout_sidecar_store.test.",
         "main.test.",
+        "panelize.test.",
     },
     // shard 1
     &.{
@@ -638,6 +639,15 @@ test {
     try std.testing.expectEqualStrings("ground_via_seed.test.", shards[0][0]);
     try std.testing.expectEqualStrings("serve.ground_vias.test.", shards[0][2]);
     try std.testing.expectEqualStrings("serve.pcb_step_export.test.", shards[0][3]);
+}
+
+// spec: Development pipeline - Panelization export tests remain claimed by the shard manifest
+test {
+    var claimed = false;
+    for (shards[0]) |filter| {
+        if (std.mem.eql(u8, filter, "panelize.test.")) claimed = true;
+    }
+    try std.testing.expect(claimed);
 }
 
 // spec: Development pipeline - RF pad adaptation tests remain claimed by the shard manifest

@@ -57,6 +57,8 @@ const trace_em_json = @import("trace_em_json.zig");
 const power_integrity_json = @import("../power_integrity_json.zig");
 const export_fab = @import("../export_fab.zig");
 const export_gerber = @import("../export_gerber.zig");
+const panelize = @import("../panelize.zig");
+const panel_export = @import("panel_export.zig");
 const fab_identity = @import("../fab_identity.zig");
 const fab_preview = @import("../fab_preview.zig");
 const subcircuit_silkscreen = @import("../subcircuit_silkscreen.zig");
@@ -5146,12 +5148,17 @@ fn pcbGerbersApiHooked(
     }
     var displayed_id = mark.short_hex;
     _ = std.ascii.upperString(&displayed_id, &mark.short_hex);
+    const panel = panel_export.requested(req.arena, req, panelize.sourceFor(fv.placement)) catch |err| {
+        panel_export.writeError(res, err);
+        return;
+    };
     const pkg = try fab_package.compose(req.arena, name, .{
         .placement = fv.placement,
         .routed = fv.routed,
         .texts = fv.texts,
         .copper = copper,
         .frame = frame,
+        .panel = panel,
     }, .{
         .mark = mark,
         .evidence = evidence,
@@ -5189,7 +5196,11 @@ fn pcbGerbersApiHooked(
     res.header(ct_hdr, "application/zip");
     res.header("x-pcb-fab-id", try req.arena.dupe(u8, &mark.short_hex));
     const revision = try fab_release.safeRevision(req.arena, fv.authored.revision.id);
-    res.header("content-disposition", try std.fmt.allocPrint(req.arena, "attachment; filename=\"{s}-rev-{s}-{s}-release.zip\"", .{ pkg.prefix, revision, &mark.short_hex }));
+    const download_name = if (panel) |p|
+        try std.fmt.allocPrint(req.arena, "attachment; filename=\"{s}-rev-{s}-{s}-panel-{d}x{d}-release.zip\"", .{ pkg.prefix, revision, &mark.short_hex, p.options.columns, p.options.rows })
+    else
+        try std.fmt.allocPrint(req.arena, "attachment; filename=\"{s}-rev-{s}-{s}-release.zip\"", .{ pkg.prefix, revision, &mark.short_hex });
+    res.header("content-disposition", download_name);
     res.body = zw.written();
     timer.lap("zip");
 }

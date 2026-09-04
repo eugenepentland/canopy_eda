@@ -40,6 +40,7 @@ const testpoint_silkscreen = @import("testpoint_silkscreen.zig");
 const numeric = @import("numeric.zig");
 const board_layers = @import("board_layers.zig");
 const env = @import("eval/env.zig");
+const panelize = @import("panelize.zig");
 // Solder-mask margin and copper-pour isolation are no longer hard-coded here —
 // they live in `optimizer.DesignRules` (`mask_margin` / `pour_clearance` /
 // `copper_edge`), resolved from the design's `(design-rules …)` form with the
@@ -106,6 +107,20 @@ pub const job_file_suffix = "job" ++ job_file_ext;
 pub const plated_drill_suffix = "PTH.drl";
 /// …and the non-plated mounting holes, which the fab drills without copper.
 pub const non_plated_drill_suffix = "NPTH.drl";
+
+/// A non-stack Gerber drawing that should still appear in the job manifest.
+pub const JobExtra = struct {
+    suffix: []const u8,
+    function: []const u8,
+    polarity: []const u8 = "Positive",
+};
+
+/// Physical output size and optional auxiliary drawings for a job manifest.
+pub const JobGeometry = struct {
+    width_mm: f64,
+    height_mm: f64,
+    extras: []const JobExtra = &.{},
+};
 
 /// Recognize filename extensions owned by the Gerber/Excellon fabrication
 /// contract, including vendor-generic and arbitrary inner-copper spellings.
@@ -232,6 +247,18 @@ pub fn writeJobFile(
     name_prefix: []const u8,
 ) std.Io.Writer.Error!void {
     const r = export_fab.outlineRect(placement);
+    return writeJobFileSized(w, placement, files, name_prefix, .{ .width_mm = r.w, .height_mm = r.h });
+}
+
+/// Panel-aware job writer. The source placement still owns stackup/thickness,
+/// while the declared X/Y size describes the actual fabrication panel.
+pub fn writeJobFileSized(
+    w: *std.Io.Writer,
+    placement: optimizer.Placement,
+    files: []const LayerFile,
+    name_prefix: []const u8,
+    geometry_spec: JobGeometry,
+) std.Io.Writer.Error!void {
     const rules = placement.rules;
     // `LayerNumber` counts the COPPER FILES THIS PACKAGE ACTUALLY SHIPS, not a
     // second reading of the stackup rules: the two used to be independent
@@ -245,7 +272,7 @@ pub fn writeJobFile(
     try w.writeAll("    \"ProjectId\": { \"Name\": ");
     try writeJsonStr(w, name_prefix);
     try w.writeAll(", \"GUID\": \"\", \"Revision\": \"\" },\n");
-    try w.print("    \"Size\": {{ \"X\": {d:.3}, \"Y\": {d:.3} }},\n", .{ r.w, r.h });
+    try w.print("    \"Size\": {{ \"X\": {d:.3}, \"Y\": {d:.3} }},\n", .{ geometry_spec.width_mm, geometry_spec.height_mm });
     try w.print("    \"LayerNumber\": {d},\n", .{layer_count});
     // Finished board thickness from the design's `(stackup … (thickness MM))`;
     // an unset thickness keeps the byte-identical fab-standard 1.6 mm default.
@@ -269,6 +296,17 @@ pub fn writeJobFile(
         try w.writeAll(", \"FileFunction\": ");
         try writeJsonStr(w, f.function);
         try w.print(", \"FilePolarity\": \"{s}\" }}", .{polarity});
+    }
+    for (geometry_spec.extras) |extra| {
+        try w.writeAll(",\n    { \"Path\": ");
+        var path_buf: [256]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}-{s}", .{ name_prefix, extra.suffix }) catch extra.suffix;
+        try writeJsonStr(w, path);
+        try w.writeAll(", \"FileFunction\": ");
+        try writeJsonStr(w, extra.function);
+        try w.writeAll(", \"FilePolarity\": ");
+        try writeJsonStr(w, extra.polarity);
+        try w.writeAll(" }");
     }
     try w.writeAll("\n  ]\n}\n");
 }
@@ -306,6 +344,10 @@ pub const Meta = struct {
     /// and threads the same field through every file, because it depends only
     /// on the board outline — never on the layer. See `pour.computeShared`.
     edge: ?pour.EdgeField = null,
+    /// Optional export-only panel. Every ordinary layer is repeated through
+    /// its translated frames; profile/V-score layers consume its panel
+    /// geometry instead of the source board outline.
+    panel: ?*const panelize.Plan = null,
 };
 
 /// The side-independent half of a board's silkscreen: mask relief, the
@@ -407,15 +449,16 @@ pub fn writeLayer(
     var aps = Apertures{};
     var g = Gx{ .w = &body.writer, .aps = &aps, .arena = arena, .frame = frame, .copper = kindOf(layer).isCopper(), .edge = meta.edge };
 
-    switch (layer) {
-        .copper => |side| try writeCopper(&g, placement, copper, side),
-        .plane => |pl| try writePlane(&g, placement, copper, pl),
-        .inner_signal => |is| try writeInnerCopper(&g, placement, copper, is.sig),
-        .mask => |side| try writeMask(&g, placement, copper, side),
-        .paste => |side| try writePaste(&g, placement, side),
-        .silk => |side| try writeSilk(&g, placement, copper, side, texts, meta.silk),
-        .fabrication => |fab| try writeFabrication(&g, placement, fab.index),
-        .edge => try writeEdge(&g, placement),
+    if (meta.panel) |panel| {
+        switch (layer) {
+            .edge => try writePanelProfile(&g, panel),
+            else => for (panel.frames) |copy_frame| {
+                g.frame = copy_frame;
+                try writeLayerContent(&g, placement, copper, texts, layer, meta.silk);
+            },
+        }
+    } else {
+        try writeLayerContent(&g, placement, copper, texts, layer, meta.silk);
     }
 
     try w.writeAll("%TF.GenerationSoftware,netlisp,netlisp,1*%\n");
@@ -449,6 +492,50 @@ pub fn writeLayer(
         }
         if (ap.func.attr() != null) try w.writeAll("%TD*%\n");
     }
+    try w.writeAll(body.written());
+    try w.writeAll("M02*\n");
+}
+
+fn writeLayerContent(
+    g: *Gx,
+    placement: optimizer.Placement,
+    copper: Copper,
+    texts: []const font.BoardText,
+    layer: Layer,
+    silk: ?*const SilkPlan,
+) Error!void {
+    switch (layer) {
+        .copper => |side| try writeCopper(g, placement, copper, side),
+        .plane => |pl| try writePlane(g, placement, copper, pl),
+        .inner_signal => |is| try writeInnerCopper(g, placement, copper, is.sig),
+        .mask => |side| try writeMask(g, placement, copper, side),
+        .paste => |side| try writePaste(g, placement, side),
+        .silk => |side| try writeSilk(g, placement, copper, side, texts, silk),
+        .fabrication => |fab| try writeFabrication(g, placement, fab.index),
+        .edge => try writeEdge(g, placement),
+    }
+}
+
+/// Emit the panel's V-score centre lines as a dedicated fabrication drawing.
+pub fn writePanelVscore(
+    w: *std.Io.Writer,
+    arena: std.mem.Allocator,
+    panel: *const panelize.Plan,
+    meta: Meta,
+) Error!void {
+    var body: std.Io.Writer.Allocating = .init(arena);
+    var aps = Apertures{};
+    var g = Gx{ .w = &body.writer, .aps = &aps, .arena = arena, .frame = .{} };
+    try writePanelScores(&g, panel);
+    try w.writeAll("%TF.GenerationSoftware,netlisp,netlisp,1*%\n");
+    if (meta.created) |stamp| try w.print("%TF.CreationDate,{s}*%\n", .{stamp});
+    try w.print("%TF.FileFunction,{s}*%\n", .{meta.function});
+    try w.writeAll("%TF.FilePolarity,Positive*%\n%FSLAX46Y46*%\n%MOMM*%\nG01*\n%LPD*%\n");
+    for (aps.list.items, 10..) |ap, code| switch (ap.kind) {
+        .c => try w.print("%ADD{d}C,{d:.6}*%\n", .{ code, umToMm(ap.w) }),
+        .r => try w.print("%ADD{d}R,{d:.6}X{d:.6}*%\n", .{ code, umToMm(ap.w), umToMm(ap.h) }),
+        .o => try w.print("%ADD{d}O,{d:.6}X{d:.6}*%\n", .{ code, umToMm(ap.w), umToMm(ap.h) }),
+    };
     try w.writeAll(body.written());
     try w.writeAll("M02*\n");
 }
@@ -1301,6 +1388,20 @@ fn writeEdge(g: *Gx, placement: optimizer.Placement) Error!void {
     try g.line(r.minx, r.miny + r.h, r.minx, r.miny);
 }
 
+fn writePanelProfile(g: *Gx, panel: *const panelize.Plan) Error!void {
+    try g.useAs(.c, edge_w_mm, 0, .profile);
+    try g.w.print("G04 panel profile; {d}x{d} boards; {s} separation*\n", .{
+        panel.options.columns, panel.options.rows, @tagName(panel.options.method),
+    });
+    for (panel.profile) |segment| try g.lineFab(segment.x1, segment.y1, segment.x2, segment.y2);
+}
+
+fn writePanelScores(g: *Gx, panel: *const panelize.Plan) Error!void {
+    try g.use(.c, edge_w_mm, 0);
+    try g.w.writeAll("G04 V-SCORE CENTER LINES - FABRICATION DRAWING*\n");
+    for (panel.scores) |segment| try g.lineFab(segment.x1, segment.y1, segment.x2, segment.y2);
+}
+
 fn writeBoardRegion(g: *Gx, placement: optimizer.Placement) Error!void {
     if (placement.board_poly) |poly| {
         if (poly.len >= 3) return regionFilletedPoly(g, poly, placement.board_arcs);
@@ -1877,6 +1978,13 @@ const Gx = struct {
         const a = g.xy(x1, y1);
         const b = g.xy(x2, y2);
         try g.w.print("X{d}Y{d}D02*\nX{d}Y{d}D01*\n", .{ a[0], a[1], b[0], b[1] });
+    }
+
+    /// Draw in already-framed panel coordinates (millimetres, y-up).
+    fn lineFab(g: *Gx, x1: f64, y1: f64, x2: f64, y2: f64) Error!void {
+        try g.w.print("X{d}Y{d}D02*\nX{d}Y{d}D01*\n", .{
+            mmToUm(x1), mmToUm(y1), mmToUm(x2), mmToUm(y2),
+        });
     }
 
     /// Native circular interpolation (single-quadrant/multi-quadrant G75) from
@@ -3648,6 +3756,51 @@ test "creation date is an injected attribute, not a clock read" {
     // …and the stamp is the ONLY difference from the unstamped file.
     const spliced = try std.mem.concat(arena, u8, &.{ out[0..head.len], out[head.len + attr.len ..] });
     try testing.expectEqualStrings(a.written(), spliced);
+}
+
+// spec: export_gerber - panel export repeats every fabrication layer in one shared array frame and replaces the source outline with the panel profile
+test "panel Gerber repeats copper and emits the rail-framed profile" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1, .h = 1 }};
+    var parts = [_]optimizer.Part{.{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 5, .y = 5 }};
+    const placement = testPlacement(&parts, &.{});
+    const panel = try panelize.plan(arena, panelize.sourceFor(placement), .{ .rows = 1, .columns = 2 });
+
+    var copper: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&copper.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .copper = .top }, .{ .function = "Copper,L1,Top", .panel = &panel });
+    try testing.expect(std.mem.indexOf(u8, copper.written(), "X10000000Y10000000D03*") != null);
+    try testing.expect(std.mem.indexOf(u8, copper.written(), "X32000000Y10000000D03*") != null);
+
+    var edge: std.Io.Writer.Allocating = .init(arena);
+    try writeLayer(&edge.writer, arena, placement, .{}, &.{}, export_fab.frameFor(placement), .edge, .{ .function = "Profile,NP", .panel = &panel });
+    try testing.expect(std.mem.indexOf(u8, edge.written(), "G04 panel profile; 2x1 boards; routed separation*") != null);
+    try testing.expect(std.mem.indexOf(u8, edge.written(), "X52000000Y0D01*") != null);
+}
+
+// spec: export_gerber - a V-score panel ships its score centre lines as an explicit fabrication drawing
+test "V-score fabrication drawing carries full-span score lines" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const placement = testPlacement(&.{}, &.{});
+    const panel = try panelize.plan(arena, panelize.sourceFor(placement), .{ .rows = 1, .columns = 2, .method = .v_score, .gap_mm = 0 });
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try writePanelVscore(&out.writer, arena, &panel, .{ .function = "Other,Drawing" });
+    try testing.expect(std.mem.indexOf(u8, out.written(), "G04 V-SCORE CENTER LINES") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "X25000000Y0D02*\nX25000000Y20000000D01*") != null);
+
+    const layers = try planLayers(arena, placement);
+    var job: std.Io.Writer.Allocating = .init(arena);
+    try writeJobFileSized(&job.writer, placement, layers, "demo", .{
+        .width_mm = panel.width_mm,
+        .height_mm = panel.height_mm,
+        .extras = &.{.{ .suffix = "V-CUT.gbr", .function = "Other,Drawing" }},
+    });
+    try testing.expect(std.mem.indexOf(u8, job.written(), "\"X\": 50.000, \"Y\": 20.000") != null);
+    try testing.expect(std.mem.indexOf(u8, job.written(), "\"Path\": \"demo-V-CUT.gbr\"") != null);
 }
 
 // spec: export_gerber - copper apertures carry their X2 %TA.AperFunction (SMD pad, component pad, via land, conductor) and the profile is classified, while openings and clearances stay unclassified

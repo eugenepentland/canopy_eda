@@ -901,6 +901,8 @@ src/export_elmer_thermal.zig::result_filename value
 src/export_fab.zig::DnpMode enum_
 src/export_fab.zig::DrillClass enum_
 src/export_fab.zig::DrillFile struct_
+src/export_fab.zig::DrillHole struct_
+src/export_fab.zig::DrillRepeat struct_
 src/export_fab.zig::Frame struct_
 src/export_fab.zig::Package struct_
 src/export_fab.zig::add | fn add(self: *Package, suffix: []const u8, data: []const u8) std.mem.Allocator.Error!void
@@ -910,6 +912,7 @@ src/export_fab.zig::assemblyPopulated | fn assemblyPopulated(instance: export_ki
 src/export_fab.zig::auto_outline_margin_mm value
 src/export_fab.zig::centroidCsv | fn centroidCsv( w: *std.Io.Writer, parts: []const optimizer.Part, instances: []const export_kicad.FlatInstance, frame: Frame, dnp: DnpMode, ) std.Io.Writer.Error!void
 src/export_fab.zig::excellonDrill | fn excellonDrill( w: *std.Io.Writer, alloc: std.mem.Allocator, parts: []const optimizer.Part, vias: []const router.Via, file: DrillFile, frame: Frame, ) (std.Io.Writer.Error || std.mem.Allocator.Error)!void
+src/export_fab.zig::excellonDrillRepeated | fn excellonDrillRepeated( w: *std.Io.Writer, alloc: std.mem.Allocator, parts: []const optimizer.Part, vias: []const router.Via, file: DrillFile, repeat: DrillRepeat, ) (std.Io.Writer.Error || std.mem.Allocator.Error)!void
 src/export_fab.zig::frameFor | fn frameFor(placement: optimizer.Placement) Frame
 src/export_fab.zig::outlineRect | fn outlineRect(placement: optimizer.Placement) optimizer.BoardRect
 src/export_fab.zig::pt | fn pt(self: Frame, x: f64, y: f64) [2]f64
@@ -917,6 +920,8 @@ src/export_gerber.zig::Copper value
 src/export_gerber.zig::Error value
 src/export_gerber.zig::FabricationLayer struct_
 src/export_gerber.zig::InnerSignal struct_
+src/export_gerber.zig::JobExtra struct_
+src/export_gerber.zig::JobGeometry struct_
 src/export_gerber.zig::Layer union_
 src/export_gerber.zig::LayerFile struct_
 src/export_gerber.zig::Meta struct_
@@ -941,7 +946,9 @@ src/export_gerber.zig::plated value
 src/export_gerber.zig::plated_drill_suffix value
 src/export_gerber.zig::top_mask value
 src/export_gerber.zig::writeJobFile | fn writeJobFile( w: *std.Io.Writer, placement: optimizer.Placement, files: []const LayerFile, name_prefix: []const u8, ) std.Io.Writer.Error!void
+src/export_gerber.zig::writeJobFileSized | fn writeJobFileSized( w: *std.Io.Writer, placement: optimizer.Placement, files: []const LayerFile, name_prefix: []const u8, geometry_spec: JobGeometry, ) std.Io.Writer.Error!void
 src/export_gerber.zig::writeLayer | fn writeLayer( w: *std.Io.Writer, arena: std.mem.Allocator, placement: optimizer.Placement, copper: Copper, texts: []const font.BoardText, frame: export_fab.Frame, layer: Layer, meta: Meta, ) Error!void
+src/export_gerber.zig::writePanelVscore | fn writePanelVscore( w: *std.Io.Writer, arena: std.mem.Allocator, panel: *const panelize.Plan, meta: Meta, ) Error!void
 src/export_kicad.zig::BundleOptions struct_
 src/export_kicad.zig::ExportError value
 src/export_kicad.zig::FlatInstance value
@@ -1730,6 +1737,16 @@ src/numeric.zig::toCount | fn toCount(f: f64) usize
 src/pad_neck_profile.zig::Profile struct_
 src/pad_neck_shape.zig::finishExactRfTapers | fn finishExactRfTapers( arena: std.mem.Allocator, placement: optimizer.Placement, selected: []const bool, routed: router.RouteResult, ) std.mem.Allocator.Error!router.RouteResult
 src/pad_neck_shape.zig::restoreGeneratedTracks | fn restoreGeneratedTracks( arena: std.mem.Allocator, placement: optimizer.Placement, selected: []const bool, routed: router.RouteResult, ) std.mem.Allocator.Error!router.RouteResult
+src/panelize.zig::Error value
+src/panelize.zig::Hole struct_
+src/panelize.zig::Method enum_
+src/panelize.zig::MouseBites struct_
+src/panelize.zig::Options struct_
+src/panelize.zig::Plan struct_
+src/panelize.zig::Segment struct_
+src/panelize.zig::Source struct_
+src/panelize.zig::plan | fn plan(arena: std.mem.Allocator, source: Source, options: Options) Error!Plan
+src/panelize.zig::sourceFor | fn sourceFor(placement: optimizer.Placement) Source
 src/parts.zig::PartEntry struct_
 src/parts.zig::PartsDb struct_
 src/parts.zig::deinit | fn deinit(self: *PartsDb) void
@@ -4510,6 +4527,8 @@ src/serve/pages.zig::HomeData struct_
 src/serve/pages.zig::cssPage | fn cssPage(_: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pages.zig::gatherHome | fn gatherHome(allocator: std.mem.Allocator, project_dir: []const u8) HomeData
 src/serve/pages.zig::indexPage | fn indexPage(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/panel_export.zig::requested | fn requested(arena: std.mem.Allocator, req: *httpz.Request, source: panelize.Source) panelize.Error!?*const panelize.Plan
+src/serve/panel_export.zig::writeError | fn writeError(res: *httpz.Response, err: panelize.Error) void
 src/serve/pcb_derived.zig::BothPayloads struct_
 src/serve/pcb_derived.zig::PageSink struct_
 src/serve/pcb_derived.zig::WarmLimit struct_

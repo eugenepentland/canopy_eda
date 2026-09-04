@@ -644,6 +644,15 @@ a.sub-name:hover,a.grp-name:hover{color:#6ba1e8;text-decoration:underline}
 .fab-body .fab-ack input{flex:none;margin-top:3px}
 .fab-body .fab-ack code{color:#f0cf92}
 .fab-body .fab-blocked{margin:8px 0;padding:8px 10px;border-left:3px solid #e05b4b;background:#2b191a;color:#efaaa4}
+.fab-panel{margin:12px 0 4px;padding:8px 10px 10px;border:1px solid #3b4656;border-radius:5px;background:#191d23}
+.fab-panel legend{padding:0 5px;color:#d7e4f4;font-weight:600}
+.fab-panel legend label{display:flex;align-items:center;gap:7px}
+.fab-panel-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px 10px;margin-top:5px}
+.fab-panel-grid>label{display:flex;justify-content:space-between;align-items:center;gap:8px;color:#aeb6c1}
+.fab-panel-grid input,.fab-panel-grid select{box-sizing:border-box;width:118px;padding:4px 5px;border:1px solid #3b4656;border-radius:3px;background:#11151a;color:#e5e8ed}
+.fab-panel-grid label>span{white-space:nowrap}
+.fab-panel-grid label>span input{width:84px}
+.fab-panel-note{margin-top:8px;color:#8e98a5;font-size:11px;line-height:1.35}
 .court-dialog .btn.fab-danger{border-color:#e05b4b;color:#ff9d95}
 .court-dialog .btn.fab-danger:hover{background:#3d1417;border-color:#e05b4b;color:#ffb3ab}
 .heatsink-dialog,.fan-dialog{width:min(620px,94vw)}
