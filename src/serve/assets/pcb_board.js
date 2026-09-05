@@ -276,7 +276,7 @@ function deferredAnalysisRebump(serverRev){
  runDrcNow();drawRfRetrofitSchedule();}
 var pdnPending=false;
 // The PDN impedance sweep is the heaviest analysis this board runs — on
-// barracuda it was 6.3 s of a 13.5 s deferred payload, because it rasters every
+// board-a it was 6.3 s of a 13.5 s deferred payload, because it rasters every
 // relevant plane and then walks each decoupling loop against it — and the only
 // thing that reads it is the PDN section of the track/via inspector. Nothing
 // paints from it and no chip counts it, so it rides its OWN dependency-cached
@@ -1739,7 +1739,7 @@ function partPath(i){var c=partPaths[i];if(c)return c;
 // "constructor" would read a prototype member out of an object literal.
 // Cap sized for the OVERSCAN bake, not the viewport: the pan buffer renders
 // 2.56x the visible area, so the live working set is ~2.5x what a viewport-only
-// render needed (measured on barracuda at mid zoom: 355 entries viewport-only,
+// render needed (measured on board-a at mid zoom: 355 entries viewport-only,
 // 435 with the bake — pad numbers saturate on the distinct strings, ref-des
 // entries scale with area). The cap is a hard clear(), so leaving it at the old
 // viewport figure would turn the cache into a per-frame rebuild on a dense
@@ -2142,7 +2142,7 @@ function paintPours(ctx,k){
     // draw order. globalAlpha is forced to 1 for the fill so `a` no longer caps
     // it (it still governs the rim/label below).
     // User-drawn fills on the selected layer are the layer's primary artwork,
-    // not a faint board-context wash. Barracuda's dense top-side placement can
+    // not a faint board-context wash. Board A's dense top-side placement can
     // otherwise bury its In2.Cu rail pours even though their fills are valid.
     // Keep declared pours and foreign custom pours at their existing contextual
     // opacity; the slider still ramps every selected fill up to solid copper.
@@ -2192,7 +2192,7 @@ function isGroundNetName(leaf){var t=(PCB&&PCB.ground_names)||[];
   if(rest[0]==="_"||rest[0]==="-")rest=rest.slice(1);
   return rest!==""&&/^\d+$/.test(rest);}
  return false;}
-// Retained net-class halo geometry. Barracuda has hundreds of RF copper
+// Retained net-class halo geometry. Board A has hundreds of RF copper
 // primitives; painting every one twice (outer mask, then own-copper punch)
 // made a keepouts-on frame issue hundreds of separate raster calls. Paths are
 // now grouped by stroke width exactly like the normal copper batch, and the
@@ -4782,7 +4782,7 @@ function loadLayoutName(nm){
  // origin bridged per sub-block scope), so a Load applies by EXACT ref only.
  // No origin map here: a client-side one was unscoped ("U1" names every
  // sub-block's IC) and last-wins, which collapsed whole sub-circuits onto one
- // pose on Load — the black-canyon layout corruption.
+ // pose on Load — the board-e layout corruption.
  P.forEach(function(p){var s=L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;p.side=s.side||"top";if(s.locked!==undefined)p.locked=!!s.locked;}});applyAll();
  // CLONE out of the saved row, never alias it: almost every copper edit mutates
  // PCB.tracks/vias/zones (and the outline's vertex arrays) IN PLACE, so a row
@@ -5054,7 +5054,7 @@ function persistLayoutNow(nm,verb,automatic){var msg=document.getElementById("pc
     if(msg){msg.style.color="#3fb950";
      msg.textContent=(automatic?"saved automatically":(verb==="updating"?"updated":"saved"))+" \u{2713}";}
     // Saving persisted this exact in-memory state; it did not edit copper.
-    // Preserve any refill already computing for that state. Barracuda's fill
+    // Preserve any refill already computing for that state. Board A's fill
     // can outlive the 2.5 s autosave delay, and treating save completion as a
     // copper edit used to supersede that valid response before RF fencing.
     scheduleDrc({stateUnchanged:true});/* fast local re-DRC of the just-saved copper (audit 1.1d) */
@@ -8058,7 +8058,7 @@ function drawPolyRectGap(poly,b){if(!poly||poly.length<3)return 1/0;
  var best=1/0,pa=poly[poly.length-1];for(var i=0;i<poly.length;i++){var pb=poly[i],ra=rect[rect.length-1];
   for(var j=0;j<rect.length;j++){var rb=rect[j];best=Math.min(best,segSegDist(pa[0],pa[1],pb[0],pb[1],ra[0],ra[1],rb[0],rb[1]));ra=rb;}pa=pb;}return best;}
 // Exact pad-clearance fallback for the dense-board hand router. Its optional
-// persistent WASM session is intentionally disabled on Barracuda, so the fast
+// persistent WASM session is intentionally disabled on Board A, so the fast
 // JS preview normally sees max-width round capsules. A wide, short land (F4.1)
 // makes that cap extend behind the real pad; judge only that pad verdict against
 // the same butt-ended swept regions fabrication and the final WASM gate use.
@@ -10836,7 +10836,7 @@ function applyWasmDrc(resp){if(!resp||!resp.drc)return;
 function drcIdSet(list){var s={};for(var i=0;i<list.length;i++){if(list[i].id)s[list[i].id]=1;}return s;}
 function idSetEq(a,b){var k;for(k in a)if(!b[k])return false;for(k in b)if(!a[k])return false;return true;}
 // The wasm engine runs drc.check only — the `net open` connectivity markers
-// exist ONLY on the server, and on a board like barracuda they are most of the
+// exist ONLY on the server, and on a board like board-a they are most of the
 // violations. So this reconcile is not a background formality: it is when the
 // user first sees the errors they care about, and its delay IS the felt DRC
 // latency. It was 2 s against a 150 ms server check. The check is now ~30 ms
@@ -10927,7 +10927,7 @@ function drcGateSessionReload(){
 // Session construction is a single non-yielding WASM call. Count the records
 // copied into its four spatial grids (pads, tracks, vias, and drilled holes)
 // before scheduling it: 1,200 keeps this optional preview accelerator bounded
-// on the browser-perf host, while a dense board such as Barracuda would put
+// on the browser-perf host, while a dense board such as Board A would put
 // roughly four thousand records through one 570–660 ms main-thread task.
 // Dense boards keep the conservative JS preview and the SAME scoped exact WASM
 // commit gate below; only the optional persistent mid-drag accelerator is off.

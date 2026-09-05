@@ -2205,7 +2205,7 @@ test "PCB WebGPU renderer retains exact swept RF copper" {
     try std.testing.expect(std.mem.indexOf(u8, cover_shader, "discard") == null);
 }
 
-// spec: Web Server - The deterministic PCB-editor zoom gate measures fit-to-8×-to-fit paints in both directions, covers the DPR-2 Canvas fallback, asserts an RF-heavy Barracuda workload stays on WebGPU, and is required metadata on every deployable release candidate
+// spec: Web Server - The deterministic PCB-editor zoom gate measures fit-to-8×-to-fit paints in both directions, covers the DPR-2 Canvas fallback, asserts an RF-heavy Board A workload stays on WebGPU, and is required metadata on every deployable release candidate
 test "PCB editor zoom gate covers both renderers and certifies release candidates" {
     const board_markers = [_][]const u8{
         "FBENCH_ZOOM",

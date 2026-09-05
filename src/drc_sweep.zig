@@ -164,7 +164,7 @@ pub fn sweepOnce(
     sub: ?[]const u8,
 ) Outcome {
     const snap = drc_reconcile.snapshotFor(store, name, sub, serve_root.getLiveVersion(name)) orelse return .{};
-    // The sweep's own arena, released before it returns: a barracuda-class
+    // The sweep's own arena, released before it returns: a board-a-class
     // reporting pass holds hundreds of megabytes, and none of it may be kept
     // past the comparison it exists to make.
     // allocator-ok: detached sweep-thread scratch, released at the end of this call.

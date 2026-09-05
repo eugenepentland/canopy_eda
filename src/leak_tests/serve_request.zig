@@ -218,13 +218,13 @@ test "leak: history listSnapshots dupes ids + notes, caller frees each" {
 // or a missing errdefer.
 test "leak: vfs dirtyDesignsForPath src branch owns slice + elements" {
     const a = std.testing.allocator;
-    const out = try vfs.dirtyDesignsForPath(a, "/unused-project-dir", "src/stm32n6.sexp");
+    const out = try vfs.dirtyDesignsForPath(a, "/unused-project-dir", "src/board-c.sexp");
     defer {
         for (out) |d| a.free(d);
         a.free(out);
     }
     try std.testing.expectEqual(@as(usize, 1), out.len);
-    try std.testing.expectEqualStrings("stm32n6", out[0]);
+    try std.testing.expectEqualStrings("board-c", out[0]);
 }
 
 // leak-audit: the .bom variant and the nested-path variant both take early
@@ -232,7 +232,7 @@ test "leak: vfs dirtyDesignsForPath src branch owns slice + elements" {
 // escapes before the return.
 test "leak: vfs dirtyDesignsForPath bom + nested-path early returns" {
     const a = std.testing.allocator;
-    const bom = try vfs.dirtyDesignsForPath(a, "/unused", "src/stm32n6.bom");
+    const bom = try vfs.dirtyDesignsForPath(a, "/unused", "src/board-c.bom");
     defer {
         for (bom) |d| a.free(d);
         a.free(bom);

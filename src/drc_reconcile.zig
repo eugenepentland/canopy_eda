@@ -3,7 +3,7 @@
 //! `POST /api/pcb-drc/:name` is what the PCB editor asks after every routing
 //! edit, and it used to answer by rebuilding the world: evaluate the design,
 //! place every part at the posted poses, pour every plane and pour, and run the
-//! whole rule set. On barracuda that is eight to thirteen seconds of work to
+//! whole rule set. On board-a that is eight to thirteen seconds of work to
 //! answer a question about one moved track — and the ONLY thing that changed
 //! between two of those requests is a handful of copper.
 //!

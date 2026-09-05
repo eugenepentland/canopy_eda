@@ -400,16 +400,16 @@ in their template.
 | Form | Summary |
 | --- | --- |
 | `(system "NAME" (title …) (part-number …) (revision …) (board …)… (interface …)… (document …)…)` | The whole contract, one per file. NAME must match the `src/systems/<name>/` directory. |
-| `(title "Barracuda OC-303-1-01")` | Human title of the system, or of the enclosing board or document. |
+| `(title "Board A OC-303-1-01")` | Human title of the system, or of the enclosing board or document. |
 | `(part-number "OC-303-1-01")` | Stable assembly identity of the system or board, independent of the human title. |
 | `(revision "B3")` | Revision of the system or board this contract is pinned to. |
 | `(board "NAME" (role rf) (source "src/…") (part-number …) (revision …) [(layout …)] [(dnp …)])` | One board in the product. NAME is the design lookup name; identity and layout must match what the board itself resolves to. |
 | `(role rf)` | Archive identity of this board within the system — unique, and the directory its evidence lands in. |
-| `(source "src/boards/barracuda/barracuda.sexp")` | Project-relative design source, checked against the path the design resolver selects. |
-| `(layout "Barracuda V2")` | Saved layout to release. Defaults to `blessed` — the board's starred default. |
+| `(source "src/boards/board-a/board-a.sexp")` | Project-relative design source, checked against the path the design resolver selects. |
+| `(layout "Board A V2")` | Saved layout to release. Defaults to `blessed` — the board's starred default. |
 | `(dnp drop)` | Whether do-not-populate parts are dropped (default) or kept in this board's outputs. |
 | `(interface "ID" (mates …) [(contact-count N)] [(auto)] (signal …)…)` | One board-to-board connector contract. Checked against both boards' netlists as `interface_mismatch` findings. |
-| `(mates "barracuda/J1" "barracuda-base/base-interface/J1")` | The two endpoints as `board/CONNECTOR` handles. The connector half may be a sub-block path; the board is the first segment. |
+| `(mates "board-a/J1" "board-a-base/base-interface/J1")` | The two endpoints as `board/CONNECTOR` handles. The connector half may be a sub-block path; the board is the first segment. |
 | `(contact-count 40)` | Physical contact count. Optional, and checked against the records present — declare it to catch a truncated table. |
 | `(auto)` | Derive every contact from the two connectors' pad tables by contact number. Explicit `(signal …)` rows then override single contacts. |
 | `(signal "CANONICAL" (left PIN ["NET"]) (right PIN ["NET"]) [optional])` | One physical contact. Without `(auto)` both nets are required; `optional` marks the contact as not required by the contract. |

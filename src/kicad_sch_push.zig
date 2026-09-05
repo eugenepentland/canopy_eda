@@ -8,9 +8,9 @@
 //!
 //! **Naming follows the KiCad project, not the netlisp design.** KiCad opens
 //! `<project>.kicad_sch` for the project `<project>.kicad_pro`, so the root
-//! sheet is named from the board's basename (`Cyclops Digital.kicad_pcb` →
-//! `Cyclops Digital.kicad_sch`) and every child sheet carries that same stem as
-//! its prefix (`Cyclops Digital-USB.kicad_sch`). The export is simply run with
+//! sheet is named from the board's basename (`Board B Digital.kicad_pcb` →
+//! `Board B Digital.kicad_sch`) and every child sheet carries that same stem as
+//! its prefix (`Board B Digital-USB.kicad_sch`). The export is simply run with
 //! the project stem as its design name, which is the one input that names the
 //! root, the children, the `Sheetfile` links between them, and the
 //! `<stem>.kicad_pro` sidecar — so all four agree by construction, and a second
@@ -127,7 +127,7 @@ pub const Target = struct {
     board_path: []const u8,
     /// Directory holding the board — the project directory written into.
     dir: []const u8,
-    /// The KiCad project stem (`Cyclops Digital`), which names the root sheet,
+    /// The KiCad project stem (`Board B Digital`), which names the root sheet,
     /// every child sheet's prefix, and the `.kicad_pro`.
     project: []const u8,
 };
@@ -195,7 +195,7 @@ pub const Existing = enum {
     /// No file there.
     absent,
     /// A `(kicad_sch …)` with no drawable content — what KiCad writes for a
-    /// brand-new project and what the real Cyclops project has carried since
+    /// brand-new project and what the real Board B project has carried since
     /// its board was imported. Nothing to lose.
     stub,
     /// `(generator "netlisp")` — a previous push, ours to replace.
@@ -586,7 +586,7 @@ pub fn run(
 const testing = std.testing;
 
 /// A real KiCad-10 empty project schematic, byte-for-byte the shape the live
-/// Cyclops project has carried since its board was imported.
+/// Board B project has carried since its board was imported.
 const stub_sheet =
     \\(kicad_sch (version 20250114) (generator "eeschema") (generator_version "9.0")
     \\  (paper "A4")
@@ -664,10 +664,10 @@ test "kicad-sch push: the target derives from the declared board path" {
     defer arena_state.deinit();
     const a = arena_state.allocator();
 
-    const block = emptyBlockForTest("/mnt/nas/Cyclops/Cyclops Digital/Cyclops Digital.kicad_pcb");
+    const block = emptyBlockForTest("/mnt/nas/Board B/Board B Digital/Board B Digital.kicad_pcb");
     const t = try targetFor(a, &block);
-    try testing.expectEqualStrings("/mnt/nas/Cyclops/Cyclops Digital", t.dir);
-    try testing.expectEqualStrings("Cyclops Digital", t.project);
+    try testing.expectEqualStrings("/mnt/nas/Board B/Board B Digital", t.dir);
+    try testing.expectEqualStrings("Board B Digital", t.project);
 
     // A design with no (kicad-pcb …) has nowhere to push.
     const bare = emptyBlockForTest(null);

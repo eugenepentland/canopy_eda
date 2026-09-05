@@ -54,7 +54,7 @@ pub fn assemble(
     // gate's airwire tally: it is a pure function of `(placement, copper)`, and
     // rastering a poured board's zones for it is the dominant cost of this
     // whole request — computing it twice made `/api/layout-progress` take 100 s
-    // on barracuda-base (15 zones) instead of 50 s.
+    // on board-a-base (15 zones) instead of 50 s.
     // That pass rasters every plane and pour of the board, and it is the same
     // raster the reporting DRC of `/api/pcb-describe` (and the editor page it
     // trails by an edit) has almost always already poured. Ask the process fill

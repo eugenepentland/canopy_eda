@@ -400,7 +400,7 @@ pub const preferred_layer_cost_mult: f64 = 3.0;
 /// it happened to pop first; 0.15 pitches is enough to separate those (a
 /// staircase pays per facet, its L pays twice) while leaving the search's
 /// ordering essentially length-driven. The ceiling is real and measured: the
-/// note this constant replaces recorded a 0.6-pitch price taking barracuda from
+/// note this constant replaces recorded a 0.6-pitch price taking board-a from
 /// 81/90 nets and 19 DRC findings to 61/90 and 257 — a bend price large enough
 /// to reorder ROUTABILITY buys shape at the cost of connectivity, which is
 /// never the trade. 0.15 keeps every corner cheaper than one orthogonal step,
@@ -2516,20 +2516,20 @@ fn finishRoute(run: RouteFinish) std.mem.Allocator.Error!RouteRun {
     // Gloss, then TOPOLOGY (drop every layer hop whose detour can be redrawn on
     // the layer both its ends already use — E10), then stitching. Three
     // constraints pin that order, and each was MEASURED on `bench-route
-    // barracuda straps` (2026-08-04) rather than argued:
+    // board-a board-d` (2026-08-04) rather than argued:
     //
     //   * `straighten` runs BEFORE the hop drop because the hop drop's detector
     //     reads copper: `HopScan` follows a bounded run of segments between two
     //     vias and `clearingElbow` judges the replacement against what leaves
     //     each end. On raw maze copper those runs are staircases, and two of
-    //     straps' redundant hops go unrecognised — +4 vias, +10 tracks — when
+    //     board-d's redundant hops go unrecognised — +4 vias, +10 tracks — when
     //     the pass is handed un-tautened metal.
     //   * the hop drop runs BEFORE `stitchReturnPaths`, so the stitcher never
     //     spends a ground via guarding a signal via that is about to be deleted.
     //   * the merged single-layer runs the hop drop leaves are re-glossed HERE,
     //     not left to the cleanup phase's closing sweep, because stitching in
     //     between pins vias into the corridors those runs would tauten through
-    //     (deferring it costs straps +6 tracks). It is conditional because with
+    //     (deferring it costs board-d +6 tracks). It is conditional because with
     //     no hop removed there is nothing merged to simplify.
     if (timing) |t| t.begin(.straighten);
     try straighten.passBoard(board);
@@ -2568,7 +2568,7 @@ fn finishRoute(run: RouteFinish) std.mem.Allocator.Error!RouteRun {
     // straighten pass had already finished with — a collinear collapse replaces
     // a whole staircase with a through-line, a closure bridge lands square — so
     // the corners they leave have never met the chamfer. (Measured on
-    // barracuda: V_6VA's two surviving square corners on B.Cu are both
+    // board-a: V_6VA's two surviving square corners on B.Cu are both
     // collinear-collapse products.) The pass only ever simplifies probed
     // copper, so a second run over already-glossed metal changes nothing.
     try straighten.passBoard(board);
@@ -3160,7 +3160,7 @@ pub fn largestNetZone(ctx: *const Ctx, net: i32) ?route_policy.ExistingZone {
         // wave excludes its layer. Dijkstra may seed at any node in the pour
         // and immediately transition through a via onto an allowed layer;
         // `relaxStep` still rejects same-layer movement because the destination
-        // layer is outside `allowed_layers`. Thus Barracuda's In2.Cu power
+        // layer is outside `allowed_layers`. Thus Board A's In2.Cu power
         // islands can feed F.Cu/B.Cu stubs without permitting arbitrary routed
         // traces across the reserved power layer.
         const area = zoneArea(zone.polygon);
@@ -3705,7 +3705,7 @@ fn retryDeferredWaypoints(
 
 /// A deferred repair corridor is a bounded authored attempt, not permission
 /// to monopolize the deadline: scaling this per waypoint (8,192/point capped
-/// at 65,536) produced byte-identical copper and cost ~6 s on Barracuda, so
+/// at 65,536) produced byte-identical copper and cost ~6 s on Board A, so
 /// the budget stays flat at the same ceiling the immediate fine retry uses.
 const deferred_repair_probe_budget: usize = 8_192;
 
@@ -4396,7 +4396,7 @@ fn ripUpReroute(run: RipUpRun) std.mem.Allocator.Error!usize {
             // large-budget retry, so one that still reaches destructive rip-up
             // is genuinely walled in. Deliberately wider than the old escape /
             // diff-pair / max-freq / ≤3-terminal gate, which left multi-drop
-            // buses (barracuda's SPI_SCK/MOSI, the V_3V3A tree) forever
+            // buses (board-a's SPI_SCK/MOSI, the V_3V3A tree) forever
             // unrippable — safe to widen because the keep-best gate below
             // reverts any rip that does not strictly improve the board, and
             // `collectRippable` still never rips a plane, a pour, or ground.
@@ -5632,7 +5632,7 @@ test "scoped route returns retained out-of-scope copper byte-identical" {
     // rewrite: an up-across-down via hop (the redundant-hop pass's target),
     // collinear runs straighten would merge, and a sub-micron stub the
     // degenerate sweep would drop. All of it must come back verbatim — a
-    // scoped barracuda re-route once returned a different board than
+    // scoped board-a re-route once returned a different board than
     // submitted and reopened six previously-connected out-of-scope nets.
     const pad = [_]@import("geometry.zig").Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
     var parts = [_]Part{
@@ -5829,7 +5829,7 @@ test "excluded inner pour reuses a same-net via within three millimetres" {
         .layer = 2,
         .net = 0,
     }};
-    // The Barracuda policy: route traces only on F.Cu/B.Cu. In2.Cu is not in
+    // The Board A policy: route traces only on F.Cu/B.Cu. In2.Cu is not in
     // the mask, but its retained pour must remain a legal via terminal.
     const outer_only = [_]route_policy.NetPolicy{.{ .allowed_layers = 0b11 }};
 
@@ -6044,7 +6044,7 @@ test "quarter-pitch pass rescues a base-grid quantization failure beyond the loc
     // findings, two lands double-billed for two legs each.) The finish's own
     // pad-escape pass — which this rescue runs below, and which every board
     // sees — is what centres those entries; the trade on the whole board is
-    // measured the other way round (`bcuda-lt3045-ldo`: 18.47 mm of trace to
+    // measured the other way round (`board-a-lt3045-ldo`: 18.47 mm of trace to
     // 16.87 mm, 24 quality warnings to 9).
     try testing.expectEqual(@as(usize, 7), drc_mod.countKind(viol, .land_transit));
     // Under the full-cross-section contact graph, only three stored sections
@@ -6308,7 +6308,7 @@ test "scoped fine-grid promotion falls back to the base pitch on node-budget ove
     const nets = [_]FlatNet{ .{ .name = "A", .pins = &pins_a }, .{ .name = "B", .pins = &pins_b } };
     // 60×24 mm at the default 0.254 mm pitch: ~25k nodes at the base pitch
     // but ~402k at the two-net quarter-pitch promotion — past max_nodes, the
-    // barracuda shape that used to degenerate a scoped route to zero copper.
+    // board-a shape that used to degenerate a scoped route to zero copper.
     const placement = optimizer.Placement{
         .parts = &parts,
         .links = &.{},

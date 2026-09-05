@@ -1730,7 +1730,7 @@ test "thermal evidence rolls up dissipation and names the hottest part" {
 }
 
 /// A two-rung ladder at 25 °C whose still-air rung cooks the part and whose
-/// 1 m/s rung saves it: the barracuda shape, where the datasheet screen says
+/// 1 m/s rung saves it: the board-a shape, where the datasheet screen says
 /// passive is fine and the board being built needs a fan.
 fn airflowLadderFixture() thermal_scenarios.Answer {
     const still = &[_]thermal_scenarios.PartRow{
@@ -1978,7 +1978,7 @@ test "frequency-plan evidence copies screens and retains the product hulls" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var name_buffer = "Barracuda Band 1".*;
+    var name_buffer = "Board A Band 1".*;
     var message_buffer = "leaves the delivered passband".*;
     const verdicts = [_]frequency_plan.Verdict{
         .{ .screen = .lo_drive, .status = .pass, .message = "ok" },
@@ -2010,7 +2010,7 @@ test "frequency-plan evidence copies screens and retains the product hulls" {
 
     const copied = try collectFrequencyPlans(allocator, &reports);
     try std.testing.expectEqual(@as(usize, 1), copied.len);
-    try std.testing.expectEqualStrings("Barracuda Band 1", copied[0].name);
+    try std.testing.expectEqualStrings("Board A Band 1", copied[0].name);
     try std.testing.expectEqual(@as(u8, 5), copied[0].profile.spurs.max_order);
     const plan = copied[0].plans[0];
     try std.testing.expectEqual(@as(usize, 1), plan.screens.pass);
@@ -2031,7 +2031,7 @@ test "frequency-plan evidence copies screens and retains the product hulls" {
     // anything the snapshot retained.
     @memset(&name_buffer, 'x');
     @memset(&message_buffer, 'x');
-    try std.testing.expectEqualStrings("Barracuda Band 1", copied[0].name);
+    try std.testing.expectEqualStrings("Board A Band 1", copied[0].name);
     try std.testing.expectEqualStrings("leaves the delivered passband", plan.screens.failing[0].message);
 }
 

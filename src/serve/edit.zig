@@ -3477,7 +3477,7 @@ test "schematic design type inserts a board role into a string block root" {
 test "autorouter power-plane toggle patches nested module design settings" {
     const allocator = std.testing.allocator;
     const source =
-        \\(defmodule bcuda-lt3045-ldo ((vout 3.3))
+        \\(defmodule board-a-lt3045-ldo ((vout 3.3))
         \\  "LDO"
         \\  (let label (fmt "~V LDO" vout))
         \\  (design-block label

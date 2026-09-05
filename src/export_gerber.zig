@@ -2254,7 +2254,7 @@ test "fabrication backing exports exact filename and side-aware footprint cutout
     try testing.expect(std.mem.indexOf(u8, out.written(), "material=tesa8854; thickness=0.100000mm") != null);
 
     var job: std.Io.Writer.Allocating = .init(arena);
-    try writeJobFile(&job.writer, placement, files, "Cyclops-Flex");
+    try writeJobFile(&job.writer, placement, files, "Board-B-Flex");
     try testing.expect(std.mem.indexOf(u8, job.written(), "\"Path\": \"psb_tesa8854.gbr\"") != null);
     try testing.expect(std.mem.indexOf(u8, job.written(), "\"LayerNumber\": 2") != null);
 }
@@ -2643,7 +2643,7 @@ test "a declared stackup ignores the implicit rail entirely" {
     const declared = [_]optimizer.PlaneAt{.{ .index = 2, .net = "GND" }};
     // A stackup is authored, so `boardRulesOf` leaves `implicit_rail` null. Set
     // it anyway: nothing downstream may read it once planes are declared, and
-    // that is the guarantee an existing board (barracuda) rests on.
+    // that is the guarantee an existing board (board-a) rests on.
     p.rules = .{
         .plane_nets = &gnd,
         .copper_layers = 4,
@@ -3639,7 +3639,7 @@ test "writeLayer emits an inner-layer user copper pour on In2.Cu, not the In1 pl
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    // The barracuda stackup: 4-layer, In1 (stack idx 2) = declared GND plane,
+    // The board-a stackup: 4-layer, In1 (stack idx 2) = declared GND plane,
     // In2 (stack idx 3) = plane-free inner signal layer (signal index 2). A
     // hand-drawn V_3V3A rail pour on In2.Cu, seeded by a same-net THROUGH-HOLE
     // pad and carving a foreign GND via barrel that reaches the inner layer.
@@ -3983,7 +3983,7 @@ test "edge closes the outline and silk omits synthetic ref-des" {
     try testing.expectEqual(@as(usize, 0), std.mem.count(u8, silk_out, "D03*"));
 }
 
-// Regression: a Barracuda-style 0.26 mm footprint pin-one ring is suppressed
+// Regression: a Board-A-style 0.26 mm footprint pin-one ring is suppressed
 // only in board artwork and replaced by one exact 0.3 mm filled Gerber flash.
 test "silk replaces a small footprint pin-one ring with a uniform dot" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);

@@ -404,7 +404,7 @@ fn pointInPoly(poly: []const [2]f64, px: f64, py: f64) bool {
 /// outline; this is the pad-side twin, and it matters because a roundrect pad is
 /// a 36-point ring (`rounded_corner_steps`) that the pour's foreign-copper
 /// stamping walks once per raster cell in the pad's window — 36 roots per cell
-/// was the largest single cost left in a barracuda DRC.
+/// was the largest single cost left in a board-a DRC.
 fn distPointPolyEdges(poly: []const [2]f64, px: f64, py: f64) f64 {
     var best2: f64 = std.math.inf(f64);
     var bdx: f64 = 0;

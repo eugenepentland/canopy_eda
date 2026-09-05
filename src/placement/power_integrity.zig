@@ -473,7 +473,7 @@ fn sourceContacts(
             try scopedSources(alloc, placement, family, prefix, &out, true);
             // A rail whose source node carries NO device pin — a boost output
             // formed by the catch diode, the output caps and the feedback
-            // divider (barracuda's `boost22/V_25V_RAW`) — has no hub pad under
+            // divider (board-a's `boost22/V_25V_RAW`) — has no hub pad under
             // the prefix at all, and the terminal used to resolve to nothing.
             // The current still physically enters the rail at those rectifier
             // and reservoir pads, so they are the source contacts, exactly as
@@ -578,7 +578,7 @@ fn scopedContacts(
 ///
 /// Four, because that is the deepest real filter chain the design corpus has:
 /// a shared input choke, a per-rail ferrite, a per-pin bead, and a jumper or
-/// 0 Ω link is already four, and `straps-synth-lmx2595` uses three of them. The
+/// 0 Ω link is already four, and `board-d-synth-lmx2595` uses three of them. The
 /// walk is bounded rather than unbounded because a rail's copper is a graph,
 /// not a tree: without a depth (and node) budget one decoupling network can
 /// reach most of the board through parts that are not the supply path at all.

@@ -2,7 +2,7 @@
 //! net's diagnosed blockers, routes that net through the corridor they vacate,
 //! and puts them back inside a single all-or-nothing transaction.
 //!
-//! Two other shapes were measured on barracuda's 102/109 residual first, and
+//! Two other shapes were measured on board-a's 102/109 residual first, and
 //! neither moved the board:
 //!
 //!   * **A whole-field joint rescue inside the timed route** — it re-routes an
@@ -88,7 +88,7 @@ pub const Corridor = struct {
     /// `Limits.blockers.max_total_elements`, and the absolute ceiling on the
     /// sum.
     ///
-    /// 2.0/mm is measured rather than chosen: barracuda carries 539 tracks over
+    /// 2.0/mm is measured rather than chosen: board-a carries 539 tracks over
     /// a 60 x 25 mm board, so a 4 mm-wide band the length of a 55 mm corridor
     /// covers about 1.4 elements per millimetre of it. The rate is that density
     /// with a little headroom, and `max_elements` is the hard stop that keeps a
@@ -109,7 +109,7 @@ pub const Limits = struct {
     /// wrong, and attempting them all would only spread the tail thinner.
     ///
     /// NETS, not transactions, and the difference cost this tier three of five
-    /// targets on barracuda. `order` used to cap the FLATTENED list, so a rail
+    /// targets on board-a. `order` used to cap the FLATTENED list, so a rail
     /// in eight islands — whose per-gap targets are the shortest hops on the
     /// board — filled three of four slots with its own sub-targets and evicted
     /// every two-terminal net behind it. Measured at ReleaseSafe: `V_3V3A` and
@@ -156,7 +156,7 @@ pub const Limits = struct {
     /// `fine_accept`'s own default is eight, sized for a declared net's handful
     /// of rescue attempts; this pass is a different shape. Every candidate that
     /// reaches the commit rule costs one, and a re-entering rail costs one per
-    /// island it merges — barracuda's `GND` arrives in eight islands and
+    /// island it merges — board-a's `GND` arrives in eight islands and
     /// `V_3V3A` in eight more. Past the budget an attempt is REFUSED rather
     /// than admitted unmeasured, which would end a merge ladder mid-rail on a
     /// board that still had the time for it. Forty-eight is `island_accept`'s
@@ -219,13 +219,13 @@ pub const Limits = struct {
 /// clock (see `route_plan.unblockBreadthLimits`), and the whole-rip authority
 /// stays with the depth ladder behind it. `outranking` is the DEEPENING round's
 /// own, switched on separately and for a different reason: deepening is reached
-/// by narrow transactions too (both measured barracuda cases are narrow
+/// by narrow transactions too (both measured board-a cases are narrow
 /// rollbacks whose wide retry the board never affords), so waiting for the wide
 /// tier would never reach the case it exists for.
 ///
 /// A FOURTH was tried and measured dead: drawing the per-gap join inside
 /// `route_close`'s last-chance detour corridor instead of the gate's straight
-/// slot. It changed nothing on barracuda, and the arithmetic says why — that
+/// slot. It changed nothing on board-a, and the arithmetic says why — that
 /// corridor is `max(3 mm, half the span)`, and these hops are short (`V_3V3A`
 /// 1.0 mm, `SPI_SCK` 6.4 mm), so the "wide" window is the same 3 mm window or
 /// within a tenth of it. The `join_no_path` verdict on those targets is real
@@ -245,7 +245,7 @@ pub const Negotiable = struct {
 /// The blocker-selection bounds this tier hands `vacate_policy.select`.
 ///
 /// THAT selector, and its restore-cheapness ranking, because it is the one
-/// measured on this board: the post-route vacate tier took barracuda 85 → 91
+/// measured on this board: the post-route vacate tier took board-a 85 → 91
 /// picking a corridor's cheapest occupants, and its pour exemption is what let
 /// the winning transaction displace a poured rail whose restore the pour
 /// underwrites. `joint_rescue`'s proximity-first ranking answers a different
@@ -278,7 +278,7 @@ pub fn corridorLimits(lim: Limits, corridor_mm: f64) vacate_policy.Limits {
 /// this grows the wall time it gets to put that copper back.
 ///
 /// The two have to move together or the bigger transaction is strictly worse
-/// than the smaller one. Measured on barracuda: with the rip scaled by corridor
+/// than the smaller one. Measured on board-a: with the rip scaled by corridor
 /// length and the cap left flat, `SPI_LMX_CSN` (42.5 mm) and `LOCK_DET`
 /// (55.3 mm) both re-entered the wide tier with two hundred elements of rip
 /// authority and the same 45 s, and both verdicts came back "the scoped
@@ -310,7 +310,7 @@ pub fn corridorSlice(lim: Limits, corridor_mm: f64) Limits {
 /// because they are the same claim: the clock and the copper have to move
 /// together or the bigger transaction is strictly worse than the smaller one.
 ///
-/// Measured on barracuda (Debug, v91). `GND`'s per-gap ladder rips 7 elements,
+/// Measured on board-a (Debug, v91). `GND`'s per-gap ladder rips 7 elements,
 /// then 10, then 12, and the flat cap gave all three the same 10 s. The first two
 /// re-routed in 10.4 s and were ACCEPTED; the third needed 13.0 s, was cut off at
 /// 8.6 s of it, and reported `slice_expired` — a verdict about the clock, on a
@@ -425,7 +425,7 @@ pub const PairBinding = struct {
 /// coupled pair placed deliberately; a re-route would not reproduce it". That
 /// is exactly right for a tier whose restore is an ordinary maze walk, and it
 /// is what makes a pair the copper that seals a corridor nothing else can open:
-/// on barracuda the `REF_LMX_P/N` In2 stripline lies across the band three
+/// on board-a the `REF_LMX_P/N` In2 stripline lies across the band three
 /// stuck control nets have to cross, and no rippable neighbour moves it.
 ///
 /// What differs here is that the pair's contract is SPACING AND SKEW, not an
@@ -462,7 +462,7 @@ pub fn pairFacts(
 ///
 /// `blockerFacts` above already lets an unblock transaction displace ground a
 /// plane carries. On a real board that permission alone changes nothing, and
-/// barracuda says exactly why: `GND` is whole, plane-carried and lying across
+/// board-a says exactly why: `GND` is whole, plane-carried and lying across
 /// every sealed corridor — and it carries hundreds of elements, so the copper
 /// budget refuses it `over_budget`, and would be right to. Re-laying a board's
 /// entire stitch field inside one transaction's slice is not a rip, it is a
@@ -508,7 +508,7 @@ pub fn liftFacts(
 /// piece of restore discipline a transaction now carries. It is not an
 /// electrical-integrity rule: those are `ground`, `diff_pair`, `rf_max_freq` and
 /// `fenced`, they refuse ahead of it, and NONE of them moves here. Measured on
-/// barracuda (ReleaseSafe, v97): `LOCK_DET`'s corridor, after every negotiable
+/// board-a (ReleaseSafe, v97): `LOCK_DET`'s corridor, after every negotiable
 /// blocker in it had been ripped and put back, was still held by `V_24V_CLEAN`
 /// — excluded on rank alone, on a board where nothing else was left to try.
 ///
@@ -753,7 +753,7 @@ pub const Target = struct {
 /// pads, each its own island, one hop between them. Such a net's entire problem
 /// is that single hop, so freeing a corridor can plausibly close it and the
 /// transaction's success test is unambiguous. A multi-island rail is the
-/// opposite case on both counts — barracuda's `V_3V3A` is 27 pads in 8 islands
+/// opposite case on both counts — board-a's `V_3V3A` is 27 pads in 8 islands
 /// needing 7 hops, and its own scattered copper is part of what jams the pocket,
 /// so ripping three neighbours neither frees it nor proves anything.
 pub fn targetOf(net_i: usize, shape: OpenShape) ?Target {
@@ -770,12 +770,12 @@ pub fn targetOf(net_i: usize, shape: OpenShape) ?Target {
 /// proves nothing — is also the reason each GAP is a sound transaction on its
 /// own: free the copper standing in one 1 mm channel, draw that one join, leave
 /// everything else exactly where it is, and the island count either fell or it
-/// did not. Barracuda's `V_3V3A` is the case (eight islands, gaps 0.99-10.19 mm,
+/// did not. Board A's `V_3V3A` is the case (eight islands, gaps 0.99-10.19 mm,
 /// every additive close refused for want of a channel).
 ///
 /// The two rules PARTITION the open nets, which is why the exclusion here is
 /// spelled as "whatever `targetOf` claims" rather than as an island count of its
-/// own. An island count left a hole exactly where barracuda's last ground gap
+/// own. An island count left a hole exactly where board-a's last ground gap
 /// sits: `GND` finishes as TWO islands over 247 pads with one 1.27 mm hop
 /// between them, so the whole-net rule refuses it (247 pads is not a
 /// two-terminal net to rewrite) and an `islands > 2` rule refused it too — the
@@ -826,7 +826,7 @@ pub fn gapTargets(
 /// output reads. It is the same principle `route_close`'s whole-net prefix is
 /// built on — spend the tail where one success is a finished net.
 ///
-/// Measured on barracuda (Debug, v91): `GND` finishes as ONE 1.27 mm hop between
+/// Measured on board-a (Debug, v91): `GND` finishes as ONE 1.27 mm hop between
 /// two islands — one accept from a closed net, and the closest win on the board —
 /// while `V_3V3A` is eight islands whose shortest pocket is 0.99 mm. Flat
 /// cheapest-hop-first put the rail's pocket first on 0.03 mm, and the phase's
@@ -855,7 +855,7 @@ pub fn closestToClosedFirst(_: void, a: Target, b: Target) bool {
 /// contributes one target per gap, and those gaps are the shortest hops on the
 /// board — so a flat cheapest-first order puts three of one rail's pockets
 /// ahead of every other open net, and a cap then discards the rest of the board
-/// unattempted. Measured on barracuda: `V_3V3A`'s three sub-targets plus
+/// unattempted. Measured on board-a: `V_3V3A`'s three sub-targets plus
 /// `SPI_SCK`'s first filled a four-slot cap and `LOCK_DET`, `TXDATA_ADF` and
 /// `SPI_LMX_CSN` were never attempted at all. Round-robin says instead: every
 /// net gets its first attempt before any net gets its second, which is what
@@ -937,7 +937,7 @@ pub fn sliceDeadline(now: i128, board_deadline: i128, targets_left: usize, lim: 
 /// `sliceDeadline` divides the remainder into equal shares, and that is the right
 /// answer while every transaction is the same size. It stops being one the moment
 /// a rip is charged per element: `restoreSlice` raises what a big restore MAY
-/// take, and the equal share then refuses to hand it over. Measured on barracuda
+/// take, and the equal share then refuses to hand it over. Measured on board-a
 /// (ReleaseSafe, v92): `SPI_LMX_CSN` and `LOCK_DET` each ripped a 66-element
 /// pour-carried rail plus two stubs — about 25 s of re-route at the tier's own
 /// declared rate — out of a 89 s phase tail split six ways, so each was quoted
@@ -1047,7 +1047,7 @@ test "a two-island net of many pads is a per-gap target" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const lim = Limits{};
-    // barracuda's finished `GND`: one 1.27 mm hop between two islands over 247
+    // board-a's finished `GND`: one 1.27 mm hop between two islands over 247
     // pads. `targetOf` refuses it (247 pads is no two-terminal rewrite) and an
     // island count of its own used to refuse it here as well, which left the
     // shortest gap on the board with no tier able to form a transaction at all.
@@ -1079,7 +1079,7 @@ test "an unblock target is a two-terminal net with one island-joining hop" {
     try testing.expectEqual(@as(usize, 4), two.net_i);
     try testing.expectApproxEqAbs(@as(f64, 16.5), two.gap_mm, 1e-12);
     // A multi-island rail: many hops, and its own scattered copper is part of
-    // the jam — barracuda's V_3V3A shape.
+    // the jam — board-a's V_3V3A shape.
     try testing.expect(targetOf(5, .{ .islands = 8, .pads = 27, .gaps = 7, .gap_mm = 1.0 }) == null);
     // Two pads already sharing an island (a hairline the oracle still calls
     // open) has no hop to free.
@@ -1115,7 +1115,7 @@ test "the attempt order is round-robin across nets, not cheapest-hop-first" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    // barracuda's exact residual: one rail in eight islands contributing the
+    // board-a's exact residual: one rail in eight islands contributing the
     // three SHORTEST hops on the board, one four-island clock net, and three
     // two-terminal control nets whose single hops are the longest of all.
     const found = [_]Target{
@@ -1146,7 +1146,7 @@ test "a net one gap from closed outranks a shorter hop on a many-gap rail" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    // barracuda's v91 residual, exactly: `GND` finishes as ONE 1.27 mm hop
+    // board-a's v91 residual, exactly: `GND` finishes as ONE 1.27 mm hop
     // between two islands — one accept from a closed net — and `V_3V3A` is eight
     // islands whose shortest pocket is 0.99 mm. Flat cheapest-hop-first put the
     // rail's pocket first on 0.03 mm and the tail ran out before `GND` was ever
@@ -1253,7 +1253,7 @@ test "the pass's accept gate weighs a whole merge ladder" {
     const lim = Limits{};
     try testing.expect(lim.max_evaluations > fine_accept.max_evaluations);
     // Enough for the planned targets AND the re-entry ladders they earn: six
-    // nets, each of which may arrive in as many islands as barracuda's `GND`.
+    // nets, each of which may arrive in as many islands as board-a's `GND`.
     try testing.expect(lim.max_evaluations >= lim.max_targets * 8);
 
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1327,7 +1327,7 @@ test "plane-carried ground is displaceable and bare ground is not" {
 // spec: placement/target-unblock - a declared differential pair is displaceable only under a tier that turns pair recoupling on and names the twin it will rip with it
 test "a pair is nominated only with the recouple switch and a twin binding" {
     const seed = vacate_policy.Seed{ .net_i = 1, .priority = 2 };
-    // barracuda's REF_LMX_P shape: a `lvds-ref` (priority 5) leg carrying 11
+    // board-a's REF_LMX_P shape: a `lvds-ref` (priority 5) leg carrying 11
     // elements, its twin another 9, sealing a `control` (priority 2) corridor.
     const base = vacate_policy.NetFacts{
         .net_i = 4,
@@ -1380,7 +1380,7 @@ test "a pair is nominated only with the recouple switch and a twin binding" {
 test "a lifted plane net is charged for its corridor, not for the whole net" {
     const seed = vacate_policy.Seed{ .net_i = 1 };
     const wide = Limits{ .negotiate = .{ .plane_corridor = true } };
-    // barracuda's `GND`: whole, plane-carried, and 300 elements of stitch field
+    // board-a's `GND`: whole, plane-carried, and 300 elements of stitch field
     // — of which 5 lie in the channel the target has to cross.
     const ground = blockerFacts(.{
         .net_i = 3,
@@ -1434,7 +1434,7 @@ fn expectRankRefused(rail: vacate_policy.NetFacts, lim: Limits, corridor: ?usize
 // spec: placement/target-unblock - a blocker held out on authored rank alone is negotiable to a tier that declares it, charged for the corridor copper it will lift, while a tier without the switch, or a blocker with no copper in the corridor, keeps today's refusal
 test "an outranking blocker is negotiable only to a tier that declares it" {
     const seed = vacate_policy.Seed{ .net_i = 1, .priority = 0 };
-    // barracuda's `V_24V_CLEAN` shape: whole, unpoured, outranking the stuck
+    // board-a's `V_24V_CLEAN` shape: whole, unpoured, outranking the stuck
     // control net whose corridor it seals, and far past the stub cap.
     const rail = vacate_policy.NetFacts{
         .net_i = 4,
@@ -1537,7 +1537,7 @@ test "the slice cap follows the corridor's own rip budget" {
     };
     // An endpoint pocket bought no extra rip, so it buys no extra clock.
     try testing.expectEqual(wide.slice.max_ns, corridorSlice(wide, 0).slice.max_ns);
-    // barracuda's `LOCK_DET`: a 55.27 mm corridor is charged 110 elements over
+    // board-a's `LOCK_DET`: a 55.27 mm corridor is charged 110 elements over
     // the base budget, and takes 110 elements' worth of clock with them.
     try testing.expectEqual(@as(usize, 128 + 110), corridorLimits(wide, 55.27).max_total_elements);
     const lock_det = corridorSlice(wide, 55.27);
@@ -1595,7 +1595,7 @@ test "the slice cap follows the restore the transaction actually took on" {
     // rate — the wide tier's own 45 s / 128 elements read back off itself —
     // charged for the copper this transaction has to put back.
     const narrow = Limits{ .slice = .{ .ns_per_element = 350 * clock.ns_per_ms } };
-    // barracuda's `GND` ladder, rung by rung: 7 elements, then 10, then the
+    // board-a's `GND` ladder, rung by rung: 7 elements, then 10, then the
     // 12-element restore the flat cap cut off mid-re-route.
     try testing.expectEqual(
         @as(i128, 10 * clock.ns_per_s + 7 * 350 * clock.ns_per_ms),
@@ -1644,7 +1644,7 @@ test "a formed transaction claims the clock its own restore is priced at" {
             .ceiling_ns = 90 * clock.ns_per_s,
         },
     };
-    // barracuda's v92 tail: 89 s reserved, six targets, and `SPI_LMX_CSN` ripping
+    // board-a's v92 tail: 89 s reserved, six targets, and `SPI_LMX_CSN` ripping
     // a 66-element pour-carried rail plus two stubs — 71 elements, ~24.85 s of
     // re-route at the tier's own rate.
     const tail: i128 = 89 * clock.ns_per_s;
@@ -1709,7 +1709,7 @@ test "the tail an earlier phase reserves is this tier's own slice for its widest
         },
     };
     const cap: i128 = 100 * clock.ns_per_s;
-    // barracuda's widest residual corridor, `LOCK_DET` at 55.27 mm: the grown
+    // board-a's widest residual corridor, `LOCK_DET` at 55.27 mm: the grown
     // slice its own rip authority buys, plus the additive close's reserve.
     const lock_det = corridorSlice(wide, 55.27).slice.max_ns;
     try testing.expectEqual(lock_det + wide.slice.reserve_ns, phaseReserve(wide, 55.27, cap));

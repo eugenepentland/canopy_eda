@@ -1110,11 +1110,11 @@ fn fixture() Deck {
 
 // spec: export-spice - the CLI parses the project dir and the output path with one positional design name, and refuses a run that names no design, names two, or carries an unknown flag
 test "export-spice CLI parses its flags and refuses an unusable vector" {
-    const parsed = try parseArgs(&.{ "--project-dir", "p", "--output", "deck.cir", "barracuda" });
+    const parsed = try parseArgs(&.{ "--project-dir", "p", "--output", "deck.cir", "board-a" });
     try testing.expectEqualStrings("p", parsed.project_dir);
-    try testing.expectEqualStrings("barracuda", parsed.name);
+    try testing.expectEqualStrings("board-a", parsed.name);
     try testing.expectEqualStrings("deck.cir", parsed.output.?);
-    try testing.expectEqualStrings("projects/designs", (try parseArgs(&.{"barracuda"})).project_dir);
+    try testing.expectEqualStrings("projects/designs", (try parseArgs(&.{"board-a"})).project_dir);
     try testing.expectError(error.SpiceUsage, parseArgs(&.{}));
     try testing.expectError(error.SpiceUsage, parseArgs(&.{ "a", "b" }));
     try testing.expectError(error.SpiceUsage, parseArgs(&.{ "--wat", "x", "a" }));

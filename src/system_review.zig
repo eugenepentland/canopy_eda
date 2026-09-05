@@ -66,7 +66,7 @@ pub const GeneratedSection = enum {
 
 /// One board participating in a system review.
 pub const BoardMember = struct {
-    /// Design lookup name, for example `barracuda-base`.
+    /// Design lookup name, for example `board-a-base`.
     name: []const u8,
     /// Human-authored system role, for example `base` or `rf`.
     role: []const u8,
@@ -1440,7 +1440,7 @@ test "system review relative path validation rejects traversal and platform esca
         "src/board.sexp/",
         "src/board\x00.sexp",
     }) |path| try std.testing.expect(!isSafeRelativePath(path));
-    try std.testing.expect(isSafeRelativePath("src/systems/barracuda/review package.md"));
+    try std.testing.expect(isSafeRelativePath("src/systems/board-a/review package.md"));
 }
 
 // spec: system-review - board archive roles are unique and authored review documents are Markdown; binary evidence uses the bounded assets area

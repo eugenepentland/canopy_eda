@@ -1730,7 +1730,7 @@ pub const system_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
     },
     .{
         .name = "title",
-        .syntax = "(title \"Barracuda OC-303-1-01\")",
+        .syntax = "(title \"Board A OC-303-1-01\")",
         .summary = "Human title of the system, or of the enclosing board or document.",
     },
     .{
@@ -1757,13 +1757,13 @@ pub const system_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
     .{
         .name = "source",
         .within = "board",
-        .syntax = "(source \"src/boards/barracuda/barracuda.sexp\")",
+        .syntax = "(source \"src/boards/board-a/board-a.sexp\")",
         .summary = "Project-relative design source, checked against the path the design resolver selects.",
     },
     .{
         .name = "layout",
         .within = "board",
-        .syntax = "(layout \"Barracuda V2\")",
+        .syntax = "(layout \"Board A V2\")",
         .summary = "Saved layout to release. Defaults to `blessed` — the board's starred default.",
     },
     .{
@@ -1780,7 +1780,7 @@ pub const system_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
     .{
         .name = "mates",
         .within = "interface",
-        .syntax = "(mates \"barracuda/J1\" \"barracuda-base/base-interface/J1\")",
+        .syntax = "(mates \"board-a/J1\" \"board-a-base/base-interface/J1\")",
         .summary = "The two endpoints as `board/CONNECTOR` handles. The connector half may be a sub-block path; the board is the first segment.",
     },
     .{

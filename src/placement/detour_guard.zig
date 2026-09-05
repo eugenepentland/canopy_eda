@@ -22,7 +22,7 @@
 //! measure denominated in millimetres rather than in grid steps.
 //!
 //! What these deliberately CANNOT do is undo a decision made before this net's
-//! turn. Measured on `bcuda-lt3045-ldo`: the `VIN` strap's 8.9 mm surface tour
+//! turn. Measured on `board-a-lt3045-ldo`: the `VIN` strap's 8.9 mm surface tour
 //! is not a mispriced via at all — by the time VIN routes, the plane-stitch pass
 //! has put 25 tracks and 20 through-barrels on the board and the bottom face
 //! under the strap is walled off, so the surface genuinely is the cheapest

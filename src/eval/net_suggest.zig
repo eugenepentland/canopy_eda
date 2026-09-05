@@ -79,7 +79,7 @@ pub fn didYouMean(name: []const u8, candidates: []const []const u8) ?[]const u8 
 /// `REFBUF_Y5`. A bus or channel index is authored deliberately, so a
 /// neighbour carrying a different index is a SIBLING lane, never a
 /// misspelling of this one. Without this every unconnected lane of a numbered
-/// family suggests some other lane — measured on `cyclops-analog`, that was
+/// family suggests some other lane — measured on `board-b-analog`, that was
 /// nine of fourteen hints, which is how a did-you-mean earns being ignored.
 /// The trade is that a typo inside a digit (`V_3V4` for `V_3V3`) gets no
 /// suggestion; a differing digit far more often means a different rail.

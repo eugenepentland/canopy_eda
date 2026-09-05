@@ -609,9 +609,9 @@ fn smallestPourGap(placement: optimizer.Placement) f64 {
 /// outline, before any clip polygon or foreign-copper stamp lowers it. It is a
 /// function of the outline, the edge inset, and the lattice — all layer-blind —
 /// so a `planeConnect` filling the three layers that carry one net (an inner
-/// declared plane plus a top and a bottom pour, barracuda's stackup) walks the
+/// declared plane plus a top and a bottom pour, board-a's stackup) walks the
 /// outline polygon per cell ONCE and copies the field into each layer's grid.
-/// Recomputing it per layer cost 16 ms of barracuda's 150 ms DRC.
+/// Recomputing it per layer cost 16 ms of board-a's 150 ms DRC.
 ///
 /// Public because the same argument holds ACROSS callers, not just across the
 /// layers of one `planeConnect`: a page render pours the identical board a
@@ -897,7 +897,7 @@ fn fillIdentity(placement: optimizer.Placement, spec: LayerSpec, contours: bool)
 ///
 /// `fillKey` answers that exactly, and answering it exactly is the expensive
 /// part of a warm reporting DRC: the digesting walk is the raster's own
-/// traversal minus the writes, so re-keying a barracuda-class board's fifty-odd
+/// traversal minus the writes, so re-keying a board-a-class board's fifty-odd
 /// fills to discover that one of them moved costs half a second. This is the
 /// cheap conservative half of that question — it reads only the CHANGED
 /// features, and every `false` it returns is a promise that `fillKey` would
@@ -1515,7 +1515,7 @@ fn initMarginRow(g: Grid, seed: EdgeSeed, j: usize, i_lo: usize, i_hi: usize) vo
     const row = j * g.nx;
     var i: usize = 0;
     // A polygon outline walks every edge per cell, which is the whole cost
-    // of seeding a poly-outline board's field (8 ms of a barracuda DRC on a
+    // of seeding a poly-outline board's field (8 ms of a board-a DRC on a
     // 20-point rounded rectangle). Whole lanes of the row take that walk
     // together; the ragged tail falls back to the scalar form.
     if (seed.placement.board_poly) |poly| {
@@ -2811,7 +2811,7 @@ fn traceOuters(
 ///
 /// ONE pass over the label grid for the whole fill, deliberately. Collecting a
 /// single component's edges is a whole-grid scan whichever way it is written, so
-/// doing it per component made tracing O(components x cells): a barracuda-class
+/// doing it per component made tracing O(components x cells): a board-a-class
 /// zone with a few hundred kept islands spent ~200 ms of its ~230 ms pour in
 /// this scan alone, which is most of what a re-poured fill costs after an edit.
 /// Bucketing costs one `ArrayList` header per component and leaves each
@@ -3493,11 +3493,11 @@ fn tracedComponentValid(arena: std.mem.Allocator, component: TracedComponent) st
     // rings whose boxes do not meet cannot nest, and the box test settles almost
     // every pair before either point walk runs. Without it the scan is
     // O(holes^2 x points^2) and dominates the whole pour: 4.5 s of a 5 s
-    // barracuda fill pass, which is most of what re-pouring one edited fill cost.
+    // board-a fill pass, which is most of what re-pouring one edited fill cost.
     const boxes = try arena.alloc([4]f64, component.holes.len);
     for (component.holes, boxes) |hole, *box| box.* = polyBounds(hole);
     // One query per hole against the OUTER ring, which on a dense pour is a
-    // boundary of thousands of points — 320 ms of a barracuda fill pass went
+    // boundary of thousands of points — 320 ms of a board-a fill pass went
     // into this one line before the ring was indexed.
     const outer_index = try RingIndex.of(arena, component.outer);
     for (component.holes, 0..) |hole, i| {
@@ -3947,7 +3947,7 @@ pub fn planeConnect(
 ) std.mem.Allocator.Error!Join {
     const layers = try carryingLayers(arena, placement.rules, q.net_name);
     // Most nets are not plane-carried. Preserve the empty-layer fast path
-    // before constructing the board-wide edge field: on Barracuda that raster
+    // before constructing the board-wide edge field: on Board A that raster
     // costs roughly 150 ms and must not be repeated for every ordinary net.
     if (layers.len == 0) return joinPlaneFills(arena, q, layers, &.{});
     const fills = try arena.alloc(Fill, layers.len);
@@ -4436,16 +4436,16 @@ test "contour topology falls back when corner fillets cross a simple loop" {
     try testing.expectEqualSlices([2]f64, simple, final);
 }
 
-test "contour topology rejects the known Barracuda Base clearance crossing" {
+test "contour topology rejects the known Board A Base clearance crossing" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_i.deinit();
     const arena = arena_i.allocator();
 
-    // Exact copper-bottom clearance region captured from Barracuda Base. It has
+    // Exact copper-bottom clearance region captured from Board A Base. It has
     // proper crossings at (192.307635, 81.186883) and
     // (209.191433, 85.692483), so it must never be accepted as a raw loop or
     // written as one ambiguous G36 region.
-    const barracuda = [_][2]f64{
+    const board_a = [_][2]f64{
         .{ 187.3293, 79.2355 },
         .{ 187.4817, 79.3065 },
         .{ 190.3773, 79.3117 },
@@ -4469,8 +4469,8 @@ test "contour topology rejects the known Barracuda Base clearance crossing" {
         .{ 186.7197, 79.3879 },
         .{ 186.8721, 79.235364 },
     };
-    try testing.expect(outline.selfIntersects(&barracuda));
-    try testing.expectError(error.InvalidBoundary, finalizeContour(arena, &barracuda, 0));
+    try testing.expect(outline.selfIntersects(&board_a));
+    try testing.expectError(error.InvalidBoundary, finalizeContour(arena, &board_a, 0));
 }
 
 fn testPlacement(parts: []optimizer.Part, nets: []const flat_netlist.FlatNet, rules: optimizer.BoardRules) optimizer.Placement {
@@ -4750,7 +4750,7 @@ test "inner-layer user pour carves foreign plated copper and ignores an SMD pad"
     defer arena_i.deinit();
     const arena = arena_i.allocator();
 
-    // The barracuda case: an In2.Cu rail pour (signal index 2 on a 4-layer board
+    // The board-a case: an In2.Cu rail pour (signal index 2 on a 4-layer board
     // whose In1 is a GND plane). A same-net V_3V3A THROUGH-HOLE pad seeds it, a
     // foreign GND VIA and plated through-hole land are carved out (both reach
     // the inner layer), and a foreign GND SMD pad DIRECTLY OVER the pour is left
@@ -4897,7 +4897,7 @@ test "priority: a user zone clears the declared background pour at any priority"
     defer arena_i.deinit();
     const arena = arena_i.allocator();
 
-    // The barracuda B.Cu case: a declared `(pour bottom "GND")` background fill
+    // The board-a B.Cu case: a declared `(pour bottom "GND")` background fill
     // with a hand-drawn rail pour of a DIFFERENT net sitting on the same face.
     // The declared pour is the blanket background, so the rail clears it at ANY
     // priority — including the 0 a freshly drawn pour starts at (else that pour
@@ -5381,7 +5381,7 @@ test "max-freq via with no impedance target antipads at the 50 ohm default" {
         .{ .name = "RF", .pins = &.{} },
     };
     // The class states only the physical fact — 12 GHz — with no (impedance …)
-    // target, the way barracuda's rf classes author their hand-computed width.
+    // target, the way board-a's rf classes author their hand-computed width.
     const rules = [_]optimizer.NetRule{
         .{},
         .{ .class = .{ .name = "rf" }, .clearance = 0.127, .rf = .{ .max_freq_hz = 12e9 } },
@@ -5708,7 +5708,7 @@ test "pour corner radius leaves an RF via antipad radially smooth" {
             .board_mm = 1.6,
         } },
     });
-    // Match the Barracuda RF transition's sub-cell phase on its 0.0762 mm
+    // Match the Board A RF transition's sub-cell phase on its 0.0762 mm
     // lattice; the old contour's scallop depended strongly on that phase.
     const via = router.Via{ .x = 10.0044, .y = 10.0502, .dia = 0.4, .drill = 0.2, .net = 1 };
     const track = router.Track{ .x1 = 4, .y1 = 10, .x2 = via.x, .y2 = via.y, .layer = 0, .width = 0.1899, .net = 1 };

@@ -10,7 +10,7 @@
 //! narrow SLOT between two pads, and an elbow through the slot only exists if
 //! the slot happens to lie on one of the two corners the elbow can take.
 //!
-//! Measured on barracuda's `loop_amp/LF_OUT`: the dive passes under a SOIC-8's
+//! Measured on board-a's `loop_amp/LF_OUT`: the dive passes under a SOIC-8's
 //! right pad column, whose 1.27 mm row pitch leaves 0.62 mm of copper-free
 //! slot between adjacent pads. At the net's 0.2532 mm width and 0.127 mm
 //! clearance the trace needs 0.5072 mm of that, so the legal band for the
@@ -175,7 +175,7 @@ fn pathLen(a: [2]f64, path: Path, b: [2]f64) f64 {
 
 /// May a dive of a net with this route policy be elided onto `layer`?
 ///
-/// A wave that lists BOTH outer faces (barracuda's every wave does — "no routed
+/// A wave that lists BOTH outer faces (board-a's every wave does — "no routed
 /// traces on either inner layer") is not asking for any particular dive; it is
 /// excluding the planes. So an allowed/preferred mask admits the elision as
 /// long as the surviving layer is in it — the result still obeys the mask. What
@@ -267,7 +267,7 @@ pub fn strandedAt(d: f64, other_reach: f64, via_r: f64, trace_w: f64) bool {
 /// second barrel overlapping it. Each is measured with `strandedAt`, so the
 /// test asks the question that matters — "does this copper survive the swap" —
 /// rather than the blunter "is anything near it", which refuses the net's OWN
-/// outer chain (on barracuda's `loop_amp/LF_OUT` the F.Cu leg's next segment
+/// outer chain (on board-a's `loop_amp/LF_OUT` the F.Cu leg's next segment
 /// passes 0.171 mm from the via it terminates at, well inside the land and
 /// well inside the replacement's reach too).
 fn viaStrands(board: Board, net: i32, vi: usize, dive: Dive) bool {
@@ -403,7 +403,7 @@ fn elideOneNet(board: Board, net: i32) std.mem.Allocator.Error!bool {
 /// elbow could take are already gone and what reaches here is exactly the
 /// residue: dives whose replacement needs a corridor the elbow cannot bend to,
 /// plus (on a board whose waves name their layers, which is every net on
-/// barracuda) the ones E10's coarser "layers are authored" guard skipped
+/// board-a) the ones E10's coarser "layers are authored" guard skipped
 /// wholesale — which is why this pass leaves `skip_layer_authored` off and
 /// applies its own finer `policyAdmits` test per dive instead.
 pub fn passBoard(board: Board) std.mem.Allocator.Error!void {
@@ -419,7 +419,7 @@ test {
 
 // spec: placement/router - a needless layer dive is replaced by a three-segment corridor path on the layer both its ends already use
 test "channelPoints threads a corridor line the two-segment elbow cannot reach" {
-    // barracuda's loop_amp/LF_OUT, measured: the dive's two via sites and the
+    // board-a's loop_amp/LF_OUT, measured: the dive's two via sites and the
     // SOIC-8 pad-row slot midline the corridor has to run along.
     const a = [2]f64{ 136.367, 107.934 };
     const b = [2]f64{ 139.003, 108.373 };
@@ -478,8 +478,8 @@ test "candidateCoord orders the corridor sweep by deviation and stops at the rea
 // spec: placement/router - a dive is elided only when nothing the removed via's land alone joined would be stranded by the thinner trace that replaces it
 test "the strand test spares the net's own chain and still catches land-only copper" {
     const via_r: f64 = 0.2; // a 0.4 mm land
-    const w: f64 = 0.2532; // barracuda's analog trace
-    // barracuda's loop_amp/LF_OUT: the F.Cu leg's NEXT segment passes 0.171 mm
+    const w: f64 = 0.2532; // board-a's analog trace
+    // board-a's loop_amp/LF_OUT: the F.Cu leg's NEXT segment passes 0.171 mm
     // from the via its neighbour terminates at. Inside the land, and inside the
     // replacement's reach too — it survives the swap, so it is not a stranding.
     try testing.expect(!strandedAt(0.1711, w / 2, via_r, w));
@@ -512,7 +512,7 @@ test "an RF-disciplined net is not offered to the dive elision" {
 
 // spec: placement/router - a dive is elided only when the net's route policy admits the surviving layer and asks for no geometry of its own
 test "policyAdmits keeps an authored transition and allows a plain outer-face mask" {
-    const outer_faces: u64 = 0b11; // "F.Cu and B.Cu" — barracuda's every wave
+    const outer_faces: u64 = 0b11; // "F.Cu and B.Cu" — board-a's every wave
     try testing.expect(policyAdmits(.{ .allowed_layers = outer_faces }, 0));
     try testing.expect(policyAdmits(.{ .allowed_layers = outer_faces }, 1));
     // A mask that excludes the surviving layer refuses it.

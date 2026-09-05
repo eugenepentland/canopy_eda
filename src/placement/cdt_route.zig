@@ -39,7 +39,7 @@ const ring_steps: usize = 16;
 ///
 /// `max_points` is sized for a WHOLE-BOARD mesh, not just a two-terminal rescue
 /// pocket: every foreign pad, track and via reaching the window contributes one
-/// inflated hull of up to `ring_steps + 4` vertices, and barracuda's busiest
+/// inflated hull of up to `ring_steps + 4` vertices, and board-a's busiest
 /// signal layer carries 644 tracks + 467 vias + its share of 187 parts' pads —
 /// about 25k vertices. The old 6000 cap silently refused a board-scale mesh.
 const max_points: usize = 400_000;
@@ -2025,7 +2025,7 @@ test "CDT bounds total meshing work and gives up instead of spinning" {
 
 /// A synthetic board-scale obstacle field: `rows` x `cols` pads on a regular
 /// pitch with a deliberate free lane down the middle column, plus a stub of
-/// track and via copper — the shape of a real signal layer (barracuda's busiest
+/// track and via copper — the shape of a real signal layer (board-a's busiest
 /// carries 644 tracks, 467 vias and its share of 187 parts' pads), at a size the
 /// old scan-per-query mesh could not reach at all.
 fn scalePads(a: std.mem.Allocator, rows: usize, cols: usize) std.mem.Allocator.Error![]router.PadObs {

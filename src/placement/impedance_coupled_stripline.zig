@@ -110,7 +110,7 @@ pub fn z0(w: f64, h1: f64, h2: f64, t: f64, er: f64, gap: f64) Error!f64 {
     return 2.0 * try corrected(odd_image, a, b, w, t, er);
 }
 
-test "barracuda L3 100 ohm pair is about 0.1617 mm at a 0.1524 mm gap" {
+test "board-a L3 100 ohm pair is about 0.1617 mm at a 0.1524 mm gap" {
     const actual = try z0(0.1617, 0.4, 0.618, 0.0152, 4.55915, 0.1524);
     try std.testing.expectApproxEqAbs(@as(f64, 100.0), actual, 0.02);
 }

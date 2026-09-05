@@ -841,7 +841,7 @@ fn appendPinOffer(context: *Context, spec: Spec, circuit: Circuit, result: Synth
 // `(synthesize …)` runs a 12,000-candidate deterministic inverse search plus six
 // refinement rounds from each of its best eight seeds, and it runs inside DESIGN
 // EVALUATION — so every page render, every `netlisp build`, every ERC run and
-// every module resolution of a design carrying one paid for it again. Measured on barracuda (ReleaseSafe,
+// every module resolution of a design carrying one paid for it again. Measured on board-a (ReleaseSafe,
 // 2026-08-28): 3.7 s of a 3.8 s `Evaluator.evalFile`, and a single cold PCB
 // page evaluates the module TWICE (the design, then the Stamp palette's module
 // resolution), a deferred-payload cycle four times.
@@ -2000,7 +2000,7 @@ test "synthesize active loop filter over operating curve" {
     const p3 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 50), Node.float(ast.Span.zero, 340e6) };
     const points = [_]Node{ Node.list(ast.Span.zero, &p1), Node.list(ast.Span.zero, &p2), Node.list(ast.Span.zero, &p3) };
     const spec = Spec{
-        .name = "Barracuda",
+        .name = "Board A",
         .topology_active_inverting = true,
         .circuit = .{
             .pfd_hz = 100e6,
@@ -2404,7 +2404,7 @@ test "synthesize under the measured AD8065/RSET model" {
     const p3 = [_]Node{ Node.atom(ast.Span.zero, "point"), Node.float(ast.Span.zero, 50), Node.float(ast.Span.zero, 300e6) };
     const points = [_]Node{ Node.list(ast.Span.zero, &p1), Node.list(ast.Span.zero, &p2), Node.list(ast.Span.zero, &p3) };
     const spec = Spec{
-        .name = "Barracuda corrected",
+        .name = "Board A corrected",
         .topology_active_inverting = true,
         .circuit = .{
             .pfd_hz = 100e6,

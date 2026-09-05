@@ -4,7 +4,7 @@
 //! request. Composition is `system_review_package.draftDossierHtml`, whose cost
 //! is a complete per-board review snapshot plus a complete fabrication
 //! readiness pass (DRC included) for every board the system names — measured at
-//! 50-57 s for the two-board Barracuda system, warm or cold, on the deployed
+//! 50-57 s for the two-board Board A system, warm or cold, on the deployed
 //! ReleaseSafe binary. A browser asked to wait that long simply looks broken.
 //!
 //! So the page no longer composes: it reads this store. One composed document

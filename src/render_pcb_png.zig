@@ -218,8 +218,8 @@ pub const PourInputs = struct {
     /// (`pour.sharedEdgeField`), seeded once by the caller. One image pours the
     /// same lattice a couple of dozen times — both outer faces, every declared
     /// plane, and every hand-drawn zone — and each of those used to re-walk the
-    /// outline to seed its own field. Measured on `barracuda`, a plain
-    /// `/api/pcb-png` render ran 28 fills; on `barracuda-base`, 8 fills over a
+    /// outline to seed its own field. Measured on `board-a`, a plain
+    /// `/api/pcb-png` render ran 28 fills; on `board-a-base`, 8 fills over a
     /// denser board. Null keeps the historical behaviour (each fill seeds its
     /// own), and a field built for a different board is rejected by
     /// `pour.EdgeField.fits` rather than read stale — so this changes latency

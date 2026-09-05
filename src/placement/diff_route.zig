@@ -912,7 +912,7 @@ fn inLineVia(v: Pt, f: InLineFrame, o: Options) LegVia {
     // Deliberately NOT scaled by the spread ladder. A perpendicular pair widens
     // to buy clearance it lacks; an in-line one already holds exactly the
     // clearance it needs, so a widen rung only sweeps its excursion further —
-    // on barracuda, straight through the pad field it just escaped.
+    // on board-a, straight through the pad field it just escaped.
     const exc = o.via_clear * in_line_margin;
     const half_d = o.via_spread / 2;
     // The excursion is held until a full clearance PAST each drill, not merely
@@ -1084,7 +1084,7 @@ fn emitRun(
     // ONE 45° jog, rather than letting the whole last segment carry the spread.
     //
     // Anchoring the offset run straight onto a barrel spreads the neck over
-    // however long that segment happens to be — 3.6 mm at barracuda's connector,
+    // however long that segment happens to be — 3.6 mm at board-a's connector,
     // i.e. 3.6 mm of line whose spacing (and so impedance) is wrong by a little
     // everywhere instead of a fifth of a millimetre that is wrong by design.
     const necks = [2]?Pt{
@@ -1694,7 +1694,7 @@ const BuildPlan = struct { sides: Sides, coupled: []const bool, widen: f64 };
 /// offset, which is exactly what the coupled run does. A via terminating a
 /// pad-escape fan faces something else entirely: copper aimed AT its twin
 /// barrel, converging from the pads' own pitch, which comes closer than the
-/// parallel model predicts (0.42 of a needed 0.45 mm on barracuda's LMX
+/// parallel model predicts (0.42 of a needed 0.45 mm on board-a's LMX
 /// escape). A barrel is on every layer, so every opposite segment counts.
 fn barrelsClear(legs: Legs, via_clear: f64) bool {
     return tightestBarrel(legs, via_clear) == null;
@@ -1892,7 +1892,7 @@ const pad_exit_mm: f64 = 0.25;
 /// end's centreline terminal must leave at least this much room between the pad
 /// pair and the terminal, or the jog lands PAST the coupled run's start and the
 /// leg has to double back into its twin — the shape that fails the clearance
-/// probe (measured on straps-synth-lmx2595, 2026-08-11). Pads already at or
+/// probe (measured on board-d-synth-lmx2595, 2026-08-11). Pads already at or
 /// inside the class gap need only the stub.
 pub fn padExitRun(outer: PadPair, off: f64) f64 {
     const pitch = std.math.hypot(outer.p.x - outer.n.x, outer.p.y - outer.n.y) / 2;
@@ -2373,7 +2373,7 @@ test "dp_coupled viaSpread widens past the coupling offset only when the barrels
     // Roomy pair: offset already exceeds every barrel rule, so the vias stay on
     // the leg lines and the legs never neck.
     try testing.expectApproxEqAbs(@as(f64, 2.0), viaSpread(2.0, 0.4, 0.127, 0.2532), 1e-9);
-    // Barracuda's lvds-ref geometry: 0.4056 offset cannot hold two 0.4 barrels,
+    // Board A's lvds-ref geometry: 0.4056 offset cannot hold two 0.4 barrels,
     // so the pair spreads to the via-to-via wall.
     try testing.expectApproxEqAbs(@as(f64, 0.527), viaSpread(0.4056, 0.4, 0.127, 0.2532), 1e-9);
 }
@@ -2680,7 +2680,7 @@ test "dp_coupled keeps each leg on its own pads' side across an escape reversal"
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    // barracuda's LMX escape in miniature: the pair leaves its pad field
+    // board-a's LMX escape in miniature: the pair leaves its pad field
     // heading WEST (the only open side), changes layer at the pocket's mouth,
     // and the haul comes back EAST underneath. "Left of the path" names the
     // north side before that via and the south side after it, so a single

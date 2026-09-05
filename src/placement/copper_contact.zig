@@ -522,7 +522,7 @@ test "track contact requires a complete bottleneck cross-section" {
     const testing = @import("std").testing;
     const width = 0.2532;
 
-    // Barracuda boost22/U23: these parallel segments overlap by 8.06 µm at
+    // Board A boost22/U23: these parallel segments overlap by 8.06 µm at
     // their flanks, but nowhere carries the trace's 0.2532 mm cross-section.
     const old = [2][2]f64{
         .{ 169.0087087130193, 107.95538566406091 },
@@ -575,7 +575,7 @@ test "via contact requires a complete bottleneck cross-section" {
     const centred = Via{ .at = .{ 1, 0 }, .dia = 0.4 };
     try testing.expect(trackViaConnects(trace, centred));
 
-    // Barracuda V_24V_CLEAN track 104 only clips the edge of via 4. Their
+    // Board A V_24V_CLEAN track 104 only clips the edge of via 4. Their
     // copper overlaps geometrically, but no 0.2532 mm trace chord fits inside
     // the 0.4 mm via land.
     const weak_trace = Trace{
@@ -635,9 +635,9 @@ test "the cross-section bounds settle end joins and flank grazes without changin
 // spec: fab_readiness - a zero-length track is a point feature that joins the same-net copper covering its centre, and its own half-width disc grants it nothing more
 test "a point track connects through its centre and grazes nothing with its disc" {
     const testing = @import("std").testing;
-    const crumb_width = 0.127; // barracuda's floor trace width: a 0.0635 mm disc
+    const crumb_width = 0.127; // board-a's floor trace width: a 0.0635 mm disc
 
-    // Barracuda: a corner drag collapsed seg-a489d105ac9c428f onto the centre
+    // Board A: a corner drag collapsed seg-a489d105ac9c428f onto the centre
     // of a through via. That crumb was the net's only copper at the spot on
     // layer 1, so refusing degenerate geometry made overlapping copper report a
     // net_open — at a NEGATIVE gap of -(0.2 + 0.0635) mm.

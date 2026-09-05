@@ -510,15 +510,15 @@ test "PCB page cache allows only HTML-stable query modes" {
 test "PCB page cache keys separate the default, named-layout, and embed pages" {
     const testing = std.testing;
     const none: [keyed_params.len]?[]const u8 = @splat(null);
-    const dflt = try cacheKey(testing.allocator, "black-canyon", .{ .layout = null, .keyed = none });
+    const dflt = try cacheKey(testing.allocator, "board-e", .{ .layout = null, .keyed = none });
     defer testing.allocator.free(dflt);
-    const rf = try cacheKey(testing.allocator, "black-canyon", .{ .layout = "RF", .keyed = none });
+    const rf = try cacheKey(testing.allocator, "board-e", .{ .layout = "RF", .keyed = none });
     defer testing.allocator.free(rf);
     try testing.expect(!std.mem.eql(u8, dflt, rf));
 
     var embedded = none;
     embedded[0] = "1"; // embed=1
-    const embed_key = try cacheKey(testing.allocator, "black-canyon", .{ .layout = null, .keyed = embedded });
+    const embed_key = try cacheKey(testing.allocator, "board-e", .{ .layout = null, .keyed = embedded });
     defer testing.allocator.free(embed_key);
     try testing.expect(!std.mem.eql(u8, dflt, embed_key));
 
@@ -526,19 +526,19 @@ test "PCB page cache keys separate the default, named-layout, and embed pages" {
     // from the assembly page's frame and must not be served that entry.
     var heated = embedded;
     heated[5] = "1"; // thermal=1
-    const heat_key = try cacheKey(testing.allocator, "black-canyon", .{ .layout = null, .keyed = heated });
+    const heat_key = try cacheKey(testing.allocator, "board-e", .{ .layout = null, .keyed = heated });
     defer testing.allocator.free(heat_key);
     try testing.expect(!std.mem.eql(u8, embed_key, heat_key));
 
     var cam = none;
     cam[6] = "1"; // cam=1
-    const cam_key = try cacheKey(testing.allocator, "black-canyon", .{ .layout = null, .keyed = cam });
+    const cam_key = try cacheKey(testing.allocator, "board-e", .{ .layout = null, .keyed = cam });
     defer testing.allocator.free(cam_key);
     try testing.expect(!std.mem.eql(u8, dflt, cam_key));
 
     var derived = none;
     derived[7] = "1"; // derived=1
-    const derived_key = try cacheKey(testing.allocator, "black-canyon", .{ .layout = null, .keyed = derived });
+    const derived_key = try cacheKey(testing.allocator, "board-e", .{ .layout = null, .keyed = derived });
     defer testing.allocator.free(derived_key);
     try testing.expect(!std.mem.eql(u8, dflt, derived_key));
 }

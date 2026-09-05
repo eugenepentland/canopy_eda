@@ -19,7 +19,7 @@
 //!     45°-step reservations and stamped RF keepout halos, because all three
 //!     live in the grid it walks. But `softEnter` treats a foreign PAD as a hard
 //!     wall, and blockers are recorded only off a path that COMPLETED, so a net
-//!     boxed in by pads yields nothing whatsoever. Measured on barracuda: six of
+//!     boxed in by pads yields nothing whatsoever. Measured on board-a: six of
 //!     the seven nets reaching the in-route tier report an EMPTY probe.
 //!   * **The corridor sweep** always answers, because it is pure geometry: every
 //!     foreign net whose copper lies within a radius of one of the straight hops
@@ -171,7 +171,7 @@ pub fn foldProbe(
 /// `s.radius_mm` of one of `s.hops`, each at its closest approach.
 ///
 /// This is the half that always answers. It is what the post-route vacate tier
-/// has always nominated from and what gave that tier its measured barracuda
+/// has always nominated from and what gave that tier its measured board-a
 /// 85 → 91; the in-route tier added it after finding its probe empty on six of
 /// seven residual nets.
 pub fn sweepHops(t: *Table, alloc: std.mem.Allocator, s: Sweep) std.mem.Allocator.Error!void {

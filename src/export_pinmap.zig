@@ -921,15 +921,15 @@ test "export-pinmap CLI parses its flags and refuses an unusable vector" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const parsed = try parseArgs(arena, &.{ "--project-dir", "p", "--ref", "U1", "--ref", "stm32", "--format", "json", "--output", "x.json", "cyclops" });
+    const parsed = try parseArgs(arena, &.{ "--project-dir", "p", "--ref", "U1", "--ref", "stm32", "--format", "json", "--output", "x.json", "board-b" });
     try testing.expectEqualStrings("p", parsed.project_dir);
-    try testing.expectEqualStrings("cyclops", parsed.name);
+    try testing.expectEqualStrings("board-b", parsed.name);
     try testing.expectEqualStrings("x.json", parsed.output.?);
     try testing.expectEqual(Format.json, parsed.format);
     try testing.expectEqual(@as(usize, 2), parsed.refs.len);
     try testing.expectEqualStrings("stm32", parsed.refs[1]);
     // The default project dir and format are the documented ones.
-    const bare = try parseArgs(arena, &.{"cyclops"});
+    const bare = try parseArgs(arena, &.{"board-b"});
     try testing.expectEqualStrings("projects/designs", bare.project_dir);
     try testing.expectEqual(Format.c, bare.format);
     // A run naming no design, naming two, carrying an unknown flag, a flag with

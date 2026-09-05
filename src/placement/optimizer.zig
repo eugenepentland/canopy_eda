@@ -2000,7 +2000,7 @@ const stage_gap_mm: f64 = 5.0;
 /// Auto-fill cost guard: staged-part counts beyond this keep the band (each
 /// fill is a windowed scan). Sized for the `(floorplan …)` usage on a real
 /// board — list the modules + connectors, auto-fill ALL the loose glue (the
-/// barracuda base board leaves 31 RC-filter parts loose; the original cap of
+/// board-a base board leaves 31 RC-filter parts loose; the original cap of
 /// 24 silently skipped every one of them). The expensive routed veto is gated
 /// separately (`AUTOFILL_VETO_MAX`), so a high cap costs only windowed scans.
 const autofill_max: usize = 64;
@@ -5970,7 +5970,7 @@ fn arrangeMacros(
     const nf: f64 = @floatFromInt(n);
     const force = try arena.alloc([2]f64, n);
     // Iteration budget scales with block count: 240 settles a dozen modules,
-    // but a 100+-block board (labstation) needs several times that for the
+    // but a 100+-block board (board-f) needs several times that for the
     // spring/repulsion pair to finish separating while keeping adjacency.
     const iters = rough_iters + 8 * n;
     var it: usize = 0;
@@ -6921,7 +6921,7 @@ pub fn fullRoutedScorePoses(
 /// board-edge guards at once: the routing maze falls back to the parts bbox
 /// (`pour.boundsRect`), bend-smoothing loses its edge veto, and
 /// `drc.checkBoardEdge` returns early on a null `board_rect`. The result is
-/// copper routed off the board with no DRC error (the barracuda RF1_HPF bug
+/// copper routed off the board with no DRC error (the board-a RF1_HPF bug
 /// class, which recurred when a new endpoint skipped the serve-side fold).
 /// Endpoints that route or DRC-check must resolve the design's drawn outline
 /// (a submitted body outline, else the blessed saved layout's — see the serve
@@ -7168,7 +7168,7 @@ const Prepared = struct {
     /// Three consumers of one placement each asked for them independently and
     /// each paid the full resolution — the RF pad adaptation here, the critical
     /// -path extraction, and the `BoardRules` the placement carries. That is a
-    /// pure function of `(block, nets)`, so on barracuda-base it was the same
+    /// pure function of `(block, nets)`, so on board-a-base it was the same
     /// 3.3 s answer computed three times: ten of a cold PCB page's ten seconds.
     net_rules: []const NetRule = &.{},
 
@@ -10404,7 +10404,7 @@ test "BoardRules signal-layer derivation across stackups" {
 
 // spec: placement/optimizer - resolves a copper-layer name to its routable signal-layer index, rejecting junk and plane-claimed inner names
 test "signalIndexOfName inverts signalLayerName and rejects non-signal names" {
-    // The barracuda case: (stackup 4 (plane 2 "GND") (pour top) (pour bottom)) —
+    // The board-a case: (stackup 4 (plane 2 "GND") (pour top) (pour bottom)) —
     // In1 (stack 2) is the GND plane, In2 (stack 3) is a free inner signal layer.
     const planes = [_]PlaneAt{
         .{ .index = 1, .net = "GND" },
@@ -12273,7 +12273,7 @@ test "a cross-hub near binding claims its owner and seeds against the named pad"
     defer astate.deinit();
     const arena = astate.allocator();
 
-    // The black-canyon R_TAP_* shape: a series resistor with one leg on an MCU
+    // The board-e R_TAP_* shape: a series resistor with one leg on an MCU
     // net and the other on a connector net. `pairSeriesLegs` requires BOTH legs
     // to reach one hub, so this part gets no series pairing at all — without a
     // `(near …)` the net-locality scan is free to hand it to J1.

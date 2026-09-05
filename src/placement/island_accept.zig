@@ -9,7 +9,7 @@
 //! at all) and the wrong one for a stitch: a barrel is "landed" whether or not
 //! the metal it drops into is the metal its island needed.
 //!
-//! A poured rail is where that matters. Barracuda's `V_3V3A` is carried by a
+//! A poured rail is where that matters. Board A's `V_3V3A` is carried by a
 //! retained In3.Cu zone and comes out of a timed route in EIGHT copper islands,
 //! so closing it is eight independent stitches — and an earlier in-place stitch
 //! pass that committed them unweighed measured 102 -> 98 connected nets.

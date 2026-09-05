@@ -475,7 +475,7 @@ fn appendLands(
 
 const testing = std.testing;
 
-/// The audit's barracuda shape: a thin branch T-ing into the interior of a
+/// The audit's board-a shape: a thin branch T-ing into the interior of a
 /// wide trunk. The branch's whole cross-section lies inside the trunk's
 /// copper, so `copper_contact` calls it connected; the solver's own snap only
 /// reaches half the BRANCH's width and calls it open.
@@ -585,7 +585,7 @@ test "a sheet contact off a trace centreline still joins that trace" {
     try testing.expectApproxEqAbs(@as(f64, 1.0), result.typical.track_current_a[0], 1e-8);
 }
 
-/// The audit's barracuda-base shape: two tracks that land on OPPOSITE edges of
+/// The audit's board-a-base shape: two tracks that land on OPPOSITE edges of
 /// one 1.2 mm regulator land, centrelines 1 mm apart so neither trace's copper
 /// reaches the other. DRC topology calls that one island through the pad; the
 /// pad-blind solve saw two.

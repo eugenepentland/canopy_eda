@@ -4680,8 +4680,8 @@ test "stackup captures soldermask and copper etch profile" {
 
 /// The board path `<project-dir>/kicad-projects.sexp` maps this design to, if
 /// any. The design name is the SOURCE FILE STEM — the same token `netlisp
-/// designs` prints and every CLI command takes — so `src/barracuda/barracuda.sexp`
-/// and `src/labstation.sexp` both key on their own basename.
+/// designs` prints and every CLI command takes — so `src/board-a/board-a.sexp`
+/// and `src/board-f.sexp` both key on their own basename.
 fn projectBoardOverride(self: *Evaluator) ?[]const u8 {
     if (self.project_dir.len == 0) return null;
     const name = designNameFromFile(self.current_file) orelse return null;
@@ -4702,8 +4702,8 @@ fn designNameFromFile(path: []const u8) ?[]const u8 {
 
 // spec: eval/design_block - Project board map keys on the design source file stem
 test "design name comes from the source file stem" {
-    try testing.expectEqualStrings("barracuda", designNameFromFile("projects/designs/src/boards/barracuda/barracuda.sexp").?);
-    try testing.expectEqualStrings("labstation", designNameFromFile("labstation.sexp").?);
+    try testing.expectEqualStrings("board-a", designNameFromFile("projects/designs/src/boards/board-a/board-a.sexp").?);
+    try testing.expectEqualStrings("board-f", designNameFromFile("board-f.sexp").?);
     try testing.expect(designNameFromFile("") == null);
     try testing.expect(designNameFromFile("lib/modules/adp7118-ldo.txt") == null);
 }
@@ -4979,7 +4979,7 @@ test "design-block resolves a stackup preset with board electrical roles" {
 // spec: eval/design_block - a stackup dielectric captures its (er X) permittivity and defaults it when absent
 test "design-block captures (dielectric … (er X))" {
     const a = std.heap.page_allocator;
-    // Barracuda's real stackup, with (er …) added to two of its three gaps —
+    // Board A's real stackup, with (er …) added to two of its three gaps —
     // the third is left bare to prove an undeclared interval stays 0 (the
     // sentinel the impedance model reads as "use generic FR-4").
     const src =

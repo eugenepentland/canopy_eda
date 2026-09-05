@@ -134,7 +134,7 @@ pub const Context = struct {
     /// function of that pair, so re-deriving it here is duplicated work, and on
     /// a poured board it is the single most expensive thing either caller does
     /// (rastering every retained zone: 47 s of a 100 s `/api/layout-progress`
-    /// request on barracuda-base, paid twice). Null ⇒ compute it, which keeps
+    /// request on board-a-base, paid twice). Null ⇒ compute it, which keeps
     /// every existing caller and the pure/test path unchanged.
     conn: ?[]const NetStatus = null,
     /// Non-null only for a manufacturing handoff. It carries the mandatory
@@ -1973,7 +1973,7 @@ pub const NetStatus = struct {
 /// The reporting DRC pours every one of them on its way to a verdict and keeps
 /// them in the process fill memo (`drc_compose.sharedFills`). A sweep that does
 /// not take them poured each plane-carried net for itself AND seeded its own
-/// board-edge field per net — on barracuda-base that is 55-60 s per sweep, and
+/// board-edge field per net — on board-a-base that is 55-60 s per sweep, and
 /// `/api/pcb-describe` runs three of them. Every field is optional: what is
 /// missing is built here exactly as before, so a caller with nothing to offer
 /// gets the old behaviour at the old cost.
@@ -1985,7 +1985,7 @@ pub const BoardPrep = struct {
     zone_fills: ?[]const pour.Fill = null,
     /// The caller's shared board-edge margin field (`pour.sharedEdgeField`).
     /// Null seeds one per fill — a ~150 ms outline walk PER NET on a
-    /// barracuda-class board.
+    /// board-a-class board.
     base: ?pour.EdgeField = null,
 };
 
@@ -2138,7 +2138,7 @@ pub const OpenNet = struct {
     /// (two pour-joined islands would surely be one island) is wrong: there is
     /// one plane node per pour COMPONENT (see `PlaneJoin.nodes`), so islands
     /// sitting on two disjoint pieces of the same net's pour are each joined, to
-    /// different metal, and stay separate islands. Measured on barracuda's
+    /// different metal, and stay separate islands. Measured on board-a's
     /// `dp-coupled-v3`: `GND` in three islands, all three plane-joined, zero
     /// stitchable. A planner that assumes one joined island reads that as "no
     /// hops for this net at all" — which is exactly what made a `close_open_nets`
@@ -2620,7 +2620,7 @@ pub fn userZoneFillsMemo(
 /// form every whole-board loop wants. The fills depend on the board and its
 /// copper, never on which net is being inspected, so a caller that walks all
 /// nets calls `userZoneFills` once and hands the same slice to each net;
-/// rebuilding it per net is what made a barracuda-sized DRC take a minute and a
+/// rebuilding it per net is what made a board-a-sized DRC take a minute and a
 /// half instead of a second.
 /// The board-level fill state one net's graph reads and no net changes: the
 /// user-zone rasters computed once for the whole sweep, plus the caller's
@@ -2752,7 +2752,7 @@ pub fn buildNetGraphPrepared(
 
     // pad ↔ pad: two of this net's OWN lands that physically touch are one
     // piece of copper and need no trace between them — a split QFN supply pad
-    // whose halves abut (barracuda's `adf4159/U20` pads 1 and 13 share an edge
+    // whose halves abut (board-a's `adf4159/U20` pads 1 and 13 share an edge
     // at y = 107.375), a probe pad dropped onto a fanout pad, any footprint
     // that draws one shape as two. Nothing else in this graph joins them, so
     // without it the net reads as two islands and every reporting surface calls
@@ -2956,7 +2956,7 @@ fn segPointDist(ax: f64, ay: f64, bx: f64, by: f64, px: f64, py: f64) f64 {
 /// away is more than `win` from the copper and cannot union. Only pairs that
 /// survive it pay for the nine-sample outline walk. Without the reject the
 /// (pads × tracks) and (pads × vias) sweeps ran that walk on every far pair —
-/// 92 ms of barracuda's 150 ms DRC, spent proving that copper centimetres apart
+/// 92 ms of board-a's 150 ms DRC, spent proving that copper centimetres apart
 /// does not touch. The track↔track sweep beside it has always had the same
 /// prefilter (`bboxNear`); these two were the ones missing it.
 fn segShapeDist(ax: f64, ay: f64, bx: f64, by: f64, p: PadNode, win: f64) f64 {
@@ -3314,7 +3314,7 @@ test "connectivity flags an unrouted net and passes a routed one" {
     try testing.expect(hasError(gapped, "unrouted-net"));
 }
 
-test "Barracuda DIV_RAW sampled taper connects both RF landing pads" {
+test "Board A DIV_RAW sampled taper connects both RF landing pads" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_i.deinit();
     const arena = arena_i.allocator();
@@ -3323,7 +3323,7 @@ test "Barracuda DIV_RAW sampled taper connects both RF landing pads" {
         .number = "2",
         .x = 0.48,
         .y = 0,
-        // Barracuda's controlled-impedance adaptation has already reduced the
+        // Board A's controlled-impedance adaptation has already reduced the
         // nominal 0.56 x 0.62 mm C0402 land to its qualified RF minimum.
         .w = 0.46,
         .h = 0.50,
@@ -3607,7 +3607,7 @@ test "a plane via on a concave custom pad uses the authored copper outline" {
     defer arena_i.deinit();
     const arena = arena_i.allocator();
 
-    // Barracuda's TPSM84338 GND pad in miniature: an L-shaped land whose
+    // Board A's TPSM84338 GND pad in miniature: an L-shaped land whose
     // bounding-box centre is empty. The via sits on the horizontal arm, not at
     // that empty centre, and must join the SMD land to the implicit GND plane.
     const l_poly = [_][2]f64{
@@ -3663,7 +3663,7 @@ test "an inner-layer copper pour connects a rail's through-hole pads" {
     defer arena_i.deinit();
     const arena = arena_i.allocator();
 
-    // The barracuda case: a V_3V3A rail with two THROUGH-HOLE pads in different
+    // The board-a case: a V_3V3A rail with two THROUGH-HOLE pads in different
     // board locations. With no copper the net is an airwire; a hand-drawn inner
     // pour (In2.Cu = signal index 2) enclosing both pads unites them — the real
     // inner copper the fab gate must credit as connecting the rail.
@@ -4399,7 +4399,7 @@ test "touching same-net pads join without a trace; opposite faces stay separate"
     defer arena_i.deinit();
     const arena = arena_i.allocator();
 
-    // barracuda's `adf4159/U20` pads 1 and 13 in miniature: one net, two lands
+    // board-a's `adf4159/U20` pads 1 and 13 in miniature: one net, two lands
     // on the same face sharing an edge. No trace runs between them because none
     // is needed — they are one piece of copper — yet the graph joined pads only
     // through tracks/vias/pours, so the net read as an airwire on every surface.

@@ -376,7 +376,7 @@ fn segIntersect(a: [2]f64, b: [2]f64, c: [2]f64, d: [2]f64) ?[2]f64 {
 // every surface that reports drift calls it: `fab_readiness`'s `outline-drift`
 // release finding and the board-review mechanical summary. They were once two
 // hand-written comparisons — one dimensions-only, one dimensions-and-shape —
-// which is how the barracuda base board came to read `matches` on the review
+// which is how the board-a base board came to read `matches` on the review
 // document and `outline-drift` on the release report at the same moment.
 
 /// Fabrication tolerance (mm) for every declared-vs-saved outline comparison.
@@ -861,7 +861,7 @@ test "filletPath preserves native rounded corners" {
     try testing.expect(arcOwnsSegment(result.arcs[0], result.poly[0], result.poly[1], 0.0001));
 }
 
-/// Barracuda-class notched outline: a rectangle whose bottom edge carries a
+/// Board-A-class notched outline: a rectangle whose bottom edge carries a
 /// rectangular recess, big fillets on the board corners and small ones in the
 /// recess — the profile `(size W H)` plus one `(corner-radius R)` cannot
 /// express, and therefore the one an approval clause exists for.

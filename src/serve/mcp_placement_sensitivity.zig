@@ -1,6 +1,6 @@
 //! `placement_sensitivity` CLI tool — which parts are load-bearing?
 //!
-//! The board that motivated this: three sub-millimetre edits inside barracuda's
+//! The board that motivated this: three sub-millimetre edits inside board-a's
 //! `lmx2595` group (R42 moved 0.2 mm in x, C91 de-rotated in place, C100 moved
 //! 0.2 mm in y) cost the full-board route SEVEN nets, deterministically, and
 //! tripled the DRC error count. Nothing in the toolchain called those three
@@ -63,7 +63,7 @@ const net_name = @import("../net_name.zig");
 
 const HandlerError = pcb_layout_page.HandlerError;
 
-/// Default pose nudge (mm). 0.2 mm is the size of the edits that cost barracuda
+/// Default pose nudge (mm). 0.2 mm is the size of the edits that cost board-a
 /// seven nets — small enough that a designer would make it without a second
 /// thought, which is exactly why it needs measuring.
 const default_delta_mm: f64 = 0.2;
@@ -736,7 +736,7 @@ const limits_note =
     "runs through its neighbourhood; the rest of the board's copper is pinned. Damage " ++
     "that flows through a net contended across the whole board (a supply rail, a bus " ++
     "clock) is therefore under-counted — 'stable' means stable against the neighbours " ++
-    "listed in " ++ scope_nets_path ++ ", not safe to move. Measured on barracuda's lmx2595 group: at " ++
+    "listed in " ++ scope_nets_path ++ ", not safe to move. Measured on board-a's lmx2595 group: at " ++
     "the 0.2 mm default this flags 1 of 3 parts a full-board re-route was known to " ++
     "break; at 1.0 mm it flags all 3. Raise delta_mm when a probe comes back stable.";
 
@@ -1094,7 +1094,7 @@ test "placement_sensitivity result states its limit against a field it emits" {
     var out: std.ArrayList(u8) = .empty;
     try testing.expect(try writeResult(&out, .{
         .alloc = arena,
-        .design = "barracuda",
+        .design = "board-a",
         .layout = "layout",
         .delta = 0.2,
         .rotations = false,

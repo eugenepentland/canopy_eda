@@ -967,7 +967,7 @@ test "a connector's exported-rail current is not charged to it as heat" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // The barracuda shape: a board-to-board terminal exporting a regulated
+    // The board-a shape: a board-to-board terminal exporting a regulated
     // rail, its contact annotated with the far-side load's draw.
     const connector = env_mod.Instance{
         .ref_des = "J1",

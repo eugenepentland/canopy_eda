@@ -28,7 +28,7 @@ pub const Allocators = struct {
 /// `?pdn=1` response.
 ///
 /// The sweep is the most expensive thing in the editor's deferred payload —
-/// 6.3 s of 13.5 s on barracuda, because `pdn_impedance` rasters every relevant
+/// 6.3 s of 13.5 s on board-a, because `pdn_impedance` rasters every relevant
 /// plane and then walks each decoupling loop against it — and the ONLY thing
 /// that reads it is the PDN section of the track/via properties inspector.
 /// Nothing paints, no chip counts, and no export depends on it, so making the

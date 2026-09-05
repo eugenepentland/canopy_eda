@@ -29,7 +29,7 @@ const std = @import("std");
 /// A dirty list rather than a generation stamp on purpose: a stamp adds a third
 /// array to the hot relax loop, and at ~10 relaxations per expansion that extra
 /// cache line costs more than the memsets it saves on a board whose legs search
-/// wide (measured on black-canyon, 1.5 M expansions over 200 legs, where the
+/// wide (measured on board-e, 1.5 M expansions over 200 legs, where the
 /// stamped variant made the maze phase slower, not faster).
 pub const Search = struct {
     dist: []f64 = &.{},
@@ -207,7 +207,7 @@ pub const RouteQItem = struct { f: f64, d: f64, key: usize };
 /// diagonal and orthogonal steps has *exactly* equal length, so a plain queue
 /// kept whichever micro-staircase it popped first where a human draws one axis
 /// run plus one 45° run. Its own doc called it "deliberately a tie-break, NOT a
-/// cost term", on the measurement that a 0.6-pitch bend PRICE took barracuda
+/// cost term", on the measurement that a 0.6-pitch bend PRICE took board-a
 /// from 81/90 nets and 19 DRC findings to 61/90 and 257.
 ///
 /// The router now prices a corner directly (`router.bend_cost_mult`, a quarter

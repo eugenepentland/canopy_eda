@@ -3,7 +3,7 @@
 //!
 //! The router places nets ONE AT A TIME. Each net's maze is greedy over the
 //! space left by its predecessors, so where several nets share one narrow
-//! escape (barracuda: eight SPI/control nets fanning west out of connector
+//! escape (board-a: eight SPI/control nets fanning west out of connector
 //! `J1`) the early nets take the middle of the channel and the late ones are
 //! starved — and no reordering fixes it, because whichever net routes first
 //! takes the same lane. A hand router solves it in one move: assign the whole
@@ -33,12 +33,12 @@
 //!      and among crossing-free solutions it minimises total detour.
 //!
 //! **The assignment declines rather than exiles.** A corridor's free space is
-//! routinely BIMODAL — barracuda's eight-net J1 escape offers ten lanes in two
+//! routinely BIMODAL — board-a's eight-net J1 escape offers ten lanes in two
 //! bands separated by a 5.9 mm dead gap — and a single monotone program over
 //! the flat lane list honours its ordering ACROSS that void: it will drag a net
 //! six millimetres into the far band rather than leave the schedule crossed.
 //! That is not scheduling, it is a detour dictated to a net that never wanted
-//! one, and measured on barracuda it cost two nets for the one it bought. So
+//! one, and measured on board-a it cost two nets for the one it bought. So
 //! each band is solved as its own capacity-limited sub-corridor over the nets
 //! whose ideals land nearest it (monotonicity is preserved WITHIN a band, where
 //! it means something — two nets in different bands are separated by an
@@ -65,7 +65,7 @@
 //! human would author to act on it.
 //!
 //! Detection and steering are split deliberately, on a measurement. On
-//! barracuda, ANY steering of the eight J1 control escapes scores 81/91 against
+//! board-a, ANY steering of the eight J1 control escapes scores 81/91 against
 //! the 82/91 control — a perfect assignment and a bare wave split with no forms
 //! alike. That escape is a knife-edge, so an automatic assignment would spend a
 //! routed net to buy a tidier picture. What the geometry can do unattended is
@@ -250,7 +250,7 @@ const lane_slack: usize = 2;
 /// "guide" is dictating a detour, which is precisely what the soft-guide
 /// contract promises never to do. Five was chosen as the smallest whole number
 /// that leaves every fixture's legitimate spread intact while refusing
-/// barracuda's measured 4.1 mm / 6.2 mm cross-void drags.
+/// board-a's measured 4.1 mm / 6.2 mm cross-void drags.
 const max_displacement_lanes: f64 = 5;
 
 /// A closed interval on the lane axis.
@@ -317,7 +317,7 @@ fn finishPlan(
 /// the constriction. Nets left unassigned contribute nothing.
 ///
 /// Deliberately NOT a ramp from the hub pad to the lane point. A pad-to-lane
-/// segment reads straight across the hub's OTHER pads (on barracuda's J1 it
+/// segment reads straight across the hub's OTHER pads (on board-a's J1 it
 /// crosses the second pad column outright), and a guide there tells the maze it
 /// is cheap to route over foreign copper — the guide is a cost bonus, not a
 /// keepout, so nothing stops it. The lane alone carries all the scheduling
@@ -640,9 +640,9 @@ fn cutStart(in: CutInput) f64 {
 ///
 /// A lane outside the board carries no copper, so offering one is offering a
 /// lane that does not exist — and the placement bbox is NOT the board: a part
-/// hanging over the edge (barracuda's mounting hole and one buck inductor both
+/// hanging over the edge (board-a's mounting hole and one buck inductor both
 /// do) pushes it out past the outline, and the escape then schedules nets into
-/// the strip beyond it. Measured on barracuda 2026-08-05: J1's eight-net escape
+/// the strip beyond it. Measured on board-a 2026-08-05: J1's eight-net escape
 /// offered a whole three-lane band at y 114.6–116.4 on a board whose outline
 /// ends at y 114.4.
 fn boardLimits(placement: optimizer.Placement, along_y: bool) Interval {
@@ -926,7 +926,7 @@ fn schedule(arena: Allocator, sources: []const Source, cut: Cut) Allocator.Error
 
 /// Thin each band to `load` + slack lanes of its own. Thinning per band rather
 /// than over the flat list is what stops a band NO net wants from spending the
-/// resolution a crowded band needs — on barracuda's bimodal J1 escape three of
+/// resolution a crowded band needs — on board-a's bimodal J1 escape three of
 /// the ten offered lanes sat in a band whose nearest net was four millimetres
 /// away. `spreadLanes` keeps a band's first and last lane, so a band's extent —
 /// the thing net attachment was decided on — survives the thinning unchanged.
@@ -1094,7 +1094,7 @@ fn refusedOf(arena: Allocator, assignments: []const Assignment) Allocator.Error!
 
 /// How many distinct bands `lanes` spans. More than one means the corridor's
 /// free space is split by an obstacle, which is the difference between "eight
-/// nets, ten lanes, fine" and barracuda's actual J1 escape.
+/// nets, ten lanes, fine" and board-a's actual J1 escape.
 fn bandCount(lanes: []const Lane) usize {
     if (lanes.len == 0) return 0;
     var n: usize = 1;
@@ -1149,9 +1149,9 @@ const detect_min_fan: usize = 3;
 /// every other gate, so the report is capped rather than exhaustive.
 ///
 /// Sized on the corpus (measured 2026-08-06, uncapped): rf-switch-8way and
-/// adf5901 find 0, the four cyclops boards and straps 2-4, black-canyon 6,
-/// barracuda 9, barracuda-base 11, stm32n6 15, and the unplaced labstation 18.
-/// Six covers every finished board's worst handful — barracuda's `J1` west
+/// adf5901 find 0, the four board-b boards and board-d 2-4, board-e 6,
+/// board-a 9, board-a-base 11, board-c 15, and the unplaced board-f 18.
+/// Six covers every finished board's worst handful — board-a's `J1` west
 /// escape, the one the audit named, comes fifth — and holds the two crowded
 /// boards to the same kind of bounded report `pad-sealed` gets from its own cap.
 const detect_max_findings: usize = 6;
@@ -1263,7 +1263,7 @@ pub fn detectCached(
 /// through the escape, so it is not contending for one.
 ///
 /// Excluding them is not tidiness, it is what makes the measurement mean
-/// anything on a real connector. Barracuda's `J1` carries twenty-one ground
+/// anything on a real connector. Board A's `J1` carries twenty-one ground
 /// pads spread over all four edges: counting `GND` as a westward contender both
 /// added a net that never wanted a lane AND stretched the cross-section across
 /// the whole connector, so the side read as sixteen nets against nineteen
@@ -2046,7 +2046,7 @@ test "the declared board outline bounds the lanes, not the placement bounding bo
     const bbox = try plan(arena, p, .{ .nets = &all_four });
 
     // Same board, now declaring an outline narrower than the parts' own extent
-    // (a part hanging over the edge is exactly how barracuda's escape came to
+    // (a part hanging over the edge is exactly how board-a's escape came to
     // offer a band 2 mm past its own board edge).
     p.board_rect = .{ .minx = -11, .miny = -3, .w = 22, .h = 6 };
     const clipped = try plan(arena, p, .{ .nets = &all_four });

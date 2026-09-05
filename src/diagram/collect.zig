@@ -829,7 +829,7 @@ fn antennaPass(
 // ── on-board clock sources ──────────────────────────────────────────────
 
 /// A 2-pin crystal / XTAL by its library component name. Excludes TCXO/oscillator
-/// *chips*, which are modelled as their own sections (e.g. cyclops's SiT5157),
+/// *chips*, which are modelled as their own sections (e.g. board-b's SiT5157),
 /// so we don't double-count them.
 fn isCrystalComponent(component: []const u8) bool {
     return std.ascii.findIgnoreCase(component, "crystal") != null or
@@ -925,7 +925,7 @@ fn accumulate(
 /// `sourceRank` (oscillator/host/regulator outrank PLL/mixer/chip sinks),
 /// breaking ties toward the lowest node id for stability. Components here
 /// don't declare pin electrical types, so role is inferred from the block's
-/// name + category — grounded in the real Cyclops part names.
+/// name + category — grounded in the real Board B part names.
 fn pickDriver(
     cls: ClassId,
     clean: []const u8,

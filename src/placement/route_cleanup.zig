@@ -921,7 +921,7 @@ fn dropSingleLayerVias(
 /// FILL; the router has drawn outlines and no raster, and an outline is not a
 /// conductor — clearance can split it, a minimum-width filter can erase a neck
 /// of it, an antipad can hole it under the very barrel being judged. Crediting
-/// outlines here was measured on barracuda: the finish deleted 380 sections
+/// outlines here was measured on board-a: the finish deleted 380 sections
 /// that the fabrication graph needed and opened about a hundred nets, silently,
 /// because this seam has no rollback. Aggressive deletion belongs at the gate,
 /// where every removal is verified against `fab_readiness` and a net that
@@ -3145,10 +3145,10 @@ test "terminalTailPadSide finds a via-tail's pad end and ignores a real trace" {
     try testing.expect(terminalTailPadSide(leg, -0.05, -0.05, @min(0.4 / 4.0, 0.127 / 2.0)) == null);
 }
 
-// spec: placement/router - a terminal-via snap reuses the earlier same-net barrel when recentering would create the barracuda TXDATA via-spacing error
+// spec: placement/router - a terminal-via snap reuses the earlier same-net barrel when recentering would create the board-a TXDATA via-spacing error
 test "terminal snap folds the later TXDATA barrel onto the earlier one" {
     // #ddc3 measured a 0.0935626 mm copper gap after the later 0.4 mm via was
-    // snapped toward the pad, below barracuda's 0.127 mm rule. Before the snap
+    // snapped toward the pad, below board-a's 0.127 mm rule. Before the snap
     // the pair sat legally 0.53 mm apart.
     const vias = [_]Via{
         .{ .x = 0.53, .y = 0, .dia = 0.4, .drill = 0.2, .net = 7 },
@@ -3165,7 +3165,7 @@ test "terminal snap folds the later TXDATA barrel onto the earlier one" {
     try testing.expectApproxEqAbs(@as(f64, 0), anchored.y2, 1e-12);
 }
 
-/// barracuda's V_12V hop: two vias 45° apart joined by ONE F.Cu segment, with
+/// board-a's V_12V hop: two vias 45° apart joined by ONE F.Cu segment, with
 /// B.Cu copper running away from each — the "up, across a millimetre, back
 /// down" shape with nothing in between.
 fn v12vHopFixture() struct { tracks: [3]Track, vias: [2]Via } {
@@ -3230,7 +3230,7 @@ test "clearingElbow refuses a replacement that runs back over the outer chain" {
     const a = [2]f64{ 185.108, 98.739 };
     const b = [2]f64{ 186.350, 99.981 };
     // The outer chains leave BOTH vias heading toward the other one — the very
-    // shape that produced barracuda's V_12V spur. Every elbow between them runs
+    // shape that produced board-a's V_12V spur. Every elbow between them runs
     // back over existing copper, so the hop must stand.
     const back = [2][2]f64{ .{ 186.000, 99.600 }, .{ 185.400, 99.000 } };
     try testing.expect(clearingElbow(AllClearProbe{}, 1, a, b, back) == null);
@@ -3275,8 +3275,8 @@ test "bridgeCopperOpen joins two disjoint same-net track islands into one" {
 }
 
 // spec: placement/router - a trace that only grazes a pad is welded from its centreline to the exact pad centre
-test "barracuda op-amp pin 6 pad-centre target rejects a grazing trace" {
-    // The saved barracuda auto-90 LF_OUT route: U21.6 is a 1.528 x 0.65 mm
+test "board-a op-amp pin 6 pad-centre target rejects a grazing trace" {
+    // The saved board-a auto-90 LF_OUT route: U21.6 is a 1.528 x 0.65 mm
     // land centred at (132.466,107.930). This 45-degree run misses its centre
     // by 0.434 mm, but its 0.2532 mm copper still grazes the pad closely enough
     // for the electrical connectivity oracle to accept it.
@@ -3440,7 +3440,7 @@ test "a fill-credited deletion plan consumes a doubled pad stub joined through i
         .{ .shape = .{ .x0 = -0.3, .y0 = -0.3, .x1 = 0.3, .y1 = 0.3 }, .net = 0, .layer = 0 },
     };
     // One land, two short legs out to two barrels 0.38 mm apart — the shape
-    // barracuda's power rails carry. Both barrels reach only this one routed
+    // board-a's power rails carry. Both barrels reach only this one routed
     // layer, so neither is a destination; the filled region under both far
     // ends is what actually joins them, and one leg is then enough.
     var list: std.ArrayList(Track) = .empty;

@@ -182,7 +182,7 @@ pub const State = struct {
     ///   * **The budget is the band actually traversed.** The old test budgeted
     ///     four times the CORRIDOR width, but the band a crossing must get
     ///     through is `2 · (corridor + caster half-width + probe half-width)`,
-    ///     which is wider. On barracuda's fenced RF class (0.627 corridor,
+    ///     which is wider. On board-a's fenced RF class (0.627 corridor,
     ///     0.3124 caster, 0.2532 probe) that band is 1.82 mm against a 2.51 mm
     ///     budget — so a 45° crossing, at 2.57 mm, was REFUSED. That is the
     ///     router's own lattice angle, and the exact case the old comment worked
@@ -273,7 +273,7 @@ pub const State = struct {
 /// 30° leaves the router's own 45° lattice a wide margin — a 45° crossing spends
 /// 1.41 band-lengths inside, against the 2.0 this allows — while still catching
 /// the case the shadow exists for: the 8 mm parallel run one layer down, which
-/// at barracuda's 1.82 mm band is 4.4 band-lengths and refused twice over.
+/// at board-a's 1.82 mm band is 4.4 band-lengths and refused twice over.
 const min_cross_angle_deg: f64 = 30.0;
 
 /// `1 / sin(min_cross_angle_deg)` — the in-band length multiple that angle
@@ -539,7 +539,7 @@ test "a stamped shadow spans both layers, exempts its owner, and prices a via ab
     try testing.expect(!plain.at(0, on, 1));
 }
 
-/// barracuda's fenced RF class as `runsAlong` sees it: a 0.627 mm corridor
+/// board-a's fenced RF class as `runsAlong` sees it: a 0.627 mm corridor
 /// (0.127 clearance + 0.1 margin + 0.4 via) cast by a 0.3124 mm RF trace, probed
 /// by the 0.2532 mm LVDS pair that has to cross it. These are the real numbers
 /// the miscalibration was found on, so the tests below are the board's own case

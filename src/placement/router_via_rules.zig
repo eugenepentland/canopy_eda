@@ -183,7 +183,7 @@ test "same-net via copper spacing rejects the TXDATA drill-wall-only pitch" {
 }
 
 // spec: placement/router-via-rules - exact off-grid via clearance measures the via radius against the physical outline
-test "exact outline clearance rejects the barracuda edge geometry" {
+test "exact outline clearance rejects the board-a edge geometry" {
     const br = optimizer.BoardRect{ .minx = 128.5, .miny = 100, .w = 10, .h = 10 };
     try std.testing.expect(!clearsOutline(br, null, 0.4, 0.2, 128.897, 105));
     try std.testing.expect(clearsOutline(br, null, 0.4, 0.2, 128.9, 105));

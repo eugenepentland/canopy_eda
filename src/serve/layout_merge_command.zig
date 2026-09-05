@@ -206,9 +206,9 @@ fn printReport(alloc: std.mem.Allocator, report: Report) RunError!void {
 
 // spec: serve/layout-merge - the argument parser reads project, source, layout, star and dry-run flags
 test "parseArgs reads semantic layout transfer flags" {
-    const args = parseArgs(&.{ "--project-dir", "/p", "barracuda", "--from", "/tmp/source.layouts.json", "--layout", "final", "--star", "--dry-run" });
+    const args = parseArgs(&.{ "--project-dir", "/p", "board-a", "--from", "/tmp/source.layouts.json", "--layout", "final", "--star", "--dry-run" });
     try std.testing.expectEqualStrings("/p", args.project_dir);
-    try std.testing.expectEqualStrings("barracuda", args.design);
+    try std.testing.expectEqualStrings("board-a", args.design);
     try std.testing.expectEqualStrings("/tmp/source.layouts.json", args.source);
     try std.testing.expectEqualStrings("final", args.layout);
     try std.testing.expect(args.star and args.dry_run);

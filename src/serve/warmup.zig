@@ -31,7 +31,7 @@
 //! The editor's DEFERRED payload (`?derived=1` — pours, the reporting DRC,
 //! mask relief, trace EM, power integrity) is warmed the same way, in a second
 //! board pass. It is fetched automatically right after every editor page paints
-//! and costs far more than the page it follows (barracuda: ~15 s against
+//! and costs far more than the page it follows (board-a: ~15 s against
 //! ~0.3 s), so a cold one is the longest wait the editor has. It is a second
 //! pass rather than part of the first because a reader BLOCKS on the page: one
 //! render can produce both halves, but holding each page back until its own
@@ -196,7 +196,7 @@ fn run(ctx: *Server) void {
             // pre-rendering exactly when it mattered: after every deploy, no
             // editor entry even began warming until the unrelated first phase
             // completed. A small worker set also starts common adjacent boards
-            // (barracuda / barracuda-base included) together.
+            // (board-a / board-a-base included) together.
             const boards_started = clock.nanoTimestamp();
             boards = warmBoards(ctx, board_order, .page);
             const board_ms = @divTrunc(clock.nanoTimestamp() - boards_started, std.time.ns_per_ms);
@@ -207,7 +207,7 @@ fn run(ctx: *Server) void {
             // The editor fetches `?derived=1` right after first paint and that
             // response — pours, the reporting DRC, mask relief, trace EM, power
             // integrity — is by far the most expensive thing this server
-            // computes (barracuda: ~15 s against ~0.3 s for its page). Warming
+            // computes (board-a: ~15 s against ~0.3 s for its page). Warming
             // it matters as much as warming the page.
             //
             // It is a separate phase rather than part of the pass above so a

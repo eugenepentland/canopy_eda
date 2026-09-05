@@ -223,13 +223,13 @@ fn printResult(arena: std.mem.Allocator, outcome: Outcome) RunError!void {
 test "argument parsing reads dry-run and the chord tolerance override" {
     const got = parseArgs(&.{
         "--project-dir",      "projects/designs",
-        "barracuda",          "--board",
+        "board-a",            "--board",
         "boards/b.kicad_pcb", "--dry-run",
         "--chord-tol-mm",     "0.1",
     });
     try std.testing.expect(got.dry_run);
     try std.testing.expectEqual(@as(f64, 0.1), got.chord_tol_mm);
-    try std.testing.expectEqualStrings("barracuda", got.design);
+    try std.testing.expectEqualStrings("board-a", got.design);
     try std.testing.expectEqualStrings("boards/b.kicad_pcb", got.board.?);
     try std.testing.expectEqualStrings("projects/designs", got.project_dir);
 }

@@ -333,7 +333,7 @@ fn checkDeprecatedForms(
 }
 
 /// Flag a design whose functional blocks aren't split into `(group …)` cohesion
-/// clusters (the barracuda-base idiom). Builds the same diagram graph the
+/// clusters (the board-a-base idiom). Builds the same diagram graph the
 /// schematic Block-overview view uses — so "ungrouped" means exactly what that
 /// view's "Other" bucket shows — and warns once a real board (≥ the block
 /// floor) leaves any block out of every cluster. Tiny power/module designs stay
@@ -374,7 +374,7 @@ fn checkComponentGrouping(
     const msg = std.fmt.allocPrint(
         allocator,
         "{d} of {d} blocks are outside any (group …) cluster: {s}{s} — add (group \"Label\" \"block\" …)" ++
-            " inside this design's (diagram-layout …) (like barracuda) for a scannable block view",
+            " inside this design's (diagram-layout …) (like board-a) for a scannable block view",
         .{ cov.ungrouped.len, cov.total, names.items, tail },
     ) catch return;
     try violations.append(allocator, .{

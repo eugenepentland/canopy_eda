@@ -58,7 +58,7 @@
 //! chain both of whose ends lie on ONE same-net land, and which everything else
 //! touches only ON that land, joins nothing the land does not already join. It
 //! is `pad_entry.whollyOnLand` asked topologically instead of vertex by vertex —
-//! which is what it takes to see straps-synth-lmx2595's `LMX_VTUNE` hairpin on
+//! which is what it takes to see board-d-synth-lmx2595's `LMX_VTUNE` hairpin on
 //! R4, a 0.367 mm out-and-back that pokes 0.06 mm past the land edge (so no
 //! vertex test catches it) and whose two ends are 0.011 mm apart on the land
 //! (so no loose-end test catches it either — both ends terminate on the pad).
@@ -66,12 +66,12 @@
 //! That argument is true of far more copper than it is SAFE to remove, and the
 //! difference cost a routed net before it was bounded. Four conditions narrow it
 //! to the shape it exists for, and three of them were measured rather than
-//! reasoned (barracuda, `bench-route`, 2026-08-12 — the unbounded rule took 32
+//! reasoned (board-a, `bench-route`, 2026-08-12 — the unbounded rule took 32
 //! chains and 29 mm off the board and opened `V_12V`, 79/92 → 78/92):
 //!
 //!   * the land must carry a same-net BARREL. That is the premise — this pad's
 //!     net continues through a via standing on its own copper — and it is the
-//!     one condition that made barracuda whole again (79/92 restored, and the
+//!     one condition that made board-a whole again (79/92 restored, and the
 //!     rule still takes the hairpin). A land with no barrel has no such story.
 //!   * the land may not be a thermal PADDLE (`land_transit.paddle_min_half_mm`):
 //!     a paddle's two corners are millimetres apart and everything between them
@@ -488,7 +488,7 @@ fn redundantOnLand(
     // past an 0402's edge — from a stub running out to a barrel that stands
     // OUTSIDE the land, which is a real connection and the land cannot replace
     // it. Measured 2026-08-12: without this bound the rule took 32 chains and
-    // 29 mm off barracuda and opened `V_12V` (bench-route 79/92 -> 78/92).
+    // 29 mm off board-a and opened `V_12V` (bench-route 79/92 -> 78/92).
     for (pts) |p| {
         if (land.pointDistTo(p) > pad_escape_clear_mm) return false;
     }
@@ -673,7 +673,7 @@ test "a leg that ends on the barrel is re-anchored onto the new site" {
 test "an out-and-back hairpin on one land is redundant" {
     const pad = land0402(1);
     const land = shapeOf(pad);
-    // straps-synth-lmx2595's LMX_VTUNE hairpin on R4, translated to the origin:
+    // board-d-synth-lmx2595's LMX_VTUNE hairpin on R4, translated to the origin:
     // out past the land's edge and back, both ends on the land.
     const hairpin = [_][2]f64{ .{ 0, 0.15 }, .{ 0, 0.3835 }, .{ 0.0107, 0.1502 } };
     try testing.expect(land.pointDistTo(hairpin[0]) == 0);

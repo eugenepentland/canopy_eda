@@ -30,7 +30,7 @@
 //! copper is the pad itself. Those count exactly like a copper island: a pad
 //! with nothing on it is the most literal open there is, and excusing it as
 //! "unrouted, the ratsnest's job" is what let a board report a clean DRC while
-//! the fab gate simultaneously refused it for the same net (barracuda's
+//! the fab gate simultaneously refused it for the same net (board-a's
 //! `hmc451/C112` sat alone on `V_5VA` and no marker named it). The two now
 //! agree by construction: `net_open` fires on exactly the nets
 //! `fab_readiness.netConnectivity` calls unconnected.
@@ -66,7 +66,7 @@ pub fn check(
 ///
 /// Exposed so the reporting DRC seam can MEMOISE it beside the topology fill it
 /// already retains: both are the same function of the board and its copper, and
-/// this one is the other half of that seam's cost — 2.6 s of a barracuda-base
+/// this one is the other half of that seam's cost — 2.6 s of a board-a-base
 /// pass, for four zones. Feed the result back through `Prepared.zone_fills`.
 pub fn zoneFills(
     arena: std.mem.Allocator,
@@ -190,7 +190,7 @@ pub fn checkWithConnectivityScoped(
     // board and its copper, not of the net being inspected, so the per-net
     // graph builder gets the same slice every time — see
     // `fab.buildNetGraphPrepared`. Rebuilding it inside the loop made this pass
-    // (which the PCB page runs on every render) cost ~86 s on barracuda.
+    // (which the PCB page runs on every render) cost ~86 s on board-a.
     // `base` is the caller's shared edge-margin field; every fill below — the
     // zone rasters here and the per-net plane connect — reads it, so the
     // outline walk happens once for the whole render instead of once per
@@ -1288,7 +1288,7 @@ test "a user copper pour overlapping pad and via edges joins islands across laye
 
     // B.Cu pour: 0.2 mm overlap with U1's bottom land at the left and 0.1 mm
     // overlap with the via's 0.2 mm-radius copper disc at the right. Both
-    // centres remain outside, matching Barracuda U19's saved custom zones.
+    // centres remain outside, matching Board A U19's saved custom zones.
     const poly = [_][2]f64{ .{ 0.1, -0.4 }, .{ 7.9, -0.4 }, .{ 7.9, 0.4 }, .{ 0.1, 0.4 } };
     const zones = [_]pour.UserZone{.{ .net = "SIG", .layer = 1, .poly = &poly }};
     try testing.expectEqual(@as(usize, 0), count(try check(arena, placement, .{ .tracks = &tracks, .vias = &vias, .zones = &zones }, null)));
@@ -1358,7 +1358,7 @@ test "an inner-layer user pour joins same-net through-hole islands but ignores S
     defer arena_i.deinit();
     const arena = arena_i.allocator();
 
-    // The barracuda case: a rail pour on In2.Cu (signal index 2). Two SIG islands
+    // The board-a case: a rail pour on In2.Cu (signal index 2). Two SIG islands
     // (a 0.4 mm-gapped stub pair → normally one net_open) each anchored by a pad.
     const tracks = [_]router.Track{
         .{ .x1 = 0, .y1 = 0, .x2 = 4.7, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
@@ -1449,7 +1449,7 @@ test "a pad the routed copper never reached is flagged as its own island" {
     defer arena_i.deinit();
     const arena = arena_i.allocator();
 
-    // barracuda's hmc451/C112 in miniature: U1 and C1 are joined by real copper,
+    // board-a's hmc451/C112 in miniature: U1 and C1 are joined by real copper,
     // and a THIRD same-net pad (C2) sits 6 mm away with nothing on it. The old
     // pass dropped that island for holding no track/via ("unrouted, the
     // ratsnest's job") and reported a clean net, while the fab gate refused the

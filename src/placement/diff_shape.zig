@@ -58,7 +58,7 @@ fn envelopeTerminals(ends: diff_route.Ends) [2]router.NetPt {
 /// strength of that guarantee. The mesh does not make it — `cdt_layers.extract`
 /// appends a via unconditionally but drops a leg whose funnel yields no polyline,
 /// so a route CAN come back with a trailing via and one run too few. Measured on
-/// barracuda: `REF_LMX_P`/`REF_LMX_N`'s re-home found exactly that channel (four
+/// board-a: `REF_LMX_P`/`REF_LMX_N`'s re-home found exactly that channel (four
 /// runs, four vias) and `shiftVia` indexed past its own last run. The router's own
 /// emitter is happy with the looser shape, so the refusal belongs here, on the one
 /// consumer whose contract is tighter.

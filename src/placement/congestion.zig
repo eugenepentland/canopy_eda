@@ -5,7 +5,7 @@
 //! PathFinder-style negotiated congestion (present + history pricing, rip and
 //! re-route until nobody shares a resource) has been tried in this router once
 //! before, INSIDE the DRC-gated transactional rip-up path, and it measured
-//! WORSE than doing nothing (83/90 on barracuda). The reason is structural, not
+//! WORSE than doing nothing (83/90 on board-a). The reason is structural, not
 //! a tuning miss: that path requires every INTERMEDIATE board to be legal, and
 //! legality mid-iteration is precisely the thing negotiated congestion cannot
 //! promise. Its whole mechanism is to let nets overlap, price the overlap, and
@@ -45,29 +45,29 @@
 //! four boards that route at a blessed placement:
 //!
 //!   * **The negotiation works as an algorithm.** It converges. On
-//!     cyclops-xband-sip the loop closes ELEVEN more nets than the ladder left
-//!     (oracle 25 -> 36) and on straps five (83 -> 88), losing none.
+//!     board-b-xband-sip the loop closes ELEVEN more nets than the ladder left
+//!     (oracle 25 -> 36) and on board-d five (83 -> 88), losing none.
 //!   * **Its copper is not legal, and convergence does not make it legal.** A
 //!     lattice on which nobody shares a cell is not a board that clears DRC: the
 //!     grid records path centrelines while the rules measure via barrels,
-//!     diagonal spans and per-class widths. Barracuda converges with ZERO shared
+//!     diagonal spans and per-class widths. Board A converges with ZERO shared
 //!     cells and still hands the gate +9 fab-blocking errors (3 via-track, 6
 //!     track-track). So the end-state gate refuses it — which is the gate doing
 //!     exactly its job.
 //!   * **Legalized, the negotiation's product is worth zero.** Laying the
 //!     discovered victim SET down the ordinary way, in the router's own priority
 //!     order (`legalize`), gives DRC-clean copper on every board — and gives back
-//!     precisely the board the ladder already had: barracuda 81 -> 81, straps
-//!     83 -> 83, cyclops-xband-sip 25 -> 25, black-canyon 54 -> 54, no net lost,
+//!     precisely the board the ladder already had: board-a 81 -> 81, board-d
+//!     83 -> 83, board-b-xband-sip 25 -> 25, board-e 54 -> 54, no net lost,
 //!     no net gained, on any board, under any budget tried.
-//!   * **Where the residual is sealed, there is nothing to negotiate.** Barracuda
-//!     and black-canyon produce 4 and 0 shared cells IN TOTAL: their open nets do
+//!   * **Where the residual is sealed, there is nothing to negotiate.** Board A
+//!     and board-e produce 4 and 0 shared cells IN TOTAL: their open nets do
 //!     not fail because copper is in the way, they fail because pads, the board
 //!     outline and the lattice are — none of which the sandbox may lower, and a
 //!     pad can never be re-routed. This is the same diagnosis `joint_rescue`
 //!     recorded for the same seven nets.
 //!   * **The unconverged residue is a capacity wall, not a pricing miss.** On
-//!     straps and cyclops-xband-sip 11-35 cells stay shared at `present = 256`
+//!     board-d and board-b-xband-sip 11-35 cells stay shared at `present = 256`
 //!     — a surcharge of 256 grid pitches per cell. A net still crossing at that
 //!     price has no alternative path at all.
 //!
@@ -179,7 +179,7 @@ pub const Limits = struct {
     max_iterations: usize = 0,
     /// Most nets the victim set may ever hold. Once it is full no further
     /// displaced net can be adopted, so the overlaps it suffered can never be
-    /// repaired — measured on cyclops-xband-sip, a cap of 12 shut out all 14
+    /// repaired — measured on board-b-xband-sip, a cap of 12 shut out all 14
     /// nets the first round displaced. It has to be wide enough to hold the
     /// residual set AND everything that residual set pushes.
     max_victims: usize = 16,
@@ -462,7 +462,7 @@ const Sandbox = struct {
     /// usable — a lattice on which nobody shares a cell is still not a board
     /// that clears DRC, because the lattice records path centrelines while the
     /// rules measure via barrels, diagonal spans and per-class widths (measured
-    /// on barracuda: a round that converged with ZERO shared cells handed the
+    /// on board-a: a round that converged with ZERO shared cells handed the
     /// gate +9 fab-blocking errors, 3 via-track and 6 track-track). What the
     /// negotiation produces that is worth keeping is the victim SET and the
     /// ORDER — which nets contend, and who should claim first. So the phase
@@ -479,7 +479,7 @@ const Sandbox = struct {
         // negotiation's product is the SET — which nets contend — and its own
         // order is an artefact of when each net was pulled in; laying a large
         // set down out of priority order is how a legalized board LOSES nets it
-        // already had (measured on straps: twelve).
+        // already had (measured on board-d: twelve).
         const order = try self.scratch.dupe(usize, self.victims.items);
         std.mem.sort(usize, order, core.result.routable, byPriorityDesc);
         for (order) |net_i| {
@@ -531,7 +531,7 @@ const Sandbox = struct {
     /// Without this the sandbox lies to itself. A cell overwritten in round 1
     /// and freed by round 2's rip belongs to nobody, so a victim may re-take it
     /// with no overlap recorded — and the loop reports a legal board while two
-    /// nets' copper sits in the same place. (Measured on cyclops-xband-sip: a
+    /// nets' copper sits in the same place. (Measured on board-b-xband-sip: a
     /// round that reported ZERO shared cells handed the gate a board with 23
     /// track-to-track clearance errors, all of them on nets whose claims had
     /// been lost this way.) A net that is itself a victim is skipped: its copper
@@ -664,7 +664,7 @@ fn byPriorityDesc(routable: []const router.RipNet, a: usize, b: usize) bool {
 /// that victim then frees the cell to nobody while the displaced net's copper is
 /// still lying there. The loop would read that as "nobody shares a cell" and the
 /// legalizing pass would draw straight through real metal. Measured on
-/// cyclops-xband-sip before this existed: a round reporting ZERO shared cells
+/// board-b-xband-sip before this existed: a round reporting ZERO shared cells
 /// handed the gate a board with 23 track-to-track clearance errors.
 pub fn reclaimLane(occ: []i32, lost: []const i32, victim: []const bool) usize {
     var back: usize = 0;

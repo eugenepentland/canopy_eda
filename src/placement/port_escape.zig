@@ -2,7 +2,7 @@
 //! block?
 //!
 //! Every other routability gate keys off nets that route INSIDE the placement.
-//! A module port does not: `straps-synth-lmx2595`'s `SPI_SCK` terminates on ONE
+//! A module port does not: `board-d-synth-lmx2595`'s `SPI_SCK` terminates on ONE
 //! pad of `U1` and goes nowhere else in the module, so it has no airwire, no
 //! lane demand at any hub's escape fan, and nothing for the router to fail at —
 //! its net is a single pin, which the router skips outright. A rough seed can
