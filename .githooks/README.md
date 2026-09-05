@@ -1,12 +1,44 @@
 # Git hooks and the production deploy
 
-Everything in this directory is **tracked**, so a fresh clone gets the whole
-setup. Point git at it and (optionally) turn on production deploys:
+## Contributors: one command, and none of the rest
 
 ```sh
 .githooks/install.sh            # hooks only — safe on any clone
-.githooks/install.sh --deploy   # + prod auto-deploy + server/checkpoint units
-.githooks/install.sh --check    # report what is/isn't installed
+```
+
+That is the whole contributor story. It points `core.hooksPath` at this
+directory so a commit runs the Guardian gate and a push of `main` runs the
+latency gate; it installs no service, starts no timer, and deploys nothing.
+Build and test with `zig build` / `zig build --seed=1 test` as usual.
+
+**Everything else in this directory, and in `systemd/`, is the maintainer's
+production deployment machinery — the owner's single-user box that serves the
+live schematic viewer.** A contributor never runs, edits, or needs any of it,
+and no netlisp feature depends on it:
+
+| File | What it is |
+| --- | --- |
+| `.githooks/deploy-prod.sh` | installs a verified candidate, restarts the unit, health-checks, rolls back |
+| `.githooks/deploy-debounce.sh` | the coalescing deploy worker behind `.git/deploy-pending` |
+| `.githooks/wait-deploy.sh` | blocks until a queued deploy has shipped (or failed) |
+| `.githooks/prepare-release.sh` | the release gate: Guardian + full suite + ReleaseSafe build + browser gates, publishing a candidate |
+| `.githooks/netlisp*.service.in`, `.githooks/netlisp*.timer.in` | templates `install.sh --deploy` renders into `~/.config/systemd/user/` |
+| `systemd/netlisp.service` | an EXAMPLE render of the server unit on a placeholder root, kept reviewable and asserted by `src/deploy_unit.zig` |
+| `systemd/netlisp-guardian-nightly.service.in`, `…timer` | the maintainer's nightly whole-tree mutation run (`install.sh --guardian-nightly`) |
+| `scripts/checkpoint-designs.py` | quiet-period git checkpoints of the live design library |
+| `scripts/perf_gate.sh` (push half) | the `main`-push latency gate, measured against the owner's boards |
+
+Nothing tracked here names a machine: the units are templates or placeholder
+renders, and `install.sh` substitutes the checkout it is run from. A real home
+directory appearing in one of them is drift, and `src/deploy_unit.zig` fails
+the build over it.
+
+The maintainer commands:
+
+```sh
+.githooks/install.sh --deploy            # + prod auto-deploy + server/checkpoint units
+.githooks/install.sh --check             # report what is/isn't installed
+.githooks/install.sh --guardian-nightly  # + the nightly Guardian/mutation timer
 ```
 
 `install.sh` sets `core.hooksPath` to this directory, so `.git/hooks/` is no
@@ -303,8 +335,27 @@ scripts/checkpoint-designs.py --project-dir projects/designs --verbose
 scripts/checkpoint-designs.py --project-dir projects/designs --force
 ```
 
+## The nightly Guardian gate (maintainer-only)
+
+`systemd/netlisp-guardian-nightly.service.in` runs `zig build` plus
+`zig build mutate-full` — the whole-tree mutation ratchet — once a night, so the
+score in `.guardian/mutation.txt` climbs without anyone waiting hours for it.
+`.githooks/install.sh --guardian-nightly` renders it for this checkout,
+installs the timer beside it and enables the timer; `install.sh --check`
+reports whether it is installed. It is a template because the unit it replaces
+was a checked-in file with one machine's checkout **and** its private Zig
+toolchain path baked in, symlinked into `~/.config/systemd/user/`. The rendered
+unit runs `zig` from a login shell's PATH instead, which is the pinned compiler
+`scripts/install-zig.sh --link` puts there.
+
 ## pre-commit
 
-`pre-commit` is managed by `guardian-check`, not by `install.sh` — it runs the
-fast 67-check gate on every commit. If it is missing, build `guardian-zig` and
-let guardian reinstall it.
+`pre-commit` is the one hook `install.sh` does not write: `guardian-check`
+generates it (`guardian-check install-hook`, and any `commit` run re-ensures
+it), and it runs the fast gate on every commit. It is therefore **not tracked**
+— it is generated per machine and `.gitignore`d, because guardian bakes the
+absolute path of the binary that installed it into the file as a last-resort
+fallback (the order is `$GUARDIAN_CHECK` → `./zig-out/bin/guardian-check` →
+`guardian-check` on PATH → that baked path). Set `GUARDIAN_CHECK` to point the
+gate somewhere else. If the hook is missing, run a build of guardian-zig and
+let guardian reinstall it, or `git commit --no-verify` once and fix it after.

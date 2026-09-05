@@ -23,8 +23,12 @@
 // quiet machine. Agents are told to ignore their own timings.
 //
 // Invoke (the caller must have created the spd-<variant> worktrees first):
-//   Workflow({ scriptPath: ".../pcb-layout-speedup.js" })                 // defaults below
-//   Workflow({ scriptPath: "...", args: { variants:["soa-relax","fastmath"] } })  // subset
+//   Workflow({ scriptPath: ".../pcb-layout-speedup.js", args: { repoRoot: "<checkout>" } })
+//   Workflow({ scriptPath: "...", args: { repoRoot: "<checkout>", variants: ["soa-relax"] } })
+// `repoRoot` is the absolute path of the netlisp checkout the spd-<variant>
+// worktrees were made from (`git rev-parse --show-toplevel`); everything else
+// defaults off it. Also accepted: projectDir, wtBase, outDir, wtHead,
+// guardianPath, correctness.
 //
 // Phases:
 //   1 Implement  one agent per variant, in its worktree — edit, build, verify checksum,
@@ -38,14 +42,24 @@ export const meta = {
   ],
 }
 
-// ── args (all overridable; defaults are this machine's discovered values) ──
+// ── args (all overridable) ────────────────────────────────────────────────
+// NOTHING here is a machine path. `repoRoot` is the one location input: pass
+// the absolute path of the netlisp checkout the pre-made worktrees came from
+// (`git rev-parse --show-toplevel` in that checkout). Without it the paths
+// below stay relative, which still works when every agent starts in the repo
+// root but reads worse in a prompt — so the caller should pass it.
 let _a = args
 if (typeof _a === 'string') { try { const p = JSON.parse(_a); if (p && typeof p === 'object') _a = p } catch (_e) { /* ignore */ } }
-const PROJECT_DIR = (_a && _a.projectDir) || '/home/epentland/ai/canopy/eda/projects/designs'
-const GUARDIAN_PATH = (_a && _a.guardianPath) || '/home/epentland/ai/canopy/guardian-zig'
+const REPO_ROOT = ((_a && _a.repoRoot) || '').replace(/\/+$/, '')
+const under = (rel) => (REPO_ROOT ? `${REPO_ROOT}/${rel}` : rel)
+const PROJECT_DIR = (_a && _a.projectDir) || under('projects/designs')
+// Optional: an absolute path to a LOCAL guardian-zig checkout, for the
+// sibling-symlink escape hatch below. Empty by default — build.zig.zon fetches
+// guardian by url+hash, so a normal build needs no local copy at all.
+const GUARDIAN_PATH = (_a && _a.guardianPath) || ''
 const OUT_DIR = (_a && _a.outDir) || '/tmp/pcb-bench'
-const WT_BASE = (_a && _a.wtBase) || '/home/epentland/ai/canopy/eda/.claude/worktrees'
-const WT_HEAD = (_a && _a.wtHead) || '7fa7868' // expected HEAD of each pre-made worktree
+const WT_BASE = (_a && _a.wtBase) || under('.claude/worktrees')
+const WT_HEAD = (_a && _a.wtHead) || '' // expected HEAD of each pre-made worktree, if pinned
 // Fast designs (each <1s) that exercise both solve paths, with their baseline
 // grid-quantized pose checksums. Agents verify their build reproduces these.
 const CORRECTNESS = (_a && Array.isArray(_a.correctness) && _a.correctness.length) ? _a.correctness : [
@@ -79,9 +93,9 @@ RULES:
   • Do NOT edit anything outside __WT__. Do NOT touch sibling spd-* worktrees, build.zig,
     src/bench_layout.zig, SPEC.md, or anything under ${PROJECT_DIR}.
 FIRST, sanity-check the workspace and STOP if it's wrong:
-  cd __WT__ && git rev-parse --short HEAD            # must print ${WT_HEAD}
+  cd __WT__ && git rev-parse --short HEAD${WT_HEAD ? `            # must print ${WT_HEAD}` : ''}
   test -f __WT__/src/bench_layout.zig && grep -q bench-layout __WT__/build.zig && echo WORKSPACE_OK
-If you don't see ${WT_HEAD} and WORKSPACE_OK, report build_ok=false with the reason and stop.
+If you don't see ${WT_HEAD ? `${WT_HEAD} and ` : ''}WORKSPACE_OK, report build_ok=false with the reason and stop.
 
 ═══ THE HOT PATH (by function name — line numbers drift, don't trust them) ═══
 \`solve\` → \`optimize\` (or \`rerankSolve\` for tiny boards) → per multi-start (STARTS=48)
@@ -107,9 +121,10 @@ do NOT heap-allocate per iteration). f64 throughout.
 ═══ BUILD (fast, ~25s, NO Guardian) ═══
   cd __WT__ && zig build bench-layout -Doptimize=ReleaseFast
 The binary lands at __WT__/zig-out/bin/bench-layout. ALWAYS ReleaseFast (Debug timings are
-meaningless). If the build fails configuring the 'guardian' dependency / can't find
-\`../guardian-zig\`, run once then rebuild:
-  [ -e __WT__/../guardian-zig ] || ln -s ${GUARDIAN_PATH} __WT__/../guardian-zig
+meaningless). The 'guardian' dependency is fetched by url+hash (build.zig.zon), so an
+offline box is the only thing that fails to configure it${GUARDIAN_PATH ? `; if that happens, point the
+fetch at the local checkout once and rebuild:
+  [ -e __WT__/../guardian-zig ] || ln -s ${GUARDIAN_PATH} __WT__/../guardian-zig` : ' — report build_ok=false in that case'}.
 
 ═══ CORRECTNESS GATE (decides if your variant is usable) ═══
   cd __WT__ && ./zig-out/bin/bench-layout --project-dir ${PROJECT_DIR} --reps 1 ${CORR_NAMES}

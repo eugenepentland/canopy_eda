@@ -24,7 +24,7 @@ board is a brand-new empty file under a temp dir.
 Usage:
     python3 scripts/test_kicad_sync_layout.py \
         [--binary zig-out/bin/netlisp] \
-        [--project /home/epentland/ai/canopy/eda/projects/designs] \
+        [--project <repo>/projects/designs] \
         [--design barracuda-base] [--port 7091]
 
 Exit code 0 = all scenarios pass.
@@ -112,6 +112,22 @@ def module_sources_with_starred_layout(project, design_sexp):
     return out
 
 
+def shared_checkout():
+    """The main checkout this worktree belongs to (its own root when it is one).
+
+    `--git-common-dir` names the SHARED .git directory, so stripping the final
+    `/.git` yields the checkout that owns projects/designs.
+    """
+    try:
+        common = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    return common[: -len("/.git")] if common.endswith("/.git") else ""
+
+
 def main():
     ap = argparse.ArgumentParser()
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -122,7 +138,11 @@ def main():
     args = ap.parse_args()
 
     if not os.path.isdir(os.path.join(args.project, "lib")):
-        alt = "/home/epentland/ai/canopy/eda/projects/designs"
+        # A linked worktree has no projects/ of its own — the designs checkout
+        # lives beside the SHARED git directory, which is where the pre-push
+        # gate resolves it from too. Never a hardcoded path: this has to work on
+        # any clone.
+        alt = os.path.join(shared_checkout(), "projects/designs")
         if os.path.isdir(os.path.join(alt, "lib")):
             args.project = alt
     real_design = None

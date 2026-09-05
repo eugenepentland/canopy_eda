@@ -1,7 +1,13 @@
-# Guardian nightly gate for the netlisp repo.
+# Guardian nightly gate for the netlisp repo — MAINTAINER INFRASTRUCTURE.
+#
+# This is a TEMPLATE, not a unit: `@TOP@` is substituted with the checkout path
+# by `.githooks/install.sh --guardian-nightly`, which writes the rendered unit
+# to ~/.config/systemd/user/ and enables the timer. Nothing about netlisp needs
+# it — it is the owner's box running the expensive nightly tier so the day's
+# commits do not have to. See .githooks/README.md.
 #
 # What it does: runs Guardian's full nightly tier against this checkout —
-#   1. `zig build`        — the whole 59-check `all` suite in baseline mode.
+#   1. `zig build`        — the whole `all` check suite in baseline mode.
 #   2. `zig build mutate-full` — whole-tree mutation testing that ratchets the
 #      kill score in .guardian/mutation.txt (the score can only ever climb;
 #      a nightly drop fails the unit). This is the guardian-check `nightly`
@@ -12,12 +18,8 @@
 # this nightly must never request ReleaseSafe/LLVM. Deployment owns that mode.
 #
 # Install / enable (user-level, matching netlisp.service — this repo's units run
-# under `systemctl --user`, see the deploy hook in CLAUDE.md):
-#   mkdir -p ~/.config/systemd/user
-#   ln -sf /home/epentland/ai/canopy/eda/systemd/netlisp-guardian-nightly.service ~/.config/systemd/user/
-#   ln -sf /home/epentland/ai/canopy/eda/systemd/netlisp-guardian-nightly.timer   ~/.config/systemd/user/
-#   systemctl --user daemon-reload
-#   systemctl --user enable --now netlisp-guardian-nightly.timer
+# under `systemctl --user`):
+#   .githooks/install.sh --guardian-nightly
 # Inspect results:   journalctl --user -u netlisp-guardian-nightly.service
 # Run once by hand:  systemctl --user start netlisp-guardian-nightly.service
 # The mutation-score ratchet it maintains lives in .guardian/mutation.txt
@@ -29,10 +31,12 @@ After=network.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/home/epentland/ai/canopy/eda
-# Login shell (-l) so the user's PATH (and thus `zig`) is available, mirroring
-# how netlisp.service pins absolute paths rather than trusting a bare env.
-ExecStart=/bin/sh -lc 'cd /home/epentland/ai/canopy/eda && /home/epentland/zig-toolchains/0.17.0-dev.1683+5ceec001b/zig build --seed=1 && /home/epentland/zig-toolchains/0.17.0-dev.1683+5ceec001b/zig build --seed=1 mutate-full'
+WorkingDirectory=@TOP@
+# Login shell (-l) so the user's PATH resolves `zig` — which must be the one
+# pinned compiler from .zigversion (scripts/install-zig.sh --link puts it
+# there). Deliberately NOT an absolute toolchain path: that spelling pinned one
+# machine's private install into a tracked file and went stale on every bump.
+ExecStart=/bin/sh -lc 'cd @TOP@ && zig build --seed=1 && zig build --seed=1 mutate-full'
 # A whole-tree mutation run is sequential and long; the systemd default
 # (~90s) would kill it. Cap generously instead of disabling the guard.
 TimeoutStartSec=6h

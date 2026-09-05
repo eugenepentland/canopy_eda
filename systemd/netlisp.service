@@ -1,3 +1,18 @@
+# EXAMPLE RENDER — not the unit any machine runs.
+#
+# `.githooks/install.sh --deploy` renders the real unit from
+# `.githooks/netlisp.service.in` into ~/.config/systemd/user/, substituting
+# @TOP@ with that machine's checkout and @PORT@ with $PORT. This file is that
+# template rendered for a checkout at /srv/netlisp on port 7050, kept in the
+# tree so the directives production runs are reviewable in a diff — and so
+# `src/deploy_unit.zig` can assert that it and the template still agree, which
+# is how DRIFT-INFRA-002 was caught: this copy had drifted back to naming the
+# build-output binary, which any local build overwrites. (That path may not be
+# spelled anywhere in this file — the test bans the substring outright.) Never
+# point a machine at this file; re-render instead. The /srv/netlisp root below
+# is a placeholder and is PINNED by that test (`example_root`), so a machine's
+# own render pasted back in here fails the build rather than shipping someone's
+# home directory in a public repo.
 [Unit]
 Description=Netlisp schematic/PCB web server
 After=network.target
@@ -9,7 +24,7 @@ StartLimitBurst=10
 
 [Service]
 Type=simple
-WorkingDirectory=/home/epentland/ai/canopy/eda
+WorkingDirectory=/srv/netlisp
 # Release candidates are built, compiler-SHA checked, tested, checksummed, and
 # installed atomically by deploy-prod.sh. The service only runs that artifact;
 # it must never rebuild an unchecked binary during restart or host boot.
@@ -23,7 +38,7 @@ Environment=NETLISP_GIT_AUTOCOMMIT=0
 # see docs/auth.md.
 # For Ward hosting, use the persistent drop-in shown in
 # systemd/netlisp-ward.conf.example instead of changing ExecStart.
-ExecStart=/home/epentland/ai/canopy/eda/.deploy/bin/netlisp serve --project-dir /home/epentland/ai/canopy/eda/projects/designs --port 7050
+ExecStart=/srv/netlisp/.deploy/bin/netlisp serve --project-dir /srv/netlisp/projects/designs --port 7050
 # `always` also recovers from signals systemd classifies as clean exits, while
 # still honoring an explicit `systemctl --user stop`.
 Restart=always

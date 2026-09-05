@@ -47,6 +47,11 @@ guardian_runtime.db
 /.reasonix/
 /reasonix.toml
 
+# The pre-commit hook guardian-check generates (`install-hook`). Per-machine by
+# construction: guardian bakes the absolute path of the installing binary into
+# it as a fallback. install.sh installs every OTHER hook from tracked files.
+/.githooks/pre-commit
+
 # Claude Code worktree metadata (per-machine; not part of the project)
 .claude/worktrees/
 # Per-machine scheduler lock written by the local agent runtime

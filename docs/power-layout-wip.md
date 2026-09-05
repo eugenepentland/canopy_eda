@@ -314,8 +314,9 @@ board), not the objective. zone-pack stays opt-in for now.
 ## Useful commands / artifacts
 
 - Test server (Debug): `./zig-out/bin/netlisp serve --project-dir
-  /home/epentland/ai/canopy/eda/projects/designs --port 7066`
-  (the worktree's own `projects/designs` is empty — point at the main checkout's).
+  "$(git rev-parse --path-format=absolute --git-common-dir)/../projects/designs"
+  --port 7066` (a worktree has no `projects/designs` of its own — point at the
+  main checkout's, which sits beside the shared git directory).
 - Diagnose: `GET /api/pcb-layout/tps55289-channel?regen=1&group_w=…&group_zone_w=…&route_gap=…`
   → JSON has per-part `blame` + `loops`; render PNG with `?blame=1&dims=1`.
 - Score an arbitrary pose set: `POST /api/pcb-score/<design>`
