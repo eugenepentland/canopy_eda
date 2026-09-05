@@ -553,7 +553,7 @@ fn evalBlockBodyForm(
         if (scope_control.kindOf(special)) |kind|
             return scope_control.evalForm(self, kind, form_children, env, BlockScopeSink{ .build = build });
         switch (special) {
-            .let, .assert_, .assert_range, .import, .id_, .implements => {
+            .let, .assert_, .assert_range, .import, .id_, .ids_, .implements => {
                 _ = try self.evalNode(form, env);
                 return;
             },
