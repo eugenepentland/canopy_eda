@@ -48,6 +48,8 @@ guardian_runtime.db
 # Machine-local symlinks for the ward path dep (see build.zig.zon)
 .claude/ward
 .claude/canopy
+# Per-machine scheduler lock written by the local agent runtime
+.claude/scheduled_tasks.lock
 
 # Local credentials for outbound part-data APIs (see .env.example)
 .env
