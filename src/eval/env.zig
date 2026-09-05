@@ -2351,7 +2351,7 @@ pub const Env = struct {
         self.bindings.deinit(self.allocator);
     }
 
-    pub fn put(self: *Env, name: []const u8, value: Value) !void {
+    pub fn put(self: *Env, name: []const u8, value: Value) std.mem.Allocator.Error!void {
         try self.bindings.put(self.allocator, name, value);
     }
 

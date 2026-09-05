@@ -82,6 +82,24 @@ pub const Grid = struct {
 /// per layer), and a bail is reported via `RouteResult.grid_overflow`.
 pub const max_nodes: usize = 200_000;
 
+/// Total nodes in an `nx` x `ny` lattice, SATURATING instead of wrapping.
+///
+/// Every node-budget bail below is `nodeCount(...) > max_nodes`, and the plain
+/// `nx * ny` it replaces could not be trusted to reach that comparison: the axis
+/// counts come from `ceil(span / pitch) + 1` over a span the DESIGN supplies, so
+/// parts placed ~1e11 mm apart give each axis ~1e11/pitch nodes and their
+/// product leaves `usize`. A safe build trapped there (an integer-overflow panic
+/// inside the router — the whole `netlisp serve` worker, for a design file), and
+/// an optimized build was worse: the product wrapped to a small number, sailed
+/// past the `> max_nodes` bail, and sized the grid allocation from the wrapped
+/// count while `Grid.nx`/`Grid.ny` stayed astronomical — an out-of-bounds write
+/// per node. Saturating is exactly right for the bail it feeds: a product that
+/// would overflow is, by construction, far past `max_nodes`, so it is refused by
+/// the same path an ordinarily oversize board takes.
+pub fn nodeCount(nx: usize, ny: usize) usize {
+    return std.math.mul(usize, nx, ny) catch std.math.maxInt(usize);
+}
+
 /// Raster apron (mm) added on every side of the placement bounding box, so a
 /// track may detour just outside the parts before coming back in.
 pub const apron_mm: f64 = 1.0;
@@ -221,7 +239,7 @@ fn dimsAt(g: f64, span_x: f64, span_y: f64) GridDims {
 /// True when a pitch's lattice fits the per-signal-layer node budget.
 fn fitsBudget(g: f64, span_x: f64, span_y: f64) bool {
     const d = dimsAt(g, span_x, span_y);
-    return d.nx * d.ny <= max_nodes;
+    return nodeCount(d.nx, d.ny) <= max_nodes;
 }
 
 /// Bisection steps used to find the finest affordable pitch. Fixed (not a

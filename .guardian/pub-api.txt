@@ -665,7 +665,7 @@ src/eval/env.zig::isPowerSource | fn isPowerSource(self: Port) bool
 src/eval/env.zig::isTestPoint | fn isTestPoint(component: []const u8) bool
 src/eval/env.zig::isTruthy | fn isTruthy(self: Value) bool
 src/eval/env.zig::parseNoteRef | fn parseNoteRef(node: ast.Node) ?NoteRef
-src/eval/env.zig::put | fn put(self: *Env, name: []const u8, value: Value) !void
+src/eval/env.zig::put | fn put(self: *Env, name: []const u8, value: Value) std.mem.Allocator.Error!void
 src/eval/env.zig::requirementIdForText | fn requirementIdForText(allocator: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error![]const u8
 src/eval/evaluator.zig::AltFunc struct_
 src/eval/evaluator.zig::AuthoredRef struct_
@@ -3217,6 +3217,7 @@ src/placement/route_grid.zig::max_targeted_expansions value
 src/placement/route_grid.zig::narrowestPitch | fn narrowestPitch( placement: optimizer.Placement, base: router.RouteParams, selected_nets: []const bool, ) f64
 src/placement/route_grid.zig::nearest | fn nearest(self: Grid, x: f64, y: f64) [2]usize
 src/placement/route_grid.zig::node | fn node(self: Grid, ix: usize, iy: usize) usize
+src/placement/route_grid.zig::nodeCount | fn nodeCount(nx: usize, ny: usize) usize
 src/placement/route_grid.zig::routeGridDims | fn routeGridDims( placement: optimizer.Placement, params: router.RouteParams, selected_nets: []const bool, resolution_scale: f64, ) GridDims
 src/placement/route_grid.zig::selectedCount | fn selectedCount(selected_nets: []const bool) usize
 src/placement/route_grid.zig::selectedDiffPairGap | fn selectedDiffPairGap(placement: optimizer.Placement, selected_nets: []const bool) f64
@@ -3815,21 +3816,21 @@ src/render_svg/context.zig::MergeAwareSplit struct_
 src/render_svg/context.zig::PinGroup struct_
 src/render_svg/context.zig::RenderCtx struct_
 src/render_svg/context.zig::Side enum_
-src/render_svg/context.zig::adjAppend | fn adjAppend(self: *RenderCtx, ref_des: []const u8, entry: AdjEntry) !void
-src/render_svg/context.zig::buildAdjacency | fn buildAdjacency(self: *RenderCtx) !void
-src/render_svg/context.zig::buildNetIndex | fn buildNetIndex(self: *RenderCtx) !void
-src/render_svg/context.zig::buildPinCanonicalNets | fn buildPinCanonicalNets(self: *RenderCtx) !void
-src/render_svg/context.zig::buildPinNetMap | fn buildPinNetMap(self: *RenderCtx) !void
-src/render_svg/context.zig::buildSignificantNets | fn buildSignificantNets(self: *RenderCtx, block: *const DesignBlock) !void
-src/render_svg/context.zig::classify | fn classify(self: *RenderCtx) !void
-src/render_svg/context.zig::collectFlat | fn collectFlat(self: *RenderCtx, block: *const DesignBlock, prefix: []const u8) !void
+src/render_svg/context.zig::adjAppend | fn adjAppend(self: *RenderCtx, ref_des: []const u8, entry: AdjEntry) std.mem.Allocator.Error!void
+src/render_svg/context.zig::buildAdjacency | fn buildAdjacency(self: *RenderCtx) std.mem.Allocator.Error!void
+src/render_svg/context.zig::buildNetIndex | fn buildNetIndex(self: *RenderCtx) std.mem.Allocator.Error!void
+src/render_svg/context.zig::buildPinCanonicalNets | fn buildPinCanonicalNets(self: *RenderCtx) std.mem.Allocator.Error!void
+src/render_svg/context.zig::buildPinNetMap | fn buildPinNetMap(self: *RenderCtx) std.mem.Allocator.Error!void
+src/render_svg/context.zig::buildSignificantNets | fn buildSignificantNets(self: *RenderCtx, block: *const DesignBlock) std.mem.Allocator.Error!void
+src/render_svg/context.zig::classify | fn classify(self: *RenderCtx) std.mem.Allocator.Error!void
+src/render_svg/context.zig::collectFlat | fn collectFlat(self: *RenderCtx, block: *const DesignBlock, prefix: []const u8) std.mem.Allocator.Error!void
 src/render_svg/context.zig::init | fn init(allocator: Allocator) RenderCtx
 src/render_svg/context.zig::isBoundaryPort | fn isBoundaryPort(self: *const RenderCtx, net: []const u8) bool
 src/render_svg/context.zig::isSpokeGroundPin | fn isSpokeGroundPin(self: *RenderCtx, ref_des: []const u8, pin_id: []const u8) bool
 src/render_svg/context.zig::rendersWhenAlone | fn rendersWhenAlone(self: *const RenderCtx, net: []const u8) bool
 src/render_svg/context.zig::setup | fn setup(self: *RenderCtx, block: *const DesignBlock) std.mem.Allocator.Error!void
-src/render_svg/context.zig::synthesizeSpokeConnections | fn synthesizeSpokeConnections(self: *RenderCtx) !void
-src/render_svg/context.zig::validateNetConsistency | fn validateNetConsistency(self: *RenderCtx) !void
+src/render_svg/context.zig::synthesizeSpokeConnections | fn synthesizeSpokeConnections(self: *RenderCtx) std.mem.Allocator.Error!void
+src/render_svg/context.zig::validateNetConsistency | fn validateNetConsistency(self: *RenderCtx) std.mem.Allocator.Error!void
 src/render_svg/draw.zig::RenderError value
 src/render_svg/draw.zig::baseNetName value
 src/render_svg/draw.zig::branch_spacing value
@@ -4042,7 +4043,7 @@ src/serve.zig::init | fn init(allocator: std.mem.Allocator) ReadCaches
 src/serve.zig::liveLayoutFor | fn liveLayoutFor(alloc: std.mem.Allocator, name: []const u8) ?[]const u8
 src/serve.zig::live_version_mutex value
 src/serve.zig::live_versions value
-src/serve.zig::notFound | fn notFound(_: *Server, _: *httpz.Request, res: *httpz.Response) !void
+src/serve.zig::notFound | fn notFound(_: *Server, _: *httpz.Request, res: *httpz.Response) error{}!void
 src/serve.zig::pcbJobBegin | fn pcbJobBegin(name: []const u8) PcbJobBegin
 src/serve.zig::pcbJobFinish | fn pcbJobFinish(name: []const u8, gen: u32, outcome: JobOutcome) void
 src/serve.zig::pcbJobFrame | fn pcbJobFrame(name: []const u8, gen: u32, json: []const u8) void
@@ -4519,20 +4520,24 @@ src/serve/navbar.zig::Active enum_
 src/serve/navbar.zig::css value
 src/serve/navbar.zig::write | fn write(w: *std.Io.Writer, active: Active) std.Io.Writer.Error!void
 src/serve/notes.zig::HandlerError value
+src/serve/notes.zig::LoadError value
+src/serve/notes.zig::MutateError value
 src/serve/notes.zig::Note struct_
 src/serve/notes.zig::NoteStatus enum_
 src/serve/notes.zig::Notes struct_
+src/serve/notes.zig::PathError value
+src/serve/notes.zig::RenderError value
 src/serve/notes.zig::TaskMutation enum_
 src/serve/notes.zig::addTaskApi | fn addTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/notes.zig::addTaskCore | fn addTaskCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, text: []const u8, ) !Note
+src/serve/notes.zig::addTaskCore | fn addTaskCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, text: []const u8, ) MutateError!Note
 src/serve/notes.zig::completeTaskApi | fn completeTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/notes.zig::getNotesApi | fn getNotesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/notes.zig::getTasksApi | fn getTasksApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/notes.zig::loadNotes | fn loadNotes( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, out_raw: *?[]u8, ) !Notes
-src/serve/notes.zig::mutateTaskCore | fn mutateTaskCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, mode: TaskMutation, ) !?bool
+src/serve/notes.zig::loadNotes | fn loadNotes( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, out_raw: *?[]u8, ) LoadError!Notes
+src/serve/notes.zig::mutateTaskCore | fn mutateTaskCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, id: []const u8, mode: TaskMutation, ) MutateError!?bool
 src/serve/notes.zig::parseNotes | fn parseNotes(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error!Notes
 src/serve/notes.zig::removeTaskApi | fn removeTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/notes.zig::renderNotes | fn renderNotes(allocator: std.mem.Allocator, notes: Notes) ![]u8
+src/serve/notes.zig::renderNotes | fn renderNotes(allocator: std.mem.Allocator, notes: Notes) RenderError![]u8
 src/serve/notes.zig::reopenTaskApi | fn reopenTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/notes.zig::saveNotesApi | fn saveNotesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/page_cache.zig::FileSet struct_
@@ -5188,12 +5193,13 @@ src/sexpr/parser.zig::freeNodes | fn freeNodes(allocator: std.mem.Allocator, nod
 src/sexpr/parser.zig::parse | fn parse(allocator: std.mem.Allocator, source: []const u8) ParseError![]const Node
 src/sexpr/parser.zig::parseDiag | fn parseDiag(allocator: std.mem.Allocator, source: []const u8, diag: *ParseDiagnostic) ParseError![]const Node
 src/sexpr/printer.zig::print | fn print(allocator: std.mem.Allocator, nodes: []const Node) std.mem.Allocator.Error![]const u8
+src/sexpr/tokenizer.zig::LexError value
 src/sexpr/tokenizer.zig::SiScale struct_
 src/sexpr/tokenizer.zig::Token struct_
 src/sexpr/tokenizer.zig::TokenTag enum_
 src/sexpr/tokenizer.zig::Tokenizer struct_
 src/sexpr/tokenizer.zig::init | fn init(source: []const u8) Tokenizer
-src/sexpr/tokenizer.zig::next | fn next(self: *Tokenizer) !Token
+src/sexpr/tokenizer.zig::next | fn next(self: *Tokenizer) LexError!Token
 src/sexpr/tokenizer.zig::si_scales value
 src/sexpr/tokenizer.zig::si_unit_letters value
 src/shape_sketch.zig::CompileError value

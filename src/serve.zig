@@ -571,7 +571,7 @@ pub const Server = struct {
         maybeCompress(&req_handler.state.caches.gzip, req, res);
     }
 
-    pub fn notFound(_: *Server, _: *httpz.Request, res: *httpz.Response) !void {
+    pub fn notFound(_: *Server, _: *httpz.Request, res: *httpz.Response) error{}!void {
         res.status = 404;
         res.body = "Not found";
     }
