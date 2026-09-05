@@ -2092,6 +2092,11 @@
   // Loads the raw .sexp via GET /api/source into a modal editor and saves via
   // POST /api/source. The server validates syntax, rebuilds, and bumps the
   // live version; on success we reload the page to pick the change up.
+  //
+  // `?file=` selects which of the design's files to read or write: the design
+  // source, or one of the autoloaded sidecars (`<name>.layout.sexp`, …). The
+  // GET answers `files` with the ones that exist, and the modal offers a tab
+  // per entry when there is more than one.
   var editSrcBtn = document.getElementById('edit-src-btn');
   if (editSrcBtn) {
     editSrcBtn.addEventListener('click', function () {
@@ -2099,13 +2104,10 @@
       editSrcBtn.dataset.busy = '1';
       var original = editSrcBtn.textContent;
       editSrcBtn.textContent = 'Loading…';
-      fetch('/api/source/' + DESIGN_NAME).then(function (r) {
-        if (!r.ok) throw new Error('fetch failed: ' + r.status);
-        return r.json();
-      }).then(function (j) {
+      fetchSourceFile('design').then(function (j) {
         editSrcBtn.textContent = original;
         editSrcBtn.dataset.busy = '';
-        openSrcEditor((j && typeof j.source === 'string') ? j.source : '', j.sourceRevision);
+        openSrcEditor(j);
       }).catch(function (e) {
         editSrcBtn.textContent = original;
         editSrcBtn.dataset.busy = '';
@@ -2114,10 +2116,45 @@
     });
   }
 
+  // One of the design's files, normalized: `{source, sourceRevision, file,
+  // files}` with `files` always an array so the caller never branches on shape.
+  function fetchSourceFile(file) {
+    return fetch('/api/source/' + DESIGN_NAME + '?file=' + encodeURIComponent(file)).then(function (r) {
+      if (!r.ok) throw new Error('fetch failed: ' + r.status);
+      return r.json();
+    }).then(function (j) {
+      return {
+        source: (j && typeof j.source === 'string') ? j.source : '',
+        sourceRevision: j && j.sourceRevision,
+        file: (j && j.file) || file,
+        files: (j && Array.isArray(j.files) && j.files.length) ? j.files : ['design']
+      };
+    });
+  }
+
+  // The on-disk name of one `file` key, for the modal title and its tabs.
+  function sourceFileName(file) {
+    return DESIGN_NAME + (file === 'design' ? '.sexp' : '.' + file + '.sexp');
+  }
+
+  // A one-line file picker for a split design; nothing at all when the design
+  // has no sidecars, so an unsplit board's editor looks exactly as before.
+  function srcFileTabs(files, selected) {
+    if (!files || files.length < 2) return '';
+    var options = files.map(function (f) {
+      return '<option value="' + escapeHtml(f) + '"' + (f === selected ? ' selected' : '') + '>' +
+        escapeHtml(sourceFileName(f)) + '</option>';
+    }).join('');
+    return '<select class="se-files" title="Which of this design\'s files to edit" ' +
+      'style="margin-left:10px;background:#161b22;color:#c9d1d9;border:1px solid #30363d;' +
+      'border-radius:6px;padding:2px 6px;font-size:12px;">' + options + '</select>';
+  }
+
   // Modal .sexp editor: a centered overlay with a monospace textarea. Save
   // POSTs the edited source; validation/rebuild errors from the server render
   // inline (red) so the user can fix and retry without losing their edit.
-  function openSrcEditor(src, sourceRevision) {
+  function openSrcEditor(doc) {
+    var current = doc;
     var overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;' +
       'display:flex;align-items:center;justify-content:center;';
@@ -2127,7 +2164,8 @@
         'box-shadow:0 8px 32px rgba(0,0,0,.5);overflow:hidden;">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;' +
           'padding:10px 14px;border-bottom:1px solid #30363d;color:#c9d1d9;font-weight:600;">' +
-          '<span>Edit <code>' + escapeHtml(DESIGN_NAME) + '.sexp</code></span>' +
+          '<span>Edit <code class="se-name">' + escapeHtml(sourceFileName(doc.file)) + '</code>' +
+            srcFileTabs(doc.files, doc.file) + '</span>' +
           '<button type="button" class="se-x" title="Close" style="background:none;border:0;' +
             'color:#8b949e;font-size:18px;cursor:pointer;line-height:1;">✕</button></div>' +
         '<textarea class="se-ta" spellcheck="false" wrap="off" style="flex:1;margin:0;border:0;' +
@@ -2144,8 +2182,33 @@
       '</div>';
     document.body.appendChild(overlay);
     var ta = overlay.querySelector('.se-ta');
-    ta.value = src;
+    ta.value = doc.source;
     var msg = overlay.querySelector('.se-msg');
+    var nameEl = overlay.querySelector('.se-name');
+    var tabs = overlay.querySelector('.se-files');
+    // Switching tab replaces the buffer, so an unsaved edit must be confirmed
+    // away rather than silently dropped; a refused switch snaps back.
+    if (tabs) tabs.addEventListener('change', function () {
+      var next = tabs.value;
+      if (next === current.file) return;
+      if (ta.value !== current.source && !window.confirm('Discard unsaved changes to ' + sourceFileName(current.file) + '?')) {
+        tabs.value = current.file;
+        return;
+      }
+      tabs.disabled = true;
+      msg.textContent = '';
+      fetchSourceFile(next).then(function (j) {
+        current = j;
+        ta.value = j.source;
+        nameEl.textContent = sourceFileName(j.file);
+        tabs.value = j.file;
+        tabs.disabled = false;
+      }).catch(function (e) {
+        tabs.value = current.file;
+        tabs.disabled = false;
+        msg.textContent = 'could not load ' + sourceFileName(next) + ': ' + e;
+      });
+    });
     function close() { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
     overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) close(); });
     overlay.querySelector('.se-x').addEventListener('click', close);
@@ -2158,7 +2221,7 @@
       fetch('/api/source/' + DESIGN_NAME, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source: ta.value, sourceRevision: sourceRevision })
+        body: JSON.stringify({ source: ta.value, sourceRevision: current.sourceRevision, file: current.file })
       }).then(function (r) {
         return r.text().then(function (body) { return { ok: r.ok, body: body }; });
       }).then(function (resp) {

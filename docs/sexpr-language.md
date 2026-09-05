@@ -1273,6 +1273,32 @@ design archive and the system-review package; and an `(id …)` minted by a form
 that lives in a sidecar is written back **into that sidecar**, never into the
 design file at a foreign byte offset.
 
+The GUI edits them in place too. The PCB **Design Settings** drawer
+(`/api/design-rules/:name`, `/api/stackup-planes/:name`), the Layout tab's
+drag-to-arrange writeback (`/api/diagram-layout/:name`) and the subcircuit
+supply-plane toggle (`/api/power-plane/:name`) each patch **the file that
+actually declares the form**, at that file's own byte spans — so on a split
+design the `(design-rules …)` edit lands in `<name>.layout.sexp` and the design
+file is not touched at all. A form nobody has authored yet is created in the
+sidecar that owns its kind when the design has one, and in the design file when
+it does not; the same singleton declared in two of the files is refused, naming
+both, which is the state the loader would refuse anyway. Nothing about a split
+design is read-only from the GUI.
+
+Undo covers them. A history snapshot captures the design source **and** every
+sidecar that exists beside it, so the entry written before a settings save
+contains the file that save changed; restoring it moves all of those files back
+together, and removes a sidecar the entry proves did not exist in that revision
+(an entry written before this — one with no `.files` manifest — still restores
+its design file and leaves today's sidecars untouched). The schematic page's
+raw-source editor covers them too: on a split design its title bar grows a file
+picker listing the design source and each sidecar that exists, and saving one
+goes through the same whole-file replace, the same syntax check, the same
+re-evaluation of the whole design, and the same history snapshot as a design
+save — `GET`/`POST /api/source/:name?file=design|checks|layout|diagram` (see
+`docs/webserver-api.md`). Only an already-authored sidecar is offered and
+writable; `split-design` below is what creates one.
+
 #### Splitting an existing design
 
 `split-design` does the move for you, and proves it:

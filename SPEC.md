@@ -7212,6 +7212,8 @@ Public functions: uploadDatasheetApi, listDatasheetsApi, serveDatasheetApi, isPd
 - rewire-pin splits a multi-pin shorthand to re-wire one pin
 - rewire-pin finds a pin in a section pins map
 - a design saved through writeAndRebuild pins its minted (id …) into the source, so the next save reproduces the same uuid and its exact selected-row BOM identity
+- a settings write that lands in a sidecar still pins every minted (id …) into the file whose byte offsets it indexes, so the sidecar's own forms are never stamped into the design source
+- the subcircuit supply-plane toggle reads and writes (power-plane …) in whichever of the design's files declares it, and refuses a board or an unreadable design rather than writing one
 - restoring a history snapshot pins the restored source's minted ids before identity resolution
 
 ## serve/edit_assist
@@ -7223,6 +7225,7 @@ Public functions: validateSourceApi, libIndexApi, saveDiagramLayoutApi
 - lib-index returns no params when the defmodule is absent
 - lib-index reports each component's footprint name
 - diagram-layout writeback locates the existing form
+- the Layout tab's diagram-layout writeback replaces the form in whichever of the design's files declares it, and refuses a design it cannot read instead of writing one
 
 ## serve/component_search
 
@@ -7514,6 +7517,8 @@ is what makes the predicate exact rather than approximately right.
 - Copper graph quantization refuses nonfinite and unrepresentable geometry instead of trapping
 
 - Source mutation adapters return commit failures instead of acknowledging successful saves
+- The source endpoint reads and writes each of a design's sidecars through the same whole-file path as the design source
+- A sidecar save through the source endpoint is refused when it does not parse, when the whole design stops evaluating, and when the design has no such sidecar
 
 - Source writes require a transaction and use exact content hashes for revision comparisons
 - Failed source commits preserve the previous file and nested mutation scopes retain one project lock
@@ -7852,6 +7857,8 @@ is what makes the predicate exact rather than approximately right.
 - PCB blobs carry each authored board keepout region as a solid named rectangle beside the derived perimeter band
 - the pcb-describe board facts list every authored keepout region in world millimetres with its side, blocked families, allowed nets and reason
 - The PCB blob emits each pad's rotation, roundrect ratio, oval slot, and through-hole flag
+- A source snapshot captures the design file and every sidecar beside it, so restoring one undoes an edit that landed in a sidecar
+- A history entry written before sidecars were snapshotted still restores its design file and leaves today's sidecars alone
 - The layout sidecar is snapshotted into history and listed newest-first
 - Layout snapshots are pruned to the newest retention cap
 - Source-snapshot listing skips the reserved layouts subdir
@@ -8179,7 +8186,15 @@ is what makes the predicate exact rather than approximately right.
 - Design Settings edits board-level numeric rules in the GUI, preserves unrelated source forms, rebuilds, and reloads the shown layout
 - Design Settings renders validated numeric rule inputs with save-and-rebuild feedback
 - Design Settings creates a design-rules source form when a board previously relied entirely on defaults
-- Design Settings refuses to author a second copy of a rule form the design keeps in its .layout.sexp sidecar
+- Design Settings locates a design-scope form in whichever of the design's files holds it, and authors a missing one into the layout sidecar when the design has been split
+- A design-scope form declared in both the design file and a sidecar is reported as a conflict naming both files instead of being patched in one of them
+- A sidecar's copy of an atom-valued design-scope form is the value in force, because the splice appends sidecar forms last
+- Design Settings writes a sidecar form at the top level and a design-file form as a design-block child, each with that file's own indentation
+- Design Settings patches a rule form that lives in the design's layout sidecar in that sidecar, at that file's own byte spans, leaving the design file untouched
+- Design Settings authors a missing rule form into the layout sidecar of a design that has one, rather than into the design file
+- A Design Settings save on a split design rewrites the layout sidecar, leaves the design file byte-identical, and the re-evaluated board reports the new rule
+- A Design Settings save on a board whose stackup has no authored form yet writes it into the layout sidecar the design already has
+- A Design Settings save is refused with 409 naming both files only when the design really does declare the same singleton twice
 - Design Settings adds, edits, and deletes whole-layer copper planes without replacing physical stackup construction or comments
 - Saving plane controls on an implicit board authors the visible copper count and supports an explicitly plane-free stack
 - Design Settings exposes whole-layer copper assignments with add, edit, delete, validated save, and read-only states

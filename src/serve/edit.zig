@@ -29,6 +29,8 @@ const datasheet_ref = @import("datasheet_ref.zig");
 const rebuild_design = @import("rebuild_design.zig");
 const modules_mod = @import("modules.zig");
 const SexprNode = @import("../sexpr/ast.zig").Node;
+const settings_target = @import("design_settings_target.zig");
+const sidecars = @import("../eval/sidecars.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const http_not_found: u16 = 404;
@@ -106,13 +108,79 @@ pub const HandlerError = error{CannotLockProject} || std.mem.Allocator.Error || 
         RebuildFailed,
     };
 
+/// Which of a design's files a `/api/source/:name` read or write addresses:
+/// the design source, or one of the autoloaded sidecars (`eval/sidecars.zig`).
+/// Spelled exactly as the `file=` query value and the `"file"` body field, so
+/// `layout` names `<name>.layout.sexp`; anything else (including absent) is
+/// the design source, which is what every pre-sidecar caller sends.
+pub const SourceFile = enum {
+    design,
+    checks,
+    layout,
+    diagram,
+
+    comptime {
+        // One name per sidecar kind, in `sidecars.kinds` order, after
+        // `design`. A fourth sidecar must gain a name here or it would be
+        // unreachable from the editor while claiming to be part of the design,
+        // and the spellings must MATCH so `parse(@tagName(kind))` is total.
+        const names = @typeInfo(SourceFile).@"enum".field_names;
+        std.debug.assert(names.len == 1 + sidecars.kinds.len);
+        for (sidecars.kinds, 1..) |kind, i| std.debug.assert(std.mem.eql(u8, @tagName(kind), names[i]));
+    }
+
+    /// The extension this file carries beside the design source.
+    pub fn ext(self: SourceFile) []const u8 {
+        return switch (self) {
+            .design => ".sexp",
+            .checks => sidecars.Kind.checks.ext(),
+            .layout => sidecars.Kind.layout.ext(),
+            .diagram => sidecars.Kind.diagram.ext(),
+        };
+    }
+
+    /// Read the wire spelling, defaulting to the design source.
+    pub fn parse(spelling: ?[]const u8) SourceFile {
+        const text = spelling orelse return .design;
+        return std.meta.stringToEnum(SourceFile, text) orelse .design;
+    }
+};
+
+/// The file `name`'s `SourceFile` resolves to (caller owns).
+fn sourceFilePath(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    file: SourceFile,
+) EditError![]u8 {
+    return paths.designSiblingPath(allocator, project_dir, name, file.ext());
+}
+
+/// The revision the source endpoints compare and report for THIS request: the
+/// content hash of the file the edit actually LANDS in. Identical to
+/// `source_transaction.revisionFor` for a design-file edit; a sidecar edit is
+/// gated on the sidecar's own bytes, because the design file — which such an
+/// edit does not touch — cannot detect that someone else moved the sidecar
+/// underneath the editor that is saving.
+fn targetRevision(
+    arena: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    file: SourceFile,
+) ?[64]u8 {
+    if (file == .design) return source_transaction.revisionFor(arena, project_dir, name);
+    const path = sourceFilePath(arena, project_dir, name, file) catch return null;
+    const bytes = infra_fs.cwd().readFileAlloc(arena, path, max_source_bytes) catch return null;
+    return source_transaction.revision(bytes);
+}
+
 fn attachRevision(ctx: *Server, req: *httpz.Request, res: *httpz.Response) void {
     if (res.status < 200 or res.status >= 300) return;
     const body = std.mem.trim(u8, res.body, " \n\r\t");
     if (body.len < 2 or body[body.len - 1] != '}') return;
     const input = edit_request.decode(req.arena, req.body() orelse "{}") catch return;
     const name = input.string("sourceName") orelse req.param("name") orelse input.string("name") orelse return;
-    const revision = source_transaction.revisionFor(req.arena, ctx.project_dir, name) orelse return;
+    const revision = targetRevision(req.arena, ctx.project_dir, name, SourceFile.parse(input.string("file"))) orelse return;
     res.body = std.fmt.allocPrint(req.arena, "{s},\"sourceRevision\":\"{s}\"}}", .{ body[0 .. body.len - 1], revision }) catch {
         res.status = 500;
         res.body = "committed, but response allocation failed; reload";
@@ -128,7 +196,7 @@ fn checkRequestRevision(ctx: *Server, req: *httpz.Request, res: *httpz.Response,
         return false;
     };
     const name = input.string("sourceName") orelse req.param("name") orelse return false;
-    const actual = source_transaction.revisionFor(req.arena, ctx.project_dir, name) orelse {
+    const actual = targetRevision(req.arena, ctx.project_dir, name, SourceFile.parse(input.string("file"))) orelse {
         sendJsonError(ctx, res, 409, "source changed or cannot be read; reload before editing");
         return false;
     };
@@ -868,7 +936,19 @@ fn patchPowerPlaneSource(allocator: std.mem.Allocator, source: []const u8, enabl
 
 const BoardRouteMeta = struct { role: env_mod.BoardRole = .subcircuit, power_plane: bool = true };
 
-fn boardRouteMeta(allocator: std.mem.Allocator, source: []const u8) EditError!BoardRouteMeta {
+/// The role and supply-plane policy in force for `name`.
+///
+/// `board-role` is a design-file form by definition (it says what the design
+/// IS), but `power-plane` is a LAYOUT form: `split-design` moves it into
+/// `<name>.layout.sexp`, and because the splice appends the sidecar last, the
+/// sidecar's copy is the one that wins. Reading the design file alone would
+/// report the wrong policy on a split board — and then write against it.
+fn boardRouteMeta(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    project_dir: []const u8,
+    name: []const u8,
+) EditError!BoardRouteMeta {
     const nodes = sexpr_parser.parse(allocator, source) catch return error.InvalidSource;
     defer sexpr_parser.freeNodes(allocator, nodes);
     var meta = BoardRouteMeta{};
@@ -884,6 +964,10 @@ fn boardRouteMeta(allocator: std.mem.Allocator, source: []const u8) EditError!Bo
             if (std.mem.eql(u8, word, "on")) meta.power_plane = true else if (std.mem.eql(u8, word, "off")) meta.power_plane = false;
         }
     }
+    if (settings_target.sidecarAtomArg(allocator, project_dir, name, "power-plane")) |word| {
+        defer allocator.free(word);
+        if (std.mem.eql(u8, word, "on")) meta.power_plane = true else if (std.mem.eql(u8, word, "off")) meta.power_plane = false;
+    }
     return meta;
 }
 
@@ -894,7 +978,7 @@ pub fn getBoardRoleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch
         return sendJsonError(ctx, res, http_not_found, "cannot read design source");
     defer ctx.allocator.free(source);
-    const meta = boardRouteMeta(ctx.allocator, source) catch
+    const meta = boardRouteMeta(ctx.allocator, source, ctx.project_dir, name) catch
         return sendJsonError(ctx, res, http_bad_request, "source does not contain an editable design root");
     res.header(header_cors_allow_origin, "*");
     res.content_type = .JSON;
@@ -967,11 +1051,31 @@ pub fn setPowerPlaneApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch
         return sendJsonError(ctx, res, http_not_found, "cannot read design source");
     defer ctx.allocator.free(source);
-    const meta = boardRouteMeta(ctx.allocator, source) catch
+    const meta = boardRouteMeta(ctx.allocator, source, ctx.project_dir, name) catch
         return sendJsonError(ctx, res, http_bad_request, "source does not contain an editable design root");
     if (meta.role != .subcircuit)
         return sendJsonError(ctx, res, http_bad_request, "power-plane mode applies only to subcircuits");
-    const updated = patchPowerPlaneSource(ctx.allocator, source, enabled_v.bool) catch |err| {
+
+    // `power-plane` is a layout form: patch it where it lives, or a split board
+    // keeps obeying the sidecar's copy while the design file grows a second one.
+    const resolution = settings_target.resolve(ctx.allocator, ctx.project_dir, name, &.{"power-plane"}) catch
+        return sendJsonError(ctx, res, http_not_found, "cannot read design source");
+    defer resolution.deinit(ctx.allocator);
+    if (resolution == .conflict)
+        return sendJsonError(ctx, res, 409, "(power-plane …) is declared in two of this design's files — delete one copy");
+    const where = resolution.target;
+    const target_source = if (where.isSidecar())
+        infra_fs.cwd().readFileAlloc(ctx.allocator, where.path, max_source_bytes) catch
+            return sendJsonError(ctx, res, http_not_found, "cannot read design source")
+    else
+        try ctx.allocator.dupe(u8, source);
+    defer ctx.allocator.free(target_source);
+
+    const replacement = if (enabled_v.bool) "(power-plane on)" else "(power-plane off)";
+    const updated = (if (where.container == .top_level)
+        settings_target.patchTopLevel(ctx.allocator, target_source, "power-plane", replacement)
+    else
+        patchPowerPlaneSource(ctx.allocator, target_source, enabled_v.bool)) catch |err| {
         const message = switch (err) {
             error.InvalidSource => "design source has invalid s-expression syntax",
             error.MalformedSource => "source does not contain an editable design root",
@@ -981,7 +1085,7 @@ pub fn setPowerPlaneApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     };
     defer ctx.allocator.free(updated);
 
-    const result = writeAndRebuild(ctx.allocator, ctx.project_dir, name, updated, "set subcircuit power-plane mode") catch
+    const result = writeFileAndRebuild(ctx.allocator, ctx.project_dir, name, where.path, updated, "set subcircuit power-plane mode") catch
         return sendJsonError(ctx, res, http_internal_error, "could not save and rebuild power-plane setting");
     res.header(header_cors_allow_origin, "*");
     res.content_type = .JSON;
@@ -2422,6 +2526,27 @@ pub fn writeAndRebuild(
     new_source: []const u8,
     description: ?[]const u8,
 ) EditError!MutationResult {
+    const path = try designFilePath(allocator, project_dir, name);
+    defer allocator.free(path);
+    return writeFileAndRebuild(allocator, project_dir, name, path, new_source, description);
+}
+
+/// `writeAndRebuild` for bytes that belong in one of `name`'s files other than
+/// the design source — an autoloaded `<name>.layout.sexp` / `.diagram.sexp`
+/// sidecar (`eval/sidecars.zig`), which is part of the design in every sense
+/// downstream. `write_path` receives the bytes; the DESIGN is still what gets
+/// evaluated, id-pinned, BOM-resolved and version-bumped, and the sidecar's own
+/// mtime is what retires the page caches keyed on it (`serve/page_cache.zig`).
+/// Resolve `write_path` with `serve/design_settings_target.zig` — a span read
+/// from one of these files and applied to another is data corruption.
+pub fn writeFileAndRebuild(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    write_path: []const u8,
+    new_source: []const u8,
+    description: ?[]const u8,
+) EditError!MutationResult {
     const mutation = try source_transaction.begin(project_dir);
     defer mutation.unlock();
     const path = try designFilePath(allocator, project_dir, name);
@@ -2430,6 +2555,9 @@ pub fn writeAndRebuild(
     // Snapshot prior state before overwriting. Null means the design didn't
     // exist yet (brand-new create). Snapshot errors are logged but don't
     // block the write — undo is a nice-to-have, not a hard requirement.
+    // `history.snapshot` captures the design source alone, so a sidecar write
+    // is versioned by the design's own history entry but not restorable from
+    // it; see serve/history.zig.
     const snap_id: ?[]const u8 = history.snapshot(allocator, project_dir, name, description) catch |e| blk: {
         log.warn("[snapshot] failed for {s}: {s}", .{ name, @errorName(e) });
         break :blk null;
@@ -2438,7 +2566,7 @@ pub fn writeAndRebuild(
     // tmp → fsync → rename: the snapshot above is best-effort, so a truncating
     // write is the one step that could leave the design with neither its old
     // nor its new contents.
-    source_transaction.writeFile(allocator, path, new_source) catch return error.CannotWriteDesign;
+    source_transaction.writeFile(allocator, write_path, new_source) catch return error.CannotWriteDesign;
 
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
@@ -2597,13 +2725,21 @@ pub fn editMpnApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     res.body = try std.fmt.allocPrint(ctx.allocator, ok_version_json_fmt, .{version});
 }
 
-/// Overwrite (or create) the design's `.sexp` with `new_source`. Validates
-/// syntax via the sexpr parser before writing, snapshots any prior state,
-/// then rebuilds the design.
-pub fn writeDesignCore(
+/// Overwrite (or create) ONE of a design's files with `new_source`: the design
+/// `.sexp` itself, or an autoloaded sidecar (`eval/sidecars.zig`). Whole-file
+/// replace either way, with the same guarantees — syntax pre-flight before the
+/// bytes hit disk, a history snapshot covering the design AND its sidecars,
+/// and a re-evaluation of the whole DESIGN afterwards, so a sidecar edit that
+/// breaks the board is refused by exactly the check a design edit is.
+///
+/// Only an EXISTING sidecar is writable here. Authoring a new one is
+/// `split-design`'s job; creating `<name>.diagram.sexp` out of a typo'd
+/// `file=` would silently add a file to the design's read set.
+pub fn writeSourceFileCore(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
+    file: SourceFile,
     new_source: []const u8,
 ) EditError!MutationResult {
     const mutation = try source_transaction.begin(project_dir);
@@ -2613,6 +2749,8 @@ pub fn writeDesignCore(
     // through to the rebuild step — the auto-snapshot serves as undo there.
     _ = sexpr_parser.parse(allocator, new_source) catch return error.InvalidSource;
 
+    if (file != .design) return writeSidecarFile(allocator, project_dir, name, file, new_source);
+
     // Ensure src/ exists so brand-new designs can be created.
     const src_dir = try std.fmt.allocPrint(allocator, "{s}/src", .{project_dir});
     defer allocator.free(src_dir);
@@ -2621,6 +2759,23 @@ pub fn writeDesignCore(
     };
 
     return writeAndRebuild(allocator, project_dir, name, new_source, "write_design");
+}
+
+/// The sidecar half of `writeSourceFileCore`, called with the project lock
+/// already held and `new_source` already parsed.
+fn writeSidecarFile(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    file: SourceFile,
+    new_source: []const u8,
+) EditError!MutationResult {
+    const target = try sourceFilePath(allocator, project_dir, name, file);
+    defer allocator.free(target);
+    infra_fs.cwd().access(target, .{}) catch return error.CannotReadDesign;
+    const desc = try std.fmt.allocPrint(allocator, "write_source {s}", .{std.fs.path.basename(target)});
+    defer allocator.free(desc);
+    return writeFileAndRebuild(allocator, project_dir, name, target, new_source, desc);
 }
 
 /// Restore a design from a history snapshot. First snapshots the current
@@ -3125,7 +3280,30 @@ pub fn swapPinsCore(
     return writeAndRebuild(allocator, project_dir, name, new_source.written(), desc);
 }
 
-/// GET /api/source/:name — returns `{"source":"<raw .sexp text>"}`.
+/// Every file of `name` the source editor may open: the design source first,
+/// then each sidecar that exists on disk. The editor renders one tab per
+/// entry, so a sidecar that was never authored is not offered.
+fn writeSourceFileList(
+    w: *std.Io.Writer,
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
+    try w.writeAll("[\"design\"");
+    for (sidecars.kinds) |kind| {
+        const file = SourceFile.parse(@tagName(kind));
+        const path = sourceFilePath(allocator, project_dir, name, file) catch continue;
+        defer allocator.free(path);
+        infra_fs.cwd().access(path, .{}) catch continue;
+        try w.print(",\"{s}\"", .{@tagName(kind)});
+    }
+    try w.writeAll("]");
+}
+
+/// GET /api/source/:name[?file=design|checks|layout|diagram] — returns
+/// `{"source":"<raw text>","sourceRevision":…,"file":…,"files":[…]}`.
+/// `file` defaults to the design source; `files` names every file of this
+/// design that exists, so the editor can offer one tab per sidecar.
 pub fn getSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
@@ -3135,8 +3313,20 @@ pub fn getSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
         res.body = err_json_missing_name;
         return;
     };
+    const query = req.query() catch {
+        res.status = http_bad_request;
+        res.body = "{\"error\":\"invalid query\"}";
+        return;
+    };
+    const file = SourceFile.parse(query.get("file"));
 
-    const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
+    const path = sourceFilePath(ctx.allocator, ctx.project_dir, name, file) catch {
+        res.status = 404;
+        res.body = "{\"error\":\"cannot read design\"}";
+        return;
+    };
+    defer ctx.allocator.free(path);
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, path, max_source_bytes) catch {
         res.status = 404;
         res.body = "{\"error\":\"cannot read design\"}";
         return;
@@ -3147,14 +3337,22 @@ pub fn getSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
     const w = &buf.writer;
     try w.writeAll("{\"source\":\"");
     try bom_html.writeJsonEscaped(w, source);
-    try w.print("\",\"sourceRevision\":\"{s}\"}}", .{source_transaction.revision(source)});
+    try w.print("\",\"sourceRevision\":\"{s}\",\"file\":\"{s}\",\"files\":", .{
+        source_transaction.revision(source),
+        @tagName(file),
+    });
+    try writeSourceFileList(w, ctx.allocator, ctx.project_dir, name);
+    try w.writeAll("}");
     res.body = buf.written();
 }
 
-/// POST /api/source/:name — body `{"source":"<raw .sexp text>"}`. Validates
-/// syntax, writes the file, rebuilds, bumps version. Returns
-/// `{"ok":true,"version":N,"snapshot":...}` on success or
-/// `{"ok":false,"error":"..."}` with HTTP 400 on invalid source.
+/// POST /api/source/:name — body `{"source":"<raw text>","file":"design"}`.
+/// Validates syntax, writes THAT file (the design `.sexp`, or one of its
+/// existing sidecars when `file` names one), re-evaluates the whole design,
+/// bumps the version. Returns `{"ok":true,"version":N,"snapshot":...}` on
+/// success or `{"ok":false,"error":"..."}` with HTTP 400 on invalid source.
+/// `sourceRevision` is the revision of the file being written, not always the
+/// design's.
 pub fn saveSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const mutation = try source_transaction.begin(ctx.project_dir);
     defer mutation.unlock();
@@ -3187,7 +3385,8 @@ pub fn saveSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         return;
     }
 
-    const result = writeDesignCore(ctx.allocator, ctx.project_dir, name, source_val.string) catch |err| {
+    const file = SourceFile.parse(input.string("file"));
+    const result = writeSourceFileCore(ctx.allocator, ctx.project_dir, name, file, source_val.string) catch |err| {
         switch (err) {
             error.InvalidSource => {
                 res.status = 400;
@@ -3202,6 +3401,12 @@ pub fn saveSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
             error.CannotWriteDesign => {
                 res.status = 500;
                 res.body = "{\"ok\":false,\"error\":\"cannot write file\"}";
+                return;
+            },
+            // Only an already-authored sidecar is editable here.
+            error.CannotReadDesign => {
+                res.status = 404;
+                res.body = "{\"ok\":false,\"error\":\"this design has no such sidecar file\"}";
                 return;
             },
             else => {
@@ -3282,12 +3487,14 @@ test "autorouter power-plane toggle patches nested module design settings" {
     defer allocator.free(updated);
     try std.testing.expect(std.mem.indexOf(u8, updated, "(power-plane off)") != null);
     try std.testing.expect(std.mem.indexOf(u8, updated, "(plane 3 \"VOUT\")") != null);
-    const meta = try boardRouteMeta(allocator, updated);
+    // No project on disk here: the sidecar lookup finds nothing and the
+    // design source alone decides, which is the unsplit case.
+    const meta = try boardRouteMeta(allocator, updated, ".", "nosuchdesign");
     try std.testing.expectEqual(env_mod.BoardRole.subcircuit, meta.role);
     try std.testing.expect(!meta.power_plane);
     const restored = try patchPowerPlaneSource(allocator, updated, true);
     defer allocator.free(restored);
-    try std.testing.expect((try boardRouteMeta(allocator, restored)).power_plane);
+    try std.testing.expect((try boardRouteMeta(allocator, restored, ".", "nosuchdesign")).power_plane);
     try std.testing.expect(std.mem.indexOf(u8, restored, "(plane 3 \"VOUT\")") != null);
 
     const js = @embedFile("assets/pcb_board.js");
@@ -3660,4 +3867,273 @@ test "edit value range skips escaped quotes in labels and values" {
     const range = findInstanceValueRange(source, 0, source.len).?;
     try std.testing.expectEqualStrings("a\\\"b\\\\c", source[range[0]..range[1]]);
     try std.testing.expectEqual(@as(u8, '"'), source[range[1]]);
+}
+
+// spec: serve/edit - a settings write that lands in a sidecar still pins every minted (id …) into the file whose byte offsets it indexes, so the sidecar's own forms are never stamped into the design source
+test "writeFileAndRebuild pins minted ids per file when the bytes land in a sidecar" {
+    // page_allocator for the same reason as the test above: the evaluator's
+    // AST slices reference source buffers it never frees.
+    const alloc = std.heap.page_allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project_dir);
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/res.sexp",
+        .data =
+        \\(component-family res
+        \\  (param-type resistance)
+        \\  (footprint "0402"))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/0402.sexp",
+        .data = "(component 0402 (footprint \"0402.kicad_mod\"))",
+    });
+
+    // The circuit is split across the design file and the (unrestricted)
+    // checks sidecar, and neither instance carries an `(id …)` yet.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/idsplit.sexp",
+        .data =
+        \\(import res)
+        \\(design-block "Id Split"
+        \\  (instance "R1" (res "10k") (pin 1 "V") (pin 2 "GND")))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/idsplit.checks.sexp",
+        .data = "(instance \"R2\" (res \"22k\") (pin 1 \"V\") (pin 2 \"GND\"))\n",
+    });
+
+    // A Design Settings save whose bytes belong in the LAYOUT sidecar.
+    const layout_path = try std.fmt.allocPrint(alloc, "{s}/src/idsplit.layout.sexp", .{project_dir});
+    defer alloc.free(layout_path);
+    _ = try writeFileAndRebuild(
+        alloc,
+        project_dir,
+        "idsplit",
+        layout_path,
+        "(design-rules (clearance 0.22))\n",
+        "edit design rules from PCB settings",
+    );
+
+    const design_after = try tmp.dir.readFileAlloc(std.testing.io, "src/idsplit.sexp", alloc, .limited(4096));
+    defer alloc.free(design_after);
+    const checks_after = try tmp.dir.readFileAlloc(std.testing.io, "src/idsplit.checks.sexp", alloc, .limited(4096));
+    defer alloc.free(checks_after);
+    const layout_after = try tmp.dir.readFileAlloc(std.testing.io, "src/idsplit.layout.sexp", alloc, .limited(4096));
+    defer alloc.free(layout_after);
+
+    // Each file received exactly its OWN mint — an id written at a foreign
+    // byte offset would land inside an unrelated form instead.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, design_after, "(id "));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, checks_after, "(id "));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, layout_after, "(id "));
+    try std.testing.expect(std.mem.indexOf(u8, design_after, "\"R1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, checks_after, "\"R2\"") != null);
+    try std.testing.expectEqualStrings("(design-rules (clearance 0.22))\n", layout_after);
+
+    // Pinned means pinned: a second settings save mints nothing new.
+    _ = try writeFileAndRebuild(
+        alloc,
+        project_dir,
+        "idsplit",
+        layout_path,
+        "(design-rules (clearance 0.25))\n",
+        "edit design rules from PCB settings",
+    );
+    const design_twice = try tmp.dir.readFileAlloc(std.testing.io, "src/idsplit.sexp", alloc, .limited(4096));
+    defer alloc.free(design_twice);
+    const checks_twice = try tmp.dir.readFileAlloc(std.testing.io, "src/idsplit.checks.sexp", alloc, .limited(4096));
+    defer alloc.free(checks_twice);
+    try std.testing.expectEqualStrings(design_after, design_twice);
+    try std.testing.expectEqualStrings(checks_after, checks_twice);
+}
+
+// spec: serve/edit - the subcircuit supply-plane toggle reads and writes (power-plane …) in whichever of the design's files declares it, and refuses a board or an unreadable design rather than writing one
+test "setPowerPlaneApi toggles the layout sidecar's copy on a split subcircuit" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    const design = "(design-block \"Sub\"\n  (board-role subcircuit)\n  (section \"S\"))\n";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/sub.sexp", .data = design });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/sub.layout.sexp",
+        .data = "; Layout sidecar.\n(power-plane on)\n",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/whole.sexp",
+        .data = "(design-block \"Whole\"\n  (board-role board)\n  (section \"S\"))\n",
+    });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    var state = serve_root.ServerState{};
+    var srv = Server{ .allocator = a, .project_dir = root, .auth_dir = root, .state = &state };
+
+    // The sidecar's copy is the one the splice leaves in force, so it is the
+    // one both the read and the write must see.
+    var read = httpz.testing.init(.{});
+    defer read.deinit();
+    read.param("name", "sub");
+    try getBoardRoleApi(&srv, read.req, read.res);
+    try std.testing.expect(std.mem.indexOf(u8, read.res.body, "\"power_plane\":true") != null);
+
+    var request = httpz.testing.init(.{});
+    defer request.deinit();
+    request.param("name", "sub");
+    request.body("{\"enabled\":false}");
+    try setPowerPlaneApi(&srv, request.req, request.res);
+    try std.testing.expectEqual(@as(u16, 200), request.res.status);
+    try std.testing.expectEqualStrings(design, try tmp.dir.readFileAlloc(std.testing.io, "src/sub.sexp", a, .limited(4096)));
+    const sidecar = try tmp.dir.readFileAlloc(std.testing.io, "src/sub.layout.sexp", a, .limited(4096));
+    try std.testing.expectEqualStrings("; Layout sidecar.\n(power-plane off)\n", sidecar);
+
+    // The two refusals the handler owns still refuse instead of writing.
+    var board = httpz.testing.init(.{});
+    defer board.deinit();
+    board.param("name", "whole");
+    board.body("{\"enabled\":false}");
+    try setPowerPlaneApi(&srv, board.req, board.res);
+    try std.testing.expectEqual(http_bad_request, board.res.status);
+
+    var missing = httpz.testing.init(.{});
+    defer missing.deinit();
+    missing.param("name", "nosuchdesign");
+    missing.body("{\"enabled\":false}");
+    try setPowerPlaneApi(&srv, missing.req, missing.res);
+    try std.testing.expectEqual(http_not_found, missing.res.status);
+}
+
+// A split design's two files, as `split-design` leaves a board: the circuit in
+// `src/split.sexp` and its `(design-rules …)` in the layout sidecar. Seeded
+// inline by each test below — the source-transaction contract owns every
+// `writeFile` reached from a function in this file, and a shared test fixture
+// helper would read as one.
+const t_split_design = "(design-block \"Split\"\n  (section \"S\"))\n";
+const t_split_layout = "(design-rules (clearance 0.2))\n";
+
+// spec: Web Server - The source endpoint reads and writes each of a design's sidecars through the same whole-file path as the design source
+test "the source endpoint opens and saves a design's layout sidecar" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/split.sexp", .data = t_split_design });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/split.layout.sexp", .data = t_split_layout });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    var state = serve_root.ServerState{};
+    var srv = Server{ .allocator = a, .project_dir = root, .auth_dir = root, .state = &state };
+
+    // GET names every file this design has, and returns the one asked for.
+    var read = httpz.testing.init(.{});
+    defer read.deinit();
+    read.param("name", "split");
+    read.query("file", "layout");
+    try getSourceApi(&srv, read.req, read.res);
+    try std.testing.expectEqual(@as(u16, 200), read.res.status);
+    const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, read.res.body, .{});
+    try std.testing.expectEqualStrings(t_split_layout, doc.object.get("source").?.string);
+    try std.testing.expectEqualStrings("layout", doc.object.get("file").?.string);
+    const files = doc.object.get("files").?.array;
+    try std.testing.expectEqual(@as(usize, 2), files.items.len);
+    try std.testing.expectEqualStrings("design", files.items[0].string);
+    try std.testing.expectEqualStrings("layout", files.items[1].string);
+
+    // POST writes the SIDECAR and leaves the design file alone.
+    var save = httpz.testing.init(.{});
+    defer save.deinit();
+    save.param("name", "split");
+    save.json(.{
+        .source = "(design-rules (clearance 0.9))\n",
+        .file = "layout",
+        .sourceRevision = doc.object.get("sourceRevision").?.string,
+    });
+    try saveSourceApi(&srv, save.req, save.res);
+    try std.testing.expectEqual(@as(u16, 200), save.res.status);
+    try std.testing.expectEqualStrings(
+        "(design-rules (clearance 0.9))\n",
+        try tmp.dir.readFileAlloc(std.testing.io, "src/split.layout.sexp", a, .limited(4096)),
+    );
+    try std.testing.expectEqualStrings(
+        t_split_design,
+        try tmp.dir.readFileAlloc(std.testing.io, "src/split.sexp", a, .limited(4096)),
+    );
+
+    // That save is undoable: its history entry carries the sidecar, so the
+    // restore puts the OLD rule back byte for byte. Restored through
+    // `history.restore` rather than `restoreDesignCore` because snapshot ids
+    // are second-granular — the pre-restore snapshot the core takes first
+    // would land in this same second and overwrite the entry under test.
+    const snaps = try history.listSnapshots(a, root, "split");
+    try std.testing.expect(snaps.len >= 1);
+    try history.restore(a, root, "split", snaps[snaps.len - 1].id);
+    try std.testing.expectEqualStrings(
+        t_split_layout,
+        try tmp.dir.readFileAlloc(std.testing.io, "src/split.layout.sexp", a, .limited(4096)),
+    );
+}
+
+// spec: Web Server - A sidecar save through the source endpoint is refused when it does not parse, when the whole design stops evaluating, and when the design has no such sidecar
+test "the source endpoint refuses a broken or absent sidecar save" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/split.sexp", .data = t_split_design });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/split.layout.sexp", .data = t_split_layout });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    var state = serve_root.ServerState{};
+    var srv = Server{ .allocator = a, .project_dir = root, .auth_dir = root, .state = &state };
+
+    const revision = source_transaction.revision(t_split_layout);
+
+    // Unparseable bytes never reach disk.
+    var broken = httpz.testing.init(.{});
+    defer broken.deinit();
+    broken.param("name", "split");
+    broken.json(.{ .source = "(design-rules", .file = "layout", .sourceRevision = &revision });
+    try saveSourceApi(&srv, broken.req, broken.res);
+    try std.testing.expectEqual(@as(u16, 400), broken.res.status);
+    try std.testing.expectEqualStrings(
+        t_split_layout,
+        try tmp.dir.readFileAlloc(std.testing.io, "src/split.layout.sexp", a, .limited(4096)),
+    );
+
+    // Parseable, but the layout sidecar refuses a circuit form — the whole
+    // design is re-evaluated after the write, and the save is refused.
+    var wrong_kind = httpz.testing.init(.{});
+    defer wrong_kind.deinit();
+    wrong_kind.param("name", "split");
+    wrong_kind.json(.{ .source = "(section \"Nope\")\n", .file = "layout", .sourceRevision = &revision });
+    try saveSourceApi(&srv, wrong_kind.req, wrong_kind.res);
+    try std.testing.expectEqual(@as(u16, 400), wrong_kind.res.status);
+    // Refused by the design-wide re-evaluation, not by the revision check.
+    try std.testing.expect(std.mem.indexOf(u8, wrong_kind.res.body, "rebuild failed") != null);
+
+    // A sidecar this design does not have is not created from a `file=` value.
+    var absent = httpz.testing.init(.{});
+    defer absent.deinit();
+    absent.param("name", "split");
+    absent.json(.{ .source = "(diagram-layout)\n", .file = "diagram", .sourceRevision = &revision });
+    try saveSourceApi(&srv, absent.req, absent.res);
+    try std.testing.expect(absent.res.status >= 400);
+    // …and the core refuses it for every caller, not only over HTTP.
+    try std.testing.expectError(
+        error.CannotReadDesign,
+        writeSourceFileCore(a, root, "split", .diagram, "(diagram-layout)\n"),
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.readFileAlloc(std.testing.io, "src/split.diagram.sexp", a, .limited(4096)),
+    );
 }

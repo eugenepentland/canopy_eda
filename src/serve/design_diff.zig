@@ -1,12 +1,18 @@
 //! Version diff: compare two evaluated revisions of a design.
 //!
-//! The server snapshots a design's `.sexp` into
-//! `<project>/history/<name>/<timestamp>/<name>.sexp` before every mutation
-//! (source save, CLI build, restore). `GET /api/diff/:name?from=<id>&to=<id|current>`
+//! The server snapshots a design's files into
+//! `<project>/history/<name>/<timestamp>/` before every mutation (source save,
+//! CLI build, restore). `GET /api/diff/:name?from=<id>&to=<id|current>`
 //! evaluates both revisions request-locally (nothing live is touched) and
 //! diffs the resulting DesignBlocks: instances added/removed, value and
 //! footprint changes, and per-net pin membership changes. `GET
 //! /api/history/:name` lists the stored snapshot ids for the picker UI.
+//!
+//! One entry is still one id however many files it holds: `revisionPath`
+//! names the entry's `<name>.sexp`, and because a snapshot now stores each
+//! sidecar as that file's SIBLING (`serve/history.zig`), the evaluator's
+//! ordinary autoload splices the revision's own sidecars rather than today's —
+//! which is what makes a split board's old revision diff as it was.
 
 const std = @import("std");
 const httpz = @import("httpz");
