@@ -726,3 +726,27 @@ real time and none is specific to that board.
   `.gitignore` now excludes them under `examples/*/`.
 - **`export-schematic-png` refuses more than 8 hubs**, and test points and
   mounting holes count as hubs, so a 20-part board already needs `--ref`.
+
+## 2026-09-05 — export-pinmap / export-spice (DSL-2 wave)
+
+- **A `**` string-repetition operator in a test body makes five Guardian
+  contract checks fail with no finding.** `const big = "1" ++ "0" ** 40;` in
+  one test made `durable-write-errors`, `persistent-read-errors`,
+  `mutation-boundary`, `request-decoding` and `edit-identity` all report
+  `FAILED without naming a single finding — its verdict cannot be keyed,
+  baselined or accepted`. Nothing names the file, so the only way to find it is
+  to bisect a new file down to a single test; that cost ~8 tool calls. Spelling
+  the literal out fixed all five. Two asks: name the file whose parse failed,
+  and teach the shared parser the `**` operator.
+- **The C-string escaper in a new exporter is reported as the `json-escaper-def`
+  idiom.** That rule's fragment is `fn writeJson`, so two JSON *object* emitters
+  (`writeJsonPart`, `writeJsonRow`) whose free strings already go through
+  `json_writer` matched it by name alone. Renaming them was the fix, but the
+  rule cannot tell an escaper from an emitter — which the guardian.toml note
+  above the rule already says. Consider matching the escaper's body shape.
+- **`/` was 100% full when this task started** (466G, 0 avail), so `zig build`
+  died with `writing dependencies.zig contents: NoSpaceLeft`. The cause is
+  211 task worktrees each holding a ~300 MB `zig-out` plus a multi-GB
+  `.zig-cache`; 40 `zig-out` directories older than 7 days were removed here,
+  which freed 113 G. A periodic sweep of build outputs in worktrees whose branch
+  has merged would stop this recurring.
