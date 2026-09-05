@@ -347,14 +347,11 @@ pub fn evalAssertRange(self: *Evaluator, args: []const Node, env: *Env) EvalErro
 
     const passed = v >= lo and v <= hi;
 
-    // Build message
-    var buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "{s} = {d:.4} (range {d:.1}-{d:.1})", .{ label, v, lo, hi }) catch "assertion";
-    const msg_copy = self.allocator.dupe(u8, msg) catch return EvalError.OutOfMemory;
+    const message = fmt_mod.assertRangeMessage(self.allocator, label, v, lo, hi) catch return EvalError.OutOfMemory;
 
     try self.assertions.append(self.allocator, .{
         .passed = passed,
-        .message = msg_copy,
+        .message = message,
     });
     return .nil;
 }

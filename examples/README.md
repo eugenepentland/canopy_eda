@@ -34,8 +34,8 @@ The three lines at the top are the design's own assertions:
 
 ```text
 PASS: LDO input-to-output headroom must exceed the regulator's dropout voltage
-PASS: LED current (mA) = 4.8148 (range 2.0-10.0)
-PASS: Blink rate (Hz) = 2.6596 (range 0.5-5.0)
+PASS: LED current (mA) = 4.8148 (range 2-10)
+PASS: Blink rate (Hz) = 2.6596 (range 0.5-5)
 ```
 
 The build also **writes two things back into `src/`**:
@@ -151,8 +151,8 @@ it. Change `r-led` to `27R` and rebuild:
 
 ```text
 PASS: LDO input-to-output headroom must exceed the regulator's dropout voltage
-FAIL: LED current (mA) = 48.1481 (range 2.0-10.0)
-PASS: Blink rate (Hz) = 2.6596 (range 0.5-5.0)
+FAIL: LED current (mA) = 48.1481 (range 2-10)
+PASS: Blink rate (Hz) = 2.6596 (range 0.5-5)
 Build failed: assertion violations
 ```
 

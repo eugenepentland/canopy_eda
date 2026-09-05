@@ -764,9 +764,11 @@ src/eval/fmt.zig::Directive struct_
 src/eval/fmt.zig::DirectiveArg enum_
 src/eval/fmt.zig::Failure struct_
 src/eval/fmt.zig::FmtError value
+src/eval/fmt.zig::assertRangeMessage | fn assertRangeMessage( allocator: std.mem.Allocator, label: []const u8, value: f64, lo: f64, hi: f64, ) FmtError![]const u8
 src/eval/fmt.zig::directive_list value
 src/eval/fmt.zig::directives value
 src/eval/fmt.zig::format | fn format(allocator: std.mem.Allocator, template: []const u8, args: []const Value) FmtError![]const u8
+src/eval/fmt.zig::formatMeasured | fn formatMeasured(writer: *std.Io.Writer, v: f64) FmtError!void
 src/eval/fmt.zig::formatWhere | fn formatWhere( allocator: std.mem.Allocator, template: []const u8, args: []const Value, where: *Failure, ) FmtError![]const u8
 src/eval/footprint_pads.zig::PadIds value
 src/eval/footprint_pads.zig::get | fn get(self: *Evaluator, fp_name: []const u8) ?*const PadIds

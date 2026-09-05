@@ -4685,6 +4685,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - Formats mixed specifiers in a single format string
 - The directives table and format()'s dispatch recognise exactly the same specifier characters
 - Lowercase ~a displays scalar values without adding engineering-unit suffixes
+- assert-range bounds are rendered at full precision instead of one decimal place
 
 ## eval/instance
 
