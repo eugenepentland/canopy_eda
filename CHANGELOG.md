@@ -26,6 +26,9 @@ fabrication and KiCad outputs. There is no GUI capture step.
 
 ### What you get
 
+- Release tarballs print their tag from `netlisp version`; builds from a
+  checkout print the commit they were built from.
+
 - **A design language.** A small S-expression DSL: components, parameterised
   component families, modules with closures, nets inferred from pin
   connections, sections, assertions and formatting directives. The reference is

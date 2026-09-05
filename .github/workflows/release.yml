@@ -75,14 +75,16 @@ jobs:
       # ReleaseSafe, self-hosted backend. `-Dllvm` is an opt-in developer
       # escape hatch that costs 12x the compile time; no release path passes it.
       #
-      # `-Dcpu=baseline` is the one flag prepare-release.sh does not pass and
-      # this must: that script builds on the machine that will run the binary,
+      # `-Dbuild-id=<tag>` stamps the tag into the binary so a downloaded tarball
+      # can name itself (a checkout resolves its id from git at runtime, a
+      # tarball has no git to ask). `-Dcpu=baseline` is the other flag
+      # prepare-release.sh does not pass and this must: that script builds on the machine that will run the binary,
       # whereas this publishes to strangers. Zig targets the building machine's
       # CPU by default, and a hosted runner's CPU is whatever Azure allocated —
       # CI run 33974127676 proved the hazard by killing a natively built
       # netlisp with SIGILL in compiler_rt on a second runner.
       - name: Build the release artifact (ReleaseSafe, self-hosted, baseline CPU)
-        run: zig build --seed=1 -Doptimize=safe -Dcpu=baseline
+        run: zig build --seed=1 -Doptimize=safe -Dcpu=baseline "-Dbuild-id=${GITHUB_REF_NAME}"
 
       - name: Strip the executable and verify no symbols remain
         run: |
@@ -103,7 +105,7 @@ jobs:
           set -euo pipefail
           bin="$PWD/zig-out/bin/netlisp"
           echo "build id: $("$bin" version)"
-          test "$("$bin" version)" = "$(git rev-parse HEAD | cut -c1-9)"
+          test "$("$bin" version)" = "${GITHUB_REF_NAME}"
           "$bin" check --project-dir test/fixtures/stdlib-smoke \
             --profile preflight stdlib-smoke
           "$bin" export-kicad --project-dir test/fixtures/stdlib-smoke \

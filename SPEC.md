@@ -224,6 +224,7 @@ candidate for deployment.
 - Rejects a shard filter that no longer names a test in the tree
 - Pins every gated full-test invocation with `--seed=1` so an unchanged tree's test run is a cache hit
 - Resolves build identity at runtime without making each commit a compiler input
+- Release binaries carry the tag they were built from as a compile-time build identity
 - Follows a worktree gitdir pointer and commondir to the shared refs, with packed-refs and detached HEAD fallbacks
 - Runs full tests and forces the concurrent ReleaseSafe build through the self-hosted backend for one exact commit
 - Cancels the complete concurrent ReleaseSafe process group as soon as full Debug tests fail
