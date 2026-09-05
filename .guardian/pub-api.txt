@@ -554,6 +554,14 @@ src/eval/check_grammar.zig::CheckDoc struct_
 src/eval/check_grammar.zig::check_docs value
 src/eval/check_grammar.zig::check_keyword_list value
 src/eval/check_grammar.zig::parseCheck | fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check
+src/eval/connect.zig::Context struct_
+src/eval/connect.zig::Kind enum_
+src/eval/connect.zig::Pending struct_
+src/eval/connect.zig::Token struct_
+src/eval/connect.zig::anon_prefix value
+src/eval/connect.zig::collect | fn collect( self: *Evaluator, queue: *std.ArrayList(Pending), kind: Kind, form_children: []const Node, env: *Env, span: ast.Span, ) EvalError!void
+src/eval/connect.zig::isAnonymous | fn isAnonymous(name: []const u8) bool
+src/eval/connect.zig::resolveAll | fn resolveAll(self: *Evaluator, ctx: Context) EvalError!void
 src/eval/design_block.zig::emit | fn emit(self: BlockScopeSink, ev: *Evaluator, form: Node, env: *Env) EvalError!void
 src/eval/design_block.zig::emit | fn emit(self: SectionSink, ev: *Evaluator, form: Node, env: *Env) EvalError!void
 src/eval/design_block.zig::emit | fn emit(self: SubSectionSink, ev: *Evaluator, form: Node, env: *Env) EvalError!void
@@ -833,6 +841,7 @@ src/eval/instance.zig::evalSeriesForm | fn evalSeriesForm( self: *Evaluator, for
 src/eval/instance.zig::instanceFromValue | fn instanceFromValue(self: *Evaluator, val: Value, ref_des: []const u8, source_offset: u32, id: []const u8) ?Instance
 src/eval/instance.zig::matchPinName | fn matchPinName(pinout: *const std.StringHashMapUnmanaged([]const u8), name: []const u8) ?PinMatch
 src/eval/instance.zig::mergeInstanceProperties | fn mergeInstanceProperties( self: *Evaluator, inst: *Instance, overrides: []const env_mod.Property, ) std.mem.Allocator.Error!void
+src/eval/instance.zig::padLess | fn padLess(a: []const u8, b: []const u8) bool
 src/eval/instance.zig::parsePinForm | fn parsePinForm( self: *Evaluator, form: Node, ref_des: []const u8, env: *Env, pin_nets: *std.ArrayList(PinNetDecl), pads: PartPads, ) EvalError!void
 src/eval/instance.zig::parsePinTail | fn parsePinTail(self: *Evaluator, pin_children: []const Node, env: *Env) EvalError!PinTail
 src/eval/instance.zig::parseTrailingArgs | fn parseTrailingArgs(self: *Evaluator, children: []const Node, env: *Env) EvalError!TrailingArgs

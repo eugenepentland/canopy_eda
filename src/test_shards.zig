@@ -352,6 +352,7 @@ pub const shards: []const []const []const u8 = &.{
         "diagram.classify.test.",
         "diagram.lod.test.",
         "docgen.test.",
+        "eval.connect.test.",
         "eval.micro_forms.test.",
         "eval.power_sequencing.test.",
         "eval.stackup_presets.test.",
@@ -668,6 +669,17 @@ test {
     try std.testing.expectEqualStrings("ground_via_seed.test.", shards[0][0]);
     try std.testing.expectEqualStrings("serve.ground_vias.test.", shards[0][2]);
     try std.testing.expectEqualStrings("serve.pcb_step_export.test.", shards[0][3]);
+}
+
+// spec: Development pipeline - The anonymous-wiring tests remain claimed by exactly one shard
+test {
+    var claims: usize = 0;
+    for (shards) |shard| {
+        for (shard) |filter| {
+            if (std.mem.eql(u8, filter, "eval.connect.test.")) claims += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), claims);
 }
 
 // spec: Development pipeline - Panelization export tests remain claimed by the shard manifest

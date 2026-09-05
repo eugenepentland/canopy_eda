@@ -224,6 +224,7 @@ candidate for deployment.
 - The library-fact envelope rules remain claimed by the shard manifest
 - The saved-pose identity tests remain claimed by the shard manifest
 - Panelization export tests remain claimed by the shard manifest
+- The anonymous-wiring tests remain claimed by exactly one shard
 - Bridges every test-bearing module into the shard import graph so filters alone decide a shard's contents
 - Rejects a shard filter that no longer names a test in the tree
 - Pins every gated full-test invocation with `--seed=1` so an unchanged tree's test run is a cache hit
@@ -5781,6 +5782,31 @@ Public functions: analyze
 - Orders dependent rail after its enable source
 - Flags enable that never resolves to a known rail
 - Routes enable through PG signal to source rail
+
+## eval/connect
+
+- a (connect …) with no (name …) derives its net name from the AUTHORED end tokens, so ref-des renumbering cannot move it
+- a generated net name is byte-identical across two evaluations of the same source
+- a generated net name reaches the KiCad netlist unescaped and cannot collide with an authored net
+- a chain over a module picks the module's unique in/out signal pair even when a bias pin is also an input
+- a sub-block port a connect wires satisfies the required-port ERC exactly as a bridge does
+- wiring a pad that already carries an authored net is refused instead of silently merging the two
+- a sub-block port wired by both a bridge and a connect is refused, naming where the bridge was written
+- a bare chain item with more than two pads is refused with the explicit spelling in the message
+- a chain item naming no placed part or sub-block is refused rather than inventing a net
+- a sub-block with no unique signal path is refused with its candidate ports listed
+- an end that names an ordinary net joins that net instead of generating a second name for the same node
+- two connects that would generate the same name get distinct nets rather than silently merging
+- a form with too few ends, or an empty end token, is refused rather than producing a nameless net
+- large inputs — a connect with many ends collapses to one short, legal, deterministic net name
+- a malformed or non-ASCII end token still yields a name legal in every URL, JSON and KiCad surface
+- panic-free — every malformed end spelling is reported with a message, never crashed on
+- a (class …) on a connect or a chain adds every net it makes to that net-class
+- a class naming no declared net-class warns rather than silently dropping the intent
+- completeness-waiver: unauthorized access (a language form over an in-memory design block; it opens nothing and checks no identity)
+- completeness-waiver: i/o failure (resolution reads only the already-materialized block and the pinout maps the evaluator had already cached)
+- completeness-waiver: concurrent access (runs inline on the single evaluation thread that built the block, before the block is published)
+- completeness-waiver: integer overflow (no arithmetic on design-supplied numbers; the only counter is the 1..1000-bounded name-disambiguation ordinal)
 
 ## eval/design_block
 

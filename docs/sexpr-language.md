@@ -1677,6 +1677,134 @@ A `(sub-block …)` accepts only `(bridge …)`, `(id …)`, `(ids …)` and
 `(reflow)` as trailing children; anything else warns. See
 [docs/language-forms.md § Sub-block sub-forms](language-forms.md).
 
+### Anonymous wiring: `(connect …)` and `(chain …)`
+
+Most nets in a signal chain exist only to have a name. On `barracuda.sexp`,
+`IF1_PAD`, `IF1_LNA`, `IF1_MIX`, `LO1_PAD`, `LO1_DRIVE`, `LO1_FILTERED` and
+`LO1_SYNTH` each name one node between two adjacent parts and nothing else,
+and every one of them also costs a `(rename …)` on each bridge that touches it.
+`(connect …)` states such a node by naming its **ends**; `(chain …)` states a
+whole cascade by naming the parts in order.
+
+Both lower to exactly the pin-net and net-tie records `(pin …)`, `(net …)` and
+`(bridge …)` already produce, so ERC, `(decouples …)`/`(near …)`, net classes,
+`(net-envelope …)`, the KiCad exports and every PCB tool see an ordinary net.
+
+```scheme
+;; One node, four ends, no invented name:
+(connect "U1.SCK" "flash/SCK" "hdr.4")
+
+;; The same node with a name you can reference elsewhere:
+(connect "U1.SCK" "flash/SCK" (name "SPI_SCK") (class "spi-fast"))
+```
+
+An **END** is one of four spellings:
+
+| Spelling | Means |
+| --- | --- |
+| `"REF.PAD"` | A physical pad on a placed part. |
+| `"REF.FN"` | A pinout **function name**, resolved through the part's `lib/pinouts/<name>.sexp` exactly as `(pin FN …)` does. |
+| `"sub/PORT"` | A declared port of a sub-block — the same record a `(bridge …)` writes, so `checkUnconnectedPorts` counts the port as wired. |
+| `"PORT"` / `"NET"` | A port of the enclosing block, or any ordinary net name. |
+
+Resolution is deferred until the whole block is built, so an end may name a
+part or a sub-block written **below** the `(connect …)`.
+
+**No silent merges.** Wiring a pad that already carries a different net is an
+error naming both nets; wiring a sub-block port a `(bridge …)` or `(net …)`
+already wired is an error naming the line that wired it. Only two *anonymous*
+nodes landing on one pad merge — they are the same node stated twice — and that
+merge is reported as a warning, because nothing in the source spells it out.
+
+#### The generated name
+
+Without `(name …)`, and with no end that is already an ordinary net, the net is
+named from the **authored end tokens**:
+
+```
+n~lpf4-OUTPUT~lpf_if_1-RF_IN
+n~pad1-RF-OUT~lna-RF_IN
+```
+
+- `n~` is the reserved prefix. `~` is an RFC 3986 *unreserved* character, so
+  the name needs no escaping in any URL; it is not `.` (the per-pin
+  bypass-stub separator) and not `/` (the hierarchy separator); it survives the
+  KiCad netlist and `.kicad_sch` export verbatim; and the leading letter keeps
+  a shell from tilde-expanding it. Every generated name is nevertheless checked
+  against the block's own net names, so a collision is impossible rather than
+  merely unlikely.
+- Identity comes from what the **source** says — `lpf4`, `pad1`, `lna/RF_IN` —
+  never from a post-flatten ref-des, so the board's auto ref-des pass and a
+  sub-block renumber both leave the name alone. A bare two-terminal chain item
+  is spelled by its pinout function names for the same reason.
+- Ends beyond a 60-character name collapse to the first end plus a hash of the
+  full key, and a name already in use takes a `~2`, `~3`, … ordinal rather than
+  merging two nodes.
+- `(name "NET")` gives an authored name instead — which is how a net-class
+  `(nets …)` list or a `(net-envelope …)` reaches the node. Both also accept
+  the generated name as written.
+
+#### `(chain …)`: a cascade in one line
+
+`(chain "NET_A" ITEM… "NET_B")` wires two-port items in order, with one
+anonymous net per gap. The first and last tokens are ordinary `(connect …)`
+ends; each ITEM is:
+
+| Spelling | Means |
+| --- | --- |
+| `"REF"` | A two-terminal part: in on its first pad, out on its second (pinout order, or `1`/`2` for a part with no pinout). A part with more pads is an error saying so. |
+| `"sub"` | A sub-block whose module declares exactly one signal `out` port and, among the ports sharing that output's kind, exactly one `in`. Power, ground/bidi and `optional` ports are never candidates. Anything less definite is an error listing them. |
+| `"REF/IN>OUT"` | The two terminals named explicitly — pad ids or pinout function names for a part, port names for a sub-block. |
+
+Barracuda's IF chain — mixer → LFCW-6000+ → 2× LFCN-1575D+ → YAT-1A+ → LNA →
+DSA — is seven nets and six `(rename …)` lines as it stands:
+
+```scheme
+(sub-block "mixer" (bcuda-mixer-mm1)
+  (bridge "" GND (rename RF RF1_PAD) (rename LO LO1_FILTERED) (rename IF IF1_MIX)))
+(instance "lpf4"     lfcw-6000+  (pin 1 "IF1_MIX")       (pin 3 "IF1_LPF2")      (pin 2 4 "GND"))
+(instance "lpf_if_1" lfcn-1575d+ (pin 1 "IF1_LPF2")      (pin 3 "IF1_LFCN_MID")  (pin 2 4 "GND"))
+(instance "lpf_if_2" lfcn-1575d+ (pin 1 "IF1_LFCN_MID")  (pin 3 "IF1_LFCN")      (pin 2 4 "GND"))
+(instance "pad1"     yat-1a+     (pin 2 "IF1_LFCN")      (pin 5 "IF1_PAD")       (pin 1 3 4 6 7 "GND"))
+(sub-block "lna" (tsy-83lnw-lna)
+  (bridge "" (rename RF_IN IF1_PAD) (rename RF_OUT IF1_LNA)
+             (rename VDD V_5VA) (rename VBYP LNA_VBYP) GND))
+(sub-block "dsa" (bcuda-dsa-hmc1119)
+  (bridge "" (rename LPF_RF IF1_LNA) (rename DSA_RF IF1_DSA) V_3V3A … GND))
+```
+
+The same chain, with only the two nets that are referenced elsewhere named:
+
+```scheme
+(sub-block "mixer" (bcuda-mixer-mm1)
+  (bridge "" GND (rename RF RF1_PAD) (rename LO LO1_FILTERED)))
+(instance "lpf4"     lfcw-6000+  (pin 2 4 "GND"))
+(instance "lpf_if_1" lfcn-1575d+ (pin 2 4 "GND"))
+(instance "lpf_if_2" lfcn-1575d+ (pin 2 4 "GND"))
+(instance "pad1"     yat-1a+     (pin 1 3 4 6 7 "GND"))
+(sub-block "lna" (tsy-83lnw-lna)
+  (bridge "" (rename VDD V_5VA) (rename VBYP LNA_VBYP) GND))
+(sub-block "dsa" (bcuda-dsa-hmc1119)
+  (bridge "" V_3V3A … GND))
+
+(chain "mixer/IF"
+       "lpf4/INPUT>OUTPUT"
+       "lpf_if_1/RF_IN>RF_OUT"
+       "lpf_if_2/RF_IN>RF_OUT"
+       "pad1/RF-IN>RF-OUT"
+       "lna"                     ;; RF_IN → RF_OUT; VBYP is an `in` too, but a
+       "dsa"                     ;;   different kind, so the rf pair is unique
+       "IF1_DSA"
+       (class "if-50"))
+```
+
+The four filters name their two terminals because each carries ground pads as
+well; `"lna"` and `"dsa"` do not, because each module declares exactly one rf
+input and one rf output. `mixer/IF` and `IF1_DSA` stay as they are — the first
+is a sub-block port, the second is named in the board's `(pcb-plan …)` wave
+lists — and the six nets between them become
+`n~mixer-IF~lpf4-INPUT`, `n~lpf4-OUTPUT~lpf_if_1-RF_IN`, and so on.
+
 ### The four unrelated `(group …)` forms
 
 `group` is overloaded across four grammars that share nothing but the word:

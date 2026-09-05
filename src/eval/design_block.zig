@@ -30,6 +30,7 @@ const physical_checks = @import("../req_physical_checks.zig");
 const test_point_mod = @import("test_point.zig");
 const micro_forms = @import("micro_forms.zig");
 const interfaces = @import("interfaces.zig");
+const connect_mod = @import("connect.zig");
 const pin_enrichment = @import("pin_enrichment.zig");
 const forms_mod = @import("forms.zig");
 const variants = @import("variants.zig");
@@ -132,6 +133,10 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var groups: std.ArrayList(Group) = .empty;
     var sections: std.ArrayList(env_mod.Section) = .empty;
     var net_ties: std.ArrayList(NetTie) = .empty;
+    // `(connect …)`/`(chain …)` resolve after the whole body is walked; the
+    // queue is per block, so a module body materialized mid-walk can never
+    // consume the enclosing design's pendings.
+    var connects: std.ArrayList(connect_mod.Pending) = .empty;
     var sub_blocks: std.ArrayList(SubBlock) = .empty;
     var port_groups: std.ArrayList(env_mod.PortGroup) = .empty;
     // `(bridge-interface …)` ties are resolved after the whole body has been
@@ -221,6 +226,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .groups = &groups,
         .sections = &sections,
         .net_ties = &net_ties,
+        .connects = &connects,
         .sub_blocks = &sub_blocks,
         .port_groups = &port_groups,
         .iface_bridges = &iface_bridges,
@@ -256,6 +262,19 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     // either declaration order.
     builders.resolveDecoupleTargets(self, instances.items);
     builders.resolveNearTargets(self, instances.items);
+    // Same reason, one step further: a `(connect …)` end may name a part or a
+    // sub-block declared BELOW it, and a `"REF.FN"` end only resolves against
+    // that part's own pinout. Runs before `buildNets` so its pin-net records
+    // and ties are ordinary inputs to the union-find merge.
+    try connect_mod.resolveAll(self, .{
+        .pending = connects.items,
+        .instances = instances.items,
+        .sub_blocks = sub_blocks.items,
+        .ports = ports.items,
+        .all_pin_nets = &all_pin_nets,
+        .net_ties = &net_ties,
+        .net_classes = &net_class_specs,
+    });
     if (!build.has_explicit_layout)
         try seedLayoutFromSectionGrid(self, body_forms, env, &layout_spec);
 
@@ -382,6 +401,8 @@ const BlockBuildState = struct {
     groups: *std.ArrayList(Group),
     sections: *std.ArrayList(env_mod.Section),
     net_ties: *std.ArrayList(NetTie),
+    /// `(connect …)`/`(chain …)` awaiting the post-build resolution pass.
+    connects: *std.ArrayList(connect_mod.Pending),
     sub_blocks: *std.ArrayList(SubBlock),
     port_groups: *std.ArrayList(env_mod.PortGroup),
     iface_bridges: *std.ArrayList(interfaces.PendingBridge),
@@ -440,6 +461,7 @@ const BlockContext = struct {
                 .pin_nets = build.all_pin_nets,
                 .notes = build.notes,
                 .test_points = build.test_points,
+                .connects = build.connects,
             },
             .net_ties = build.net_ties,
             .sections = build.sections,
@@ -567,6 +589,8 @@ fn evalBlockBodyForm(
             validate.trackNetFormSource(self, form_children, env, build.net_form_sources);
         },
         .bus_net => try evalBusNetForm(self, form_children, env, build.net_ties),
+        .connect => try connect_mod.collect(self, build.connects, .connect, form_children, env, form.span),
+        .chain => try connect_mod.collect(self, build.connects, .chain, form_children, env, form.span),
         .series => try instance_mod.evalSeriesForm(self, form_children, env, build.instances, build.all_pin_nets, build.notes),
         .fanout => try instance_mod.evalFanoutForm(self, form_children, env, build.instances, build.all_pin_nets),
         .decouple => try evalDecoupleForm(self, form_children, env, build.instances, build.all_pin_nets),
@@ -577,6 +601,7 @@ fn evalBlockBodyForm(
             .pin_nets = build.all_pin_nets,
             .notes = build.notes,
             .test_points = build.test_points,
+            .connects = build.connects,
         }),
         .pullup => try micro_forms.emit(self, .pullup, form_children, env, build.instances, build.all_pin_nets),
         .pulldown => try micro_forms.emit(self, .pulldown, form_children, env, build.instances, build.all_pin_nets),
@@ -789,7 +814,7 @@ fn evalNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_tie
         for (form_children[2..]) |dst_node| {
             const dst_val = try self.evalNode(dst_node, env);
             const dst = dst_val.asString() orelse continue;
-            try net_ties.append(self.allocator, .{ .a = src, .b = dst });
+            try net_ties.append(self.allocator, .{ .a = src, .b = dst, .span = form_children[0].span });
         }
     }
 }
@@ -957,6 +982,12 @@ fn evalSubBlockBridges(
         if (!child.isForm("bridge")) continue;
         const bc = child.asList().?;
         if (bc.len < 2) continue;
+        // Stamp this bridge's span onto every tie it emits, so a later
+        // `(connect …)` on the same sub-block port can name BOTH places.
+        const pre = net_ties.items.len;
+        defer for (net_ties.items[pre..]) |*t| {
+            t.span = child.span;
+        };
         const prefix = literalText(bc[1]) orelse "";
         for (bc[2..]) |item| {
             if (item.isForm("rename")) {
@@ -1455,6 +1486,8 @@ fn evalSectionChild(
         },
         .net => try evalNetForm(self, sf_children, env, net_ties),
         .bus_net => try evalBusNetForm(self, sf_children, env, net_ties),
+        .connect => try connect_mod.collect(self, ctx.block.tp.connects, .connect, sf_children, env, sf.span),
+        .chain => try connect_mod.collect(self, ctx.block.tp.connects, .chain, sf_children, env, sf.span),
         .section => try evalSubSection(self, sf_children, env, ctx.block, ctx.instances, ctx.sub_sections, ctx.name),
         .test_point => if (try test_point_mod.evalForm(self, sf_children, env, ctx.block.tp)) |inst|
             try ctx.instances.append(self.allocator, inst),
@@ -1752,6 +1785,8 @@ fn evalSubSectionChild(
         },
         .net => try evalNetForm(self, ssf_children, env, net_ties),
         .bus_net => try evalBusNetForm(self, ssf_children, env, net_ties),
+        .connect => try connect_mod.collect(self, ctx.block.tp.connects, .connect, ssf_children, env, ssf.span),
+        .chain => try connect_mod.collect(self, ctx.block.tp.connects, .chain, ssf_children, env, ssf.span),
         .test_point => if (try test_point_mod.evalForm(self, ssf_children, env, ctx.block.tp)) |inst| {
             try ctx.sec_instances.append(self.allocator, inst);
             try ctx.instances.append(self.allocator, inst);
