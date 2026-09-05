@@ -4806,6 +4806,32 @@ src/serve/pcb_fence.zig::pcbFenceApi | fn pcbFenceApi(ctx: *Server, req: *httpz.
 src/serve/pcb_fence.zig::run | fn run( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opt: Options, ) FenceError!Outcome
 src/serve/pcb_keepout_json.zig::write | fn write( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
 src/serve/pcb_keepout_json.zig::writeBlockFamilies | fn writeBlockFamilies(w: *std.Io.Writer, blocks: env.PerimeterKeepoutBlocks) std.Io.Writer.Error!void
+src/serve/pcb_layout_chrome.zig::PanelData struct_
+src/serve/pcb_layout_chrome.zig::ReadOnlyEmbedChrome struct_
+src/serve/pcb_layout_chrome.zig::SidebarOpts struct_
+src/serve/pcb_layout_chrome.zig::cooling_modals value
+src/serve/pcb_layout_chrome.zig::courtyard_modal value
+src/serve/pcb_layout_chrome.zig::embed_css value
+src/serve/pcb_layout_chrome.zig::fab_modal value
+src/serve/pcb_layout_chrome.zig::fp_card_modal value
+src/serve/pcb_layout_chrome.zig::mobile_css value
+src/serve/pcb_layout_chrome.zig::pad_align_css value
+src/serve/pcb_layout_chrome.zig::page_css value
+src/serve/pcb_layout_chrome.zig::pcb_3d_stage_html value
+src/serve/pcb_layout_chrome.zig::pcb_3d_toggle_js value
+src/serve/pcb_layout_chrome.zig::toolstrip_html value
+src/serve/pcb_layout_chrome.zig::writeActivityRail | fn writeActivityRail(w: *std.Io.Writer) std.Io.Writer.Error!void
+src/serve/pcb_layout_chrome.zig::writeDocHead | fn writeDocHead(w: *std.Io.Writer, title: []const u8, embed: bool, edit_embed: bool) std.Io.Writer.Error!void
+src/serve/pcb_layout_chrome.zig::writeEditControls | fn writeEditControls( w: *std.Io.Writer, placement: optimizer.Placement, name: []const u8, src: LayoutSource, grid_only: bool, routed: ?router.RouteResult, ro_params: router.RouteParams, n_drc: usize, embed: bool, ) std.Io.Writer.Error!void
+src/serve/pcb_layout_chrome.zig::writeHeadNav | fn writeHeadNav( w: *std.Io.Writer, is_module: bool, name: []const u8, title: []const u8, layout: ?[]const u8, tally: ?fab_readiness.Tally, ) std.Io.Writer.Error!void
+src/serve/pcb_layout_chrome.zig::writeLegend | fn writeLegend(w: *std.Io.Writer, p: optimizer.Placement, hidden: bool) std.Io.Writer.Error!void
+src/serve/pcb_layout_chrome.zig::writeLinks | fn writeLinks(w: *std.Io.Writer, links: []const optimizer.Link, rules: optimizer.BoardRules) std.Io.Writer.Error!void
+src/serve/pcb_layout_chrome.zig::writeNetColors | fn writeNetColors(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement) HandlerError!void
+src/serve/pcb_layout_chrome.zig::writeNetNames | fn writeNetNames(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement) HandlerError!void
+src/serve/pcb_layout_chrome.zig::writeReadOnlyEmbedChrome | fn writeReadOnlyEmbedChrome(w: *std.Io.Writer, o: ReadOnlyEmbedChrome) std.Io.Writer.Error!void
+src/serve/pcb_layout_chrome.zig::writeRightDock | fn writeRightDock( w: *std.Io.Writer, alloc: std.mem.Allocator, embed: bool, edit_embed: bool, pd: PanelData, ) std.Io.Writer.Error!void
+src/serve/pcb_layout_chrome.zig::writeSidebar | fn writeSidebar(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, sch_base: []const u8, o: SidebarOpts) HandlerError!void
+src/serve/pcb_layout_chrome.zig::writeStage | fn writeStage(w: *std.Io.Writer, view: View, embed: bool) std.Io.Writer.Error!void
 src/serve/pcb_layout_import.zig::writeImportedStarredLayout | fn writeImportedStarredLayout( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, imported: import_layout.Imported, ) bool
 src/serve/pcb_layout_mcp.zig::McpExistingCopper struct_
 src/serve/pcb_layout_mcp.zig::addTracksFixture | fn addTracksFixture(parts: []optimizer.Part, nets: []const export_kicad.FlatNet, rules: []const optimizer.NetRule) optimizer.Placement
@@ -4844,6 +4870,8 @@ src/serve/pcb_layout_page.zig::FabView struct_
 src/serve/pcb_layout_page.zig::FabViewError value
 src/serve/pcb_layout_page.zig::GroupKnobs struct_
 src/serve/pcb_layout_page.zig::HandlerError value
+src/serve/pcb_layout_page.zig::LayoutSource enum_
+src/serve/pcb_layout_page.zig::PageScripts struct_
 src/serve/pcb_layout_page.zig::PartPose value
 src/serve/pcb_layout_page.zig::PngError value
 src/serve/pcb_layout_page.zig::PngFail struct_
@@ -4874,6 +4902,8 @@ src/serve/pcb_layout_page.zig::SyncPerimeterMask struct_
 src/serve/pcb_layout_page.zig::SyncPose value
 src/serve/pcb_layout_page.zig::SyncVia struct_
 src/serve/pcb_layout_page.zig::ThermalPng struct_
+src/serve/pcb_layout_page.zig::Toggles struct_
+src/serve/pcb_layout_page.zig::View struct_
 src/serve/pcb_layout_page.zig::addSubcircuitRouteSeeds | fn addSubcircuitRouteSeeds( alloc: std.mem.Allocator, project_dir: []const u8, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, options: *route_policy.Options, ) std.mem.Allocator.Error!SubcircuitRouteSeedStats
 src/serve/pcb_layout_page.zig::applyDeferred | fn applyDeferred(ctx: *Server, name: []const u8, placement: optimizer.Placement, view: *ShownView) void
 src/serve/pcb_layout_page.zig::bodyParam | fn bodyParam(req: *httpz.Request, res: *httpz.Response) ?[]const u8
@@ -4885,8 +4915,10 @@ src/serve/pcb_layout_page.zig::fabViewFor | fn fabViewFor(alloc: std.mem.Allocat
 src/serve/pcb_layout_page.zig::fabViewForResolved | fn fabViewForResolved( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layout_arg: ?[]const u8, block: *env_mod.DesignBlock, ) FabViewError!FabView
 src/serve/pcb_layout_page.zig::git value
 src/serve/pcb_layout_page.zig::hasSavedLayout value
+src/serve/pcb_layout_page.zig::kindStr | fn kindStr(k: optimizer.RatKind) []const u8
 src/serve/pcb_layout_page.zig::kind_manual value
 src/serve/pcb_layout_page.zig::layouts_ext value
+src/serve/pcb_layout_page.zig::liveOfPlacement | fn liveOfPlacement(alloc: std.mem.Allocator, p: optimizer.Placement) ?[]const LiveRef
 src/serve/pcb_layout_page.zig::loadSubBlockPoses | fn loadSubBlockPoses(alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock) ?[]const optimizer.RefPose
 src/serve/pcb_layout_page.zig::loadSyncLayout | fn loadSyncLayout( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) ?std.StringHashMapUnmanaged(SyncPose)
 src/serve/pcb_layout_page.zig::loadSyncPerimeterMask | fn loadSyncPerimeterMask( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, name: []const u8, ) ?SyncPerimeterMask
@@ -4913,6 +4945,7 @@ src/serve/pcb_layout_page.zig::mcpWorkingName value
 src/serve/pcb_layout_page.zig::moved | fn moved(self: StoreRevCheck) bool
 src/serve/pcb_layout_page.zig::nameParam | fn nameParam(req: *httpz.Request, res: *httpz.Response) ?[]const u8
 src/serve/pcb_layout_page.zig::netIndexByName | fn netIndexByName(placement: optimizer.Placement, name: []const u8) ?i32
+src/serve/pcb_layout_page.zig::net_json_key value
 src/serve/pcb_layout_page.zig::no_block_msg value
 src/serve/pcb_layout_page.zig::no_sub_msg value
 src/serve/pcb_layout_page.zig::normalizeJunctionsApi value
@@ -4991,11 +5024,13 @@ src/serve/pcb_layout_page.zig::write value
 src/serve/pcb_layout_page.zig::writeFreshRfPathsJson | fn writeFreshRfPathsJson(w: *std.Io.Writer, outcomes: []const rf_port_report.Outcome, nets: []const export_kicad.FlatNet) std.Io.Writer.Error!void
 src/serve/pcb_layout_page.zig::writeJsonStr value
 src/serve/pcb_layout_page.zig::writeLayoutsFileJsonRev value
+src/serve/pcb_layout_page.zig::writePageScripts | fn writePageScripts(w: *std.Io.Writer, mode: PageScripts) std.Io.Writer.Error!void
 src/serve/pcb_layout_page.zig::writePcbDerivedData | fn writePcbDerivedData(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, rv: ShownView, opts: PcbDataOpts) HandlerError!void
 src/serve/pcb_layout_page.zig::writePerNetJson | fn writePerNetJson(w: *std.Io.Writer, per_net: []const router.NetRouted) std.Io.Writer.Error!void
 src/serve/pcb_layout_page.zig::writeRoutePayload | fn writeRoutePayload( w: *std.Io.Writer, prep: RoutePrep, outcome: RouteOutcome, ) std.Io.Writer.Error!void
 src/serve/pcb_layout_page.zig::writeRouteSeedStats | fn writeRouteSeedStats(w: *std.Io.Writer, stats: SubcircuitRouteSeedStats) std.Io.Writer.Error!void
 src/serve/pcb_layout_page.zig::writeSavedRoutesJson value
+src/serve/pcb_layout_page.zig::writeUrlEncoded | fn writeUrlEncoded(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void
 src/serve/pcb_layout_sync.zig::importKicadLayoutApi value
 src/serve/pcb_page_cache.zig::Entry struct_
 src/serve/pcb_page_cache.zig::Retain struct_

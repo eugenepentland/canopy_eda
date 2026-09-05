@@ -312,7 +312,8 @@ inputs = ["scripts/ui_browser_perf/run.js", "scripts/ui_browser_perf/manifest.js
     "test/fixtures/browser_perf/route-review.kicad_pcb",
     "test/fixtures/browser_perf/datasheet.pdf",
     "test/fixtures/browser_perf/generate_datasheet.js", "src/serve.zig",
-    "src/serve/pcb_layout_page.zig", "src/serve/assets/pcb_pad_align_tool.html",
+    "src/serve/pcb_layout_page.zig", "src/serve/pcb_layout_chrome.zig",
+    "src/serve/assets/pcb_pad_align_tool.html",
     "src/serve/assets/pcb_find_header.html", "src/serve/assets/pcb_drc_pane.html",
     "docs/benchmarks/ui-browser/baseline.json", "docs/benchmarks/pcb-editor/baseline.json"]
 
@@ -1242,7 +1243,7 @@ name = "serve-placement-internals"
 from = ["src/serve/*"]
 to = ["src/placement/*"]
 allow = ["src/serve/mcp_connector_pinout.zig", "src/serve/pcb_subseeds.zig", "src/serve/saved_zone.zig",
-  "src/serve/pcb_layout_mcp.zig"]
+  "src/serve/pcb_layout_mcp.zig", "src/serve/pcb_layout_chrome.zig"]
 reason = "ratchet ahead of the placement/model.zig extraction - serve should depend on placement's data model, not compile against the 12.3k-line solver; saved_zone is the sanctioned adapter that expands persisted zone intent into placement copper; the pcb_layout_* modules are pcb_layout_page.zig's own cohesive split (the file-size hard cap forced it) and carry the edges that file already held frozen - they add no coupling this rule was not already counting"
 
 [[twin]]
