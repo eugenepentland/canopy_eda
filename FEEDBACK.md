@@ -826,3 +826,6 @@ real time and none is specific to that board.
 
 ## 2026-09-05 · codex · IC package builder CLI exploration
 - **friction:** `netlisp serve --help` started the server instead of printing help, created a worktree interaction log, then hit the existing port and emitted startup allocator-leak traces. Reject unknown serve flags or handle `--help` before opening logs and sockets so CLI discovery is read-only.
+
+## 2026-09-05 · codex · IC package test registration
+- **friction:** New test-bearing modules must be added to both `src/test_root.zig` and `src/test_shards.zig`; importing them through `main.zig` is enough for focused tests but not the sharded release suite. The first package release gate caught five missing module registrations after a 118-second run and cancelled its concurrent build. Document these two registries in the inner-loop instructions, and run the focused shard-manifest/import-bridge checks when adding test files.

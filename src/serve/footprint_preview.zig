@@ -391,13 +391,13 @@ fn emitFootprintJson(w: anytype, shapes: Shapes, revision: ?u64) HandlerError!vo
     viewport.max_x += svg_bbox_pad;
     viewport.max_y += svg_bbox_pad;
 
-    try w.print("{{\"bbox\":{{\"x\":{d:.6},\"y\":{d:.6},\"w\":{d:.6},\"h\":{d:.6}}}", .{
+    try w.print("{{\"bbox\":{{\"x\":{d:.3},\"y\":{d:.3},\"w\":{d:.3},\"h\":{d:.3}}}", .{
         viewport.min_x, viewport.min_y, viewport.max_x - viewport.min_x, viewport.max_y - viewport.min_y,
     });
-    try w.print(",\"bounds\":{{\"x\":{d:.6},\"y\":{d:.6},\"w\":{d:.6},\"h\":{d:.6}}}", .{
+    try w.print(",\"bounds\":{{\"x\":{d:.3},\"y\":{d:.3},\"w\":{d:.3},\"h\":{d:.3}}}", .{
         bounds.min_x, bounds.min_y, bounds.max_x - bounds.min_x, bounds.max_y - bounds.min_y,
     });
-    try w.print(",\"editor\":{{\"grid\":{d:.6},\"margin\":{d:.6}}}", .{
+    try w.print(",\"editor\":{{\"grid\":{d:.3},\"margin\":{d:.3}}}", .{
         optimizer.grid_mm, geometry.bbox_margin_mm,
     });
     if (revision) |rev| try w.print(",\"revision\":\"{x}\"", .{rev});

@@ -727,14 +727,13 @@ test "convert flattens exact quarter-turn pad at-angle to size swap" {
     const output = try convertFootprint(alloc, input);
     defer alloc.free(output);
     // 90° and −90° (= 270°) swap W×H; the two-number (pos …) shows no angle
-    // token — identical copper, and identical output to every conversion the
-    // committed library was generated under.
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"1\" smd rect (pos -1.0000 0.0000) (size 1.0000 0.5000))") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"2\" smd rect (pos 1.0000 0.0000) (size 1.2000 0.6000))") != null);
+    // token. The copper-only layer list also retains its suppressed paste.
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"1\" smd rect (pos -1.0000 0.0000) (size 1.0000 0.5000) no-paste)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"2\" smd rect (pos 1.0000 0.0000) (size 1.2000 0.6000) no-paste)") != null);
     // 180° is the identity for the 2-fold-symmetric shapes emitted here.
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"3\" smd rect (pos 0.0000 1.0000) (size 0.7000 1.4000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"3\" smd rect (pos 0.0000 1.0000) (size 0.7000 1.4000) no-paste)") != null);
     // Angles reduce mod 360: 450° is the 90° swap.
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"4\" smd rect (pos 0.0000 -1.0000) (size 1.6000 0.8000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"4\" smd rect (pos 0.0000 -1.0000) (size 1.6000 0.8000) no-paste)") != null);
 }
 
 // spec: convert/footprint - Preserves a plain pad's non-quarter-turn at-angle as a netlisp-frame pos rotation token
@@ -755,11 +754,11 @@ test "convert preserves non-quarter pad at-angle in netlisp frame" {
     // The token is netlisp's frame — mod(360 − kicad, 360), the same bridge as
     // serve/sync.zig's netlispRotToKicad — and the size stays the pad's own
     // unrotated W×H, never swapped.
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"1\" smd rect (pos 0.0000 0.0000 45.0000) (size 0.5800 0.5800))") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"2\" smd rect (pos 2.0000 1.0000 330.0000) (size 1.2000 0.6000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"1\" smd rect (pos 0.0000 0.0000 45.0000) (size 0.5800 0.5800) no-paste)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"2\" smd rect (pos 2.0000 1.0000 330.0000) (size 1.2000 0.6000) no-paste)") != null);
     // 100° used to fall in the old near-90° window and flatten to a 90° swap,
     // 10° wrong; it now keeps its real angle.
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"3\" smd rect (pos -2.0000 1.0000 260.0000) (size 0.9000 1.8000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"3\" smd rect (pos -2.0000 1.0000 260.0000) (size 0.9000 1.8000) no-paste)") != null);
 }
 
 // spec: convert/footprint - Emits the pad number as a quoted token so an SI-shaped or spaced pad name reads back unchanged
