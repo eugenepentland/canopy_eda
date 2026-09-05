@@ -201,4 +201,5 @@ see [SECURITY.md](SECURITY.md). Release notes live in
 `vendor/` and the browser libraries under `src/serve/assets/` keep their
 own licenses. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists every
 one of them — component, version, license and where its text lives — and
-flags the two that are not permissively licensed.
+flags the one copyleft component (the OpenCASCADE-based STEP importer,
+LGPL-2.1 with the OCCT exception).
