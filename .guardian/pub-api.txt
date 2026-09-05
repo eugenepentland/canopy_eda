@@ -907,6 +907,7 @@ src/eval/variants.zig::applyFor | fn applyFor(variant: []const u8, rules: []cons
 src/eval/variants.zig::decl_form value
 src/eval/variants.zig::dnp_in_form value
 src/eval/variants.zig::formName | fn formName(kind: env_mod.VariantRuleKind) []const u8
+src/eval/variants.zig::hasPopulationRule | fn hasPopulationRule(rules: []const VariantRule) bool
 src/eval/variants.zig::install | fn install( self: *Evaluator, body_forms: []const Node, span: ast.Span, ) EvalError!VariantScope
 src/eval/variants.zig::isDeclaration | fn isDeclaration(node: Node) bool
 src/eval/variants.zig::isInstanceForm | fn isInstanceForm(form: Node) bool
@@ -914,6 +915,8 @@ src/eval/variants.zig::max_name_len value
 src/eval/variants.zig::only_in_form value
 src/eval/variants.zig::parseInstanceForm | fn parseInstanceForm( self: *Evaluator, form: Node, ref_des: []const u8, family: []const u8, env: *Env, rules: *std.ArrayList(VariantRule), ) EvalError!void
 src/eval/variants.zig::populatedIn | fn populatedIn(rules: []const VariantRule, base_dnp: bool, variant: []const u8) bool
+src/eval/variants.zig::rulesEqual | fn rulesEqual(a: []const VariantRule, b: []const VariantRule) bool
+src/eval/variants.zig::unconditionalDnp | fn unconditionalDnp(dnp: bool, rules: []const VariantRule) bool
 src/eval/variants.zig::validateInstance | fn validateInstance( self: *Evaluator, span: ast.Span, ref_des: []const u8, has_dnp: bool, rules: []const VariantRule, ) EvalError!void
 src/eval/variants.zig::valueIn | fn valueIn(rules: []const VariantRule, base_value: []const u8, variant: []const u8) []const u8
 src/eval/variants.zig::value_in_form value

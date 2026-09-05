@@ -836,7 +836,13 @@ exemptions, the schematic strike-through — follows the selected variant.
 
 `netlisp instances` reports the declared variants, the selected one, and each
 part's `populated_in` list; `netlisp designs` lists the names each design
-declares. The `.bom` sidecar is the identity ledger for the **base** assembly:
+declares. The BOM CSV gains a `Populated In` column listing, per rolled-up line,
+which variants stuff that part — and two otherwise identical parts populated in
+different variants become two lines, because they are two purchase decisions.
+Both are omitted for a design that declares no variants, so a single-assembly
+BOM keeps exactly the columns it has always had.
+
+The `.bom` sidecar is the identity ledger for the **base** assembly:
 every variant's parts are in it and it records the authored value, never a
 `(value-in …)` override, so building a non-default variant cannot disturb the
 MPN selections the base assembly's rows carry.

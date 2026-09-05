@@ -19,6 +19,7 @@ const footprint_path_fmt = "lib/footprints/{s}.sexp";
 const log = @import("../infra/log.zig");
 const na = @import("../eval/net_analysis.zig");
 const net_name = @import("../net_name.zig");
+const variants = @import("../eval/variants.zig");
 
 /// A datasheet href is safe to emit as a link only if it is a same-origin
 /// path or an http(s) URL. Anything else (`javascript:`, `data:`, …) is
@@ -156,6 +157,11 @@ const BomLine = struct {
     attrs: []const []const u8,
     properties: []const env_mod.Property,
     dnp: bool,
+    /// The part's assembly-variant clauses. Part of the line identity for the
+    /// same reason `dnp` is: two same-value parts populated in DIFFERENT
+    /// variants are two purchase decisions, and rolling them together would
+    /// make the per-variant population column answer for neither.
+    variants: env_mod.InstanceVariants,
     count: u32,
     refs: std.ArrayList([]const u8),
 
@@ -164,6 +170,7 @@ const BomLine = struct {
     /// from the populated part it shadows, however identical the rest reads.
     fn groups(self: BomLine, inst: env_mod.Instance) bool {
         if (self.dnp != inst.dnp) return false;
+        if (!variants.rulesEqual(self.variants.rules, inst.variants.rules)) return false;
         if (!std.mem.eql(u8, self.component, inst.component)) return false;
         if (!std.mem.eql(u8, self.value, inst.value)) return false;
         if (!std.mem.eql(u8, self.footprint, inst.footprint)) return false;
@@ -179,6 +186,7 @@ const BomLine = struct {
             .attrs = inst.attrs,
             .properties = inst.properties,
             .dnp = inst.dnp,
+            .variants = inst.variants,
             .count = 1,
             .refs = refs,
         };
@@ -383,8 +391,13 @@ pub fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_m
         }
     }.lt);
 
-    // CSV header
-    try w.writeAll("Qty,References,Component,Value,Footprint,MPN,Manufacturer,Datasheet,DNP\r\n");
+    // CSV header. The per-variant population column exists only for a design
+    // that declares variants, so every single-assembly BOM keeps the exact nine
+    // columns it has always had.
+    const declares_variants = block.variants.decls.len > 0;
+    try w.writeAll("Qty,References,Component,Value,Footprint,MPN,Manufacturer,Datasheet,DNP");
+    if (declares_variants) try w.writeAll(",Populated In");
+    try w.writeAll("\r\n");
 
     for (lines.items) |line| {
         // Qty
@@ -422,8 +435,32 @@ pub fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_m
         try writeCsvField(w, datasheet);
         try w.writeAll(",");
         try w.writeAll(if (line.dnp) "DNP" else "");
+        if (declares_variants) {
+            try w.writeAll(",");
+            try writeCsvField(w, try populatedInText(allocator, block, line));
+        }
         try w.writeAll("\r\n");
     }
+}
+
+/// The `Populated In` cell: every declared variant this line's parts are
+/// stuffed in, semicolon-separated. Empty means "no variant populates it" — a
+/// part that only exists as a footprint option on the board.
+fn populatedInText(
+    allocator: std.mem.Allocator,
+    block: *const env_mod.DesignBlock,
+    line: BomLine,
+) std.mem.Allocator.Error![]const u8 {
+    const base_dnp = variants.unconditionalDnp(line.dnp, line.variants.rules);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    var written: usize = 0;
+    for (block.variants.decls) |decl| {
+        if (!variants.populatedIn(line.variants.rules, base_dnp, decl.name)) continue;
+        if (written > 0) out.writer.writeAll("; ") catch return error.OutOfMemory;
+        out.writer.writeAll(decl.name) catch return error.OutOfMemory;
+        written += 1;
+    }
+    return out.written();
 }
 
 fn writeCsvField(w: anytype, field: []const u8) !void {

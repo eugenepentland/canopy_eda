@@ -62,10 +62,10 @@ pub fn writePopulatedIn(
     dnp: bool,
 ) !void {
     if (block.variants.decls.len == 0) return;
-    // `dnp` here is the SELECTED variant's answer, so an unconditional `(dnp)`
-    // has to be read off the clauses: a part with no clauses that is DNP anyway
-    // is DNP in every variant.
-    const base_dnp = dnp and inst_variants.rules.len == 0;
+    // `dnp` here is the SELECTED variant's answer, so a permanent `(dnp)` has
+    // to be read back off the clauses: a part DNP for a reason no clause could
+    // have produced is DNP in every variant.
+    const base_dnp = variants.unconditionalDnp(dnp, inst_variants.rules);
     try w.writeAll(",\"populated_in\":[");
     var written: usize = 0;
     for (block.variants.decls) |d| {

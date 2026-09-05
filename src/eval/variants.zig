@@ -422,6 +422,36 @@ pub fn applyFor(variant: []const u8, rules: []const VariantRule) Applied {
     return out;
 }
 
+/// True when any clause decides POPULATION rather than value. Because `(dnp)`
+/// may not be combined with a population clause, this is also what separates a
+/// resolved `dnp` the selected variant produced from an unconditional one.
+pub fn hasPopulationRule(rules: []const VariantRule) bool {
+    for (rules) |rule| {
+        if (rule.kind != .value_in) return true;
+    }
+    return false;
+}
+
+/// The unconditional `(dnp)` behind an instance's already-resolved `dnp` flag:
+/// true only when no clause could have set it. A part that is DNP everywhere is
+/// populated in no variant, which is what the population matrix must report.
+pub fn unconditionalDnp(dnp: bool, rules: []const VariantRule) bool {
+    return dnp and !hasPopulationRule(rules);
+}
+
+/// True when two parts carry the same variant clauses in the same order, so a
+/// BOM may roll them onto one line: they are populated in the same variants and
+/// carry the same value in each, which is exactly what a purchase order asks.
+pub fn rulesEqual(a: []const VariantRule, b: []const VariantRule) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (x.kind != y.kind) return false;
+        if (!std.mem.eql(u8, x.variant, y.variant)) return false;
+        if (!std.mem.eql(u8, x.value, y.value)) return false;
+    }
+    return true;
+}
+
 /// Whether a part with these clauses is populated in `variant` ("" = base).
 /// `base_dnp` is the unconditional `(dnp)` flag, which depopulates everywhere.
 pub fn populatedIn(rules: []const VariantRule, base_dnp: bool, variant: []const u8) bool {
@@ -481,6 +511,35 @@ test "populatedIn answers per variant and obeys an unconditional dnp" {
     try testing.expect(!populatedIn(&.{}, true, ""));
     try testing.expect(populatedIn(&.{}, false, "Lite"));
     try testing.expect(!populatedIn(&[_]VariantRule{.{ .kind = .only_in, .variant = "Pro" }}, false, ""));
+}
+
+// spec: eval/variants - An unconditional dnp is the one no population clause could have set
+test "unconditionalDnp separates a variant's answer from a permanent do-not-populate" {
+    const pop = [_]VariantRule{.{ .kind = .only_in, .variant = "Pro" }};
+    const val = [_]VariantRule{.{ .kind = .value_in, .variant = "Pro", .value = "4.7k" }};
+    try testing.expect(unconditionalDnp(true, &.{}));
+    try testing.expect(!unconditionalDnp(false, &.{}));
+    // Resolved DNP that a clause produced is not permanent.
+    try testing.expect(!unconditionalDnp(true, &pop));
+    // `(dnp)` may pair with a value override, and stays permanent when it does.
+    try testing.expect(unconditionalDnp(true, &val));
+    try testing.expect(hasPopulationRule(&pop));
+    try testing.expect(!hasPopulationRule(&val));
+}
+
+// spec: eval/variants - Two parts roll onto one BOM line only when their variant clauses agree
+test "rulesEqual separates parts whose population or per-variant value differs" {
+    const a = [_]VariantRule{.{ .kind = .only_in, .variant = "Pro" }};
+    const b = [_]VariantRule{.{ .kind = .dnp_in, .variant = "Pro" }};
+    const c = [_]VariantRule{.{ .kind = .only_in, .variant = "Lite" }};
+    const d = [_]VariantRule{.{ .kind = .value_in, .variant = "Pro", .value = "4.7k" }};
+    const e = [_]VariantRule{.{ .kind = .value_in, .variant = "Pro", .value = "10k" }};
+    try testing.expect(rulesEqual(&a, &a));
+    try testing.expect(rulesEqual(&.{}, &.{}));
+    try testing.expect(!rulesEqual(&a, &b));
+    try testing.expect(!rulesEqual(&a, &c));
+    try testing.expect(!rulesEqual(&a, &.{}));
+    try testing.expect(!rulesEqual(&d, &e));
 }
 
 // spec: eval/variants - valueIn reports the per-variant value without re-evaluating the design

@@ -502,8 +502,10 @@ design's `(default)` variant, and failing that the base (implicit) one.
 - `GET /schematics/:name` — the rendered HTML cache keys each variant apart, so
   the Lite page and the Pro page are separate cache slots rather than whichever
   request landed first. The embedded BOM table follows the same selection.
-- the export seam shared by `GET /api/export-bom-csv/:name`,
-  `GET /api/export-kicad/:name` and the other by-name exports.
+- the export seam shared by `GET /api/export-bom/:name`,
+  `GET /api/export-kicad/:name` and the other by-name exports. A
+  variant-declaring design's BOM CSV also carries a `Populated In` column
+  naming, per line, which variants stuff that part.
 
 Everything else — the PCB layout page and `/api/pcb-describe`, the DRC and
 routing surfaces, the assembly workspace, the system-review pages — renders the

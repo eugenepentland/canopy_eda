@@ -4677,6 +4677,8 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - The base variant populates everything except parts reserved by only-in
 - The selected variant drives population and the value override
 - populatedIn reports the population matrix without re-evaluating the design
+- An unconditional dnp is the one no population clause could have set
+- Two parts roll onto one BOM line only when their variant clauses agree
 - valueIn reports the per-variant value without re-evaluating the design
 - A variant scope reports its active name and finds declarations by name
 - completeness-waiver: empty inputs (an empty rule set and an empty declaration list ARE the base variant — the case every design with no `(variant …)` form takes, asserted above)
