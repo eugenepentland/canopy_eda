@@ -717,6 +717,7 @@ pub fn processPinForm(
         var first_pin = true;
         for (pin_children[1 .. tail - 1]) |pin_node| {
             if (pin_node.isForm("as")) continue;
+            try instance_mod.checkSuffixedPinToken(self, pin_node, pins_ref, "pin", .{ .pinout = pin_func_map });
             const raw = ids.pinId(self, pin_node) orelse continue;
             const pn = if (pin_func_map) |pm| (instance_mod.resolvePinName(self, pm, raw, pin_node.span) orelse raw) else raw;
             try all_pin_nets.append(self.allocator, .{

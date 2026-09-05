@@ -246,18 +246,67 @@ pub fn evalFmt(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value 
         try fmt_args.append(self.allocator, v);
     }
 
-    const result = fmt_mod.format(self.allocator, template, fmt_args.items) catch |err| switch (err) {
+    var where: fmt_mod.Failure = .{};
+    const result = fmt_mod.formatWhere(self.allocator, template, fmt_args.items, &where) catch |err| switch (err) {
         error.OutOfMemory => return EvalError.OutOfMemory,
-        error.FormatError => return EvalError.FormatError,
-        error.TypeError => return EvalError.TypeError,
-        error.NotEnoughArgs => return EvalError.NotEnoughArgs,
+        error.FormatError, error.TypeError, error.NotEnoughArgs => return fmtFailure(self, args, err, where),
     };
     return .{ .string = result };
 }
 
+/// Turn a `(fmt …)` failure into a located diagnostic and re-raise it.
+///
+/// The span points at the ARGUMENT the directive was reaching for when one
+/// exists (`~V` handed a string), and at the template otherwise (an unknown
+/// directive, or one argument past the end). Without this the whole build
+/// reported `Build error: error.FormatError` — no file, no line, and no hint
+/// which of a template's directives the evaluator choked on.
+fn fmtFailure(self: *Evaluator, args: []const Node, err: fmt_mod.FmtError, where: fmt_mod.Failure) EvalError {
+    const spec: [1]u8 = .{if (where.spec == 0) '~' else where.spec};
+    const template_span = args[0].span;
+    const arg_node: usize = where.arg_index + 1;
+    const arg_span = if (arg_node < args.len) args[arg_node].span else template_span;
+    switch (err) {
+        error.FormatError => {
+            self.setErrorFmt(template_span, "(fmt …) unknown directive `~{s}` at template offset {d} — the directives are {s}", .{ &spec, where.offset, fmt_mod.directive_list });
+            return EvalError.FormatError;
+        },
+        error.NotEnoughArgs => {
+            self.setErrorFmt(template_span, "(fmt …) directive `~{s}` at template offset {d} wants argument {d}, but the form supplies {d}", .{ &spec, where.offset, arg_node, args.len - 1 });
+            return EvalError.NotEnoughArgs;
+        },
+        error.TypeError => {
+            self.setErrorFmt(arg_span, "(fmt …) directive `~{s}` at template offset {d} needs a {s} argument", .{ &spec, where.offset, directiveArgName(where.spec) });
+            return EvalError.TypeError;
+        },
+        error.OutOfMemory => return EvalError.OutOfMemory,
+    }
+}
+
+/// What a directive consumes, named for the diagnostic ("number", "string").
+/// Reads the same table `format()` dispatches on, so the wording cannot drift
+/// from what the directive actually demands.
+fn directiveArgName(spec: u8) []const u8 {
+    for (fmt_mod.directives) |d| {
+        if (d.spec != spec) continue;
+        return switch (d.arg) {
+            .value => "value",
+            .number => "number",
+            .string => "string",
+            .none => "no",
+        };
+    }
+    return "value";
+}
+
 /// Evaluate `(assert cond "message")`: append a pass/fail entry to the
-/// evaluator's assertions list. The build never aborts on failure — the
-/// review page surfaces the failures so the designer can decide.
+/// evaluator's assertions list, tagged with the form's own span.
+///
+/// EVALUATION never aborts on a failure: the design is evaluated to the end
+/// and every assertion is recorded, so one run reports all of them. What the
+/// caller then does with the list is the layer's decision — a command that
+/// EMITS an artifact refuses to write one (`commands.reportAssertions`), while
+/// `check`, the review PDF and the served pages report it as a finding.
 pub fn evalAssert(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     try checkArity(self, .assert_, args);
     const cond = try self.evalNode(args[0], env);
@@ -269,6 +318,8 @@ pub fn evalAssert(self: *Evaluator, args: []const Node, env: *Env) EvalError!Val
     try self.assertions.append(self.allocator, .{
         .passed = cond.isTruthy(),
         .message = msg,
+        .span = args[0].span,
+        .file = self.current_file,
     });
     return .nil;
 }
@@ -303,14 +354,13 @@ pub fn evalAssertRange(self: *Evaluator, args: []const Node, env: *Env) EvalErro
 
     const passed = v >= lo and v <= hi;
 
-    // Build message
-    var buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "{s} = {d:.4} (range {d:.1}-{d:.1})", .{ label, v, lo, hi }) catch "assertion";
-    const msg_copy = self.allocator.dupe(u8, msg) catch return EvalError.OutOfMemory;
+    const message = fmt_mod.assertRangeMessage(self.allocator, label, v, lo, hi) catch return EvalError.OutOfMemory;
 
     try self.assertions.append(self.allocator, .{
         .passed = passed,
-        .message = msg_copy,
+        .message = message,
+        .span = args[0].span,
+        .file = self.current_file,
     });
     return .nil;
 }

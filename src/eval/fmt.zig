@@ -51,8 +51,42 @@ pub const directives = [_]Directive{
     .{ .spec = '~', .arg = .none, .summary = "Literal `~` (consumes no argument)." },
 };
 
+/// Every directive this formatter accepts, rendered from the table above so a
+/// new row reaches the diagnostic text without a second edit.
+pub const directive_list = blk: {
+    var list: []const u8 = "";
+    for (directives, 0..) |d, i| list = list ++ (if (i == 0) "" else " ") ++ "~" ++ [_]u8{d.spec};
+    break :blk list;
+};
+
+/// Where a template failed, for the caller's diagnostic. Written only on the
+/// error paths and meaningful only then: `spec` is the specifier byte after
+/// the `~` (0 when the template ended on a bare `~`), `offset` is that `~`'s
+/// byte offset in the template, and `arg_index` is the 0-based argument the
+/// directive was reaching for. Without this the evaluator could only report
+/// `error.FormatError` with no file, line, or offending directive.
+pub const Failure = struct {
+    spec: u8 = 0,
+    offset: usize = 0,
+    arg_index: usize = 0,
+};
+
 /// Format a string with ~a, ~V, ~R, ~C, ~A, ~S, ~~ specifiers.
 pub fn format(allocator: std.mem.Allocator, template: []const u8, args: []const Value) FmtError![]const u8 {
+    var where: Failure = .{};
+    return formatWhere(allocator, template, args, &where);
+}
+
+/// `format` that also records WHERE it failed. The evaluator uses this one so
+/// an unknown directive, a missing argument, or an argument of the wrong kind
+/// becomes a located `file:line:col` diagnostic naming the directive instead
+/// of a bare `Build error: error.FormatError`.
+pub fn formatWhere(
+    allocator: std.mem.Allocator,
+    template: []const u8,
+    args: []const Value,
+    where: *Failure,
+) FmtError![]const u8 {
     var buf: std.Io.Writer.Allocating = .init(allocator);
     errdefer buf.deinit();
     const writer = &buf.writer;
@@ -62,6 +96,7 @@ pub fn format(allocator: std.mem.Allocator, template: []const u8, args: []const 
     while (i < template.len) {
         if (template[i] == '~' and i + 1 < template.len) {
             const spec = template[i + 1];
+            where.* = .{ .spec = spec, .offset = i, .arg_index = arg_idx };
             i += 2;
             switch (spec) {
                 '~' => writer.writeByte('~') catch return FmtError.OutOfMemory,
@@ -104,6 +139,32 @@ fn nextString(args: []const Value, idx: *usize) FmtError![]const u8 {
     const v = args[idx.*].asString() orelse return FmtError.TypeError;
     idx.* += 1;
     return v;
+}
+
+/// The message `(assert-range value lo hi "label")` records:
+/// `LABEL = VALUE (range LO-HI)`, every number through `formatMeasured`.
+///
+/// The bounds used to go through `{d:.1}`, so the `0.002 .. 0.010` window an
+/// ampere-denominated assertion declares printed as `(range 0.0-0.0)` — a
+/// message naming a range it did not describe. Caller owns the result.
+pub fn assertRangeMessage(
+    allocator: std.mem.Allocator,
+    label: []const u8,
+    value: f64,
+    lo: f64,
+    hi: f64,
+) FmtError![]const u8 {
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    errdefer buf.deinit();
+    const w = &buf.writer;
+    w.print("{s} = ", .{label}) catch return FmtError.OutOfMemory;
+    try formatMeasured(w, value);
+    w.writeAll(" (range ") catch return FmtError.OutOfMemory;
+    try formatMeasured(w, lo);
+    w.writeByte('-') catch return FmtError.OutOfMemory;
+    try formatMeasured(w, hi);
+    w.writeByte(')') catch return FmtError.OutOfMemory;
+    return buf.toOwnedSlice() catch FmtError.OutOfMemory;
 }
 
 fn formatDisplay(writer: *std.Io.Writer, value: Value) FmtError!void {
@@ -171,6 +232,29 @@ fn formatAmperage(writer: *std.Io.Writer, v: f64) FmtError!void {
         try formatNumber(writer, v * mega);
         writer.writeAll("uA") catch return FmtError.OutOfMemory;
     }
+}
+
+/// Below this magnitude a four-decimal rendering stops carrying the digits the
+/// value is made of — `0.002` becomes `0.0` — so `formatMeasured` switches to
+/// the shortest text that round-trips instead.
+const measured_precision_floor: f64 = 0.01;
+
+/// Render a raw measured value or range bound for a validation message.
+///
+/// Whole numbers print plain and ordinary magnitudes get `formatNumber`'s four
+/// trimmed decimals, but a value below `measured_precision_floor` is printed at
+/// full shortest-round-trip precision: `(assert-range … 0.002 0.010 …)` used to
+/// report its window as `(range 0.0-0.0)`, which states nothing at all. Unlike
+/// `~V`/`~A` this adds no unit — an assertion's label already says what the
+/// number is, and its bounds are written in whatever quantity the author chose.
+pub fn formatMeasured(writer: *std.Io.Writer, v: f64) FmtError!void {
+    const abs = @abs(v);
+    const whole = v == @floor(v) and abs < whole_number_limit;
+    if (std.math.isFinite(v) and !whole and abs < measured_precision_floor) {
+        writer.print("{d}", .{v}) catch return FmtError.OutOfMemory;
+        return;
+    }
+    return formatNumber(writer, v);
 }
 
 fn formatNumber(writer: *std.Io.Writer, v: f64) FmtError!void {
@@ -352,4 +436,29 @@ fn specRecognized(alloc: std.mem.Allocator, spec: u8) bool {
         return true;
     } else |err| if (err != FmtError.FormatError) return true;
     return false;
+}
+
+// spec: eval/fmt - assert-range bounds are rendered at full precision instead of one decimal place
+test "assert-range message keeps its bounds" {
+    const alloc = std.testing.allocator;
+    {
+        // The reported defect: an ampere window of 2 mA to 10 mA printed as
+        // `(range 0.0-0.0)` under the old `{d:.1}` bounds.
+        const m = try assertRangeMessage(alloc, "LED current (A)", 0.0048148, 0.002, 0.010);
+        defer alloc.free(m);
+        try std.testing.expectEqualStrings("LED current (A) = 0.0048148 (range 0.002-0.01)", m);
+    }
+    {
+        // Ordinary magnitudes keep the four-decimal reading the examples show,
+        // and a whole bound stays whole rather than growing a `.0`.
+        const m = try assertRangeMessage(alloc, "LED current (mA)", 4.814814814814815, 2.0, 10.0);
+        defer alloc.free(m);
+        try std.testing.expectEqualStrings("LED current (mA) = 4.8148 (range 2-10)", m);
+    }
+    {
+        // A sub-milli window survives whole, which four decimals would flatten.
+        const m = try assertRangeMessage(alloc, "Cgs (F)", 2.2e-9, 1e-9, 1e-7);
+        defer alloc.free(m);
+        try std.testing.expectEqualStrings("Cgs (F) = 0.0000000022 (range 0.000000001-0.0000001)", m);
+    }
 }

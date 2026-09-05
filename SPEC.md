@@ -24,6 +24,18 @@ match the heading the bullet lives under. `guardian-check spec-sync .` prints
 dry-run suggestions for bullets that have no test yet. A worked example and the
 full contract are in [CONTRIBUTING.md](CONTRIBUTING.md) § 4.
 
+## CLI global flags
+
+- the process-wide directory flags are consumed before dispatch so a command never reads one of their values as a positional
+- completeness-waiver: empty inputs (a flag with no value drops the flag alone; an empty argv is returned unchanged)
+- completeness-waiver: large inputs (argv is bounded by the operating system's own limit and each entry is only borrowed)
+- completeness-waiver: unauthorized access (the flags name directories the invoking user already has authority over)
+- completeness-waiver: i/o failure (the filter touches no filesystem; the directories it installs are opened by their readers)
+- completeness-waiver: concurrent access (both roots are installed once, before any command or thread dispatches)
+- completeness-waiver: malformed encoding (argv entries are compared as bytes and never decoded)
+- completeness-waiver: integer overflow (a single forward pass over argv with no arithmetic on its length)
+- completeness-waiver: panic-free (an allocation failure returns the unfiltered argv rather than failing the run)
+
 ## CLI allocation lifetime
 
 - one-shot CLI commands keep process-lifetime evaluation storage on the automatically cleaned process arena
@@ -4707,6 +4719,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - Formats mixed specifiers in a single format string
 - The directives table and format()'s dispatch recognise exactly the same specifier characters
 - Lowercase ~a displays scalar values without adding engineering-unit suffixes
+- assert-range bounds are rendered at full precision instead of one decimal place
 
 ## eval/instance
 
@@ -4720,6 +4733,9 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - a (near …) missing its ref or pin warns and binds nothing rather than half a target
 - an instance sub-form within two edits of a real one is an error naming the spelling meant
 - an unknown sub-form head that is not a near-miss still becomes an inline property
+- a bare SI-suffixed pin token that also names one of the part's pin functions is rejected as ambiguous
+- a quoted pin name and a bare pad number are both unambiguous spellings and neither warns
+- an SI-suffixed pin token naming nothing on the part binds the numeric pad and warns about both readings
 - a pad token outside the part's known pad set is an error carrying the pad count
 - strap-ok, nc-ok and a (near …) own pad are held to the same pad set as (pin …)
 - a part with neither a pinout nor a footprint has an unknown pad set and every pad token passes
@@ -5026,8 +5042,10 @@ against its own file rather than the design's.
 - Evaluates let bindings that define named values in scope
 - Evaluates if conditionals selecting a branch by predicate
 - Evaluates fmt expressions producing formatted strings
+- A failing fmt directive records a located diagnostic naming the directive
 - Evaluates assert-range that passes when value is in bounds
 - Evaluates assert-range that fails when value is out of bounds
+- A recorded assertion carries the span of the form that raised it
 - evalFile auto-imports the standard passives prelude before user nodes run
 - Module files loaded via resolveImport get the same passives prelude before their body evaluates
 - componentPrefix maps passive families to their ref-des letters
@@ -7327,6 +7345,7 @@ Public functions: read, fetch
 - restore_layout_snapshot restores protected PCB layout history after snapshotting the current sidecar and bumping its revision
 - stitch_ground_pads applies the autorouter's final ground-reference pass transactionally to a saved layout
 - attach_datasheet links a stored PDF into the library component, refuses a filename absent from lib/datasheets, and reports an already-linked stem instead of duplicating it
+- The pose tools describe x/y as the footprint origin, the point the placement transform actually adds pad offsets to
 
 Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesignSummaries, renderSceneGraph, requireString, optionalString, optionalU64, optionalBool, missingArg
 
@@ -7593,6 +7612,8 @@ is what makes the predicate exact rather than approximately right.
 - The board PNG query turns ?thermal=1 into a heat-zone request carrying its scenario and ambient, and an unknown scenario word falls back to still air rather than refusing the image
 - export-schematic-png parses native image focus, view, theme, width, and output options
 - Native schematic export paints the SVG display list into a valid PNG without a browser
+- Test points, mounting holes and fiducials do not spend the unfocused schematic PNG's hub budget
+- An unfocused schematic PNG renders a board whose hub count is only over the cap because of its test points and mounting holes
 - Schematic image view parsing accepts the UI's Sequential and Functional names and defaults to Functional
 - The schematic display-list translator applies the renderer's rotate group transform to vertical passives
 - The src basename index resolves a design sibling without re-walking the tree, and rebuilds when a directory it walked changes mtime
@@ -7875,6 +7896,7 @@ is what makes the predicate exact rather than approximately right.
 - the pcb-describe board facts list every authored keepout region in world millimetres with its side, blocked families, allowed nets and reason
 - The PCB blob emits each pad's rotation, roundrect ratio, oval slot, and through-hole flag
 - The layout sidecar is snapshotted into history and listed newest-first
+- An installed runtime-state root moves history/ off the project, leaving its sources and sidecars in place
 - Layout snapshots are pruned to the newest retention cap
 - Source-snapshot listing skips the reserved layouts subdir
 - The layout sidecar carries an optimistic-concurrency rev, emitted only when non-zero

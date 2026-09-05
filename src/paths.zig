@@ -235,6 +235,37 @@ const SrcFingerprint = struct {
     }
 };
 
+// ── Process-wide runtime-state root ───────────────────────────────────
+//
+// Set once from `main.zig` (`--state-dir`, then `NETLISP_STATE_DIR`) and read
+// by the two writers of runtime state: the interaction log's `logs/` and the
+// version history's `history/`. Unset means "beside the project", which is
+// what every existing deployment expects — and what dirties a TRACKED project
+// (the examples) the moment it is served or laid out.
+
+/// The override root, scoped inside a non-pub container rather than left as a
+/// module-level `var` for the same reason `SrcIndex` is: the readers are plain
+/// path helpers with no store to thread through. Empty means unset.
+const StateRoot = struct {
+    var dir: []const u8 = "";
+};
+
+/// Point the runtime state the tool WRITES — `logs/`, `history/` — at `dir`
+/// instead of at the project directory. Design sources, their sidecars, the
+/// library and every export are unaffected: this relocates only output that
+/// accumulates while the tool runs, which is what keeps a tracked example
+/// project clean while it is served or laid out. Null or empty restores the
+/// default. Called once from `main.zig` before any command dispatches.
+pub fn setStateRoot(dir: ?[]const u8) void {
+    StateRoot.dir = dir orelse "";
+}
+
+/// Where `project_dir`'s runtime state lives: the installed override, else
+/// `project_dir` itself.
+pub fn stateDir(project_dir: []const u8) []const u8 {
+    return if (StateRoot.dir.len > 0) StateRoot.dir else project_dir;
+}
+
 /// The index's state. Scoped inside this non-pub struct rather than left as
 /// module-level `var`s because `findUniqueInSrc` is reached from plain path
 /// helpers with no server handle to thread a store through — the same reason

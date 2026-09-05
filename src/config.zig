@@ -211,6 +211,14 @@ pub fn stdlibDir(allocator: std.mem.Allocator) ?[]u8 {
     return nonEmpty(lookup(allocator, "NETLISP_STDLIB_DIR"));
 }
 
+/// Directory that receives the runtime state the tool writes beside a project
+/// — the interaction log's `logs/` and the version history's `history/`
+/// (`NETLISP_STATE_DIR`). Null when unset, and both then land in the project
+/// directory. The `--state-dir` flag overrides it; see `src/paths.zig`.
+pub fn stateDir(allocator: std.mem.Allocator) ?[]u8 {
+    return nonEmpty(lookup(allocator, "NETLISP_STATE_DIR"));
+}
+
 /// Resolve `key` from the real environment first, then from `.env`. Returns
 /// null when unset or empty. Caller owns the slice.
 fn lookup(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {
