@@ -107,7 +107,7 @@ pub fn assemble(
         .has_outline = placement.board_rect != null,
         .placement = placement,
         .net_conn = try mapNetConn(arena, conn),
-        .fab = fab,
+        .fab_errors = try mapFabErrors(arena, fab.errors),
         .from_saved_layout = shown.from_saved,
         .plan = plan,
     });
@@ -119,6 +119,26 @@ pub fn assemble(
 fn mapNetConn(arena: Allocator, conn: []const fab_readiness.NetStatus) Allocator.Error![]const progress.NetConn {
     const out = try arena.alloc(progress.NetConn, conn.len);
     for (conn, 0..) |ns, i| out[i] = .{ .name = ns.name, .routable = ns.routable, .connected = ns.connected };
+    return out;
+}
+
+/// Mirror the fab gate's BLOCKING errors onto the ladder's own `Item` shape,
+/// keeping each finding's stable id / ref / net / count and tagging it
+/// `fab-error`. The same seam as `mapNetConn` above, and for the same reason:
+/// the ladder is a pure function over shapes IT declares, so `src/placement/`
+/// never imports `src/fab_readiness.zig`. Warnings never block the fab-ready
+/// rung, so only `errors` crosses. An empty slice means "the gate ran and
+/// passed" — null (which this seam never produces) means "it has not run".
+fn mapFabErrors(arena: Allocator, errors: []const fab_readiness.Item) Allocator.Error![]const progress.Item {
+    const out = try arena.alloc(progress.Item, errors.len);
+    for (errors, 0..) |fe, i| out[i] = .{
+        .id = fe.id,
+        .kind = "fab-error",
+        .message = fe.message,
+        .ref = fe.ref,
+        .net = fe.net,
+        .meta = .{ .count = fe.count },
+    };
     return out;
 }
 

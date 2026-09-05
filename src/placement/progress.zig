@@ -9,7 +9,14 @@
 //! (home-page chip, `/pcb-layout` scorebar, a CLI tool) computes the same
 //! `Report` from the same facts. The serve layer gathers the inputs (ERC count,
 //! per-net connectivity via `fab_readiness.netConnectivity`, the blessed
-//! placement, an optional fab report) and calls `compute`.
+//! placement, the fab gate's blocking errors already mirrored into ladder
+//! items) and calls `compute`.
+//!
+//! Every input arrives in a shape this module declares — `NetConn` for
+//! connectivity, `Item` for the fab gate's errors — so the ladder never names
+//! the fab/export layer that produced them. That is what keeps `src/placement/`
+//! from importing `src/fab_readiness.zig` (the `[[boundary]]` rule in
+//! `guardian.toml`), and it is the same seam `NetConn` has always used.
 //!
 //! A rung is `done` the instant its predicate holds, INDEPENDENTLY of the rungs
 //! before it, so out-of-order work (a routed net before every part is locked)
@@ -29,7 +36,6 @@ const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const optimizer = @import("optimizer.zig");
 const plan_resolve = @import("plan_resolve.zig");
-const fab_readiness = @import("../fab_readiness.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -143,7 +149,11 @@ pub const Inputs = struct {
     has_outline: bool,
     placement: optimizer.Placement,
     net_conn: []const NetConn,
-    fab: ?fab_readiness.Report,
+    /// The fab-readiness gate's BLOCKING errors, already mirrored into ladder
+    /// items by the caller (`serve/pcb_progress.zig`, beside its `NetConn`
+    /// mapping). `null` = the gate has not run; an empty slice = it ran and
+    /// passed. Warnings never block the rung, so they are not carried.
+    fab_errors: ?[]const Item,
     from_saved_layout: bool,
     /// The resolved `(pcb-plan …)` splitting the placement/routing rungs into
     /// ordered waves. The default (empty place/route) keeps each rung on its
@@ -418,7 +428,7 @@ fn appendOutOfOrder(arena: Allocator, items: *std.ArrayList(Item), tallies: []co
 /// and did so on a saved (blessed) layout. Open items mirror the gate's errors,
 /// or flag that the gate never ran / the layout is unsaved.
 fn fabReadyStage(arena: Allocator, in: Inputs) Allocator.Error!Stage {
-    const ready = in.fab != null and in.fab.?.ok() and in.from_saved_layout;
+    const ready = in.fab_errors != null and in.fab_errors.?.len == 0 and in.from_saved_layout;
     var items: std.ArrayList(Item) = try fabItems(arena, in);
     return finishStage(arena, .fab_ready, if (ready) 1 else 0, 1, &items);
 }
@@ -427,31 +437,18 @@ fn fabReadyStage(arena: Allocator, in: Inputs) Allocator.Error!Stage {
 /// the gate's own errors when it failed, else an unsaved-layout nudge.
 fn fabItems(arena: Allocator, in: Inputs) Allocator.Error!std.ArrayList(Item) {
     var items: std.ArrayList(Item) = .empty;
-    const rep = in.fab orelse {
+    const errors = in.fab_errors orelse {
         const msg = "the fab-readiness gate has not run — run it on a saved layout";
         try items.append(arena, try mkItem(arena, "fab-gate-not-run", msg, .{}));
         return items;
     };
-    if (!rep.ok()) {
-        for (rep.errors) |fe| try items.append(arena, mirrorFabError(fe));
+    if (errors.len > 0) {
+        for (errors) |fe| try items.append(arena, fe);
     } else if (!in.from_saved_layout) {
         const msg = "the fab gate passed on the optimizer cache — save/star the layout to finish";
         try items.append(arena, try mkItem(arena, "layout-not-saved", msg, .{}));
     }
     return items;
-}
-
-/// Re-express one fab-readiness error as a ladder item, keeping the gate's own
-/// stable id / net / ref / count and tagging it with the "fab-error" kind.
-fn mirrorFabError(fe: fab_readiness.Item) Item {
-    return .{
-        .id = fe.id,
-        .kind = "fab-error",
-        .message = fe.message,
-        .ref = fe.ref,
-        .net = fe.net,
-        .meta = .{ .count = fe.count },
-    };
 }
 
 /// Freeze a rung's open items into a `Stage` with a placeholder status (the
@@ -615,10 +612,6 @@ fn writeItem(w: *std.Io.Writer, it: Item) std.Io.Writer.Error!void {
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
-const geometry = @import("geometry.zig");
-const router = @import("router.zig");
-const flat_netlist = @import("../flat_netlist.zig");
-const routed_copper = @import("routed_copper.zig");
 
 /// A minimal `Placement` with the given parts and no nets/copper — enough to
 /// exercise the ladder rungs that only read parts.
@@ -648,7 +641,7 @@ fn baseInputs(pl: optimizer.Placement) Inputs {
         .has_outline = true,
         .placement = pl,
         .net_conn = &.{},
-        .fab = null,
+        .fab_errors = null,
         .from_saved_layout = true,
     };
 }
@@ -810,7 +803,7 @@ test "fab-ready rung requires a passed gate on a saved layout" {
     try testing.expect(stageHasKind(stageById(r0, .fab_ready), "fab-gate-not-run"));
 
     // Clean report on a saved layout → done.
-    in.fab = fab_readiness.Report{ .errors = &.{}, .warnings = &.{}, .stats = .{} };
+    in.fab_errors = &.{};
     in.from_saved_layout = true;
     try testing.expect(stageDone(try compute(arena, in), .fab_ready));
 
@@ -820,9 +813,10 @@ test "fab-ready rung requires a passed gate on a saved layout" {
     try testing.expect(!stageDone(r1, .fab_ready));
     try testing.expect(stageHasKind(stageById(r1, .fab_ready), "layout-not-saved"));
 
-    // A failing gate → not done, its errors mirrored as fab-error items.
-    const errs = [_]fab_readiness.Item{.{ .id = "no-outline", .message = "no board outline" }};
-    in.fab = fab_readiness.Report{ .errors = &errs, .warnings = &.{}, .stats = .{} };
+    // A failing gate → not done, the caller-mirrored fab-error items carried
+    // onto the rung verbatim.
+    const errs = [_]Item{.{ .id = "no-outline", .kind = "fab-error", .message = "no board outline" }};
+    in.fab_errors = &errs;
     in.from_saved_layout = true;
     const r2 = try compute(arena, in);
     try testing.expect(!stageDone(r2, .fab_ready));
@@ -839,7 +833,7 @@ test "current is the first not-done rung despite a later done rung" {
     // layout: out-of-order work.
     var in = baseInputs(fixturePlacement(&.{}));
     in.erc_error_count = 2;
-    in.fab = fab_readiness.Report{ .errors = &.{}, .warnings = &.{}, .stats = .{} };
+    in.fab_errors = &.{};
     in.from_saved_layout = true;
     const r = try compute(arena, in);
     try testing.expect(r.current == .schematic);
@@ -910,65 +904,6 @@ test "an empty placement has vacuously done placement and routing rungs" {
     try testing.expect(stageDone(r, .routing));
     try testing.expectEqual(@as(usize, 0), stageById(r, .placement).total);
     try testing.expectEqual(@as(usize, 0), stageById(r, .placement).items.len);
-}
-
-// spec: placement/progress - netConnectivity reports the routable and connected counts the fab report records
-test "netConnectivity totals match the fab report stats" {
-    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_i.deinit();
-    const arena = arena_i.allocator();
-
-    // Two 2-location nets: SIG is routed end-to-end, OPEN has no copper.
-    const u_pads = [_]geometry.Pad{
-        .{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
-        .{ .number = "2", .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
-    };
-    const c_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
-    const d_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
-    var parts = [_]optimizer.Part{
-        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &u_pads, .fallback = false, .x = 0, .y = 0 },
-        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &c_pads, .fallback = false, .x = 10, .y = 0 },
-        .{ .ref_des = "D1", .kind = .passive, .hw = 1, .hh = 1, .pads = &d_pads, .fallback = false, .x = 0, .y = 10 },
-    };
-    const sig_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
-    const open_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "D1", .pin = "1" } };
-    const nets = [_]flat_netlist.FlatNet{
-        .{ .name = "SIG", .pins = &sig_pins },
-        .{ .name = "OPEN", .pins = &open_pins },
-    };
-    const placement = optimizer.Placement{
-        .parts = &parts,
-        .links = &.{},
-        .loops = &.{},
-        .stubs = &.{},
-        .instances = &.{},
-        .nets = &nets,
-        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
-        .minx = -2,
-        .miny = -2,
-        .maxx = 12,
-        .maxy = 12,
-        .generated = false,
-        .board_rect = .{ .minx = -2, .miny = -2, .w = 16, .h = 16 },
-        .rules = .{ .plane_nets = &.{}, .copper_layers = 2 },
-    };
-    const tracks = [_]router.Track{.{ .x1 = 0, .y1 = 0, .x2 = 10, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 }};
-    const copper = routed_copper.Copper{ .tracks = &tracks };
-
-    const report = try fab_readiness.check(arena, placement, copper, .{});
-    const conn = try fab_readiness.netConnectivity(arena, placement, copper);
-    var routable: usize = 0;
-    var connected: usize = 0;
-    for (conn) |ns| {
-        if (!ns.routable) continue;
-        routable += 1;
-        if (ns.connected) connected += 1;
-    }
-    try testing.expectEqual(report.stats.routable_nets, routable);
-    try testing.expectEqual(report.stats.connected_nets, connected);
-    // Sanity: SIG connected, OPEN not → 2 routable, 1 connected.
-    try testing.expectEqual(@as(usize, 2), routable);
-    try testing.expectEqual(@as(usize, 1), connected);
 }
 
 // ── Wave-split (pcb-plan) tests ───────────────────────────────────────────────

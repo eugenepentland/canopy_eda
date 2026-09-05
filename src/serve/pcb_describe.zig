@@ -2063,7 +2063,7 @@ test "writeDescribeJson emits the progress block and mirrors plan warnings into 
         .has_outline = true,
         .placement = p,
         .net_conn = &.{},
-        .fab = null,
+        .fab_errors = null,
         .from_saved_layout = true,
         .plan = .{ .warnings = &warns },
     });
