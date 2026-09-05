@@ -958,7 +958,7 @@ async function main() {
       const port = await freePort();
       base = `http://127.0.0.1:${port}`;
       server = spawn(options.binary, ["serve", "--project-dir", project, "--port", String(port), "--skip-warmup"], {
-        cwd: root, env: { ...process.env, NETLISP_DEV: "1" }, stdio: ["ignore", "pipe", "pipe"],
+        cwd: root, env: { ...process.env }, stdio: ["ignore", "pipe", "pipe"],
       });
       // A Ctrl+C would otherwise leave the server holding a port and a project
       // dir this run is about to delete — pkill is not an option on a machine

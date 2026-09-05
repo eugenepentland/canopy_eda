@@ -329,7 +329,6 @@ pub templ Navbar(active: []const u8) {
     <nav class="navbar" aria-label="Primary">
         <a href="/" class={if (std.mem.eql(u8, active, "designs")) "brand active" else "brand"} aria-current={if (std.mem.eql(u8, active, "designs")) "page" else null}>Netlisp</a>
         <a href="/library" class={if (std.mem.eql(u8, active, "library")) "active" else null} aria-current={if (std.mem.eql(u8, active, "library")) "page" else null}>Library</a>
-        <a href="https://ward.eugenepentland.dev/admin" style="margin-left:auto">Account</a>
     </nav>
 }
 

@@ -42,12 +42,8 @@
             .path = "vendor/httpz",
         },
         // Guardian (code-quality gate) is an unpinned *relative-path* dep: a
-        // sibling guardian-zig checkout at ~/ai/canopy/guardian-zig. The path is
-        // spelled `../../canopy/guardian-zig` (not `../guardian-zig`) so it
-        // normalizes to the SAME dependency key the `ward` dep composes to
-        // (ward → `../canopy/guardian-zig`); otherwise Zig sees guardian-zig as
-        // two modules and fails with "file exists in modules". From the main
-        // checkout this resolves directly; worktrees resolve it via the
+        // sibling guardian-zig checkout at ~/ai/canopy/guardian-zig. From the
+        // main checkout this resolves directly; worktrees resolve it via the
         // `.claude/canopy` symlink. There is no published URL+hash yet, so a
         // fresh clone must also clone guardian-zig alongside it for `zig build`
         // to succeed (Guardian gates every build). Repin to a `.url`+`.hash`
@@ -58,16 +54,6 @@
         // Latest upstream main at migration time, vendored so the small Zig
         // master compatibility delta is durable and reviewed with this tree.
         .zt = .{ .path = "vendor/zt" },
-        // Ward auth library (session-cookie + OAuth-bearer verification against
-        // the wardd server at ward.eugenepentland.dev). Relative-path dep like
-        // guardian: resolves to ~/ai/ward from the main checkout. Worktree
-        // builds resolve through two symlinks (.claude/ward -> ~/ai/ward plus
-        // .claude/canopy -> ~/ai/canopy — the latter because ward's own
-        // ../canopy/guardian-zig sub-dep is lexically joined to the symlinked
-        // location, not ward's real root).
-        .ward = .{
-            .path = "../../ward",
-        },
     },
     .paths = .{
         "build.zig",

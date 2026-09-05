@@ -14,7 +14,14 @@ WorkingDirectory=/home/epentland/ai/canopy/eda
 # installed atomically by deploy-prod.sh. The service only runs that artifact;
 # it must never rebuild an unchecked binary during restart or host boot.
 Environment=NETLISP_GIT_AUTOCOMMIT=0
-ExecStart=/home/epentland/ai/canopy/eda/.deploy/bin/netlisp serve --project-dir /home/epentland/ai/canopy/eda/projects/designs --port 7050
+# netlisp binds 127.0.0.1 and, on its own, admits only a loopback, unproxied
+# request. This host serves the public URL through an authenticating reverse
+# proxy, so every real request arrives with `X-Forwarded-*` set and would
+# otherwise be answered 403. `--allow-remote` hands the auth decision to that
+# proxy: with it, EVERY request netlisp receives is an admin. It is correct
+# ONLY while something in front of this port is authenticating callers — see
+# docs/auth.md. Remove it (and the proxy) and the server is local-only again.
+ExecStart=/home/epentland/ai/canopy/eda/.deploy/bin/netlisp serve --project-dir /home/epentland/ai/canopy/eda/projects/designs --allow-remote --port 7050
 # `always` also recovers from signals systemd classifies as clean exits, while
 # still honoring an explicit `systemctl --user stop`.
 Restart=always

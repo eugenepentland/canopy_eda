@@ -2,12 +2,19 @@
 
 > Moved verbatim from CLAUDE.md (2026-08-19); linked from its Reference Docs section.
 
-The production netlisp server runs at **https://netlisp.eugenepentland.dev** —
-that's the canonical URL for the KiCad-sync agent and browser clients. The
-structured tool surface is local-only through `netlisp tool`.
-Local dev still uses `http://localhost:7050`.
+`netlisp serve` binds **`127.0.0.1:7050`** by default — netlisp is a local
+tool, and a loopback request is an admin (see [auth.md](auth.md)). A deployment
+that must answer off-host runs behind an authenticating reverse proxy and adds
+`--bind` / `--allow-remote`. The structured tool surface is local-only through
+`netlisp tool`.
 
-`netlisp serve` starts an HTTP server with the schematic viewer:
+`netlisp serve [--project-dir <d>] [--port <n>] [--bind <addr>] [--allow-remote]
+[--auth-dir <d>] [--skip-warmup]` starts an HTTP server with the schematic
+viewer. `--bind` defaults to `127.0.0.1`; `--allow-remote` (or
+`NETLISP_ALLOW_REMOTE=1`) makes every request an admin and is only correct
+behind an authenticating reverse proxy. `GET /healthz` answers a fixed
+`{"status":"ok"}` without any credential — it is the deployment liveness probe.
+Auth in full: [auth.md](auth.md).
 
 - **Design list**: `GET /` — links to all .sexp designs, with per-card health chips (ERC errors/warnings, failed assertions, open notes, green PASS)
 - **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG. The page also embeds the design-review panels inline (power-budget table, power-sequence, test-points, per-section coverage). There is no standalone review-report endpoint.
@@ -595,8 +602,8 @@ production is in several times a day. The ordering that keeps that from being a
 visible outage:
 
 **Nothing expensive runs before `listen()`.** `serve()` configures rate limits,
-builds `ServerState`, initialises the ward adapter from `WARD_*`, registers the
-routes, and binds. Measured on this corpus (ReleaseSafe, 2026-08-28): **5 ms
+builds `ServerState`, registers the routes, and binds. Measured on this corpus
+(ReleaseSafe, 2026-08-28): **5 ms
 from exec to the first accepted connection**, of which netlisp's own startup —
 `main` entry to bound socket — is **0.54 ms**; the rest is exec and dynamic
 loading. The startup banner is followed by `[I] startup: listening after N.NN ms
@@ -605,29 +612,17 @@ delay is a *request*, not the boot. (Sub-millisecond is why that line carries
 two decimals — an integer `0 ms` reads like a broken clock.)
 
 **The deploy health check never touches a design.** `.githooks/deploy-prod.sh`
-polls `HEALTH_URLS` — `/.well-known/oauth-protected-resource` expecting **200**
-and `/` expecting **302** — for up to `HEALTH_TIMEOUT` (90 s). Both are answered
-ahead of every handler: the metadata route is on the session allowlist and
-returns a static RFC 9728 document, and `/` is answered by
-`ward_auth.authMiddleware`, which redirects an unauthenticated request to the
-ward login *before* `pages.indexPage` is ever called. Neither can be delayed by
-a cold cache, a warm-up sweep, or a design scan. Verified against a
-freshly-started cold server with `WARD_*` pointing at a port nothing listens
-on: metadata `200` and `/` `302`, both answered within 120 ms of exec — the
-redirect is decided from the absent cookie alone, so it needs no round trip to
-wardd.
+polls `HEALTH_URLS` — `/healthz` expecting **200** — for up to `HEALTH_TIMEOUT`
+(90 s). That route is public (it answers ahead of the locality decision) and
+returns a fixed `{"status":"ok"}` body without reading a design, a sidecar or a
+cache, so no cold cache, warm-up sweep or design scan can delay it. It is
+reproducible anywhere: `curl -sf http://127.0.0.1:7050/healthz` against a
+freshly started server, with no environment set up at all.
 
-Two things to know when reproducing this locally:
-
-- **`NETLISP_DEV=1` changes what `/` means.** Dev mode bypasses auth for
-  loopback, so `/` renders the actual home page — which on a cold process gathers
-  every design and is the slowest read on the server. The deploy health check
-  never sees that page, because prod does not set `NETLISP_DEV`.
-- **Ward-less local runs answer 503, not 302**, by design (`sessionConfigured` is
-  false → fail closed). That is not a health-check regression; it means the probe
-  cannot be reproduced without `WARD_VERIFY_URL` / `WARD_LOGIN_URL` set. Check
-  the *metadata* URL locally, and check the pair against a ward-configured
-  server.
+The one thing to know when reproducing this locally: **do not probe `/`**. It is
+loopback-admin now, so a local `curl http://127.0.0.1:7050/` renders the actual
+home page — which on a cold process gathers every design and is the slowest read
+on the server. That is exactly why the probe is `/healthz` and not `/`.
 
 **Everything else warms behind the socket.** `serve/warmup.zig` runs on its own
 thread: the design-summary gather first (`[I] warmup: N design summary(s) ready
@@ -927,7 +922,7 @@ dirty paths *before* the mutation and commits exactly the paths that became
 newly dirty *after* it (`after − before`). This means it is **path-scoped**
 — never `git add .`/`-A`, so loose uncommitted human work already in the tree
 is never swept in — and `history/` snapshots plus `*.bak-*`/`backups/`
-artifacts are always excluded. The commit is authored as `netlisp-dev`, with
+artifacts are always excluded. The commit is authored as `netlisp-local`, with
 the committer left as the tool
 (`netlisp <netlisp@server>`); the one-line message is
 `cli: <tool> <paths…>`. It is **fail-open** — git missing, not a repo, a

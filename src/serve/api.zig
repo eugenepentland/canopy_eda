@@ -173,6 +173,15 @@ pub fn versionApi(_: *Server, req: *httpz.Request, res: *httpz.Response) Handler
     try w.print("{{\"version\":{d}}}", .{v});
 }
 
+/// GET /healthz — unauthenticated liveness probe. Answers 200 with a fixed
+/// one-line JSON body and touches no design, sidecar or cache, so a deployment
+/// health check measures whether the process is listening and routing rather
+/// than how long the slowest page takes to render.
+pub fn healthzApi(_: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    res.content_type = .JSON;
+    res.body = "{\"status\":\"ok\"}";
+}
+
 /// GET /api/scene-graph/:name — return the cached schematic scene-graph JSON
 /// produced by the last build/push OF THAT DESIGN.
 ///

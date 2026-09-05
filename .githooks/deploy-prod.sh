@@ -194,12 +194,13 @@ fi
 export ZIG_LOCAL_CACHE_DIR="${ZIG_LOCAL_CACHE_DIR:-$TOP/.git/deploy-zig-cache}"
 
 # Health probes: "URL=expected_http_code", space separated.
-#   /.well-known/oauth-protected-resource — served unauthenticated, proves the
-#     process is listening AND routing AND emitting a real response body (200).
-#   /                                     — proves the ward auth path works; an
-#     unauthenticated browser hit must redirect to ward's login (302).
-# A 502/000/500 on either means the binary is not serving traffic.
-HEALTH_URLS="${HEALTH_URLS:-http://127.0.0.1:7050/.well-known/oauth-protected-resource=200 http://127.0.0.1:7050/=302}"
+#   /healthz — served unauthenticated ahead of every handler, proves the process
+#     is listening AND routing AND emitting a real response body (200). It reads
+#     no design, sidecar or cache, so a cold process answers it as fast as a warm
+#     one. Deliberately NOT `/`: that renders the design list, which on a cold
+#     process is the slowest read on the server.
+# A 502/000/500 means the binary is not serving traffic.
+HEALTH_URLS="${HEALTH_URLS:-http://127.0.0.1:7050/healthz=200}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-90}"
 HEALTH_INTERVAL="${HEALTH_INTERVAL:-3}"
 

@@ -160,13 +160,12 @@ def main():
         log(f"whole-design layout present: {bool(has_whole)} (fix is exercised when False)")
 
         port = free_port(args.port)
-        # NETLISP_DEV lets loopback requests bypass passkey/OAuth as dev@localhost,
-        # so /api/push + /api/sync-kicad-pcb work without minting a token for this
-        # throwaway server (it's a temp instance on a spare port, never prod).
+        # A loopback request is an admin, so /api/push + /api/sync-kicad-pcb work
+        # without minting a token for this throwaway server (it's a temp instance
+        # on a spare port bound to 127.0.0.1, never prod).
         proc = subprocess.Popen(
             [args.binary, "serve", "--project-dir", tmp, "--port", str(port)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            env={**os.environ, "NETLISP_DEV": "1"},
         )
         base = f"http://localhost:{port}"
         for _ in range(60):

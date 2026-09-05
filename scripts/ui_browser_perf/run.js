@@ -1860,7 +1860,7 @@ async function main() {
         // otherwise protected, by its systemd unit. Together with
         // projectOverlay's refusal to link .git this is defence in depth: a
         // benchmark server must not be able to commit anywhere.
-        env: { ...process.env, NETLISP_DEV: "1", NETLISP_GIT_AUTOCOMMIT: "0" },
+        env: { ...process.env, NETLISP_GIT_AUTOCOMMIT: "0" },
         stdio: ["ignore", "pipe", "pipe"],
       });
       const append = (chunk) => { serverText = (serverText + chunk.toString()).slice(-24000); };
