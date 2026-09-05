@@ -1,11 +1,14 @@
 //! Authenticated browser/API surface for system-level review workspaces.
 //!
 //! The manifest is the authority for every document the browser may read or
-//! mutate. Callers never supply a filesystem path: `:name` resolves the fixed
-//! `src/systems/<name>/system.json`, and `:doc` resolves one declared document
-//! id. Authored writes use the VFS sandbox/CAS path plus the ordinary
-//! autocommit seam. Attestation updates replace only the manifest's top-level
-//! `attestation` value so the human-authored manifest stays otherwise intact.
+//! mutate. Callers never supply a filesystem path: `:name` resolves through
+//! `system_sexp.locate` to whichever of `src/systems/<name>/system.sexp` and
+//! `system.json` is that workspace's contract, and `:doc` resolves one declared
+//! document id. Authored writes use the VFS sandbox/CAS path plus the ordinary
+//! autocommit seam. Attestation updates replace only the stored attestation —
+//! the JSON manifest's top-level `attestation` value, or the contract source's
+//! `(attestation …)` form at its byte span — so every other byte of the
+//! human-authored manifest, comments included, stays exactly as it was.
 
 const std = @import("std");
 const httpz = @import("httpz");
@@ -17,6 +20,7 @@ const system_review_markers = @import("../system_review_markers.zig");
 const system_review_assets = @import("../system_review_assets.zig");
 const system_review_md = @import("../system_review_md.zig");
 const system_review_package = @import("../system_review_package.zig");
+const system_sexp = @import("../system_sexp.zig");
 const serve_root = @import("../serve.zig");
 const autocommit = @import("autocommit.zig");
 const dossier_jobs = @import("dossier_jobs.zig");
@@ -40,8 +44,17 @@ const mutation_header_value = "1";
 pub const HandlerError = vfs.VfsError || pcb_layout_page.HandlerError || error{InvalidManifest};
 
 const LoadedSystem = struct {
+    /// Which spelling this workspace's contract is written in. Decides how an
+    /// attestation is written back, and nothing else.
+    kind: system_sexp.ManifestKind,
     manifest_rel: []const u8,
+    /// The manifest exactly as it sits on disk — what `sha256` covers and what
+    /// a write is patched from.
     raw: []const u8,
+    /// The contract as canonical `netlisp-system-review-v1` JSON. Identical to
+    /// `raw` for a JSON manifest; rendered from the parsed spec for a contract
+    /// source, so the browser's manifest object has one shape either way.
+    manifest_json: []const u8,
     parsed: system_review.ParsedSystemSpec,
     sha256: [64]u8,
     has_attestation_value: bool,
@@ -49,6 +62,7 @@ const LoadedSystem = struct {
 
     fn deinit(self: *LoadedSystem, allocator: std.mem.Allocator) void {
         self.parsed.deinit();
+        if (self.manifest_json.ptr != self.raw.ptr) allocator.free(self.manifest_json);
         allocator.free(self.raw);
         allocator.free(self.manifest_rel);
     }
@@ -102,10 +116,6 @@ fn isSimpleName(name: []const u8) bool {
         return false;
     }
     return true;
-}
-
-fn manifestRelativePath(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "src/systems/{s}/system.json", .{name});
 }
 
 fn cadDocumentRelativePath(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
@@ -283,17 +293,41 @@ fn hasNonNullAttestation(source: []const u8) bool {
     return !std.mem.eql(u8, std.mem.trim(u8, source[span.value_start..span.value_end], " \t\r\n"), "null");
 }
 
+/// Read whichever manifest is this workspace's contract and parse it. `depth`
+/// is `.identity_only` for the listing surfaces, which render no interface and
+/// must not pay a board evaluation per workspace to derive one.
 fn loadSystem(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
+    depth: system_review_package.ContractDepth,
     diagnostic: *system_review.Diagnostic,
 ) !LoadedSystem {
     if (!isSimpleName(name)) return error.InvalidSystemName;
-    const manifest_rel = try manifestRelativePath(allocator, name);
-    errdefer allocator.free(manifest_rel);
-    const raw = try readProjectFile(allocator, project_dir, manifest_rel, system_review.max_manifest_bytes);
-    errdefer allocator.free(raw);
+    const manifest = try system_sexp.locate(allocator, project_dir, name);
+    errdefer allocator.free(manifest.relative);
+    errdefer allocator.free(manifest.source);
+    var loaded = switch (manifest.kind) {
+        .sexp => try loadSexpSystem(allocator, project_dir, manifest, depth, diagnostic),
+        .json => try loadJsonSystem(allocator, manifest, diagnostic),
+    };
+    if (!std.mem.eql(u8, loaded.parsed.value.name, name)) {
+        loaded.parsed.deinit();
+        if (loaded.manifest_json.ptr != loaded.raw.ptr) allocator.free(loaded.manifest_json);
+        return error.SystemNameMismatch;
+    }
+    return loaded;
+}
+
+/// The long-standing JSON manifest. A stored attestation that no longer parses
+/// is recovered from rather than fatal: an approval goes stale the moment a
+/// document is edited, and the editor has to stay reachable to fix that.
+fn loadJsonSystem(
+    allocator: std.mem.Allocator,
+    manifest: system_sexp.Manifest,
+    diagnostic: *system_review.Diagnostic,
+) !LoadedSystem {
+    const raw = manifest.source;
     var syntax = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch |err| {
         diagnostic.* = .{
             .code = .invalid_json,
@@ -305,23 +339,75 @@ fn loadSystem(
     };
     defer syntax.deinit();
     const has_attestation = hasNonNullAttestation(raw);
-    var parsed = system_review.parseSystemSpec(allocator, raw, diagnostic) catch |first_error| blk: {
+    const parsed = system_review.parseSystemSpec(allocator, raw, diagnostic) catch |first_error| blk: {
         if (!has_attestation) return first_error;
         const without_attestation = try patchTopLevelAttestation(allocator, raw, "null");
         defer allocator.free(without_attestation);
         break :blk system_review.parseSystemSpec(allocator, without_attestation, diagnostic) catch return first_error;
     };
-    if (!std.mem.eql(u8, parsed.value.name, name)) {
-        parsed.deinit();
-        return error.SystemNameMismatch;
-    }
     return .{
-        .manifest_rel = manifest_rel,
+        .kind = .json,
+        .manifest_rel = manifest.relative,
         .raw = raw,
+        .manifest_json = raw,
         .parsed = parsed,
         .sha256 = system_review.sha256Hex(raw),
         .has_attestation_value = has_attestation,
         .recovered_stale_attestation = has_attestation and parsed.value.attestation == null,
+    };
+}
+
+/// The `(system …)` contract source. It parses to the same spec through the
+/// same package entry point the readiness gate uses, so the editor, the gate
+/// and the release composer can never read one workspace differently.
+fn loadSexpSystem(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    manifest: system_sexp.Manifest,
+    depth: system_review_package.ContractDepth,
+    diagnostic: *system_review.Diagnostic,
+) !LoadedSystem {
+    const raw = manifest.source;
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const has_attestation = system_sexp.hasAttestation(scratch.allocator(), raw);
+    const contract = try system_review_package.parseSexpContract(allocator, project_dir, raw, depth, diagnostic);
+    return .{
+        .kind = .sexp,
+        .manifest_rel = manifest.relative,
+        .raw = raw,
+        .manifest_json = contract.json,
+        .parsed = contract.parsed,
+        .sha256 = system_review.sha256Hex(raw),
+        .has_attestation_value = has_attestation,
+        .recovered_stale_attestation = has_attestation and contract.parsed.value.attestation == null,
+    };
+}
+
+/// The manifest bytes to persist for a newly computed attestation — the JSON
+/// manifest's `attestation` value replaced, or the contract source's
+/// `(attestation …)` form replaced at its byte span (appended when it carries
+/// none). Both spellings end up describing the identical attestation record.
+fn manifestWithAttestation(
+    allocator: std.mem.Allocator,
+    loaded: *const LoadedSystem,
+    result: system_review_package.AttestationResult,
+) !?[]const u8 {
+    return switch (loaded.kind) {
+        .json => try patchTopLevelAttestation(allocator, loaded.raw, result.attestation_json),
+        .sexp => try system_sexp.withAttestation(allocator, loaded.raw, result.attestation_sexp),
+    };
+}
+
+/// The manifest bytes that carry no approval any more. Null when the contract
+/// source has no `(attestation …)` to drop, which callers already gate on.
+fn manifestWithoutAttestation(
+    allocator: std.mem.Allocator,
+    loaded: *const LoadedSystem,
+) !?[]const u8 {
+    return switch (loaded.kind) {
+        .json => try patchTopLevelAttestation(allocator, loaded.raw, "null"),
+        .sexp => try system_sexp.withoutAttestation(allocator, loaded.raw),
     };
 }
 
@@ -335,12 +421,17 @@ fn loadSystemForRequest(
         try sendJsonError(res, 404, "missing system name");
         return null;
     };
-    return loadSystem(ctx.allocator, ctx.project_dir, name, diagnostic) catch |err| {
+    return loadSystem(ctx.allocator, ctx.project_dir, name, .full, diagnostic) catch |err| {
         switch (err) {
             error.InvalidSystemName, error.SystemNameMismatch => try sendJsonError(res, 400, "invalid system name"),
             error.FileNotFound => try sendJsonError(res, 404, "system not found"),
             error.UnsafePath, error.AccessDenied => try sendJsonError(res, 422, "system manifest path escapes the project"),
-            error.InvalidJson, error.InvalidManifest, error.ManifestTooLarge => try sendDiagnostic(res, 422, "invalid system manifest", diagnostic.*),
+            error.InvalidJson,
+            error.InvalidManifest,
+            error.ManifestTooLarge,
+            error.InvalidSystemSexp,
+            error.SourceTooLarge,
+            => try sendDiagnostic(res, 422, "invalid system manifest", diagnostic.*),
             else => try sendJsonError(res, 500, "cannot read system manifest"),
         }
         return null;
@@ -477,7 +568,7 @@ fn invalidateManifestAttestation(
     response: *std.ArrayList(u8),
 ) !bool {
     if (!loaded.has_attestation_value) return true;
-    const patched = try patchTopLevelAttestation(ctx.allocator, loaded.raw, "null");
+    const patched = (try manifestWithoutAttestation(ctx.allocator, loaded)) orelse return true;
     defer ctx.allocator.free(patched);
     return writeVfsFile(
         ctx.allocator,
@@ -519,9 +610,12 @@ fn lessSystemSummary(_: void, a: SystemSummary, b: SystemSummary) bool {
 /// workspace cannot blank the home page or the listing endpoint.
 pub const ListSystemsError = @typeInfo(@typeInfo(@TypeOf(collectSystemSummariesImpl)).@"fn".return_type.?).error_union.error_set;
 
-/// Enumerate `src/systems/*/system.json`, sorted by name. Empty (not an
-/// error) when the project has no `src/systems` at all, so a project that
-/// never adopted system review renders a home page with no systems section.
+/// Enumerate `src/systems/*`, sorted by name — each workspace summarised from
+/// whichever manifest `system_sexp.locate` says is its contract, so migrating a
+/// workspace to `system.sexp` cannot make it vanish from the home page. Empty
+/// (not an error) when the project has no `src/systems` at all, so a project
+/// that never adopted system review renders a home page with no systems
+/// section.
 pub fn collectSystemSummaries(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -549,7 +643,7 @@ fn collectSystemSummariesImpl(
     while (try iterator.next()) |entry| {
         if (entry.kind != .directory or !isSimpleName(entry.name)) continue;
         var diagnostic: system_review.Diagnostic = .{};
-        var loaded = loadSystem(allocator, project_dir, entry.name, &diagnostic) catch continue;
+        var loaded = loadSystem(allocator, project_dir, entry.name, .identity_only, &diagnostic) catch continue;
         defer loaded.deinit(allocator);
         const spec = loaded.parsed.value;
         try summaries.append(allocator, .{
@@ -566,7 +660,7 @@ fn collectSystemSummariesImpl(
     return summaries.toOwnedSlice(allocator);
 }
 
-/// GET /api/systems — discover valid `src/systems/*/system.json` workspaces.
+/// GET /api/systems — discover valid `src/systems/*` review workspaces.
 pub fn listSystemsApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const summaries = collectSystemSummaries(res.arena, ctx.project_dir) catch {
         return sendJsonError(res, 500, "cannot list system workspaces");
@@ -605,7 +699,7 @@ pub fn getSystemApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
     var out: std.Io.Writer.Allocating = .init(res.arena);
     const writer = &out.writer;
     try writer.writeAll("{\"manifest\":");
-    try writer.writeAll(loaded.raw);
+    try writer.writeAll(loaded.manifest_json);
     try writer.writeAll(",\"manifest_sha256\":");
     try json_writer.writeString(writer, &loaded.sha256);
     try writer.writeAll(",\"attestation_recoverable_stale\":");
@@ -969,7 +1063,8 @@ pub fn attestSystemApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         timestamp,
     ) catch |err| return sendPackageFailure(res, err, .attest);
 
-    const patched = try patchTopLevelAttestation(ctx.allocator, loaded.raw, result.attestation_json);
+    const patched = (try manifestWithAttestation(ctx.allocator, &loaded, result)) orelse
+        return sendJsonError(res, 422, "system manifest has no form to attest into");
     defer ctx.allocator.free(patched);
     if (patched.len > system_review.max_manifest_bytes)
         return sendJsonError(res, 422, "attested system manifest exceeds the 1 MiB limit");
@@ -2233,4 +2328,169 @@ test "saving a review document preserves an explicitly stale dossier" {
     try std.testing.expect(std.mem.indexOf(u8, after.res.body, "Cached dossier is stale") != null);
     try std.testing.expectEqualStrings("stale", after.res.headers.get("x-netlisp-dossier-state").?);
     try std.testing.expect(!state.reviews.dossiers.snapshot(null, "demo").composing);
+}
+
+// spec: Web Server - a workspace whose only manifest is a (system …) contract source is listed, opened and attested through the browser exactly as a JSON one is, because every manifest reader and writer resolves the contract the same way
+test "a sexp-only system workspace is listed, loaded and attested through the browser" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/sexponly");
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/jsononly");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/sexponly/system.sexp",
+        .data =
+        \\;; authored by hand
+        \\(system "sexponly"
+        \\  (title "Contract Source Only")
+        \\  (part-number "SEXP-1")
+        \\  (revision "C")
+        \\  (board "board" (role main) (source "src/board.sexp") (part-number "PCB-1") (revision "A"))
+        \\  (document "release-checklist" (title "Release checklist")
+        \\    (path "src/systems/sexponly/release.md") (classification checklist)))
+        ,
+    });
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/wrongname");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/wrongname/system.sexp",
+        .data =
+        \\(system "other" (title "Wrong") (part-number "W-1") (revision "A")
+        \\  (board "board" (role main) (source "src/board.sexp") (part-number "PCB-1") (revision "A"))
+        \\  (document "release-checklist" (title "C")
+        \\    (path "src/systems/wrongname/release.md") (classification checklist)))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/jsononly/system.json",
+        .data =
+        \\{"schema":"netlisp-system-review-v1","name":"jsononly","title":"JSON Only","part_number":"JSON-1","revision":"A","boards":[{"name":"board","role":"main","source":"src/board.sexp","part_number":"PCB-1","revision":"A"}],"documents":[{"id":"release-checklist","title":"Release checklist","path":"src/systems/jsononly/release.md","classification":"checklist","required":true}]}
+        ,
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", std.testing.allocator);
+    defer std.testing.allocator.free(project);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    // The home page's cards and /api/systems read one enumeration. Before this,
+    // it looked for `system.json` and the sexp-only workspace had no card at
+    // all — unreachable without typing its URL.
+    const summaries = try collectSystemSummaries(allocator, project);
+    try std.testing.expectEqual(@as(usize, 2), summaries.len);
+    try std.testing.expectEqualStrings("jsononly", summaries[0].name);
+    try std.testing.expectEqualStrings("sexponly", summaries[1].name);
+    try std.testing.expectEqualStrings("Contract Source Only", summaries[1].title);
+    try std.testing.expectEqualStrings("SEXP-1", summaries[1].part_number);
+    try std.testing.expectEqualStrings("C", summaries[1].revision);
+    try std.testing.expect(!summaries[1].attested);
+
+    var diagnostic: system_review.Diagnostic = .{};
+    var loaded = try loadSystem(allocator, project, "sexponly", .full, &diagnostic);
+    try std.testing.expectEqual(system_sexp.ManifestKind.sexp, loaded.kind);
+    try std.testing.expectEqualStrings("src/systems/sexponly/system.sexp", loaded.manifest_rel);
+    // The browser is handed canonical manifest JSON, not the contract source,
+    // so the editor's `manifest.title` reads the same either way.
+    try std.testing.expect(std.mem.indexOf(u8, loaded.manifest_json, "\"title\": \"Contract Source Only\"") != null);
+    try std.testing.expect(!loaded.has_attestation_value);
+
+    // Attestation patches the contract source at the form's span instead of
+    // refusing, and every authored byte outside it survives.
+    const result: system_review_package.AttestationResult = .{
+        .attestation_json = "{\"system_lock_sha256\":\"" ++ "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" ++ "\"}",
+        .attestation_sexp = "\n  (attestation\n    (system-lock \"" ++ "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" ++ "\")\n    )\n",
+        .readiness = undefined,
+    };
+    const attested = (try manifestWithAttestation(allocator, &loaded, result)).?;
+    try std.testing.expect(std.mem.startsWith(u8, attested, ";; authored by hand\n"));
+    try std.testing.expect(std.mem.indexOf(u8, attested, "(attestation") != null);
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/sexponly/system.sexp",
+        .data = attested,
+    });
+    var reloaded = try loadSystem(allocator, project, "sexponly", .full, &diagnostic);
+    try std.testing.expect(reloaded.has_attestation_value);
+    try std.testing.expect(!reloaded.recovered_stale_attestation);
+    try std.testing.expectEqualStrings("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", reloaded.parsed.value.attestation.?.system_lock_sha256);
+
+    // Saving a document invalidates that approval by dropping the form, which
+    // restores the authored source rather than leaving a `null` behind.
+    const invalidated = (try manifestWithoutAttestation(allocator, &reloaded)).?;
+    try std.testing.expect(std.mem.indexOf(u8, invalidated, "attestation") == null);
+
+    // The JSON manifest beside it still loads unchanged, through the same call.
+    const json_loaded = try loadSystem(allocator, project, "jsononly", .full, &diagnostic);
+    try std.testing.expectEqual(system_sexp.ManifestKind.json, json_loaded.kind);
+    try std.testing.expectEqualStrings("src/systems/jsononly/system.json", json_loaded.manifest_rel);
+
+    // A contract source naming a different system is refused rather than
+    // adopted — and the listing above skipped it without blanking the page.
+    try std.testing.expectError(error.SystemNameMismatch, loadSystem(allocator, project, "wrongname", .full, &diagnostic));
+}
+
+// spec: Web Server - a system endpoint refuses a missing, unsafe or unparseable manifest with the status and diagnostic that name the failure, whichever manifest spelling the workspace uses
+test "the shared system-request loader answers each manifest refusal in its own terms" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/broken");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/broken/system.sexp",
+        .data = "(system \"broken\" (title \"Broken\") (nope))",
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", std.testing.allocator);
+    defer std.testing.allocator.free(project);
+
+    var state: serve_root.ServerState = .{};
+    var server = Server{
+        .allocator = std.testing.allocator,
+        .project_dir = project,
+        .auth_dir = project,
+        .state = &state,
+    };
+
+    // No `:name` at all, a traversal-shaped one, an absent workspace, and a
+    // contract source that will not parse — four different refusals, none of
+    // them a 500 and none of them leaking a filesystem path.
+    var missing_param = httpz.testing.init(.{});
+    defer missing_param.deinit();
+    server.allocator = missing_param.res.arena;
+    var diagnostic: system_review.Diagnostic = .{};
+    try std.testing.expect((try loadSystemForRequest(&server, missing_param.req, missing_param.res, &diagnostic)) == null);
+    try std.testing.expectEqual(@as(u16, 404), missing_param.res.status);
+
+    var unsafe = httpz.testing.init(.{});
+    defer unsafe.deinit();
+    server.allocator = unsafe.res.arena;
+    unsafe.param("name", "../escape");
+    try std.testing.expect((try loadSystemForRequest(&server, unsafe.req, unsafe.res, &diagnostic)) == null);
+    try std.testing.expectEqual(@as(u16, 400), unsafe.res.status);
+
+    var absent = httpz.testing.init(.{});
+    defer absent.deinit();
+    server.allocator = absent.res.arena;
+    absent.param("name", "nosuch");
+    try std.testing.expect((try loadSystemForRequest(&server, absent.req, absent.res, &diagnostic)) == null);
+    try std.testing.expectEqual(@as(u16, 404), absent.res.status);
+
+    var broken = httpz.testing.init(.{});
+    defer broken.deinit();
+    server.allocator = broken.res.arena;
+    broken.param("name", "broken");
+    try std.testing.expect((try loadSystemForRequest(&server, broken.req, broken.res, &diagnostic)) == null);
+    try std.testing.expectEqual(@as(u16, 422), broken.res.status);
+    try std.testing.expect(std.mem.indexOf(u8, broken.res.body, "invalid system manifest") != null);
+
+    // The same refusals reach `loadSystem` itself as named errors.
+    try std.testing.expectError(
+        error.InvalidSystemName,
+        loadSystem(std.testing.allocator, project, "../escape", .full, &diagnostic),
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        loadSystem(std.testing.allocator, project, "nosuch", .full, &diagnostic),
+    );
+    try std.testing.expectError(
+        error.InvalidSystemSexp,
+        loadSystem(std.testing.allocator, project, "broken", .full, &diagnostic),
+    );
 }

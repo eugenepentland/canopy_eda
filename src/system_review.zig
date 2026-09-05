@@ -861,18 +861,37 @@ pub fn writeAttestationJson(
     writer: *std.Io.Writer,
     attestation: Attestation,
 ) AttestationWriteError!void {
-    const sorted_inputs = try allocator.dupe(InputAttestation, attestation.inputs);
-    defer allocator.free(sorted_inputs);
-    std.mem.sort(InputAttestation, sorted_inputs, {}, lessInputAttestation);
-
-    const sorted_documents = try allocator.dupe(DocumentAttestation, attestation.documents);
-    defer allocator.free(sorted_documents);
-    std.mem.sort(DocumentAttestation, sorted_documents, {}, lessDocumentAttestation);
-
-    var normalized = attestation;
-    normalized.inputs = sorted_inputs;
-    normalized.documents = sorted_documents;
+    const normalized = try canonicalAttestation(allocator, attestation);
+    defer freeCanonicalAttestation(allocator, normalized);
     try std.json.Stringify.value(normalized, .{ .emit_null_optional_fields = false }, writer);
+}
+
+/// One attestation with its two order-free collections in canonical order:
+/// inputs by path, documents by id. Neither order carries meaning, so every
+/// serializer of an attestation — the JSON manifest, the JSON attestation
+/// value, and the `(attestation …)` contract source — normalizes through this
+/// one function and the three cannot disagree about what "the same
+/// attestation" looks like. The two returned slices belong to `allocator`;
+/// release them with `freeCanonicalAttestation`.
+pub fn canonicalAttestation(
+    allocator: std.mem.Allocator,
+    attestation: Attestation,
+) std.mem.Allocator.Error!Attestation {
+    const inputs = try allocator.dupe(InputAttestation, attestation.inputs);
+    errdefer allocator.free(inputs);
+    std.mem.sort(InputAttestation, inputs, {}, lessInputAttestation);
+    const documents = try allocator.dupe(DocumentAttestation, attestation.documents);
+    std.mem.sort(DocumentAttestation, documents, {}, lessDocumentAttestation);
+    var normalized = attestation;
+    normalized.inputs = inputs;
+    normalized.documents = documents;
+    return normalized;
+}
+
+/// Release the two slices `canonicalAttestation` allocated.
+pub fn freeCanonicalAttestation(allocator: std.mem.Allocator, attestation: Attestation) void {
+    allocator.free(attestation.inputs);
+    allocator.free(attestation.documents);
 }
 
 /// Serialize a complete typed manifest as stable, two-space-indented JSON.
@@ -886,17 +905,8 @@ pub fn writeSystemSpecJson(
 ) SystemSpecWriteError!void {
     var normalized_spec = spec;
     if (spec.attestation) |attestation| {
-        const sorted_inputs = try allocator.dupe(InputAttestation, attestation.inputs);
-        defer allocator.free(sorted_inputs);
-        std.mem.sort(InputAttestation, sorted_inputs, {}, lessInputAttestation);
-
-        const sorted_documents = try allocator.dupe(DocumentAttestation, attestation.documents);
-        defer allocator.free(sorted_documents);
-        std.mem.sort(DocumentAttestation, sorted_documents, {}, lessDocumentAttestation);
-
-        var normalized_attestation = attestation;
-        normalized_attestation.inputs = sorted_inputs;
-        normalized_attestation.documents = sorted_documents;
+        const normalized_attestation = try canonicalAttestation(allocator, attestation);
+        defer freeCanonicalAttestation(allocator, normalized_attestation);
         normalized_spec.attestation = normalized_attestation;
         try std.json.Stringify.value(normalized_spec, .{
             .whitespace = .indent_2,
@@ -1716,4 +1726,33 @@ test "system review validates complete attestations and rejects a stale lock" {
     stale.system_lock_sha256 = &stale_hex;
     try std.testing.expectError(error.InvalidManifest, validateAttestation(allocator, fixtureSpec(), stale, &diagnostic));
     try std.testing.expectEqual(DiagnosticCode.system_lock_mismatch, diagnostic.code);
+}
+
+// spec: system-review - one attestation normalizes to canonical order through a single function, and a normalization that runs out of memory part-way releases what it already took
+test "canonical attestation orders its collections and leaks nothing on failure" {
+    const attestation = Attestation{
+        .system_lock_sha256 = "lock",
+        .inputs = &.{
+            .{ .path = "src/z.sexp", .sha256 = "z" },
+            .{ .path = "src/a.sexp", .sha256 = "a" },
+        },
+        .documents = &.{
+            .{ .id = "zebra", .path = "src/systems/demo/z.md", .sha256 = "z" },
+            .{ .id = "alpha", .path = "src/systems/demo/a.md", .sha256 = "a" },
+        },
+    };
+    const canonical = try canonicalAttestation(std.testing.allocator, attestation);
+    defer freeCanonicalAttestation(std.testing.allocator, canonical);
+    try std.testing.expectEqualStrings("src/a.sexp", canonical.inputs[0].path);
+    try std.testing.expectEqualStrings("alpha", canonical.documents[0].id);
+    // The caller's own record is untouched: normalization copies, so the
+    // authored order a manifest was written in is not silently rewritten.
+    try std.testing.expectEqualStrings("src/z.sexp", attestation.inputs[0].path);
+
+    // The second of the two allocations failing must not strand the first.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        canonicalAttestation(failing.allocator(), attestation),
+    );
 }

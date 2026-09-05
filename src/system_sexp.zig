@@ -21,14 +21,20 @@
 //! makes `JSON -> spec` and `JSON -> sexp -> spec` the same spec, which
 //! `convert-system-manifest` and its round-trip test rely on.
 //!
-//! The module never writes into a project. Its one filesystem-touching entry
-//! point, `convertTool`, reads one manifest through the contained-path reader
-//! and prints the equivalent source; where the result is stored is the
-//! caller's decision.
+//! The module never writes into a project. It reads through the contained-path
+//! reader only — `locate`, which decides which of the two files is a
+//! workspace's contract and is the single discovery every reader shares, and
+//! `convertTool`, which prints the equivalent source for one JSON manifest.
+//! Where any result is stored stays the caller's decision, which is why the
+//! attestation editors here (`withAttestation`, `withoutAttestation`) return
+//! new bytes rather than touching the file: persistence belongs at the
+//! authenticated VFS boundary, and the bytes they return differ from the ones
+//! they were given only inside the `(attestation …)` form.
 
 const std = @import("std");
 
 const ast = @import("sexpr/ast.zig");
+const paren_span = @import("sexpr/paren_span.zig");
 const parser = @import("sexpr/parser.zig");
 const system_review = @import("system_review.zig");
 
@@ -132,6 +138,18 @@ pub fn isUnconnectedNet(net: []const u8) bool {
 
 // ── Parsing ──────────────────────────────────────────────────────────
 
+/// How much of a contract one parse needs.
+pub const Options = struct {
+    /// Supplies the pad tables an `(auto)` interface derives its contact table
+    /// from. Absent when the caller has no evaluator to spend.
+    resolver: ?Resolver = null,
+    /// Drop an `(auto)` interface that no resolver can derive instead of
+    /// refusing the whole contract. Only for callers that read identity and
+    /// counts — the home page's cards — where a derived contact table costs a
+    /// full evaluation of both boards and appears in nothing they render.
+    omit_underivable_interfaces: bool = false,
+};
+
 /// Parse one `(system …)` source into the same strict v1 spec the JSON loader
 /// produces. Everything returned is allocated from `allocator`; callers use an
 /// arena and free it whole. The result is NOT yet semantically validated —
@@ -140,6 +158,16 @@ pub fn parse(
     allocator: std.mem.Allocator,
     source: []const u8,
     resolver: ?Resolver,
+    diagnostic: *Diagnostic,
+) ParseError!SystemSpec {
+    return parseWith(allocator, source, .{ .resolver = resolver }, diagnostic);
+}
+
+/// `parse` with the derivation policy spelled out. See `Options`.
+pub fn parseWith(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    options: Options,
     diagnostic: *Diagnostic,
 ) ParseError!SystemSpec {
     diagnostic.clear();
@@ -166,13 +194,13 @@ pub fn parse(
     }
     const system = root orelse
         return fail(diagnostic, .missing_sexp_field, "manifest", "no (system …) form in this source", "");
-    return parseSystem(allocator, system, resolver, diagnostic);
+    return parseSystem(allocator, system, options, diagnostic);
 }
 
 fn parseSystem(
     allocator: std.mem.Allocator,
     node: Node,
-    resolver: ?Resolver,
+    options: Options,
     diagnostic: *Diagnostic,
 ) ParseError!SystemSpec {
     const children = node.asList().?;
@@ -222,7 +250,7 @@ fn parseSystem(
 
     spec.boards = boards.items;
     spec.documents = documents.items;
-    spec.interfaces = try resolveInterfaces(allocator, interfaces.items, resolver, diagnostic);
+    spec.interfaces = try resolveInterfaces(allocator, interfaces.items, options, diagnostic);
     return spec;
 }
 
@@ -560,13 +588,14 @@ fn parseDocumentAttestation(
 fn resolveInterfaces(
     allocator: std.mem.Allocator,
     drafts: []const InterfaceDraft,
-    resolver: ?Resolver,
+    options: Options,
     diagnostic: *Diagnostic,
 ) ParseError![]const system_review.InterfaceContract {
     var out: std.ArrayList(system_review.InterfaceContract) = .empty;
     for (drafts) |draft| {
+        if (draft.auto and options.resolver == null and options.omit_underivable_interfaces) continue;
         const signals = if (draft.auto)
-            try deriveSignals(allocator, draft, resolver, diagnostic)
+            try deriveSignals(allocator, draft, options.resolver, diagnostic)
         else
             try explicitSignals(allocator, draft, diagnostic);
         if (draft.has_contact_count and draft.contact_count != signals.len)
@@ -741,7 +770,7 @@ pub fn write(
     for (spec.boards) |board| try writeBoard(writer, board);
     for (spec.interfaces) |interface| try writeInterface(allocator, writer, interface);
     for (spec.documents) |document| try writeDocument(writer, document);
-    if (spec.attestation) |attestation| try writeAttestation(writer, attestation);
+    if (spec.attestation) |attestation| try writeAttestationForm(allocator, writer, attestation);
     try writer.writeAll(")\n");
 }
 
@@ -839,7 +868,17 @@ fn writeDocument(writer: *std.Io.Writer, document: system_review.DocumentSpec) W
     try writer.writeAll(")\n");
 }
 
-fn writeAttestation(writer: *std.Io.Writer, attestation: system_review.Attestation) WriteError!void {
+/// Serialize one `(attestation …)` form, indented as a `(system …)` child and
+/// framed by a leading and a trailing newline. Inputs and documents are
+/// emitted in `system_review.canonicalAttestation` order, so this form and the
+/// JSON attestation value describe byte-for-byte the same record.
+pub fn writeAttestationForm(
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    raw_attestation: system_review.Attestation,
+) WriteError!void {
+    const attestation = try system_review.canonicalAttestation(allocator, raw_attestation);
+    defer system_review.freeCanonicalAttestation(allocator, attestation);
     try writer.writeAll("\n  (attestation\n    (system-lock ");
     try writeQuoted(writer, attestation.system_lock_sha256);
     try writer.writeAll(")\n");
@@ -1108,6 +1147,159 @@ fn refuse(writer: *std.Io.Writer, message: []const u8) ToolError!bool {
     try json_writer.writeString(writer, message);
     try writer.writeAll("}");
     return false;
+}
+
+// ── Manifest discovery and in-place attestation edits ────────────────
+
+/// Which of the two manifest spellings a workspace's contract is written in.
+pub const ManifestKind = enum { sexp, json };
+
+/// The one manifest file a workspace's contract is read from, and its bytes.
+pub const Manifest = struct {
+    kind: ManifestKind,
+    /// Project-relative path the bytes came from.
+    relative: []const u8,
+    source: []const u8,
+    /// True when a `system.sexp` won over a `system.json` still on disk. The
+    /// JSON is then inert, and the readiness gate says so rather than
+    /// silently ignoring it.
+    shadowed_json: bool = false,
+};
+
+/// Errors `locate` reports. A workspace with neither manifest surfaces as the
+/// `FileNotFound` the JSON read raises, so "no such system" keeps one spelling.
+pub const LocateError = error{InvalidSystemName} ||
+    @typeInfo(@typeInfo(@TypeOf(review_assets.readContainedFile)).@"fn".return_type.?).error_union.error_set;
+
+/// Resolve which file is `name`'s contract and read it. The DSL contract wins
+/// when it exists; the JSON stays loadable unchanged for every workspace that
+/// has not migrated. Every reader and writer of a system manifest — the
+/// readiness gate, the dossier composer, the home page's cards and the HTTP
+/// attestation endpoint — goes through this one function, so no surface can
+/// decide on its own that a workspace does not exist.
+pub fn locate(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+) LocateError!Manifest {
+    if (!isSimpleSystemName(name)) return error.InvalidSystemName;
+    const sexp_rel = try std.fmt.allocPrint(allocator, "src/systems/{s}/{s}", .{ name, sexp_manifest_name });
+    if (readOptional(allocator, project_dir, sexp_rel)) |source| {
+        const json_rel = try std.fmt.allocPrint(allocator, "src/systems/{s}/{s}", .{ name, json_manifest_name });
+        defer allocator.free(json_rel);
+        // Only whether the shadowed JSON is there matters; its bytes are inert.
+        const shadow = readOptional(allocator, project_dir, json_rel);
+        if (shadow) |bytes| allocator.free(bytes);
+        return .{
+            .kind = .sexp,
+            .relative = sexp_rel,
+            .source = source,
+            .shadowed_json = shadow != null,
+        };
+    }
+    allocator.free(sexp_rel);
+    const json_rel = try std.fmt.allocPrint(allocator, "src/systems/{s}/{s}", .{ name, json_manifest_name });
+    errdefer allocator.free(json_rel);
+    return .{
+        .kind = .json,
+        .relative = json_rel,
+        .source = try review_assets.readContainedFile(
+            allocator,
+            project_dir,
+            json_rel,
+            system_review.max_manifest_bytes,
+        ),
+    };
+}
+
+/// Read one optional manifest file. Only absence is null; every other read
+/// failure still propagates through the caller's own read of the file it
+/// decided to use.
+fn readOptional(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    relative: []const u8,
+) ?[]const u8 {
+    return review_assets.readContainedFile(
+        allocator,
+        project_dir,
+        relative,
+        system_review.max_manifest_bytes,
+    ) catch null;
+}
+
+/// Half-open byte range of a form inside a contract source.
+pub const Span = struct { start: usize, end: usize };
+
+/// Byte span of the `(attestation …)` child of the top-level `(system …)`
+/// form, or null when the contract carries none. Located by parsing for the
+/// form's start offset and matching its closing paren over the raw text, so a
+/// paren inside a quoted net name cannot end it early.
+/// `allocator` holds the throwaway parse; callers pass a scratch arena.
+pub fn attestationSpan(allocator: std.mem.Allocator, source: []const u8) ?Span {
+    const nodes = parser.parse(allocator, source) catch return null;
+    for (nodes) |node| {
+        if (!node.isForm("system")) continue;
+        const children = node.asList() orelse continue;
+        for (children) |child| {
+            if (!child.isForm("attestation")) continue;
+            const start: usize = child.span.offset;
+            const end = paren_span.endIndex(source, start, .line_semicolon) orelse return null;
+            return .{ .start = start, .end = end };
+        }
+    }
+    return null;
+}
+
+/// True when the contract already carries an `(attestation …)`.
+pub fn hasAttestation(allocator: std.mem.Allocator, source: []const u8) bool {
+    return attestationSpan(allocator, source) != null;
+}
+
+/// Replace — or, when absent, append — the `(attestation …)` child of a
+/// contract source, leaving every other byte, comment and blank line exactly
+/// as authored. `form` is one rendered `(attestation …)` as
+/// `writeAttestationForm` prints it. Null when the source has no top-level
+/// `(system …)` form to edit.
+pub fn withAttestation(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    form: []const u8,
+) std.mem.Allocator.Error!?[]const u8 {
+    const body = std.mem.trim(u8, form, " \t\r\n");
+    if (attestationSpan(allocator, source)) |span|
+        return try std.mem.concat(allocator, u8, &.{ source[0..span.start], body, source[span.end..] });
+    const close = systemFormClose(allocator, source) orelse return null;
+    var insert_at = close;
+    while (insert_at > 0 and std.ascii.isWhitespace(source[insert_at - 1])) insert_at -= 1;
+    return try std.mem.concat(allocator, u8, &.{ source[0..insert_at], "\n  ", body, source[insert_at..] });
+}
+
+/// Drop the `(attestation …)` child of a contract source. A form that owns its
+/// own lines takes its indentation and the newline above it with it, so
+/// invalidating an approval restores the source `withAttestation` was handed;
+/// a form written inline keeps the line it shares intact. Null when there is
+/// none to drop — an approval that was never granted needs no invalidation,
+/// and the caller can skip the write entirely.
+pub fn withoutAttestation(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+) std.mem.Allocator.Error!?[]const u8 {
+    const span = attestationSpan(allocator, source) orelse return null;
+    var indent = span.start;
+    while (indent > 0 and (source[indent - 1] == ' ' or source[indent - 1] == '\t')) indent -= 1;
+    const start = if (indent > 0 and source[indent - 1] == '\n') indent - 1 else span.start;
+    return try std.mem.concat(allocator, u8, &.{ source[0..start], source[span.end..] });
+}
+
+/// Byte offset of the `)` closing the top-level `(system …)` form.
+fn systemFormClose(allocator: std.mem.Allocator, source: []const u8) ?usize {
+    const nodes = parser.parse(allocator, source) catch return null;
+    for (nodes) |node| {
+        if (!node.isForm("system")) continue;
+        return paren_span.matchingClose(source, node.span.offset, .line_semicolon);
+    }
+    return null;
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -1482,4 +1674,141 @@ test "system contract forms and their reference table cannot drift" {
         &diagnostic,
     ));
     try testing.expectEqual(system_review.DiagnosticCode.unknown_sexp_form, diagnostic.code);
+}
+
+// spec: system-review - a contract source's (attestation …) is replaced, appended or dropped at its byte span, leaving every other byte, comment and blank line as authored
+test "attestation edits touch only the attestation form" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    const authored =
+        \\;; hand-written header comment
+        \\(system "demo"
+        \\  (title "Demo")          ; trailing comment
+        \\  (part-number "D-1")
+        \\  (revision "A")
+        \\  (board "b" (role main) (source "src/b.sexp") (part-number "P") (revision "A"))
+        \\  (document "release-checklist" (title "C")
+        \\    (path "src/systems/demo/c.md") (classification checklist)))
+        \\
+    ;
+    try testing.expect(!hasAttestation(allocator, authored));
+
+    var rendered: std.Io.Writer.Allocating = .init(allocator);
+    try writeAttestationForm(allocator, &rendered.writer, .{
+        .system_lock_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        .attested_by = "writer@example.com",
+        .attested_at = "2026-01-02T03:04:05Z",
+        .inputs = &.{},
+        .documents = &.{},
+    });
+    const attested = (try withAttestation(allocator, authored, rendered.written())).?;
+
+    // Everything the author wrote survives byte for byte, comments included.
+    try testing.expect(std.mem.startsWith(u8, attested, ";; hand-written header comment\n"));
+    try testing.expect(std.mem.indexOf(u8, attested, "(title \"Demo\")          ; trailing comment") != null);
+    try testing.expect(hasAttestation(allocator, attested));
+
+    // And the appended form is a real child of `(system …)`: the contract
+    // re-parses, carrying the attestation the writer just approved.
+    var diagnostic: Diagnostic = .{};
+    const spec = try parse(allocator, attested, null, &diagnostic);
+    try testing.expectEqualStrings("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", spec.attestation.?.system_lock_sha256);
+    try testing.expectEqualStrings("writer@example.com", spec.attestation.?.attested_by.?);
+
+    // A second approval replaces the form in place rather than appending a
+    // second one, which the parser refuses outright.
+    var replacement: std.Io.Writer.Allocating = .init(allocator);
+    try writeAttestationForm(allocator, &replacement.writer, .{
+        .system_lock_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        .inputs = &.{},
+        .documents = &.{},
+    });
+    const reattested = (try withAttestation(allocator, attested, replacement.written())).?;
+    const respec = try parse(allocator, reattested, null, &diagnostic);
+    try testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", respec.attestation.?.system_lock_sha256);
+    try testing.expect(std.mem.indexOf(u8, reattested, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") == null);
+
+    // Invalidation restores the authored source exactly.
+    try testing.expectEqualStrings(authored, (try withoutAttestation(allocator, reattested)).?);
+    try testing.expect((try withoutAttestation(allocator, authored)) == null);
+
+    // A parenthesis inside a quoted value cannot end the form early, so the
+    // span that gets spliced is the whole attestation and nothing beyond it.
+    const quoted =
+        \\(system "demo" (title "Demo") (part-number "D-1") (revision "A")
+        \\  (board "b" (role main) (source "src/b.sexp") (part-number "P") (revision "A"))
+        \\  (attestation (system-lock "lock") (input "src/(nc 1).md" "hash"))
+        \\  (document "d" (title "T") (path "src/systems/demo/d.md") (classification design)))
+    ;
+    const span = attestationSpan(allocator, quoted).?;
+    try testing.expectEqualStrings(
+        "(attestation (system-lock \"lock\") (input \"src/(nc 1).md\" \"hash\"))",
+        quoted[span.start..span.end],
+    );
+
+    // A source with no (system …) form has nothing to attest into, and says so
+    // rather than writing a manifest that would not load.
+    try testing.expect((try withAttestation(allocator, "(design-block \"x\")", "(attestation)")) == null);
+}
+
+// spec: system-review - manifest discovery answers with the contract source when a workspace has one and the JSON manifest otherwise, and a workspace with neither is absent rather than empty
+test "manifest discovery picks the contract source over the JSON beside it" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "project/src/systems/demo");
+    const project = try tmp.dir.realPathFileAlloc(testing.io, "project", allocator);
+
+    try testing.expectError(error.FileNotFound, locate(allocator, project, "demo"));
+    try testing.expectError(error.InvalidSystemName, locate(allocator, project, "../escape"));
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "project/src/systems/demo/system.json",
+        .data = "{\"name\":\"demo\"}",
+    });
+    const json = try locate(allocator, project, "demo");
+    try testing.expectEqual(ManifestKind.json, json.kind);
+    try testing.expectEqualStrings("src/systems/demo/system.json", json.relative);
+    try testing.expect(!json.shadowed_json);
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "project/src/systems/demo/system.sexp",
+        .data = "(system \"demo\")\n",
+    });
+    const sexp = try locate(allocator, project, "demo");
+    try testing.expectEqual(ManifestKind.sexp, sexp.kind);
+    try testing.expectEqualStrings("src/systems/demo/system.sexp", sexp.relative);
+    try testing.expectEqualStrings("(system \"demo\")\n", sexp.source);
+    try testing.expect(sexp.shadowed_json);
+}
+
+// spec: system-review - an identity-only parse drops an (auto) interface it has no evaluator for instead of refusing the contract, so a listing surface never pays a board evaluation per workspace
+test "an identity-only parse omits the interfaces it cannot derive" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    const source =
+        \\(system "twin"
+        \\  (title "Twin") (part-number "T-1") (revision "A")
+        \\  (board "a" (role rf) (source "src/a.sexp") (part-number "A") (revision "A"))
+        \\  (board "b" (role base) (source "src/b.sexp") (part-number "B") (revision "A"))
+        \\  (interface "link" (mates "a/J1" "b/J1") (auto))
+        \\  (document "d" (title "T") (path "src/systems/twin/d.md") (classification design)))
+    ;
+    var diagnostic: Diagnostic = .{};
+    // With no resolver, the full parse refuses rather than inventing contacts.
+    try testing.expectError(error.InvalidSystemSexp, parse(allocator, source, null, &diagnostic));
+    try testing.expectEqual(system_review.DiagnosticCode.unresolved_connector, diagnostic.code);
+
+    const spec = try parseWith(allocator, source, .{ .omit_underivable_interfaces = true }, &diagnostic);
+    try testing.expectEqualStrings("Twin", spec.title);
+    try testing.expectEqual(@as(usize, 2), spec.boards.len);
+    try testing.expectEqual(@as(usize, 1), spec.documents.len);
+    try testing.expectEqual(@as(usize, 0), spec.interfaces.len);
 }

@@ -522,17 +522,31 @@ An undeclared variant name fails the evaluation and renders the diagnostic page
 assembly than the caller asked for.
 - **Library upload**: `GET /library`, `POST /api/upload-symbol`, `POST /api/upload-footprint`
 - **System review workspace**: `GET /systems/:name` — the document editor over
-  `src/systems/<name>/system.json`, with `GET|PUT /api/systems/:name/docs/:doc`,
+  that system's manifest, with `GET|PUT /api/systems/:name/docs/:doc`,
   `POST /api/systems/:name/attest`, `POST /api/systems/:name/assets`,
   `GET /api/systems/:name/readiness`, `GET /api/systems/:name/draft.zip` and
   `POST /api/systems/:name/release` behind it. Session-gated like the rest of
   the browser surface; every mutation needs the `X-Netlisp-Review: 1` header and
-  the writer role. The readiness, draft, dossier and release paths read the
-  system contract from `src/systems/<name>/system.sexp` when it exists and fall
-  back to `system.json` otherwise (see
-  [docs/sexpr-language.md § System contracts](sexpr-language.md)); the
-  document-editing and attestation endpoints still read and write the JSON
-  form.
+  the writer role. **Every** endpoint here — the listing, the editor, readiness,
+  draft, dossier, attestation and release — reads the contract from
+  `src/systems/<name>/system.sexp` when it exists and falls back to
+  `system.json` otherwise (see
+  [docs/sexpr-language.md § System contracts](sexpr-language.md)), so a
+  workspace that has migrated is served identically to one that has not.
+  `GET /api/systems/:name` always answers with canonical
+  `netlisp-system-review-v1` JSON in `manifest`, rendered from the contract
+  source when that is the manifest, so the page script sees one object shape.
+
+  **Attestation writes.** `POST /api/systems/:name/attest` stores the approval
+  in the manifest's own spelling: the JSON manifest's top-level `attestation`
+  value is replaced, and a contract source's `(attestation …)` form is replaced
+  at its byte span (appended before the closing paren when it carries none).
+  Nothing else in the file is rewritten — comments, blank lines and authored
+  formatting survive byte for byte — and the two spellings parse to the
+  identical spec. The reverse write, which any document save or asset upload
+  performs, sets the JSON value to `null` and removes the `(attestation …)`
+  form. Both go through the ordinary VFS CAS path, so a manifest that changed
+  under the request is a 409 rather than a clobber.
 - **System interface findings**: `GET /api/systems/:name/readiness` (and the
   identical document `netlisp system-check` prints) carries three fields beyond
   the historical gate: `manifest` — the project-relative contract actually

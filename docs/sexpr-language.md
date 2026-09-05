@@ -2042,10 +2042,15 @@ netlisp tool convert-system-manifest --project-dir <d> --args '{"system":"barrac
 The converter is read-only — it prints the equivalent source and writes nothing
 into the project — and the printed contract re-parses to the identical
 canonical spec, so the migration is provably not a rewrite. It is safe to
-delete the JSON afterwards; note that the HTTP manifest-editing endpoints
-(`POST /api/systems/:name/attest` above all) still operate on `system.json`,
-so a workspace that attests through the browser should keep the JSON form for
-now.
+delete the JSON afterwards: every surface that reads a manifest resolves the
+contract the same way, so a sexp-only workspace gets its home-page card, its
+`/api/systems` entry, its editor, its readiness, draft, dossier and release —
+and it can be approved through the browser. `POST /api/systems/:name/attest`
+writes the approval back as an `(attestation …)` form spliced in at its byte
+span, replacing the one already there or appending a new one; every other byte
+of the contract, comments and blank lines included, is left exactly as
+authored. Invalidating an approval (any document save or asset upload) removes
+that form again, restoring the source it was spliced into.
 
 #### Endpoint handles
 
