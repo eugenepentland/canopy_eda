@@ -57,6 +57,15 @@ pub fn build(b: *std.Build) void {
         "Run only unit tests whose name contains this substring (repeatable; `test` step only, default: run all)",
     ) orelse &.{};
 
+    // Compile-time build identity for binaries that leave this machine. Unset
+    // locally and in production on purpose: HEAD stays out of the compiler
+    // inputs so an unchanged ReleaseSafe executable is reused across doc-only
+    // commits (see src/build_id.zig). Only .github/workflows/release.yml passes
+    // it, with the tag being built; `netlisp version` prints it verbatim.
+    const build_id_opt = b.option([]const u8, "build-id", "Stamp a build identity into the binary (release workflow only); unset = resolve at runtime");
+    const build_options = b.addOptions();
+    build_options.addOption(?[]const u8, "build_id", build_id_opt);
+
     const httpz = b.dependency("httpz", .{
         .target = target,
         .optimize = optimize,
@@ -159,6 +168,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.strip = optimize == .safe;
     exe_mod.addImport("httpz", httpz.module("httpz"));
     exe_mod.addImport("ward", ward_mod);
+    exe_mod.addOptions("build_options", build_options);
     // Embed the compiled drc.wasm so static_assets.zig can @embedFile it.
     exe_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
 
@@ -216,6 +226,7 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.addImport("httpz", httpz.module("httpz"));
     test_mod.addImport("ward", ward_mod);
+    test_mod.addOptions("build_options", build_options);
     test_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
     addDeployUnitImports(b, test_mod);
 
@@ -285,6 +296,7 @@ pub fn build(b: *std.Build) void {
     });
     fast_test_mod.addImport("httpz", httpz.module("httpz"));
     fast_test_mod.addImport("ward", ward_mod);
+    fast_test_mod.addOptions("build_options", build_options);
     fast_test_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
     addDeployUnitImports(b, fast_test_mod);
 

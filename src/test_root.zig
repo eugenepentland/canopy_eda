@@ -863,6 +863,17 @@ test "gated full test invocations pin the Zig build seed" {
     ) != null);
 }
 
+// spec: Development pipeline - Release binaries carry the tag they were built from as a compile-time build identity
+
+test "release workflow stamps the tag into the binary it publishes" {
+    const workflow = try readRepoFile(std.testing.allocator, ".github/workflows/release.yml");
+    defer std.testing.allocator.free(workflow);
+    // The stamp is passed to the build and then asserted on the stripped binary,
+    // so a tarball names its tag while a checkout keeps resolving git at runtime.
+    try std.testing.expect(std.mem.indexOf(u8, workflow, "\"-Dbuild-id=${GITHUB_REF_NAME}\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, workflow, "test \"$(\"$bin\" version)\" = \"${GITHUB_REF_NAME}\"") != null);
+}
+
 // spec: Development pipeline - Runs full tests and forces the concurrent ReleaseSafe build through the self-hosted backend for one exact commit
 
 test "release preparation starts test and build jobs before waiting" {
@@ -945,7 +956,10 @@ test "only the production optimization mode strips the application" {
     defer std.testing.allocator.free(source);
     try std.testing.expect(std.mem.indexOf(u8, source, "exe_mod.strip = optimize == .safe;") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "gitShortHash") == null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "addOptions(\"build_options\"") == null);
+    // The only compile-time identity is the explicit, default-less `-Dbuild-id`
+    // the release workflow passes; nothing derives a stamp from git at build time.
+    try std.testing.expect(std.mem.indexOf(u8, source, "build_options.addOption(?[]const u8, \"build_id\", build_id_opt);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "b.option([]const u8, \"build-id\"") != null);
 }
 
 // spec: Development pipeline - Verifies the self-hosted production ELF has no debug or symbol-table sections before publication

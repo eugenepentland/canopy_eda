@@ -28,6 +28,7 @@ const gerber_dump = @import("gerber_dump.zig");
 const netlist_dump = @import("netlist_dump.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
 const build_id = @import("build_id.zig");
+const build_options = @import("build_options");
 const stdlib = @import("stdlib.zig");
 
 /// Process capabilities installed from `std.process.Init` for infrastructure
@@ -126,7 +127,9 @@ pub fn main(init: std.process.Init) !void {
     // The server outlives individual requests, so it still needs an allocator
     // whose allocations can be released independently.
     const service_allocator = init.gpa;
-    process_build_id = build_id.load(init.io, arena, ".");
+    // A release build carries its tag at compile time (`-Dbuild-id`); every
+    // other binary resolves its identity from the deploy marker or git.
+    process_build_id = build_options.build_id orelse build_id.load(init.io, arena, ".");
     const args = try init.minimal.args.toSlice(arena);
     installLibraryRoots(arena, args);
 
