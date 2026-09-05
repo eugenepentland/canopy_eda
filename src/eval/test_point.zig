@@ -4,6 +4,7 @@
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("env.zig");
+const deprecations = @import("deprecations.zig");
 const evaluator_mod = @import("evaluator.zig");
 const instance_mod = @import("instance.zig");
 const modules = @import("modules.zig");
@@ -104,6 +105,19 @@ pub fn evalForm(
         try ctx.test_points.append(self.allocator, tp);
         return null;
     }
+
+    // A non-virtual declaration is exactly `(instance "TP" testpoint (pin 1 "NET"))`
+    // plus the purpose/required-for metadata, so it is a second spelling for a
+    // physical part. `(virtual)` keeps its own meaning (a marker with no pad)
+    // and is NOT deprecated.
+    deprecations.note(
+        self,
+        form_children[0].span,
+        "a non-virtual (test-point \"{s}\" \"{s}\" …) places the same physical pad as " ++
+            "(instance \"{s}\" testpoint (pin 1 \"{s}\")) — prefer the instance spelling, " ++
+            "and keep (test-point …) for the (virtual) schematic-only marker",
+        .{ tp.ref_des, tp.net, tp.ref_des, tp.net },
+    );
 
     // The unified form is self-contained: callers should not have to retain
     // an `(import testpoint)` solely because the declaration now emits a pad.

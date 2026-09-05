@@ -52,7 +52,7 @@ fn renderTo(writer: anytype) !void {
         \\Every special form, builtin operator, fmt directive, numeric-literal
         \\suffix, and design-scope form the toolchain recognises, with arity
         \\contracts and one-line summaries. The hand-written prose lives in
-        \\[`sexp-language.md`](sexp-language.md); this file is the
+        \\[`sexpr-language.md`](sexpr-language.md); this file is the
         \\machine-checked grammar surface.
         \\
         \\## Special forms
@@ -276,11 +276,13 @@ fn renderPortSubForms(writer: anytype) !void {
         \\
         \\Parenthesised options of a `(port …)` declaration, in any order after
         \\the direction. Bare-token options sit alongside them: `optional`
-        \\marks the port as not required by the module contract, a
-        \\signal-type keyword (`power`, `clock`, `rf`, …) sets the port kind,
-        \\`role R` / `protocol P` / `class C` each consume the following token
-        \\as metadata, and a bare number is the nominal voltage. An
-        \\unrecognised option warns.
+        \\marks the port as not required by the module contract, and a
+        \\signal-type keyword (`power`, `clock`, `rf`, …) sets the port kind.
+        \\Two older bare-token spellings still work and each record a
+        \\`deprecated_form` info: `role R` / `protocol P` / `class C` consume
+        \\the following token as metadata (write `(role R)` …), and a bare
+        \\number is the nominal voltage (write `(nominal V)`). An unrecognised
+        \\option warns.
         \\
     );
     try renderSubFormTable(writer, forms.port_form_docs);

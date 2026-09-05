@@ -528,6 +528,9 @@ src/eval/check_grammar.zig::CheckDoc struct_
 src/eval/check_grammar.zig::check_docs value
 src/eval/check_grammar.zig::check_keyword_list value
 src/eval/check_grammar.zig::parseCheck | fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check
+src/eval/deprecations.zig::Log struct_
+src/eval/deprecations.zig::deinit | fn deinit(self: *Log, allocator: std.mem.Allocator) void
+src/eval/deprecations.zig::note | fn note(self: *Evaluator, span: ast.Span, comptime fmt: []const u8, args: anytype) void
 src/eval/design_block.zig::evalDesignBlock | fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/design_block.zig::materializeBlock | fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const Node, env: *Env) EvalError!Value
 src/eval/electrical.zig::parse | fn parse(form_children: []const Node) ?ElectricalDecl
@@ -555,6 +558,7 @@ src/eval/env.zig::DatasheetReview struct_
 src/eval/env.zig::DatasheetReviewNa struct_
 src/eval/env.zig::DatasheetReviewStatus enum_
 src/eval/env.zig::DecoupleBind struct_
+src/eval/env.zig::DeprecatedForm struct_
 src/eval/env.zig::DesignBlock struct_
 src/eval/env.zig::DesignRulesSpec struct_
 src/eval/env.zig::DistanceKind enum_
@@ -828,6 +832,8 @@ src/eval/power_budget.zig::resolveRailVoltage | fn resolveRailVoltage(allocator:
 src/eval/power_sequencing.zig::SequenceRow struct_
 src/eval/power_sequencing.zig::SequenceStatus enum_
 src/eval/power_sequencing.zig::analyze | fn analyze( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const SequenceRow
+src/eval/project_boards.zig::file_name value
+src/eval/project_boards.zig::lookup | fn lookup(nodes: []const Node, design_name: []const u8) ?[]const u8
 src/eval/rails.zig::analog_supply value
 src/eval/rails.zig::build | fn build( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const PowerRail
 src/eval/rails.zig::diagram_supply_prefixes value
@@ -3753,6 +3759,7 @@ src/render_block_types.zig::classifyByName | fn classifyByName(name: []const u8,
 src/render_block_types.zig::classifyCategoryKey | fn classifyCategoryKey(category: []const u8, name: []const u8) Category
 src/render_block_types.zig::classifySection | fn classifySection(sec: env_mod.Section) Category
 src/render_block_types.zig::containsCI | fn containsCI(haystack: []const u8, needle: []const u8) bool
+src/render_block_types.zig::nameKeywordCategory | fn nameKeywordCategory(name: []const u8) ?Category
 src/render_block_types.zig::name_rules value
 src/render_block_types.zig::toLower | fn toLower(c: u8) u8
 src/render_html.zig::CheckResultMap value

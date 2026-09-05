@@ -6,6 +6,7 @@
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("env.zig");
+const deprecations = @import("deprecations.zig");
 const evaluator_mod = @import("evaluator.zig");
 const Evaluator = evaluator_mod.Evaluator;
 const EvalError = evaluator_mod.EvalError;
@@ -336,7 +337,10 @@ fn parseUnknownSubForm(
     const key = fc[0].asAtom() orelse return;
     if (env_mod.containsString(&known_forms, key)) return;
     const val = (try self.evalNode(fc[1], env)).asString() orelse {
-        if (!env_mod.containsString(&grid_hint_forms, key)) {
+        if (env_mod.containsString(&grid_hint_forms, key)) {
+            deprecations.note(self, form.span, "({s} …) on (instance \"{s}\" …) is accepted and does nothing — " ++
+                "only (section … (row N) (col N)) and (diagram-layout …) place anything; delete it", .{ key, ref_des });
+        } else {
             self.warnFmt(form.span, "ignored sub-form ({s} …) in (instance \"{s}\" …) — property values must be strings", .{ key, ref_des });
         }
         return;
@@ -543,6 +547,13 @@ fn parsePartForm(
     const before = pin_nets.items.len;
     for (children[2..]) |child| {
         if (child.isForm("pin")) try parsePinForm(self, child, ref_des, env, pin_nets, pads);
+        const kids = child.asList() orelse continue;
+        if (kids.len == 0) continue;
+        const head = kids[0].asAtom() orelse continue;
+        if (env_mod.containsString(&grid_hint_forms, head)) {
+            deprecations.note(self, child.span, "(part \"{s}\" … ({s} …)) is accepted and does nothing — " ++
+                "multi-part units are placed automatically; delete it", .{ name, head });
+        }
     }
     var part_pins: std.ArrayList(env_mod.PartPin) = .empty;
     for (pin_nets.items[before..]) |pn| {

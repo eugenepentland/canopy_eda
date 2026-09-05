@@ -24,6 +24,7 @@ const collect = @import("diagram/collect.zig");
 const lod = @import("diagram/lod.zig");
 const membership = @import("diagram/membership.zig");
 const component_classification = @import("component_classification.zig");
+const block_types = @import("render_block_types.zig");
 const canonical_module_check = @import("canonical_module_check.zig");
 const lib_limits = @import("lib_limits.zig");
 const stdlib = @import("stdlib.zig");
@@ -82,6 +83,8 @@ pub const ViolationKind = enum {
     direct_component_implementation,
     module_metadata_incomplete,
     layout_class_inferred,
+    section_category_inferred,
+    deprecated_form,
     components_not_grouped,
     verification_orphaned,
     diff_pair_half_connected,
@@ -140,6 +143,8 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
         });
     }
     try checkLayoutClasses(allocator, block, &violations);
+    try checkSectionCategories(allocator, block, &violations);
+    try checkDeprecatedForms(allocator, block, &violations);
     try checkComponentGrouping(allocator, block, &violations);
     try checkOrphanedVerifications(allocator, block, &violations);
     if (project_dir.len > 0) try checkPinFunctions(allocator, block, project_dir, &violations);
@@ -233,6 +238,87 @@ fn checkLayoutClasses(
             .severity = .info,
             .message = msg,
             .net = net.name,
+        });
+    }
+}
+
+/// Surface every section whose diagram category was GUESSED from a keyword in
+/// its name, so the author can pin the decision with `(category …)` instead of
+/// having to keep a magic word in the title. The twin of `checkLayoutClasses`:
+/// `info` only, one row per section, silent as soon as the section declares a
+/// recognised `(category …)`. Sections that fall through to the ref-des /
+/// `.peripheral` default are silent too — there is no keyword to lose there.
+fn checkSectionCategories(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayList(Violation),
+) !void {
+    // Deduped by section NAME: the fix is one `(category …)` edit at the
+    // section's source, so a module used twice must not report twice.
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(allocator);
+    try collectSectionCategories(allocator, block, &seen, violations);
+}
+
+fn collectSectionCategories(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    seen: *std.StringHashMapUnmanaged(void),
+    violations: *std.ArrayList(Violation),
+) std.mem.Allocator.Error!void {
+    try collectSectionCategoryRows(allocator, block.sections, seen, violations);
+    for (block.sub_blocks) |sb| try collectSectionCategories(allocator, sb.block, seen, violations);
+}
+
+fn collectSectionCategoryRows(
+    allocator: std.mem.Allocator,
+    sections: []const env_mod.Section,
+    seen: *std.StringHashMapUnmanaged(void),
+    violations: *std.ArrayList(Violation),
+) std.mem.Allocator.Error!void {
+    for (sections) |sec| {
+        try collectSectionCategoryRows(allocator, sec.sub_sections, seen, violations);
+        if (block_types.category_keys.get(sec.category) != null) continue;
+        const guessed = block_types.nameKeywordCategory(sec.name) orelse continue;
+        const gop = try seen.getOrPut(allocator, sec.name);
+        if (gop.found_existing) continue;
+        const msg = std.fmt.allocPrint(
+            allocator,
+            "Section \"{s}\" is categorised {s} for the system overview because its NAME contains a " ++
+                "classifier keyword — pin the decision with (category {s}) so a rename cannot move it",
+            .{ sec.name, @tagName(guessed), @tagName(guessed) },
+        ) catch return;
+        try violations.append(allocator, .{
+            .kind = .section_category_inferred,
+            .severity = .info,
+            .message = msg,
+        });
+    }
+}
+
+/// Report the superseded spellings the evaluator met, each with the
+/// `file:line:col` of the form and the spelling that replaces it.
+///
+/// These are deliberately **info**, never evaluator warnings: the release
+/// profile promotes evaluator warnings to errors, and every deprecated
+/// spelling here keeps working. Only the block the evaluator handed the whole
+/// design's range (the root) is read — nested blocks carry overlapping
+/// sub-ranges, so recursing would double-count.
+fn checkDeprecatedForms(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayList(Violation),
+) !void {
+    for (block.deprecations) |dep| {
+        const msg = std.fmt.allocPrint(
+            allocator,
+            "{s}:{d}:{d}: {s}",
+            .{ dep.file, dep.line, dep.col, dep.message },
+        ) catch return;
+        try violations.append(allocator, .{
+            .kind = .deprecated_form,
+            .severity = .info,
+            .message = msg,
         });
     }
 }

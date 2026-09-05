@@ -5597,6 +5597,35 @@ Public functions: analyze
 - a bus-port index range whose lane span would overflow the i64 subtraction is diagnosed and expands nothing
 - a zero-based bus-port range still expands and the lane cap admits a span of exactly 4095
 - a frequency-plan declaration is collected during the block body and evaluated after it, publishing its typed report on the evaluator beside the loop-filter ones
+- Project board map keys on the design source file stem
+
+## eval/deprecations
+
+Public functions: note
+
+- Deprecation records dedupe by source position so a reused module reports once
+- completeness-waiver: empty inputs (a record with an empty file or message still lands and prints; only the dedupe key needs to be well-formed, and it always is because the span supplies it)
+- completeness-waiver: large inputs (the log holds one entry per distinct source position of a deprecated form, so it is bounded by the size of the design's own source)
+- completeness-waiver: unauthorized access (an in-process log over already-parsed source the evaluator was handed; it grants no file, network, or user capability)
+- completeness-waiver: i/o failure (recording performs no I/O — the caller has already read the source, and rendering the log is ERC's job)
+- completeness-waiver: concurrent access (each evaluator owns its own log for the duration of one single-threaded build; nothing is shared between builds)
+- completeness-waiver: malformed encoding (messages are compile-time format strings filled with slices out of the source the parser already accepted)
+- completeness-waiver: integer overflow (the only arithmetic is the list append the allocator bounds; line and column come from spans the tokenizer already produced)
+- completeness-waiver: panic-free (both allocations are `catch return` — a failed record drops the finding, never the build, which is the whole point of keeping deprecations out of the warning list)
+
+## eval/project_boards
+
+Public functions: lookup
+
+- Project board map resolves a design name to its KiCad board path
+- Project board map skips malformed entries instead of failing the build
+- completeness-waiver: empty inputs (an empty design name resolves to no override, and an absent or empty mapping file leaves every design on whatever its own source declares)
+- completeness-waiver: large inputs (the file holds one short line per design and is read through the evaluator's capped, cached file loader, so a design with fifty sub-blocks parses it once)
+- completeness-waiver: unauthorized access (a project-local file the same process already reads designs from; it names a board path and grants nothing on its own — the KiCad sync route keeps its own authorization)
+- completeness-waiver: i/o failure (a missing or unreadable file resolves to no override rather than failing a build, because a file of machine-local paths must never break a machine that has none)
+- completeness-waiver: concurrent access (read-only, and read through the evaluator's per-build file cache; nothing here writes)
+- completeness-waiver: integer overflow (no arithmetic — the grammar is a linear scan over parsed nodes comparing two strings)
+- completeness-waiver: panic-free (every shape mismatch is an `orelse return null`; a short form, an unquoted name and a foreign head are each skipped rather than indexed into)
 
 ## eval/test_point
 
