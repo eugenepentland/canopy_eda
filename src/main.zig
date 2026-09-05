@@ -28,6 +28,7 @@ const gerber_dump = @import("gerber_dump.zig");
 const netlist_dump = @import("netlist_dump.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
 const build_id = @import("build_id.zig");
+const stdlib = @import("stdlib.zig");
 
 /// Process capabilities installed from `std.process.Init` for infrastructure
 /// adapters imported throughout the application graph.
@@ -88,6 +89,20 @@ fn oneShotAllocator(process_arena: *std.heap.ArenaAllocator) std.mem.Allocator {
     return process_arena.allocator();
 }
 
+/// Install the roots every `lib/<sub>/<name>.sexp` lookup falls through to
+/// after the project's own `lib/`: `--lib-dir` (or `NETLISP_LIB_DIR`) names a
+/// shared/company library laid out like a project, and `NETLISP_STDLIB_DIR`
+/// replaces the standard library compiled into this binary. Called once here,
+/// before any command dispatches, because the ~40 readers of library files all
+/// take a project directory and resolve the rest through `stdlib.zig` — see
+/// docs/standard-library.md.
+fn installLibraryRoots(allocator: std.mem.Allocator, args: []const []const u8) void {
+    const flag: ?[]const u8 = optionalArg(args, "--lib-dir");
+    const lib_dir: ?[]const u8 = if (flag) |f| f else config.libDir(allocator);
+    const stdlib_dir: ?[]const u8 = config.stdlibDir(allocator);
+    stdlib.setRoots(lib_dir, stdlib_dir);
+}
+
 /// CLI entry point: parses `argv[1]` as the subcommand name and dispatches
 /// to the matching `cmd*` handler in `commands.zig` (or one of the local
 /// `convert-*` / `parse` / `mint-plugin-token` helpers). Prints the usage
@@ -113,6 +128,7 @@ pub fn main(init: std.process.Init) !void {
     const service_allocator = init.gpa;
     process_build_id = build_id.load(init.io, arena, ".");
     const args = try init.minimal.args.toSlice(arena);
+    installLibraryRoots(arena, args);
 
     if (args.len < 2) {
         try printUsage();
@@ -569,6 +585,12 @@ fn printUsage() !void {
         \\  netlisp gen-language-docs [--output <path>] [--check]  Regenerate (or verify with --check) docs/language-forms.md from the dispatch tables
         \\  netlisp version                          Print the runtime build id (the netlisp commit, or the current checkout's HEAD)
         \\  netlisp help                            Show this help
+        \\
+        \\Library resolution (any command above):
+        \\  --lib-dir <d>          Search <d>/lib/... after the project's own lib/ (env: NETLISP_LIB_DIR)
+        \\  NETLISP_STDLIB_DIR=<d> Use <d> instead of the standard library bundled into this binary
+        \\                         Order: project lib/, then --lib-dir, then the standard library.
+        \\                         See docs/standard-library.md for what is bundled.
         \\
     );
 }

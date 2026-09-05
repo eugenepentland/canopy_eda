@@ -40,6 +40,7 @@ const block_diagram = @import("diagram/diagram.zig");
 const membership = @import("diagram/membership.zig");
 const rb = @import("render_block_types.zig");
 const lib_limits = @import("lib_limits.zig");
+const stdlib = @import("stdlib.zig");
 const bom_html = @import("serve/bom_html.zig");
 const pages_tmpl = @import("serve/templates/pages.zig");
 const isHub = draw.isHub;
@@ -1199,9 +1200,7 @@ fn pinNameMapFor(ctx: *RenderCtx, allocator: Allocator, inst: FlatInst) std.Stri
     const candidates = [_][]const u8{ inst.pinout, inst.symbol, inst.component };
     for (candidates) |cand| {
         if (cand.len == 0) continue;
-        const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ ctx.project_dir, cand }) catch continue;
-        defer allocator.free(path);
-        var pinmap = loadPinoutNames(allocator, path) orelse continue;
+        var pinmap = loadPinoutNames(allocator, ctx.project_dir, cand) orelse continue;
         var it = pinmap.iterator();
         while (it.next()) |kv| {
             if (!map.contains(kv.key_ptr.*)) map.put(allocator, kv.key_ptr.*, kv.value_ptr.*) catch return map;
@@ -1215,8 +1214,10 @@ fn pinNameMapFor(ctx: *RenderCtx, allocator: Allocator, inst: FlatInst) std.Stri
 /// ids stringify to "5", "11", … — the spelling the evaluator's `ids.pinId`
 /// gives a `PinRef.pin`, and the one `erc.loadPinoutMap` and
 /// `kicad_sch/shape.zig`'s `readPinout` now key on too (via `Node.tokenText`).
-fn loadPinoutNames(allocator: Allocator, path: []const u8) ?std.StringHashMapUnmanaged([]const u8) {
-    const content = infra_fs.cwd().readFileAlloc(allocator, path, lib_limits.max_lib_file_bytes) catch return null;
+fn loadPinoutNames(allocator: Allocator, project_dir: []const u8, part: []const u8) ?std.StringHashMapUnmanaged([]const u8) {
+    const sub_path = std.fmt.allocPrint(allocator, "lib/pinouts/{s}.sexp", .{part}) catch return null;
+    defer allocator.free(sub_path);
+    const content = stdlib.read(allocator, project_dir, sub_path, lib_limits.max_lib_file_bytes) orelse return null;
     const nodes = parser_mod.parse(allocator, content) catch return null;
     if (nodes.len == 0) return null;
     const top = nodes[0].asList() orelse return null;
@@ -2736,13 +2737,13 @@ test "loadPinoutNames rejects a top list whose head is not pinout" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "notpinout.sexp", .data = "(notpinout a b)" });
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/pinouts/notpinout.sexp", .data = "(notpinout a b)" });
     const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena);
-    const path = try std.fmt.allocPrint(arena, "{s}/notpinout.sexp", .{dir});
     // The guard `top.len < 2 or top[0] != "pinout"` bails on any non-pinout head.
     // `or`→`and` only bails when BOTH hold, so a well-formed non-pinout list would
     // parse into a spurious map instead of null.
-    try std.testing.expect(loadPinoutNames(arena, path) == null);
+    try std.testing.expect(loadPinoutNames(arena, dir, "notpinout") == null);
 }
 
 // spec: Web Server - the schematic page serves an embedded pane variant that drops the navbar, page header, and sidebar

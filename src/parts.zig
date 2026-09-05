@@ -4,10 +4,15 @@
 //! after its first parse. Read-only lookup keyed by family + value + attrs.
 
 const std = @import("std");
-const infra_fs = @import("infra/fs.zig");
+const lib_limits = @import("lib_limits.zig");
+const stdlib = @import("stdlib.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const env_mod = @import("eval/env.zig");
 const Property = env_mod.Property;
+
+/// Project-relative sub-path of one parts table; resolved through `stdlib`
+/// (project `lib/`, the shared lib root, then the bundled standard library).
+const parts_path_fmt = "lib/parts/{s}.sexp";
 
 /// One row in a `lib/parts/<family>.sexp` table: the value string a design
 /// would request (e.g. `"100nF"`), the manufacturer/MPN to ship in the
@@ -77,13 +82,9 @@ pub const PartsDb = struct {
         const family_entries = self.entries.get(family) orelse return true;
         if (family_entries.len > 0) return true;
 
-        const path = std.fmt.allocPrint(self.allocator, "{s}/lib/parts/{s}.sexp", .{ self.project_dir, family }) catch return true;
-        defer self.allocator.free(path);
-        infra_fs.cwd().access(path, .{}) catch |err| return switch (err) {
-            error.FileNotFound => false,
-            else => true,
-        };
-        return true;
+        const sub_path = std.fmt.allocPrint(self.allocator, parts_path_fmt, .{family}) catch return true;
+        defer self.allocator.free(sub_path);
+        return stdlib.exists(self.allocator, self.project_dir, sub_path);
     }
 
     fn lookupMode(self: *PartsDb, family: []const u8, value: []const u8, attrs: []const []const u8, strict: bool) ?*const PartEntry {
@@ -148,16 +149,15 @@ pub const PartsDb = struct {
     }
 
     fn loadFamily(self: *PartsDb, family: []const u8) !void {
-        const path = try std.fmt.allocPrint(self.allocator, "{s}/lib/parts/{s}.sexp", .{ self.project_dir, family });
-        defer self.allocator.free(path);
+        const sub_path = try std.fmt.allocPrint(self.allocator, parts_path_fmt, .{family});
+        defer self.allocator.free(sub_path);
 
-        const source = infra_fs.cwd().readFileAlloc(self.allocator, path, 1 * 1024 * 1024) catch |err| switch (err) {
-            error.FileNotFound => {
-                // Cache empty so we don't retry
-                try self.entries.put(self.allocator, try self.allocator.dupe(u8, family), &.{});
-                return;
-            },
-            else => return err,
+        const source = stdlib.read(self.allocator, self.project_dir, sub_path, lib_limits.max_lib_file_bytes) orelse {
+            // No library carries a table for this family — cache empty so we
+            // don't retry. Indistinguishable from an unreadable file by
+            // design: `hasFamily` is what release callers fail closed on.
+            try self.entries.put(self.allocator, try self.allocator.dupe(u8, family), &.{});
+            return;
         };
         defer self.allocator.free(source);
 

@@ -18,12 +18,15 @@ const model_mod = @import("export_kicad_model.zig");
 const sch_mod = @import("export_kicad_sch.zig");
 const zipfile = @import("zipfile.zig");
 const lib_limits = @import("lib_limits.zig");
+const stdlib = @import("stdlib.zig");
 
 const writeNetlist = netlist_mod.writeNetlist;
 const extractPadNames = netlist_mod.extractPadNames;
 
 // ── Constants ─────────────────────────────────────────────────────
-const footprint_path_template = "{s}/lib/footprints/{s}.sexp";
+/// Project-relative sub-path of one footprint; resolved through `stdlib`
+/// (project `lib/`, the shared lib root, then the bundled standard library).
+const footprint_path_template = "lib/footprints/{s}.sexp";
 const model_max_bytes: usize = 20 * 1024 * 1024;
 const extractFootprintName = netlist_mod.extractFootprintName;
 const exportFootprintMod = footprint_mod.exportFootprintMod;
@@ -121,9 +124,9 @@ fn buildPadMap(
     for (instances) |inst| {
         if (inst.footprint.len == 0) continue;
         if (fp_pad_map.contains(inst.footprint)) continue;
-        const fp_path = try std.fmt.allocPrint(allocator, footprint_path_template, .{ project_dir, inst.footprint });
-        defer allocator.free(fp_path);
-        const fp_src = infra_fs.cwd().readFileAlloc(allocator, fp_path, lib_limits.max_footprint_bytes) catch continue;
+        const fp_sub = try std.fmt.allocPrint(allocator, footprint_path_template, .{inst.footprint});
+        defer allocator.free(fp_sub);
+        const fp_src = stdlib.read(allocator, project_dir, fp_sub, lib_limits.max_footprint_bytes) orelse continue;
         defer allocator.free(fp_src);
         const pad_names = extractPadNames(allocator, fp_src) catch continue;
         try fp_pad_map.put(allocator, inst.footprint, pad_names);
@@ -197,11 +200,11 @@ pub fn exportKicad(
         try fp_components.put(allocator, inst.footprint, inst.component);
 
         // Load and parse footprint .sexp to get declared name
-        const fp_path = try std.fmt.allocPrint(allocator, footprint_path_template, .{ project_dir, inst.footprint });
-        defer allocator.free(fp_path);
+        const fp_sub = try std.fmt.allocPrint(allocator, footprint_path_template, .{inst.footprint});
+        defer allocator.free(fp_sub);
 
-        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, lib_limits.max_footprint_bytes) catch |err| {
-            log.warn("cannot read footprint {s}: {}", .{ fp_path, err });
+        const fp_source = stdlib.read(allocator, project_dir, fp_sub, lib_limits.max_footprint_bytes) orelse {
+            log.warn("cannot read footprint {s} under {s} or the standard library", .{ fp_sub, project_dir });
             try fp_name_map.put(allocator, inst.footprint, inst.footprint);
             continue;
         };
@@ -336,10 +339,10 @@ pub fn exportNetlistOnly(
         if (processed_fps.contains(inst.footprint)) continue;
         try processed_fps.put(allocator, inst.footprint, {});
 
-        const fp_path = try std.fmt.allocPrint(allocator, footprint_path_template, .{ project_dir, inst.footprint });
-        defer allocator.free(fp_path);
+        const fp_sub = try std.fmt.allocPrint(allocator, footprint_path_template, .{inst.footprint});
+        defer allocator.free(fp_sub);
 
-        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, lib_limits.max_footprint_bytes) catch {
+        const fp_source = stdlib.read(allocator, project_dir, fp_sub, lib_limits.max_footprint_bytes) orelse {
             try fp_name_map.put(allocator, inst.footprint, inst.footprint);
             continue;
         };
@@ -394,10 +397,10 @@ pub fn exportKicadEntries(
         if (processed_fps.contains(inst.footprint)) continue;
         try processed_fps.put(allocator, inst.footprint, {});
 
-        const fp_path = try std.fmt.allocPrint(allocator, footprint_path_template, .{ project_dir, inst.footprint });
-        defer allocator.free(fp_path);
+        const fp_sub = try std.fmt.allocPrint(allocator, footprint_path_template, .{inst.footprint});
+        defer allocator.free(fp_sub);
 
-        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, lib_limits.max_footprint_bytes) catch {
+        const fp_source = stdlib.read(allocator, project_dir, fp_sub, lib_limits.max_footprint_bytes) orelse {
             try fp_name_map.put(allocator, inst.footprint, inst.footprint);
             continue;
         };

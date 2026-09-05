@@ -11,13 +11,15 @@
 const std = @import("std");
 const parser = @import("../sexpr/parser.zig");
 const ast = @import("../sexpr/ast.zig");
-const infra_fs = @import("../infra/fs.zig");
 const numeric = @import("../numeric.zig");
 const board_layers = @import("../board_layers.zig");
 const lib_limits = @import("../lib_limits.zig");
+const stdlib = @import("../stdlib.zig");
 const Node = ast.Node;
 
-const path_fmt = "{s}/lib/footprints/{s}.sexp";
+/// Project-relative sub-path of one footprint; `stdlib.read` searches the
+/// project, the shared library root and the bundled standard library for it.
+const path_fmt = "lib/footprints/{s}.sexp";
 /// Extra clearance baked into a part's courtyard half-extents so the
 /// optimizer leaves a little air between adjacent parts. Public so the
 /// courtyard editor can invert it (effective extent ↔ written rect).
@@ -159,7 +161,8 @@ pub const Geom = struct {
     features: FootprintFeatures = .{},
 };
 
-/// Load `<project_dir>/lib/footprints/<fp_name>.sexp`. Falls back to a
+/// Load `lib/footprints/<fp_name>.sexp` through the library search order
+/// (project, shared lib root, bundled standard library). Falls back to a
 /// synthesized box (sized by `pin_count_hint`) on any failure.
 pub fn load(
     arena: std.mem.Allocator,
@@ -168,9 +171,9 @@ pub fn load(
     pin_count_hint: usize,
     margin: f64,
 ) Geom {
-    const path = std.fmt.allocPrint(arena, path_fmt, .{ project_dir, fp_name }) catch
+    const sub_path = std.fmt.allocPrint(arena, path_fmt, .{fp_name}) catch
         return fallbackGeom(pin_count_hint);
-    const source = infra_fs.cwd().readFileAlloc(arena, path, lib_limits.max_footprint_bytes) catch
+    const source = stdlib.read(arena, project_dir, sub_path, lib_limits.max_footprint_bytes) orelse
         return fallbackGeom(pin_count_hint);
     const nodes = parser.parse(arena, source) catch return fallbackGeom(pin_count_hint);
     if (nodes.len == 0 or !nodes[0].isForm("footprint")) return fallbackGeom(pin_count_hint);

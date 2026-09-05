@@ -15,6 +15,7 @@ const parser_mod = @import("../sexpr/parser.zig");
 const ast = @import("../sexpr/ast.zig");
 const serve_root = @import("../serve.zig");
 const lib_limits = @import("../lib_limits.zig");
+const stdlib = @import("../stdlib.zig");
 const navbar = @import("navbar.zig");
 const urlcodec = @import("urlcodec.zig");
 const Server = serve_root.Server;
@@ -418,11 +419,11 @@ fn writePadsAndCourtyard(
     project_dir: []const u8,
     footprint: []const u8,
 ) !void {
-    const path = std.fmt.allocPrint(arena, "{s}/lib/footprints/{s}.sexp", .{ project_dir, footprint }) catch {
+    const sub_path = std.fmt.allocPrint(arena, "lib/footprints/{s}.sexp", .{footprint}) catch {
         try w.writeAll(empty_pads_tail);
         return;
     };
-    const source = infra_fs.cwd().readFileAlloc(arena, path, lib_limits.max_footprint_bytes) catch {
+    const source = stdlib.read(arena, project_dir, sub_path, lib_limits.max_footprint_bytes) orelse {
         try w.writeAll(empty_pads_tail);
         return;
     };

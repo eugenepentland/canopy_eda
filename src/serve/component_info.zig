@@ -14,6 +14,10 @@
 const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
+const stdlib = @import("../stdlib.zig");
+
+/// Project-relative sub-path of one component file.
+const component_sub_path_fmt = "lib/components/{s}.sexp";
 const sexpr_parser = @import("../sexpr/parser.zig");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("../eval/env.zig");
@@ -54,12 +58,14 @@ pub fn describeComponent(
         return writeJsonError(allocator, out, err_invalid_name);
     }
 
-    const comp_path = try componentPath(allocator, project_dir, name);
-    defer allocator.free(comp_path);
-    const comp_src = infra_fs.cwd().readFileAlloc(allocator, comp_path, max_component_bytes) catch |e| switch (e) {
-        error.FileNotFound => return writeJsonError(allocator, out, err_component_not_found),
-        else => return e,
-    };
+    // The READ resolves through the library search order, so `describe` can
+    // explain a part that comes from the bundled standard library. The WRITE
+    // side (`componentPath` at its other call sites) deliberately does not:
+    // an edit always lands in the project's own `lib/components/`.
+    const comp_sub = try std.fmt.allocPrint(allocator, component_sub_path_fmt, .{name});
+    defer allocator.free(comp_sub);
+    const comp_src = stdlib.read(allocator, project_dir, comp_sub, max_component_bytes) orelse
+        return writeJsonError(allocator, out, err_component_not_found);
     defer allocator.free(comp_src);
 
     const comp_nodes = sexpr_parser.parse(allocator, comp_src) catch {
@@ -167,9 +173,10 @@ fn loadPinoutWithSource(
     project_dir: []const u8,
     ref: []const u8,
 ) !LoadedPinout {
-    const path = try std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ project_dir, ref });
-    defer allocator.free(path);
-    const src = try infra_fs.cwd().readFileAlloc(allocator, path, max_component_bytes);
+    const sub_path = try std.fmt.allocPrint(allocator, "lib/pinouts/{s}.sexp", .{ref});
+    defer allocator.free(sub_path);
+    const src = stdlib.read(allocator, project_dir, sub_path, max_component_bytes) orelse
+        return error.FileNotFound;
     defer allocator.free(src);
 
     const source = try findSourceComment(allocator, src);
@@ -588,8 +595,11 @@ fn validComponentName(name: []const u8) bool {
         std.mem.indexOf(u8, name, "..") == null;
 }
 
+/// Path of the component file an EDIT targets — always the project's own
+/// `lib/components/`, never a shared or bundled library. Reads use
+/// `component_sub_path_fmt` through `stdlib` instead.
 fn componentPath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, name });
+    return std.fmt.allocPrint(allocator, "{s}/" ++ component_sub_path_fmt, .{ project_dir, name });
 }
 
 /// Validate `nodes` is a single `(component ...)` / `(component-family ...)`

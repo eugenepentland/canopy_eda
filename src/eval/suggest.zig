@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
+const stdlib = @import("../stdlib.zig");
 const env_mod = @import("env.zig");
 const Evaluator = @import("evaluator.zig").Evaluator;
 const Env = env_mod.Env;
@@ -39,8 +40,9 @@ pub fn unboundMessage(self: *Evaluator, name: []const u8, env: *const Env) []con
 }
 
 /// True when `lib/components/<name>.sexp` or `lib/modules/<name>.sexp`
-/// exists under the project dir or the shared lib dir — the exact search
-/// path `(import …)` resolution uses.
+/// resolves — under the project dir, the shared lib dir, or the bundled
+/// standard library. The exact search `(import …)` resolution uses, so the
+/// hint never promises a file the resolver would then fail to find.
 fn existsInLibrary(self: *Evaluator, name: []const u8) bool {
     for (libRoots(self)) |root| {
         for (lib_prefixes) |prefix| {
@@ -49,6 +51,11 @@ fn existsInLibrary(self: *Evaluator, name: []const u8) bool {
             infra_fs.cwd().access(path, .{}) catch continue;
             return true;
         }
+    }
+    for (lib_prefixes) |prefix| {
+        const sub_path = std.fmt.allocPrint(self.allocator, "{s}{s}.sexp", .{ prefix, name }) catch return false;
+        defer self.allocator.free(sub_path);
+        if (stdlib.bundled(sub_path) != null) return true;
     }
     return false;
 }
@@ -89,6 +96,13 @@ fn nearestName(self: *Evaluator, name: []const u8, env: *const Env) ?[]const u8 
 /// candidate ranking. Stems are duped (directory iteration reuses its name
 /// buffer, and the winning candidate must outlive the scan).
 fn considerLibraryStems(self: *Evaluator, name: []const u8, best: *?[]const u8, best_dist: *usize) void {
+    // The bundled standard library first: its stems are static strings, so a
+    // winner needs no dup, and a project that carries the same name simply
+    // ties at the same distance.
+    for (lib_prefixes) |prefix| {
+        var it = stdlib.stems(prefix);
+        while (it.next()) |stem| considerCandidate(name, stem, best, best_dist);
+    }
     for (libRoots(self)) |root| {
         for (lib_prefixes) |prefix| {
             const dir_path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ root, prefix }) catch continue;

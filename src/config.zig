@@ -115,6 +115,22 @@ fn gitAutocommitEnabledFromRaw(raw: []const u8) bool {
     return !std.mem.eql(u8, std.mem.trim(u8, raw, whitespace), "0");
 }
 
+/// Extra library root (`NETLISP_LIB_DIR`) searched after the project's own
+/// `lib/` and before the bundled standard library — a shared/company library
+/// laid out like a project (it CONTAINS `lib/components`, `lib/footprints`, …).
+/// Null when unset. The `--lib-dir` flag overrides it; see `src/stdlib.zig`.
+pub fn libDir(allocator: std.mem.Allocator) ?[]u8 {
+    return nonEmpty(lookup(allocator, "NETLISP_LIB_DIR"));
+}
+
+/// Replacement for the standard library compiled into this binary
+/// (`NETLISP_STDLIB_DIR`), laid out like the repository's `stdlib/` (it
+/// contains `components/`, `footprints/`, `pinouts/`, … directly). Null when
+/// unset — the embedded table is then the last resort. See `src/stdlib.zig`.
+pub fn stdlibDir(allocator: std.mem.Allocator) ?[]u8 {
+    return nonEmpty(lookup(allocator, "NETLISP_STDLIB_DIR"));
+}
+
 /// Resolve `key` from the real environment first, then from `.env`. Returns
 /// null when unset or empty. Caller owns the slice.
 fn lookup(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {

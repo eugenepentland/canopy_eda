@@ -17,6 +17,7 @@ const log = @import("infra/log.zig");
 const module_metadata = @import("module_metadata.zig");
 const optimizer = @import("placement/optimizer.zig");
 const infra_fs = @import("infra/fs.zig");
+const stdlib = @import("stdlib.zig");
 const paths = @import("paths.zig");
 const pour = @import("placement/pour.zig");
 const router = @import("placement/router.zig");
@@ -239,8 +240,15 @@ fn evaluationReadSet(arena: std.mem.Allocator, evaluator: *Evaluator) ReadSet {
     var names: std.ArrayList([]const u8) = .empty;
     var iterator = evaluator.loaded_files.keyIterator();
     while (iterator.next()) |name| {
-        const canonical = infra_fs.canonicalPathAlloc(arena, name.*) catch
-            return .{ .sha256 = unavailable_read_set, .complete = false };
+        // A file the evaluator took from the bundled standard library has no
+        // filesystem path to canonicalize — it IS its own canonical identity,
+        // immutable for the life of the binary — so it enters the digest as
+        // itself rather than sinking the whole read set to "unavailable".
+        const canonical = if (stdlib.isBundledPath(name.*))
+            name.*
+        else
+            infra_fs.canonicalPathAlloc(arena, name.*) catch
+                return .{ .sha256 = unavailable_read_set, .complete = false };
         names.append(arena, canonical) catch return .{ .sha256 = unavailable_read_set, .complete = false };
     }
     std.mem.sort([]const u8, names.items, {}, struct {
@@ -250,7 +258,7 @@ fn evaluationReadSet(arena: std.mem.Allocator, evaluator: *Evaluator) ReadSet {
     }.lessThan);
     var hash = Sha256.init(.{});
     for (names.items) |name| {
-        const bytes = infra_fs.cwd().readFileAlloc(arena, name, 16 * 1024 * 1024) catch
+        const bytes = stdlib.readPath(arena, name, 16 * 1024 * 1024) orelse
             return .{ .sha256 = unavailable_read_set, .complete = false };
         hashField(&hash, name);
         hashField(&hash, bytes);

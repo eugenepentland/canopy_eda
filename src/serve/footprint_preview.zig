@@ -18,6 +18,7 @@ const Server = serve_root.Server;
 const numeric = @import("../numeric.zig");
 const json_writer = @import("../json_writer.zig");
 const lib_limits = @import("../lib_limits.zig");
+const stdlib = @import("../stdlib.zig");
 // ── Constants ─────────────────────────────────────────────────────
 const http_not_found: u16 = 404;
 const http_internal_error: u16 = 500;
@@ -98,12 +99,12 @@ pub fn footprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
         return;
     };
 
-    const fp_path = std.fmt.allocPrint(ctx.allocator, "{s}/lib/footprints/{s}.sexp", .{ ctx.project_dir, name }) catch {
+    const fp_sub = std.fmt.allocPrint(ctx.allocator, "lib/footprints/{s}.sexp", .{name}) catch {
         res.status = http_internal_error;
         return;
     };
-    defer ctx.allocator.free(fp_path);
-    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, fp_path, lib_limits.max_footprint_bytes) catch {
+    defer ctx.allocator.free(fp_sub);
+    const content = stdlib.read(ctx.allocator, ctx.project_dir, fp_sub, lib_limits.max_footprint_bytes) orelse {
         res.status = http_not_found;
         res.body = "Footprint not found";
         return;

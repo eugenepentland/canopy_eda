@@ -29,6 +29,7 @@ The intended workflow is text-first and live: edit a `.sexp` file → run `netli
 | **Sub-block** | An instance of another `.sexp` file. If that file is a `defmodule`, it takes parameters; otherwise it's a plain composition. |
 | **Component vs component-family** | `component` is a fixed part (`res-0402`, `tpsm84338rcjr`). `component-family` is a parameterised template (`(cap "100nF")`, `(res "10k")`). |
 | **Hubs vs spokes** | A rendering convention. Hubs are ICs/connectors/transistors (ref-des `U/J/P/X/Q`) — they get drawn as boxes on a grid. Spokes are R/C/L/F/D — they're rendered inline on the connection between two hubs. |
+| **Standard library** | The component set compiled into the `netlisp` binary (`stdlib/`): the sixteen passive families every design auto-imports, their land patterns, and a few generic board features. Resolution is project `lib/` → `--lib-dir` / `NETLISP_LIB_DIR` → `NETLISP_STDLIB_DIR` → the bundle, first hit per name — so a project with no `lib/` still evaluates and a project with one always wins. See [standard-library.md](standard-library.md). |
 | **Stable ID** | An 8-char hex ID grafted onto every instance/series/decouple, written back into the source file on first build. Lets ref-deses be reshuffled without breaking BOM/PCB linkage. |
 
 ## 3. The pipeline

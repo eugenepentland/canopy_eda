@@ -15,6 +15,7 @@ const export_fab = @import("export_fab.zig");
 const export_kicad = @import("export_kicad.zig");
 const fab_release = @import("fab_release.zig");
 const infra_fs = @import("infra/fs.zig");
+const stdlib = @import("stdlib.zig");
 const paths = @import("paths.zig");
 const datasheet_ref = @import("serve/datasheet_ref.zig");
 
@@ -152,7 +153,11 @@ fn appendSourceFile(
     path: []const u8,
     stats: *Stats,
 ) !void {
-    const data = infra_fs.cwd().readFileAlloc(allocator, path, archive_source_limit_bytes) catch return;
+    // `readPath` rather than a bare filesystem read: a source the evaluator
+    // took from the bundled standard library has no file to open, and dropping
+    // it would leave the archive claiming a complete source set it does not
+    // have.
+    const data = stdlib.readPath(allocator, path, archive_source_limit_bytes) orelse return;
     const relative = projectRelative(project_dir, path);
     const name = try std.fmt.allocPrint(allocator, "sources/{s}", .{relative});
     const before = pkg.entries.items.len;
@@ -169,7 +174,9 @@ fn appendFootprintSources(
     stats: *Stats,
 ) !void {
     for (block.instances) |instance| if (instance.footprint.len > 0) {
-        const path = try std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, instance.footprint });
+        const sub_path = try std.fmt.allocPrint(allocator, "lib/footprints/{s}.sexp", .{instance.footprint});
+        defer allocator.free(sub_path);
+        const path = stdlib.resolvePath(allocator, project_dir, sub_path) orelse continue;
         try appendSourceFile(allocator, pkg, seen, project_dir, path, stats);
     };
     for (block.sub_blocks) |sub| try appendFootprintSources(allocator, pkg, seen, project_dir, sub.block, stats);
@@ -264,6 +271,9 @@ fn collectDatasheetRefs(
 }
 
 fn projectRelative(project_dir: []const u8, path: []const u8) []const u8 {
+    // A bundled path names no directory on this machine; file it under
+    // `stdlib/` so the archive says where the bytes actually came from.
+    if (stdlib.isBundledPath(path)) return stdlib.displayPath(path);
     if (std.mem.startsWith(u8, path, project_dir)) {
         const relative = std.mem.trimStart(u8, path[project_dir.len..], "/");
         if (relative.len > 0 and std.mem.indexOf(u8, relative, "..") == null) return relative;

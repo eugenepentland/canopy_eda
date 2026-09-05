@@ -64,6 +64,7 @@ const mcp_checks = @import("mcp_checks.zig");
 const schematic_view = @import("mcp_schematic_view.zig");
 const mcp_build = @import("mcp_build.zig");
 const library_search_metadata = @import("library_search_metadata.zig");
+const stdlib = @import("../stdlib.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const name_field_prefix = "{\"name\":";
@@ -623,27 +624,13 @@ fn toolListLibrary(allocator: std.mem.Allocator, project_dir: []const u8, args_v
 /// sorted) without opening a single file — no `(description …)` scan — so the
 /// response stays small and fast even on a library of hundreds of parts.
 fn writeLibraryNames(allocator: std.mem.Allocator, project_dir: []const u8, sub: []const u8, w: anytype) !void {
-    const dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/{s}", .{ project_dir, sub });
-    defer allocator.free(dir_path);
+    var entries: std.ArrayList(LibEntry) = .empty;
+    defer entries.deinit(allocator);
+    try collectLibraryEntries(allocator, project_dir, sub, &entries);
 
     var names: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (names.items) |n| allocator.free(n);
-        names.deinit(allocator);
-    }
-
-    if (infra_fs.cwd().openDir(dir_path, .{ .iterate = true })) |dir_open| {
-        var dir = dir_open;
-        defer dir.close();
-        var it = dir.iterate();
-        while (try it.next()) |entry| {
-            if (entry.kind != .file and entry.kind != .sym_link) continue;
-            if (!std.mem.endsWith(u8, entry.name, ".sexp")) continue;
-            const base = entry.name[0 .. entry.name.len - ".sexp".len];
-            try names.append(allocator, try allocator.dupe(u8, base));
-        }
-    } else |_| {}
-
+    defer names.deinit(allocator);
+    for (entries.items) |e| try names.append(allocator, e.name);
     std.sort.heap([]const u8, names.items, {}, lessThanStr);
 
     try w.print("{{\"count\":{d},\"names\":[", .{names.items.len});
@@ -652,6 +639,62 @@ fn writeLibraryNames(allocator: std.mem.Allocator, project_dir: []const u8, sub:
         try json_writer.writeString(w, n);
     }
     try w.writeAll("]}");
+}
+
+/// One entry a library listing can show: the bare basename, plus the path its
+/// `(description …)` should be read from — a real filename, or a bundled
+/// standard-library path that `library_search_metadata.extract` serves out of
+/// the binary. Both slices are owned by the caller's allocator (an arena at
+/// every call site).
+const LibEntry = struct {
+    name: []const u8,
+    path: []const u8,
+};
+
+/// Every `<name>.sexp` the library search order exposes under `lib/<sub>/`,
+/// in priority order and deduplicated by name: the project's own directory
+/// first, then any shared `--lib-dir` root, then the bundled standard library.
+/// First occurrence wins, so a project file shadows the bundled part of the
+/// same name in the listing exactly as it does at resolution.
+fn collectLibraryEntries(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    sub: []const u8,
+    out: *std.ArrayList(LibEntry),
+) !void {
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(allocator);
+
+    var dirs: std.ArrayList([]const u8) = .empty;
+    defer dirs.deinit(allocator);
+    try stdlib.listDirs(allocator, project_dir, sub, &dirs);
+
+    for (dirs.items) |dir_path| {
+        var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch continue;
+        defer dir.close();
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .file and entry.kind != .sym_link) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".sexp")) continue;
+            const base = try allocator.dupe(u8, entry.name[0 .. entry.name.len - ".sexp".len]);
+            const gop = try seen.getOrPut(allocator, base);
+            if (gop.found_existing) continue;
+            try out.append(allocator, .{
+                .name = base,
+                .path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name }),
+            });
+        }
+    }
+
+    var prefix_buf: [stdlib.max_stems_prefix]u8 = undefined;
+    var stems = stdlib.stemsIn(&prefix_buf, sub);
+    while (stems.next()) |stem| {
+        if (seen.contains(stem)) continue;
+        try seen.put(allocator, stem, {});
+        const sub_path = try std.fmt.allocPrint(allocator, "lib/{s}/{s}.sexp", .{ sub, stem });
+        defer allocator.free(sub_path);
+        try out.append(allocator, .{ .name = stem, .path = try stdlib.bundledPath(allocator, sub_path) });
+    }
 }
 
 /// Alphabetical `[]const u8` order for `std.sort` (stable library listings).
@@ -1348,32 +1391,18 @@ pub fn listLibrarySubdir(
     limit: ?usize,
     w: anytype,
 ) !void {
-    const dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/{s}", .{ project_dir, sub });
-    defer allocator.free(dir_path);
-
-    var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
-        try w.writeAll("[]");
-        return;
-    };
-    defer dir.close();
+    var entries: std.ArrayList(LibEntry) = .empty;
+    defer entries.deinit(allocator);
+    try collectLibraryEntries(allocator, project_dir, sub, &entries);
 
     const q = query orelse {
-        // No filter — stream every entry in directory order.
+        // No filter — stream every entry in search order.
         try w.writeAll("[");
-        var first = true;
-        var it = dir.iterate();
-        while (try it.next()) |entry| {
-            if (entry.kind != .file and entry.kind != .sym_link) continue;
-            if (!std.mem.endsWith(u8, entry.name, ".sexp")) continue;
-            const base = entry.name[0 .. entry.name.len - ".sexp".len];
-            const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
-            defer allocator.free(full_path);
-            const description = library_search_metadata.extract(allocator, full_path, sub);
+        for (entries.items, 0..) |entry, i| {
+            const description = library_search_metadata.extract(allocator, entry.path, sub);
             defer if (description) |d| allocator.free(d);
-
-            if (!first) try w.writeAll(",");
-            first = false;
-            try writeLibEntry(w, base, description);
+            if (i > 0) try w.writeAll(",");
+            try writeLibEntry(w, entry.name, description);
         }
         try w.writeAll("]");
         return;
@@ -1381,22 +1410,15 @@ pub fn listLibrarySubdir(
 
     // Filtered — score every entry, keep matches, emit ranked best-first.
     var matches: std.ArrayList(LibMatch) = .empty;
-    var it = dir.iterate();
-    while (try it.next()) |entry| {
-        if (entry.kind != .file and entry.kind != .sym_link) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".sexp")) continue;
-        const base = entry.name[0 .. entry.name.len - ".sexp".len];
-        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
-        defer allocator.free(full_path);
-        const description = library_search_metadata.extract(allocator, full_path, sub);
-
-        const score = libEntryScore(q, base, description);
+    for (entries.items) |entry| {
+        const description = library_search_metadata.extract(allocator, entry.path, sub);
+        const score = libEntryScore(q, entry.name, description);
         if (score == 0) {
             if (description) |d| allocator.free(d);
             continue;
         }
         try matches.append(allocator, .{
-            .name = try allocator.dupe(u8, base),
+            .name = entry.name,
             .description = description,
             .score = score,
         });

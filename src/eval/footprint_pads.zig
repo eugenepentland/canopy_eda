@@ -20,16 +20,18 @@
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const ids = @import("ids.zig");
-const infra_fs = @import("../infra/fs.zig");
 const lib_limits = @import("../lib_limits.zig");
 const parser_mod = @import("../sexpr/parser.zig");
+const stdlib = @import("../stdlib.zig");
 const Evaluator = @import("evaluator.zig").Evaluator;
 
 /// Pad ids of one footprint, as a set. Empty means "unknown" (see the module
 /// header), which is why callers test `count() > 0` before trusting a miss.
 pub const PadIds = std.StringHashMapUnmanaged(void);
 
-const path_fmt = "{s}/lib/footprints/{s}.sexp";
+/// Project-relative sub-path of one footprint, resolved through `stdlib`
+/// (project `lib/` first, the bundled standard library last).
+const path_fmt = "lib/footprints/{s}.sexp";
 
 /// The pad ids of `fp_name`, loading and caching the footprint on first ask.
 /// Null when the name is empty; an empty set when the file is missing or is
@@ -42,15 +44,16 @@ pub fn get(self: *Evaluator, fp_name: []const u8) ?*const PadIds {
     return self.footprint_pad_cache.getPtr(fp_name);
 }
 
-/// Read `<project_dir>/lib/footprints/<fp_name>.sexp` and collect every
+/// Read `lib/footprints/<fp_name>.sexp` — from the project, then the shared
+/// library root, then the bundled standard library — and collect every
 /// `(pad ID …)` id. Any failure yields the empty set rather than an error:
-/// a part whose footprint this project does not carry must not fail a build
-/// that never needed the geometry.
+/// a part whose footprint no library carries must not fail a build that never
+/// needed the geometry.
 fn load(self: *Evaluator, fp_name: []const u8) PadIds {
     var pads: PadIds = .empty;
-    const path = std.fmt.allocPrint(self.allocator, path_fmt, .{ self.project_dir, fp_name }) catch return pads;
-    defer self.allocator.free(path);
-    const source = infra_fs.cwd().readFileAlloc(self.allocator, path, lib_limits.max_footprint_bytes) catch return pads;
+    const sub_path = std.fmt.allocPrint(self.allocator, path_fmt, .{fp_name}) catch return pads;
+    defer self.allocator.free(sub_path);
+    const source = stdlib.read(self.allocator, self.project_dir, sub_path, lib_limits.max_footprint_bytes) orelse return pads;
     const nodes = parser_mod.parse(self.allocator, source) catch return pads;
     if (nodes.len == 0 or !nodes[0].isForm("footprint")) return pads;
     const children = nodes[0].asList() orelse return pads;

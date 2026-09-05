@@ -278,6 +278,30 @@ test "recommended warns while example remains discovery only" {
     try std.testing.expectEqual(@as(usize, 0), findings.items.len);
 }
 
+// spec: fabrication-release - a project with no lib/modules directory has an empty canonical-module policy rather than an unverifiable one
+test "a project without a module library is complete, not incomplete" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // No `lib/` at all — the state of a new project, and of one whose parts all
+    // come from the bundled standard library. There is no canonical module to
+    // have diverged from, so strict policy is satisfied rather than blocked.
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(project);
+    const block: env.DesignBlock = .{
+        .name = "board",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    const findings = try run(allocator, &block, project);
+    defer freeFindingSlice(allocator, findings);
+    try std.testing.expectEqual(@as(usize, 0), findings.len);
+}
+
 // spec: fabrication-release - strict canonical-module policy is incomplete, and therefore release-blocking, when any module source is malformed
 test "malformed module metadata is an explicit strict finding" {
     const allocator = std.testing.allocator;

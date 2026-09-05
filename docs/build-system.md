@@ -87,6 +87,17 @@ when they create a stamped artifact. This keeps docs- and hook-only commits out
 of the application cache key; the measured unchanged compiler
 graph returns in about **0.27 s** instead of recompiling for a new embedded hash.
 
+### The bundled standard library
+
+`stdlib/**/*.sexp` is compiled INTO every artifact. `stdlibEmbed` in
+`build.zig` walks `stdlib/` at configure time, copies each file into a
+generated module directory, and emits a `path → @embedFile(…)` table as the
+`stdlib_embed` module; the exe, both test binaries, the layout bench and the
+WASM DRC all import it, because all five can reach `src/stdlib.zig`. Adding a
+`.sexp` under `stdlib/` therefore needs no registration — the glob picks it up,
+and the copies are `LazyPath`s onto the real files, so editing one re-runs the
+step. See [standard-library.md](standard-library.md).
+
 ### Guardian gate
 
 Guardian runs its full **71-check suite on every `zig build` / `zig build
