@@ -79,7 +79,7 @@ const max_cull_rounds: usize = 3;
 
 /// Why a fence run produced nothing — each maps to one HTTP status + body and
 /// one CLI failure message, so the two surfaces explain themselves identically.
-pub const FenceError = error{
+pub const FenceError = @import("../layout_sidecar_store.zig").StoreError || error{
     /// The design/module name resolves to no block.
     BlockNotFound,
     /// A layout was asked for by name and no saved row answers to it.
@@ -449,7 +449,7 @@ pub fn run(
 
     const entry_name = pcb_layout_page.mcpWorkingName(alloc, project_dir, name, layout_arg);
     if (!opt.dry_run) {
-        pcb_layout_page.mcpPersistWorking(alloc, project_dir, name, .{
+        try pcb_layout_page.mcpPersistWorking(alloc, project_dir, name, .{
             .name = entry_name,
             .kind = "manual",
             .ts = 0,
@@ -507,6 +507,8 @@ pub fn errorMessage(e: FenceError) []const u8 {
         error.NoFenceClasses => "this board declares no (fence …) and has no (max-freq …) RF traces — nothing to fence",
         error.PlacementFailed => "the placement could not be built",
         error.OutOfMemory => "out of memory",
+        error.CannotReadSidecar, error.InvalidSidecar => "cannot read saved layouts safely",
+        error.CannotWriteSidecar => "cannot persist saved layout",
     };
 }
 
@@ -516,7 +518,7 @@ pub fn errorStatus(e: FenceError) u16 {
     return switch (e) {
         error.BlockNotFound, error.UnknownLayout => 404,
         error.NoSavedLayout, error.NoCopper, error.NoFenceClasses => 409,
-        error.PlacementFailed, error.OutOfMemory => 500,
+        error.PlacementFailed, error.OutOfMemory, error.CannotReadSidecar, error.InvalidSidecar, error.CannotWriteSidecar => 500,
     };
 }
 

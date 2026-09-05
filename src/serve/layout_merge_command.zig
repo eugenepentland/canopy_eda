@@ -60,12 +60,13 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) RunError!void
         error.LayoutNotFound => exit.fatal("merge-layout: layout \"{s}\" was not found in {s}\n", .{ args.layout, args.source }),
         error.TargetNotFound => exit.fatal("merge-layout: target design or module does not exist: {s}\n", .{args.design}),
         error.WriteFailed => exit.fatal("merge-layout: target sidecar did not retain layout \"{s}\"\n", .{args.layout}),
+        error.CannotReadSidecar, error.InvalidSidecar, error.CannotWriteSidecar => exit.fatal("merge-layout: persistence failed: {s}\n", .{@errorName(err)}),
         error.OutOfMemory => return error.OutOfMemory,
     };
     try printReport(arena, report);
 }
 
-const MergeError = std.mem.Allocator.Error || error{
+const MergeError = @import("../layout_sidecar_store.zig").StoreError || std.mem.Allocator.Error || error{
     SourceTooBig,
     SourceUnreadable,
     InvalidSource,
@@ -106,7 +107,7 @@ fn merge(alloc: std.mem.Allocator, args: Args) MergeError!Report {
     // A source's star belongs to the source project.  The target keeps its own
     // default unless --star explicitly transfers that decision too.
     entry.default = false;
-    if (!args.dry_run) pcb_layout_page.mcpPersistWorking(alloc, args.project_dir, args.design, entry, args.star);
+    if (!args.dry_run) try pcb_layout_page.mcpPersistWorking(alloc, args.project_dir, args.design, entry, args.star);
 
     const after = if (args.dry_run) before else pcb_layout_page.readLayouts(alloc, args.project_dir, args.design);
     const rev_after = if (args.dry_run) rev_before else pcb_layout_page.readLayoutRev(alloc, args.project_dir, args.design, null);

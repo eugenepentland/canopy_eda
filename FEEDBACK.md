@@ -678,3 +678,7 @@ matters when the person re-recording is the author of the change.
 - **idea:** Keep benchmark modes side-effect-free at the shared initialization boundary: any new load-time migration should be guarded by `!FBENCH`, and the static benchmark contract should assert the guard before the expensive release gate starts.
 - **workaround:** The shared RF-retrofit scheduler now returns in benchmark mode, covering both startup and deferred-analysis completion; ordinary editor loads still migrate stale saved tapers, and focused string contracts prevent either scheduling path from returning unnoticed.
 - **status:** resolved in this change
+
+## 2026-09-05 · codex · resolve Guardian contract findings
+- **friction:** New test-bearing modules require both the explicit import bridge in `src/test_root.zig` and the filters in `src/test_shards.zig`; two focused runs initially selected no named tests. A scaffold command that adds both entries would remove these retries.
+- **wish:** The sidecar lock-order tests match literal function-call spellings, and the shard smoke test asserts fixed array indexes. Replacing permissive reads with strict reads required three spelling updates; inserting new shard filters before the existing entries failed unrelated assertions. Prefer declaration-aware lock checks and membership assertions so these tests preserve their guarantees through routine refactoring.

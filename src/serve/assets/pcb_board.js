@@ -3284,8 +3284,9 @@ function passiveRefreshApply(p,edit,score){var fresh=score&&score.refresh&&score
  var index=P.indexOf(p),oldPads=p.pads||[],oldFp=p.fp;passiveRefreshTopology(index,oldPads,fresh.pads||[]);
  var fields=["origin","hw","hh","ccx","ccy","kind","fb","fp","val","component","mpn","pads","silk"];
  fields.forEach(function(k){if(Object.prototype.hasOwnProperty.call(fresh,k))p[k]=fresh[k];else delete p[k];});
+ if(edit&&edit.part_edits)Object.keys(edit.part_edits).forEach(function(ref){PED[ref]=edit.part_edits[ref];});
  var meta=edit&&edit.part_edits&&edit.part_edits[p.ref];
- if(meta){p.src=meta.src;p.srcName=meta.srcName;p.srcRef=meta.srcRef;}
+ if(meta){p.src=meta.src;p.srcName=meta.srcName;p.srcRef=meta.srcRef;PED[p.ref]=meta;}
  if(oldFp!==p.fp){PCB.models=PCB.models||{};Object.keys(score.refresh.models||{}).forEach(function(fp){PCB.models[fp]=score.refresh.models[fp];});}
  if(score.blame)P.forEach(function(q){if(score.blame[q.ref]!==undefined)q.blame=score.blame[q.ref];});
  linksDirty=true;linkConnCache={};cullBox=null;passiveRefreshLoops();PCB.drc=[];
@@ -3301,7 +3302,7 @@ function wirePassiveFootprint(p){var sel=document.getElementById("prop-footprint
  sel.addEventListener("change",function(){var next=sel.value;if(!next||next===p.component)return;
   var saved=false;sel.disabled=true;passiveFpMsg("Updating schematic source…",false);
   fetch("/api/edit-footprint/"+encodeURIComponent(PCB.name),{method:"POST",headers:{"Content-Type":"application/json"},
-   body:JSON.stringify({ref:p.srcRef||p.ref,component:next,oldComponent:p.component,srcOff:p.src,sourceName:p.srcName})})
+   body:JSON.stringify({ref:p.srcRef||p.ref,component:next,oldComponent:p.component,srcOff:p.src,sourceName:p.srcName,sourceRevision:(PED[p.ref]||{}).sourceRevision})})
    .then(function(r){return r.text().then(function(t){if(!r.ok)throw new Error(t||"Footprint update failed.");
     try{var j=t?JSON.parse(t):null;if(j&&j.error)throw new Error(j.error);return j;}catch(e){if(e instanceof SyntaxError)return {};throw e;} });})
    .then(function(edit){saved=true;return fetch("/api/pcb-score/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",headers:{"Content-Type":"application/json"},

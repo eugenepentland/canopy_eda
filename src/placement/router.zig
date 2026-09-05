@@ -7511,7 +7511,7 @@ fn tryDirectTreePair(run: DirectRun, from: NetPt, to: NetPt) std.mem.Allocator.E
         return true;
     }
     if (!run.ctx.allow_vias) return false;
-    const max_ring: i64 = @intFromFloat(@ceil(direct_tree_via_radius_mm / direct_via_grid_mm));
+    const max_ring: i64 = numeric.checkedInt(i64, @ceil(direct_tree_via_radius_mm / direct_via_grid_mm)) orelse return false;
     var ring: i64 = 1;
     while (ring <= max_ring) : (ring += 1) {
         for ([2]NetPt{ from, to }) |anchor| {
@@ -8167,10 +8167,10 @@ const ContinuousState = struct {
 
 const ContinuousPointKey = struct { x: i32, y: i32 };
 
-fn continuousPointKey(point: [2]f64) ContinuousPointKey {
+fn continuousPointKey(point: [2]f64) ?ContinuousPointKey {
     return .{
-        .x = @intFromFloat(@round(point[0] * 1000.0)),
-        .y = @intFromFloat(@round(point[1] * 1000.0)),
+        .x = numeric.checkedInt(i32, point[0] * 1000.0) orelse return null,
+        .y = numeric.checkedInt(i32, point[1] * 1000.0) orelse return null,
     };
 }
 
@@ -8229,14 +8229,14 @@ fn findMultiBend(
         .depth = 0,
         .cost = 0,
     });
-    try best.put(path.ctx.arena, continuousPointKey(a), 0);
+    try best.put(path.ctx.arena, continuousPointKey(a) orelse return null, 0);
     try queue.add(.{ .d = std.math.hypot(b[0] - a[0], b[1] - a[1]), .key = 0 });
 
     var expansions: usize = 0;
     while (queue.removeOrNull()) |item| {
         if (expansions >= max_continuous_expansions) break;
         const state = states.items[item.key];
-        const known = best.get(continuousPointKey(state.point)) orelse continue;
+        const known = best.get(continuousPointKey(state.point) orelse continue) orelse continue;
         if (state.cost > known + clearance_eps) continue;
         expansions += 1;
         if (findDogleg(path, state.point, b)) |tail| {
@@ -8249,7 +8249,7 @@ fn findMultiBend(
             const step = std.math.hypot(point[0] - state.point[0], point[1] - state.point[1]);
             if (step < 0.1) continue;
             const cost = state.cost + step;
-            const key = continuousPointKey(point);
+            const key = continuousPointKey(point) orelse continue;
             if (best.get(key)) |old| if (old <= cost + clearance_eps) continue;
             try best.put(path.ctx.arena, key, cost);
             const index = states.items.len;
@@ -8370,8 +8370,8 @@ fn fineGateways(
     target: [2]f64,
 ) std.mem.Allocator.Error![]const usize {
     var out: std.ArrayList(usize) = .empty;
-    const cx: i64 = @intFromFloat(@round((target[0] - grid.ox) / fine_grid_mm));
-    const cy: i64 = @intFromFloat(@round((target[1] - grid.oy) / fine_grid_mm));
+    const cx: i64 = numeric.checkedInt(i64, (target[0] - grid.ox) / fine_grid_mm) orelse return &.{};
+    const cy: i64 = numeric.checkedInt(i64, (target[1] - grid.oy) / fine_grid_mm) orelse return &.{};
     var ring: i64 = 0;
     while (ring <= 4) : (ring += 1) {
         var dx = -ring;
@@ -9032,7 +9032,7 @@ fn tryDirectOneVia(run: DirectRun, from: NetPt, to: NetPt) std.mem.Allocator.Err
             if (try tryDirectViaLatticeRing(run, from, to, anchor, ring)) return true;
         }
     }
-    ring = @intFromFloat(@ceil(0.4 / direct_via_grid_mm));
+    ring = numeric.checkedInt(i64, @ceil(0.4 / direct_via_grid_mm)) orelse return false;
     while (ring <= max_ring) : (ring += 1) {
         if (try tryThreeBendViaLatticeRing(run, from, to, ring)) return true;
     }

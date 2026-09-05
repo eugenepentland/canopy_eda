@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const clock = @import("infra/clock.zig");
+const atomic_write = @import("infra/atomic_write.zig");
 const infra_fs = @import("infra/fs.zig");
 const log = @import("infra/log.zig");
 const numeric = @import("numeric.zig");
@@ -164,7 +165,7 @@ pub fn readLayoutsSub(
     name: []const u8,
     sub: ?[]const u8,
 ) []const SavedLayout {
-    return readSidecarDoc(alloc, project_dir, name, sub).layouts;
+    return (readSidecarDoc(alloc, project_dir, name, sub) catch return &.{}).layouts;
 }
 
 /// Parse a `.layouts.json` document, or null for malformed top-level JSON.
@@ -330,7 +331,7 @@ fn parseCacheParams(object: std.json.Value, params: *optimizer.Params) void {
 
 /// Read the embedded cache, falling back to a legacy standalone cache file.
 pub fn readCacheSlot(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?CacheSlot {
-    return readSidecarDoc(alloc, project_dir, name, null).cache orelse readLegacyCacheSlot(alloc, project_dir, name);
+    return (readSidecarDoc(alloc, project_dir, name, null) catch return null).cache orelse readLegacyCacheSlot(alloc, project_dir, name);
 }
 
 fn readLegacyCacheSlot(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?CacheSlot {
@@ -348,7 +349,7 @@ pub fn readLayoutRev(
     name: []const u8,
     sub: ?[]const u8,
 ) i64 {
-    return readSidecarDoc(alloc, project_dir, name, sub).rev;
+    return (readSidecarDoc(alloc, project_dir, name, sub) catch return 0).rev;
 }
 
 fn revFromRoot(root: std.json.Value) i64 {
@@ -362,30 +363,43 @@ fn revFromRoot(root: std.json.Value) i64 {
 }
 
 /// Read one design document with its legacy cache fallback applied.
-pub fn readDesignDoc(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) SidecarDoc {
-    var doc = readSidecarDoc(alloc, project_dir, name, null);
+pub fn readDesignDoc(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) StoreError!SidecarDoc {
+    var doc = try readSidecarDoc(alloc, project_dir, name, null);
     if (doc.cache == null) doc.cache = readLegacyCacheSlot(alloc, project_dir, name);
     return doc;
 }
 
-/// Read and parse one sidecar in a single filesystem pass.
+/// Errors that prevent persisted layout state from being read or committed.
+pub const StoreError = error{ CannotReadSidecar, InvalidSidecar, CannotWriteSidecar } || std.mem.Allocator.Error;
+
+/// Read and parse one sidecar; only a missing file is an empty document.
 pub fn readSidecarDoc(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
     sub: ?[]const u8,
-) SidecarDoc {
+) StoreError!SidecarDoc {
     var doc = SidecarDoc{};
-    const path = layoutsSidecar(alloc, project_dir, name, sub, layouts_ext) orelse return doc;
+    const path = layoutsSidecar(alloc, project_dir, name, sub, layouts_ext) orelse return error.CannotReadSidecar;
     defer alloc.free(path);
-    const data = infra_fs.cwd().readFileAlloc(alloc, path, sidecar_max_bytes) catch |err| {
-        if (err != error.FileNotFound) log.warn("layouts: cannot read {s}: {s} — reading as NO saved layouts", .{ path, @errorName(err) });
-        return doc;
+    const data = infra_fs.cwd().readFileAlloc(alloc, path, sidecar_max_bytes) catch |err| switch (err) {
+        error.FileNotFound => return doc,
+        else => return error.CannotReadSidecar,
     };
-    const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch {
-        log.warn("layouts: {s} did not parse — reading as NO saved layouts", .{path});
-        return doc;
-    };
+    const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, data, .{}) catch return error.InvalidSidecar;
+    if (root != .object) return error.InvalidSidecar;
+    if (root.object.get("layouts")) |rows| {
+        if (rows != .array) return error.InvalidSidecar;
+        for (rows.array.items) |row| {
+            if (row != .object) return error.InvalidSidecar;
+            const label = row.object.get("name") orelse return error.InvalidSidecar;
+            if (label != .string) return error.InvalidSidecar;
+        }
+    }
+    if (root.object.get("rev")) |value| {
+        const rev = clientRev(value) orelse return error.InvalidSidecar;
+        if (rev < 0 or rev == std.math.maxInt(i64)) return error.InvalidSidecar;
+    }
     doc.root = root;
     if (layoutsFromRoot(alloc, root)) |layouts| doc.layouts = layouts;
     if (root == .object) {
@@ -395,28 +409,25 @@ pub fn readSidecarDoc(
     return doc;
 }
 
-fn writeFileAll(path: []const u8, data: []const u8) !void {
-    var write_buf: [4096]u8 = undefined;
-    var atomic = try infra_fs.cwd().atomicFile(path, .{ .write_buffer = &write_buf });
-    defer atomic.deinit();
-    try atomic.file_writer.interface.writeAll(data);
-    try atomic.finish();
+fn writeFileAll(path: []const u8, data: []const u8) atomic_write.Error!void {
+    try atomic_write.writeFile(path, data);
 }
 
-/// Best-effort persistence that preserves the design cache and revision.
-pub fn writeLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) void {
-    writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name), readLayoutRev(alloc, project_dir, name, null));
+/// Persist layouts, propagating failures while preserving the design cache and revision.
+pub fn writeLayouts(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) StoreError!void {
+    const doc = try readDesignDoc(alloc, project_dir, name);
+    try writeLayoutsFile(alloc, project_dir, name, layouts, doc.cache, doc.rev);
 }
 
-/// Best-effort scoped persistence that preserves the current revision.
+/// Persist scoped layouts, propagating failures while preserving the current revision.
 pub fn writeLayoutsSub(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
     sub: ?[]const u8,
     layouts: []const SavedLayout,
-) void {
-    writeLayoutsSubRev(alloc, project_dir, name, sub, layouts, readLayoutRev(alloc, project_dir, name, sub));
+) StoreError!void {
+    try writeLayoutsSubRev(alloc, project_dir, name, sub, layouts, (try readSidecarDoc(alloc, project_dir, name, sub)).rev);
 }
 
 /// Persist a design or sub-block sidecar with an explicit revision.
@@ -427,13 +438,15 @@ pub fn writeLayoutsSubRev(
     sub: ?[]const u8,
     layouts: []const SavedLayout,
     rev: i64,
-) void {
-    if (sub == null) return writeLayoutsFile(alloc, project_dir, name, layouts, readCacheSlot(alloc, project_dir, name), rev);
-    const path = layoutsSidecar(alloc, project_dir, name, sub, layouts_ext) orelse return;
+) StoreError!void {
+    if (sub == null) return writeLayoutsFile(alloc, project_dir, name, layouts, (try readDesignDoc(alloc, project_dir, name)).cache, rev);
+    const path = layoutsSidecar(alloc, project_dir, name, sub, layouts_ext) orelse return error.CannotWriteSidecar;
     defer alloc.free(path);
+    _ = try readSidecarDoc(alloc, project_dir, name, sub);
     var output: std.Io.Writer.Allocating = .init(alloc);
-    writeLayoutsFileJsonRev(&output.writer, dedupedLayouts(alloc, layouts), null, rev) catch return;
-    writeFileAll(path, output.written()) catch return;
+    defer output.deinit();
+    writeLayoutsFileJsonRev(&output.writer, dedupedLayouts(alloc, layouts), null, rev) catch return error.CannotWriteSidecar;
+    writeFileAll(path, output.written()) catch return error.CannotWriteSidecar;
 }
 
 /// Persist the complete design sidecar with layouts, cache, and revision.
@@ -444,12 +457,14 @@ pub fn writeLayoutsFile(
     layouts: []const SavedLayout,
     cache: ?CacheSlot,
     rev: i64,
-) void {
-    const path = paths.designSiblingPath(alloc, project_dir, name, layouts_ext) catch return;
+) StoreError!void {
+    const path = paths.designSiblingPath(alloc, project_dir, name, layouts_ext) catch return error.CannotWriteSidecar;
     defer alloc.free(path);
+    _ = try readSidecarDoc(alloc, project_dir, name, null);
     var output: std.Io.Writer.Allocating = .init(alloc);
-    writeLayoutsFileJsonRev(&output.writer, dedupedLayouts(alloc, layouts), cache, rev) catch return;
-    writeFileAll(path, output.written()) catch return;
+    defer output.deinit();
+    writeLayoutsFileJsonRev(&output.writer, dedupedLayouts(alloc, layouts), cache, rev) catch return error.CannotWriteSidecar;
+    writeFileAll(path, output.written()) catch return error.CannotWriteSidecar;
 }
 
 /// Return layouts whose exact duplicate copper rows have been removed.
@@ -680,10 +695,10 @@ pub fn displayLayouts(
     if (deduped.len != raw.len) {
         const guard = lockSidecar(name, sub);
         defer guard.unlock();
-        const fresh = readLayoutsSub(alloc, project_dir, name, sub);
+        const fresh = (readSidecarDoc(alloc, project_dir, name, sub) catch return deduped).layouts;
         const fresh_deduped = dedupLayouts(alloc, fresh);
         if (fresh_deduped.len != fresh.len)
-            writeLayoutsSub(alloc, project_dir, name, sub, fresh_deduped);
+            writeLayoutsSub(alloc, project_dir, name, sub, fresh_deduped) catch return deduped;
     }
     const sorted = alloc.dupe(SavedLayout, deduped) catch return deduped;
     std.sort.insertion(SavedLayout, sorted, {}, layoutMoreRecentlyEdited);
@@ -725,7 +740,7 @@ pub fn recordAutoLayout(
     // Solving already finished in the caller; only the file work is inside.
     const guard = lockSidecar(name, null);
     defer guard.unlock();
-    const existing = readLayouts(alloc, project_dir, name);
+    const existing = (readSidecarDoc(alloc, project_dir, name, null) catch return).layouts;
     for (existing, 0..) |layout, i| {
         if (!sameLayoutScore(layout.score, score)) continue;
         if (params.rough and !layout.rough) {
@@ -752,21 +767,21 @@ pub fn recordAutoLayout(
             if (autos >= max_auto_layouts and !layout.default) continue;
             autos += 1;
         }
-        out.append(alloc, layout) catch break;
+        out.append(alloc, layout) catch return;
     }
-    writeLayouts(alloc, project_dir, name, out.items);
+    writeLayouts(alloc, project_dir, name, out.items) catch |err| log.warn("layout persistence failed: {s}", .{@errorName(err)});
 }
 
 fn tagRough(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, existing: []const SavedLayout, idx: usize) void {
     const out = alloc.dupe(SavedLayout, existing) catch return;
     out[idx].rough = true;
-    writeLayouts(alloc, project_dir, name, out);
+    writeLayouts(alloc, project_dir, name, out) catch |err| log.warn("layout persistence failed: {s}", .{@errorName(err)});
 }
 
 fn backfillNewestScore(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, existing: []const SavedLayout, score: LayoutScore) void {
     const out = alloc.dupe(SavedLayout, existing) catch return;
     out[0].score = score;
-    writeLayouts(alloc, project_dir, name, out);
+    writeLayouts(alloc, project_dir, name, out) catch |err| log.warn("layout persistence failed: {s}", .{@errorName(err)});
 }
 
 fn fmtAutoName(alloc: std.mem.Allocator, timestamp: i64) std.mem.Allocator.Error![]const u8 {
@@ -961,7 +976,7 @@ test "the render and regenerate sidecar writers hold the sidecar lock" {
     const display = try storeFunctionBody(source, "pub fn displayLayouts(", "fn posesFromPlacement(");
     const display_lock = std.mem.indexOf(u8, display, "lockSidecar(name, sub)") orelse
         return error.TestExpectedDisplayLock;
-    const display_reread = std.mem.indexOf(u8, display, "readLayoutsSub(alloc, project_dir, name, sub)") orelse
+    const display_reread = std.mem.indexOf(u8, display, "readSidecarDoc(alloc, project_dir, name, sub)") orelse
         return error.TestExpectedDisplayReread;
     const display_write = std.mem.indexOf(u8, display, "writeLayoutsSub(") orelse
         return error.TestExpectedDisplayWrite;
@@ -971,7 +986,7 @@ test "the render and regenerate sidecar writers hold the sidecar lock" {
     const record = try storeFunctionBody(source, "pub fn recordAutoLayout(", "fn tagRough(");
     const record_lock = std.mem.indexOf(u8, record, "lockSidecar(name, null)") orelse
         return error.TestExpectedRecordLock;
-    const record_read = std.mem.indexOf(u8, record, "readLayouts(alloc, project_dir, name)") orelse
+    const record_read = std.mem.indexOf(u8, record, "readSidecarDoc(alloc, project_dir, name, null)") orelse
         return error.TestExpectedRecordRead;
     const record_write = std.mem.indexOf(u8, record, "writeLayouts(alloc, project_dir, name") orelse
         return error.TestExpectedRecordWrite;
@@ -1032,7 +1047,7 @@ test "the layout save holds one sidecar lock across its whole revision check-the
 
     const lock = std.mem.indexOf(u8, handler, "const guard = lockSidecar(name, sub);") orelse
         return error.TestExpectedSidecarLock;
-    const rev_read = std.mem.indexOf(u8, handler, "const disk_rev = readLayoutRev(") orelse
+    const rev_read = std.mem.indexOf(u8, handler, "const disk_rev = (try readSidecarDoc(") orelse
         return error.TestExpectedRevRead;
     const bump = std.mem.indexOf(u8, handler, "const new_rev = disk_rev + 1;") orelse
         return error.TestExpectedRevBump;
@@ -1056,7 +1071,7 @@ test "the layout save holds one sidecar lock across its whole revision check-the
     // with the cheap pre-check that fails an already-doomed save fast.
     const layers = std.mem.indexOf(u8, handler, "layout_save_layers.savedLayoutLayers(") orelse
         return error.TestExpectedLayerResolve;
-    const precheck = std.mem.indexOf(u8, handler, "const seen_rev = readLayoutRev(") orelse
+    const precheck = std.mem.indexOf(u8, handler, "const seen_rev = (try readSidecarDoc(") orelse
         return error.TestExpectedRevPrecheck;
     try std.testing.expect(layers < lock);
     try std.testing.expect(precheck < layers);
@@ -1130,7 +1145,7 @@ const SidecarStressWriter = struct {
         }) catch return false;
 
         const next = disk_rev + 1;
-        writeLayoutsSubRev(alloc, self.project_dir, self.design, null, out.items, next);
+        writeLayoutsSubRev(alloc, self.project_dir, self.design, null, out.items, next) catch return false;
         // `writeLayoutsSubRev` is best-effort and returns void, so the write is
         // confirmed from disk while the lock is still held. Counting only
         // confirmed writes is what keeps "the final revision equals the number of
@@ -1247,4 +1262,30 @@ fn expectEveryStressRowPresent(
             if (!seen.contains(want)) return error.TestLostLayoutRow;
         }
     }
+}
+
+// spec: Web Server - Missing sidecars are empty but damaged or unreadable saved state blocks every replacement
+test "sidecar read errors cannot become successful empty saves" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "src", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/errors.sexp", .data = "(design-block \"Errors\")" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    try std.testing.expectEqual(@as(usize, 0), (try readSidecarDoc(a, root, "errors", null)).layouts.len);
+    const relative = "src/errors.layouts.json";
+    for ([_][]const u8{ "{broken", "[]", "{\"layouts\":false}", "{\"layouts\":[{}]}" }) |damaged| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = relative, .data = damaged });
+        try std.testing.expectError(error.InvalidSidecar, readSidecarDoc(a, root, "errors", null));
+        try std.testing.expectError(error.InvalidSidecar, writeLayoutsFile(a, root, "errors", &.{}, null, 99));
+        const after = try tmp.dir.readFileAlloc(std.testing.io, relative, a, .limited(1024));
+        try std.testing.expectEqualStrings(damaged, after);
+    }
+    try tmp.dir.deleteFile(std.testing.io, relative);
+    try tmp.dir.createDir(std.testing.io, relative, .default_dir);
+    try std.testing.expectError(error.CannotReadSidecar, readSidecarDoc(a, root, "errors", null));
+    // No parent exists for a scoped output: the serializer must report failure.
+    try std.testing.expectError(error.CannotWriteSidecar, writeLayoutsSubRev(a, root, "errors", "missing/child", &.{}, 1));
 }

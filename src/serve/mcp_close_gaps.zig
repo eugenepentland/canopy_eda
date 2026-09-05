@@ -404,7 +404,7 @@ pub fn mcpCloseOpenNets(
         .outline = working.outline,
         .texts = working.texts,
     };
-    pcb_layout_page.mcpPersistWorking(alloc, project_dir, name, entry, false);
+    try pcb_layout_page.mcpPersistWorking(alloc, project_dir, name, entry, false);
     return writeResult(out, .{
         .alloc = alloc,
         .project_dir = project_dir,

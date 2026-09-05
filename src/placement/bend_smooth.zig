@@ -475,7 +475,7 @@ const GeomProbe = struct {
         const chords = chordCount(c, emit_sagitta_mm);
         const step: f64 = 0.03; // radians between samples
         const by_angle = @max(2.0, @ceil(@abs(c.sweep) / step));
-        const count: usize = @intFromFloat(@min(@max(by_angle, @as(f64, @floatFromInt(chords))), 160));
+        const count: usize = numeric.checkedInt(usize, @min(@max(by_angle, @as(f64, @floatFromInt(chords))), 160)) orelse return false;
         const halfstep = c.r * @abs(c.sweep) / @as(f64, @floatFromInt(count)) / 2.0;
         for (0..count + 1) |k| {
             const pt = polylinePoint(c, arc, chords, @as(f64, @floatFromInt(k)) /
@@ -552,7 +552,7 @@ const GeomProbe = struct {
     /// The geometric half of `segmentClear`: foreign tracks, vias, pads, edge.
     fn geomSegmentClear(self: GeomProbe, a: [2]f64, b: [2]f64, ref: CopperRef) bool {
         const len = dist(a, b);
-        const count: usize = @intFromFloat(@min(@max(@ceil(len / 0.05), 2.0), 160));
+        const count: usize = numeric.checkedInt(usize, @min(@max(@ceil(len / 0.05), 2.0), 160)) orelse return false;
         const half = len / @as(f64, @floatFromInt(count)) / 2.0;
         // Nothing foreign in reach ⇒ only the board edge can still veto, and
         // that walk costs no obstacle scan at all.
@@ -1364,10 +1364,10 @@ const Graph = struct {
     visited: []bool,
 };
 
-fn qpt(x: f64, y: f64) [2]i32 {
+fn qpt(x: f64, y: f64) ?[2]i32 {
     return .{
-        @intFromFloat(std.math.round(x / snap)),
-        @intFromFloat(std.math.round(y / snap)),
+        numeric.checkedInt(i32, x / snap) orelse return null,
+        numeric.checkedInt(i32, y / snap) orelse return null,
     };
 }
 
@@ -1386,7 +1386,7 @@ pub fn extractChains(
     for (segs, 0..) |s, si| {
         const pab = [2][2]f64{ .{ s.x1, s.y1 }, .{ s.x2, s.y2 } };
         for (pab, 0..) |p, side| {
-            const slot = try node_of.getOrPut(arena, qpt(p[0], p[1]));
+            const slot = try node_of.getOrPut(arena, qpt(p[0], p[1]) orelse return &.{});
             if (!slot.found_existing) {
                 slot.value_ptr.* = @intCast(pts.items.len);
                 try pts.append(arena, p);
@@ -1685,7 +1685,7 @@ fn chordCount(c: Circle, max_sagitta: f64) usize {
 /// — the copper itself, as opposed to the circle it approximates.
 fn polylinePoint(c: Circle, arc: router.Arc, count: usize, u: f64) [2]f64 {
     const scaled = std.math.clamp(u, 0, 1) * @as(f64, @floatFromInt(count));
-    const i: usize = @min(count -| 1, @as(usize, @intFromFloat(@floor(scaled))));
+    const i: usize = @min(count -| 1, (numeric.checkedInt(usize, @floor(scaled)) orelse 0));
     const t = scaled - @as(f64, @floatFromInt(i));
     const a = chordVertex(c, arc, count, i);
     const b = chordVertex(c, arc, count, i + 1);

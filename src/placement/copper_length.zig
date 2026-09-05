@@ -29,6 +29,7 @@
 //! `drc_diffpair`'s post-route check measure the same way by construction.
 
 const std = @import("std");
+const numeric = @import("../numeric.zig");
 
 /// One piece of copper on one layer.
 pub const Seg = struct { a: [2]f64, b: [2]f64, layer: u8 };
@@ -56,13 +57,13 @@ const Key = struct {
     y: i64,
     layer: u8,
 
-    fn of(p: [2]f64, layer: u8) Key {
-        return .{ .x = quant(p[0]), .y = quant(p[1]), .layer = layer };
+    fn of(p: [2]f64, layer: u8) ?Key {
+        return .{ .x = quant(p[0]) orelse return null, .y = quant(p[1]) orelse return null, .layer = layer };
     }
 };
 
-fn quant(v: f64) i64 {
-    return @intFromFloat(@round(v / node_eps));
+fn quant(v: f64) ?i64 {
+    return numeric.checkedInt(i64, v / node_eps);
 }
 
 /// An undirected edge between two node indices, with its geometric length.
@@ -75,8 +76,8 @@ const Graph = struct {
     pos: std.ArrayList([2]f64),
     adj: std.ArrayList(std.ArrayList(Edge)),
 
-    fn nodeOf(self: *Graph, arena: std.mem.Allocator, p: [2]f64, layer: u8) std.mem.Allocator.Error!usize {
-        const want = Key.of(p, layer);
+    fn nodeOf(self: *Graph, arena: std.mem.Allocator, p: [2]f64, layer: u8) (std.mem.Allocator.Error || error{InvalidGeometry})!usize {
+        const want = Key.of(p, layer) orelse return error.InvalidGeometry;
         for (self.keys.items, 0..) |k, i| {
             if (k.x == want.x and k.y == want.y and k.layer == want.layer) return i;
         }
@@ -132,7 +133,10 @@ pub fn shortestVia(
     via_len_mm: f64,
 ) std.mem.Allocator.Error!?f64 {
     var g = Graph{ .keys = .empty, .pos = .empty, .adj = .empty };
-    try buildGraph(arena, &g, segs, vias, via_len_mm);
+    buildGraph(arena, &g, segs, vias, via_len_mm) catch |err| switch (err) {
+        error.InvalidGeometry => return null,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
     if (g.keys.items.len == 0) return null;
     const src = nearestNode(g, from) orelse return null;
     const dst = nearestNode(g, to) orelse return null;
@@ -168,7 +172,7 @@ fn buildGraph(
     segs: []const Seg,
     vias: []const Via,
     via_len_mm: f64,
-) std.mem.Allocator.Error!void {
+) (std.mem.Allocator.Error || error{InvalidGeometry})!void {
     for (segs) |s| {
         const cuts = try splitParams(arena, segs, s);
         var prev = s.a;
@@ -189,7 +193,7 @@ fn linkPiece(
     a: [2]f64,
     b: [2]f64,
     layer: u8,
-) std.mem.Allocator.Error!void {
+) (std.mem.Allocator.Error || error{InvalidGeometry})!void {
     const len = dist(a, b);
     if (len < min_piece_mm) return;
     const na = try g.nodeOf(arena, a, layer);
@@ -209,7 +213,7 @@ fn linkVia(
     segs: []const Seg,
     v: Via,
     via_len_mm: f64,
-) std.mem.Allocator.Error!void {
+) (std.mem.Allocator.Error || error{InvalidGeometry})!void {
     var first: ?usize = null;
     for (segs) |s| {
         if (dist(s.a, v.at) > node_eps and dist(s.b, v.at) > node_eps) continue;
@@ -440,4 +444,12 @@ test "copper_length joins layers at a via and refuses disconnected copper" {
     };
     try testing.expect((try shortest(arena, &crossing, &.{}, .{ 0, 0 }, .{ 5, 5 })) == null);
     try testing.expect(selfSimple(&crossing)); // different layers never conflict
+}
+
+// spec: Web Server - Copper graph quantization refuses nonfinite and unrepresentable geometry instead of trapping
+test "numeric copper quantization rejects invalid geometry" {
+    try std.testing.expect(Key.of(.{ std.math.inf(f64), 0 }, 0) == null);
+    try std.testing.expect(Key.of(.{ 0, std.math.nan(f64) }, 0) == null);
+    try std.testing.expect(Key.of(.{ 1e100, 0 }, 0) == null);
+    try std.testing.expectEqual(@as(i64, 0), quant(0).?);
 }

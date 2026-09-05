@@ -24,7 +24,7 @@ const serve_root = @import("../serve.zig");
 const Server = serve_root.Server;
 
 /// Error set for HTTP handlers in this module.
-pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error || error{InvalidName};
+pub const HandlerError = error{CannotLockProject} || std.mem.Allocator.Error || std.Io.Writer.Error || error{InvalidName};
 
 // ── Rendered-HTML cache ────────────────────────────────────────────────
 //
@@ -243,6 +243,8 @@ pub fn benchColdPage(allocator: std.mem.Allocator, project_dir: []const u8, name
 /// GET /schematics/:name — HTML schematic page. Evaluates the design, runs
 /// ERC for the status banner, then hands off to render_html.renderToHtml.
 pub fn schematicPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try @import("../infra/source_transaction.zig").begin(ctx.project_dir);
+    defer mutation.unlock();
     const name = req.param("name") orelse {
         res.status = 404;
         return;

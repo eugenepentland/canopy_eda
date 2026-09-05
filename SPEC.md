@@ -7040,6 +7040,23 @@ is what makes the predicate exact rather than approximately right.
 
 ## Web Server
 
+- Editing an already escaped value finds its complete string and preserves adjacent fields
+
+- HTTP source saves reject missing or stale revisions and return the exact committed source revision
+- Notes replacement requires the revision of the exact file read so concurrent task changes survive stale scratchpad saves
+
+- Numeric input conversion rejects nonfinite and out-of-range values without trapping or losing integer precision
+- Copper graph quantization refuses nonfinite and unrepresentable geometry instead of trapping
+
+- Source mutation adapters return commit failures instead of acknowledging successful saves
+
+- Source writes require a transaction and use exact content hashes for revision comparisons
+- Failed source commits preserve the previous file and nested mutation scopes retain one project lock
+- Concurrent source mutations serialize their entire read-modify-write so every accepted change survives
+- Edit JSON decodes escaped values exactly once and rejects malformed or wrongly typed fields
+- Instance edits require current source revisions and unique parsed source labels rather than stale byte offsets
+- Missing sidecars are empty but damaged or unreadable saved state blocks every replacement
+
 - The panel export disables V-score for rounded, curved, or non-rectangular outlines, selects routed tabs instead, and explains the constraint before export
 - The panel export groups rail presence into one top-and-bottom toggle and one left-and-right toggle while preserving each side's configured width and features
 - The panel export shows a live dimensioned preview that repeats the actual board outline inside its configured rails and marks scores, tooling holes and fiducials

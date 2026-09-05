@@ -399,7 +399,7 @@ pub fn saveSubcircuitLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Re
     var out: std.ArrayList(pcb.SavedLayout) = .empty;
     try out.append(req.arena, entry);
     try out.appendSlice(req.arena, existing);
-    const new_rev = pcb.commitNamedLayoutMutation(req.arena, ctx.project_dir, target_name, target_slug, out.items, disk_rev);
+    const new_rev = try pcb.commitNamedLayoutMutation(req.arena, ctx.project_dir, target_name, target_slug, out.items, disk_rev);
     res.content_type = .JSON;
     res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rev\":{d},\"parts\":{d},\"copper\":{}}}", .{ new_rev, captured.parts.len, routes != null });
 }

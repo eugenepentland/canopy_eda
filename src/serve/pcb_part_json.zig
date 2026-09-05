@@ -3,6 +3,7 @@
 //! part JSON fields.
 
 const std = @import("std");
+const source_transaction = @import("../infra/source_transaction.zig");
 const env_mod = @import("../eval/env.zig");
 const export_kicad = @import("../export_kicad.zig");
 const json_writer = @import("../json_writer.zig");
@@ -157,10 +158,12 @@ fn instanceLabel(inst: export_kicad.FlatInstance) []const u8 {
 /// Build {ref:{src,srcName,srcRef}} for every source-backed instance. Root
 /// instances edit root_source; recursion switches to each sub-block's actual
 /// module source so a flattened parent board never patches the wrong file.
+pub const SourceLocation = struct { name: []const u8, project_dir: []const u8 = "" };
+
 pub fn buildEditSources(
     allocator: std.mem.Allocator,
     block: *const env_mod.DesignBlock,
-    root_source: []const u8,
+    root_source: SourceLocation,
 ) []const u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     const w = &aw.writer;
@@ -176,10 +179,11 @@ fn emitBlock(
     w: *std.Io.Writer,
     block: *const env_mod.DesignBlock,
     prefix: []const u8,
-    source_name_raw: []const u8,
+    source: SourceLocation,
     first: *bool,
 ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
-    const source_name = editableSourceName(source_name_raw);
+    const source_name = editableSourceName(source.name);
+    const revision = source_transaction.revisionFor(allocator, source.project_dir, source_name);
     for (block.instances) |inst| {
         if (inst.source_offset == 0 or source_name.len == 0) continue;
         const ref = try joinedRef(allocator, prefix, inst.ref_des);
@@ -190,11 +194,15 @@ fn emitBlock(
         try json_writer.writeScriptString(w, source_name);
         try w.writeAll(",\"srcRef\":");
         try json_writer.writeScriptString(w, if (inst.label.len > 0) inst.label else inst.ref_des);
+        if (revision) |value| {
+            try w.writeAll(",\"sourceRevision\":");
+            try json_writer.writeScriptString(w, &value);
+        }
         try w.writeByte('}');
     }
     for (block.sub_blocks) |sub| {
         const sub_prefix = try joinedRef(allocator, prefix, sub.name);
-        try emitBlock(allocator, w, sub.block, sub_prefix, sub.source, first);
+        try emitBlock(allocator, w, sub.block, sub_prefix, .{ .name = sub.source, .project_dir = source.project_dir }, first);
     }
 }
 
@@ -255,7 +263,7 @@ test "PCB edit metadata resolves root and nested module sources without flatteni
         .groups = &.{},
         .sub_blocks = &subs,
     };
-    const json = buildEditSources(a, &root, "black-canyon");
+    const json = buildEditSources(a, &root, .{ .name = "black-canyon" });
     try std.testing.expect(std.mem.indexOf(u8, json, "\"R1\":{\"src\":19,\"srcName\":\"black-canyon\",\"srcRef\":\"R_BIAS\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"filter/C7\":{\"src\":73,\"srcName\":\"rf-filter\",\"srcRef\":\"C_FILTER\"}") != null);
     try std.testing.expectEqualStrings("", editableSourceName("custom/rf-filter.sexp"));
@@ -423,7 +431,7 @@ test "PCB edit-source provenance escapes a closing script tag in ref-des and lab
         .groups = &.{},
         .sub_blocks = &.{},
     };
-    const json = buildEditSources(a, &root, "black-canyon");
+    const json = buildEditSources(a, &root, .{ .name = "black-canyon" });
     try std.testing.expect(std.mem.indexOf(u8, json, "</script>") == null);
     try std.testing.expect(std.mem.indexOfScalar(u8, json, '<') == null);
 

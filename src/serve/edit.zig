@@ -4,9 +4,11 @@
 //! granular edits), BOM resolution, and version restore — the write half of
 //! the schematic viewer, paired with the read-only handlers in `mcp_tools`.
 const std = @import("std");
+const edit_target = @import("edit_target.zig");
+const edit_request = @import("edit_request.zig");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
-const atomic_write = @import("../infra/atomic_write.zig");
+const source_transaction = @import("../infra/source_transaction.zig");
 const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
@@ -34,14 +36,6 @@ const http_bad_request: u16 = 400;
 const http_internal_error: u16 = 500;
 const max_source_bytes: usize = 10 * 1024 * 1024;
 
-// JSON key prefixes (length-encoded so we don't need bare integer offsets)
-const json_ref_key = "\"ref\":\"";
-const json_value_key = "\"value\":\"";
-const json_component_key = "\"component\":\"";
-const json_old_component_key = "\"oldComponent\":\"";
-const json_src_off_key = "\"srcOff\":";
-const json_pins_key = "\"pins\"";
-
 // Repeated string templates / fragments
 const component_path_template = "{s}/lib/components/{s}.sexp";
 const instance_open_template = "(instance \"{s}\"";
@@ -68,9 +62,6 @@ const err_json_fmt = "{{\"error\":\"{s}\"}}";
 /// differently-shaped success than its siblings.
 const ok_version_json_fmt = "{{\"ok\":true,\"version\":{d}}}";
 
-/// The request-body key naming the design section a mutation applies to. It is
-/// the QUOTED key `parseJsonString` scans for, not the bare word.
-const json_key_section = "\"section\"";
 /// Bodies for the two mutation arguments most often left out by a caller.
 const err_missing_net = "missing net";
 const err_missing_to = "missing to";
@@ -96,7 +87,7 @@ const AllocatingWriter = struct {
 /// Error set for HTTP handlers in this module. Wide enough to cover
 /// every subsystem error that may bubble through `try`: allocator, writer,
 /// file IO, BOM resolve, sexpr parser, and httpz form/query parsing.
-pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+pub const HandlerError = error{CannotLockProject} || std.mem.Allocator.Error || std.Io.Writer.Error ||
     infra_fs.File.WriteError || infra_fs.File.OpenError || infra_fs.File.ReadError ||
     infra_fs.Dir.MakeError || infra_fs.Dir.StatFileError ||
     @import("../bom_resolve.zig").ResolveError ||
@@ -115,6 +106,37 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
         RebuildFailed,
     };
 
+fn attachRevision(ctx: *Server, req: *httpz.Request, res: *httpz.Response) void {
+    if (res.status < 200 or res.status >= 300) return;
+    const body = std.mem.trim(u8, res.body, " \n\r\t");
+    if (body.len < 2 or body[body.len - 1] != '}') return;
+    const input = edit_request.decode(req.arena, req.body() orelse "{}") catch return;
+    const name = input.string("sourceName") orelse req.param("name") orelse input.string("name") orelse return;
+    const revision = source_transaction.revisionFor(req.arena, ctx.project_dir, name) orelse return;
+    res.body = std.fmt.allocPrint(req.arena, "{s},\"sourceRevision\":\"{s}\"}}", .{ body[0 .. body.len - 1], revision }) catch {
+        res.status = 500;
+        res.body = "committed, but response allocation failed; reload";
+        return;
+    };
+}
+
+fn checkRequestRevision(ctx: *Server, req: *httpz.Request, res: *httpz.Response, input: edit_request.Request) bool {
+    const expected = input.string("sourceRevision") orelse {
+        // Creation has no prior source. Every existing-source edit asserts a revision.
+        if (req.param("name") == null) return true;
+        sendJsonError(ctx, res, 409, "source revision required; reload before editing");
+        return false;
+    };
+    const name = input.string("sourceName") orelse req.param("name") orelse return false;
+    const actual = source_transaction.revisionFor(req.arena, ctx.project_dir, name) orelse {
+        sendJsonError(ctx, res, 409, "source changed or cannot be read; reload before editing");
+        return false;
+    };
+    if (std.mem.eql(u8, expected, &actual)) return true;
+    sendJsonError(ctx, res, 409, "source changed; reload before editing");
+    return false;
+}
+
 fn warnResolveIdentities(name: []const u8, err: anyerror) void {
     log.warn("resolveIdentities {s} failed: {s}", .{ name, @errorName(err) });
 }
@@ -123,6 +145,9 @@ fn warnResolveIdentities(name: []const u8, err: anyerror) void {
 /// the source `.sexp` (e.g. C3 → `0.5pF`), re-evaluate the design, and
 /// bump the live version so the schematic viewer redraws on its next poll.
 pub fn editValueApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -131,17 +156,22 @@ pub fn editValueApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
         sendJsonError(ctx, res, 400, "no body");
         return;
     };
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
 
     // Parse JSON: {"ref": "C3", "value": "0.5pF", "srcOff": 1234}
-    const ref_des = parseJsonString(body, "\"ref\"") orelse {
+    const ref_des = input.string("ref") orelse {
         sendJsonError(ctx, res, 400, err_missing_ref);
         return;
     };
-    const new_value = parseJsonString(body, "\"value\"") orelse {
+    const new_value = input.string("value") orelse {
         sendJsonError(ctx, res, 400, "missing value");
         return;
     };
-    const src_off = parseSrcOff(body);
+    const src_off = input.offset();
 
     // Read the .sexp file
     const file_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch {
@@ -157,7 +187,7 @@ pub fn editValueApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
     defer ctx.allocator.free(source);
 
     // Locate the enclosing instance form (offset-first → label-robust).
-    const inst_open = findInstanceOpen(source, ref_des, src_off) orelse {
+    const inst_open = findInstanceOpen(req.arena, source, input.string("sourceLabel") orelse ref_des, src_off, input.string("sourceRevision")) orelse {
         sendJsonError(ctx, res, 404, if (src_off > 0) err_generated_part else err_instance_not_found);
         return;
     };
@@ -175,9 +205,9 @@ pub fn editValueApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
     var new_source: std.Io.Writer.Allocating = .init(ctx.allocator);
     const nw = &new_source.writer;
     if (findInstanceValueRange(source, inst_open, inst_end)) |vr| {
-        try nw.writeAll(source[0..vr[0]]);
-        try nw.writeAll(new_value);
-        try nw.writeAll(source[vr[1]..]);
+        try nw.writeAll(source[0 .. vr[0] - 1]);
+        try writeSexprString(AllocatingWriter{ .writer = nw }, new_value);
+        try nw.writeAll(source[vr[1] + 1 ..]);
     } else if (findBareComponentRange(source, inst_open, inst_end)) |br| {
         const atom = source[br[0]..br[1]];
         if (!componentIsFamily(ctx.allocator, ctx.project_dir, atom)) {
@@ -185,14 +215,16 @@ pub fn editValueApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
             return;
         }
         try nw.writeAll(source[0..br[0]]);
-        try nw.print("({s} \"{s}\")", .{ atom, new_value });
+        try nw.print("({s} ", .{atom});
+        try writeSexprString(AllocatingWriter{ .writer = nw }, new_value);
+        try nw.writeByte(')');
         try nw.writeAll(source[br[1]..]);
     } else {
         sendJsonError(ctx, res, 400, err_no_editable_value);
         return;
     }
 
-    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = new_source.written() }) catch {
+    source_transaction.writeFile(ctx.allocator, file_path, new_source.written()) catch {
         sendJsonError(ctx, res, 500, err_cannot_write_file);
         return;
     };
@@ -201,6 +233,18 @@ pub fn editValueApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
         sendJsonError(ctx, res, 500, err_rebuild_failed);
         return;
     };
+}
+
+/// Closing quote after an opening quote, skipping escaped quotes and slashes.
+fn quotedEnd(source: []const u8, start: usize) ?usize {
+    var i = start;
+    while (i < source.len) : (i += 1) {
+        if (source[i] == '\\') {
+            if (i + 1 >= source.len) return null;
+            i += 1;
+        } else if (source[i] == '"') return i;
+    }
+    return null;
 }
 
 /// Locate the editable value string inside an instance form — the first quoted
@@ -212,14 +256,14 @@ fn findInstanceValueRange(source: []const u8, inst_open: usize, inst_end: usize)
     var pos = inst_open + instance_head.len;
     while (pos < inst_end and isPinWs(source[pos])) : (pos += 1) {}
     if (pos >= inst_end or source[pos] != '"') return null;
-    pos = (std.mem.indexOfScalarPos(u8, source, pos + 1, '"') orelse inst_end) + 1; // past label
+    pos = (quotedEnd(source, pos + 1) orelse inst_end) + 1; // past label
     while (pos < inst_end and isPinWs(source[pos])) : (pos += 1) {}
     if (pos >= inst_end or source[pos] != '(') return null; // fixed component
     const comp_end = findFormEnd(source, pos) orelse inst_end;
     const vq = std.mem.indexOfScalarPos(u8, source, pos + 1, '"') orelse return null;
     if (vq >= comp_end) return null;
     const vs = vq + 1;
-    const ve = std.mem.indexOfScalarPos(u8, source, vs, '"') orelse return null;
+    const ve = quotedEnd(source, vs) orelse return null;
     return .{ vs, ve };
 }
 
@@ -233,7 +277,7 @@ fn findBareComponentRange(source: []const u8, inst_open: usize, inst_end: usize)
     var pos = inst_open + instance_head.len;
     while (pos < inst_end and isPinWs(source[pos])) : (pos += 1) {}
     if (pos >= inst_end or source[pos] != '"') return null;
-    pos = (std.mem.indexOfScalarPos(u8, source, pos + 1, '"') orelse inst_end) + 1; // past label
+    pos = (quotedEnd(source, pos + 1) orelse inst_end) + 1; // past label
     while (pos < inst_end and isPinWs(source[pos])) : (pos += 1) {}
     if (pos >= inst_end or source[pos] == '(') return null; // family form, not a bare atom
     const start = pos;
@@ -270,21 +314,19 @@ fn isFootprintTokenBoundary(c: u8) bool {
 /// `srcOff` points at the instance form (the scene-graph `components[].src`
 /// offset) rather than at the component token itself. Returns null when the
 /// instance or a whole-token match isn't found.
-fn findComponentTokenInInstance(source: []const u8, ref: []const u8, component: []const u8) ?usize {
-    if (ref.len == 0 or component.len == 0) return null;
-    var buf: [256]u8 = undefined;
-    const needle = std.fmt.bufPrint(&buf, instance_open_template, .{ref}) catch return null;
-    const inst_start = std.mem.indexOf(u8, source, needle) orelse return null;
-    const inst_end = findFormEnd(source, inst_start) orelse source.len;
-    var from = inst_start + needle.len;
-    while (std.mem.indexOfPos(u8, source[0..inst_end], from, component)) |pos| {
-        const before_ok = pos == 0 or isFootprintTokenBoundary(source[pos - 1]);
-        const after_pos = pos + component.len;
-        const after_ok = after_pos >= inst_end or isFootprintTokenBoundary(source[after_pos]);
-        if (before_ok and after_ok) return pos;
-        from = pos + 1;
-    }
-    return null;
+fn findComponentTokenInInstance(allocator: std.mem.Allocator, source: []const u8, ref: []const u8, component: []const u8) ?usize {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const start = (edit_target.resolve(arena.allocator(), source, ref, 0, null) catch return null) orelse return null;
+    const end = findFormEnd(source, start) orelse return null;
+    const nodes = sexpr_parser.parse(arena.allocator(), source[start..end]) catch return null;
+    const children = nodes[0].asList() orelse return null;
+    if (children.len < 3) return null;
+    const slot = children[2];
+    const token = if (slot.asList()) |family| (if (family.len > 0) family[0] else return null) else slot;
+    const atom = token.asAtom() orelse return null;
+    if (!std.mem.eql(u8, atom, component)) return null;
+    return start + token.span.offset;
 }
 
 /// POST /api/edit-footprint/:name — swap an instance's component/footprint
@@ -293,6 +335,9 @@ fn findComponentTokenInInstance(source: []const u8, ref: []const u8, component: 
 /// at the instance form), ensures the new family is imported, rebuilds, and
 /// returns the refreshed `components` map.
 pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -302,53 +347,24 @@ pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
         res.body = "no body";
         return;
     };
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
 
     // Parse JSON: {"ref": "C3", "component": "cap-0603", "oldComponent": "cap-0805", "srcOff": 1234}
-    const comp_start_marker = std.mem.indexOf(u8, body, json_component_key) orelse {
-        res.status = 400;
-        res.body = "missing component";
-        return;
-    };
-    const comp_start = comp_start_marker + json_component_key.len;
-    const comp_end = std.mem.indexOfPos(u8, body, comp_start, "\"") orelse {
-        res.status = 400;
-        return;
-    };
-    const new_component = body[comp_start..comp_end];
-
-    const old_comp_marker = std.mem.indexOf(u8, body, json_old_component_key) orelse {
-        res.status = 400;
-        res.body = "missing oldComponent";
-        return;
-    };
-    const old_comp_start = old_comp_marker + json_old_component_key.len;
-    const old_comp_end = std.mem.indexOfPos(u8, body, old_comp_start, "\"") orelse {
-        res.status = 400;
-        return;
-    };
-    const old_component = body[old_comp_start..old_comp_end];
-
-    const src_off_marker = std.mem.indexOf(u8, body, json_src_off_key) orelse {
-        res.status = 400;
-        res.body = "missing srcOff";
-        return;
-    };
-    const src_off_num_start = src_off_marker + json_src_off_key.len;
-    var src_off_num_end = src_off_num_start;
-    while (src_off_num_end < body.len and body[src_off_num_end] >= '0' and body[src_off_num_end] <= '9') : (src_off_num_end += 1) {}
-    const source_offset = std.fmt.parseInt(usize, body[src_off_num_start..src_off_num_end], 10) catch {
-        res.status = 400;
-        res.body = "invalid srcOff";
-        return;
-    };
+    const new_component = input.string("component") orelse return sendJsonError(ctx, res, 400, "missing component");
+    const old_component = input.string("oldComponent") orelse return sendJsonError(ctx, res, 400, "missing oldComponent");
+    const source_offset = input.offset();
 
     // Optional `ref` lets us recover when srcOff points at the instance form
     // (the scene-graph offset) instead of at the component token.
-    const ref_des = parseJsonString(body, "\"ref\"") orelse "";
+    const ref_des = input.string("ref") orelse "";
     // PCB pages can display passives flattened out of a module. Keep the route
     // name as the open parent design (so its live version gets rebuilt/bumped),
     // while editing the module file that actually owns the selected instance.
-    const source_name = parseJsonString(body, "\"sourceName\"") orelse name;
+    const source_name = input.string("sourceName") orelse name;
 
     // Verify the new component family exists
     const comp_path = std.fmt.allocPrint(ctx.allocator, component_path_template, .{ ctx.project_dir, new_component }) catch {
@@ -380,16 +396,12 @@ pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     // The component token must sit exactly at `source_offset`. When it doesn't
     // (e.g. srcOff is the instance-form offset the scene graph reports), fall
     // back to locating the token inside the `(instance "ref" …)` form.
-    const direct_ok = source_offset + old_component.len <= source.len and
-        std.mem.eql(u8, source[source_offset .. source_offset + old_component.len], old_component);
-    const comp_offset = if (direct_ok)
-        source_offset
-    else
-        findComponentTokenInInstance(source, ref_des, old_component) orelse {
-            res.status = 400;
-            res.body = "source offset mismatch — file may have changed";
-            return;
-        };
+    const source_label = input.string("sourceLabel") orelse ref_des;
+    const target = findInstanceOpen(req.arena, source, source_label, source_offset, input.string("sourceRevision")) orelse
+        return sendJsonError(ctx, res, 409, "instance identity mismatch; reload before editing");
+    const comp_offset = findComponentTokenInInstance(req.arena, source, source_label, old_component) orelse
+        return sendJsonError(ctx, res, 409, "component changed; reload before editing");
+    if (comp_offset < target) return sendJsonError(ctx, res, 409, "invalid component target");
 
     var new_source: std.Io.Writer.Allocating = .init(ctx.allocator);
     const nw = &new_source.writer;
@@ -438,7 +450,7 @@ pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
         }
     }
 
-    atomic_write.writeFile(file_path, final_source) catch {
+    source_transaction.writeFile(ctx.allocator, file_path, final_source) catch {
         res.status = 500;
         res.body = err_cannot_write_file;
         return;
@@ -501,7 +513,7 @@ pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     try cw.print("{{\"ok\":true,\"version\":{d},\"components\":{{", .{version});
     _ = try bom_html.writeComponentsJson(cw, block, "", &svg_sym_cache, ctx.allocator, ctx.project_dir);
     try cw.writeAll("},\"part_edits\":");
-    try cw.writeAll(pcb_part_json.buildEditSources(ctx.allocator, block, name));
+    try cw.writeAll(pcb_part_json.buildEditSources(ctx.allocator, block, .{ .name = name, .project_dir = ctx.project_dir }));
     try cw.writeAll("}");
 
     res.header(header_cors_allow_origin, "*");
@@ -515,6 +527,9 @@ pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
 /// A module emits a top-level (sub-block "<name>" (<module> <args>)); the
 /// section field is ignored for modules (sub-blocks are not evaluated in a section).
 pub fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -524,19 +539,24 @@ pub fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
         res.body = "no body";
         return;
     };
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
 
-    const component = parseJsonString(body, "\"component\"") orelse {
+    const component = input.string("component") orelse {
         res.status = 400;
         res.body = "missing component";
         return;
     };
-    const value = parseJsonString(body, "\"value\"") orelse "";
-    const section = parseJsonString(body, json_key_section) orelse "";
+    const value = input.string("value") orelse "";
+    const section = input.string("section") orelse "";
     // Optional caller-chosen ref-des. When omitted we emit the component name
     // as a descriptive (non-standard) label, which the evaluator's post-build
     // auto-assignment renumbers to the right prefix (C1, R3, …). An instance
     // form requires a ref-des string first arg, so this must never be empty.
-    const ref_arg = parseJsonString(body, "\"ref\"") orelse "";
+    const ref_arg = input.string("ref") orelse "";
     const label = if (ref_arg.len > 0) ref_arg else component;
 
     // `kind:"module"` emits a (sub-block "<name>" (<module> <args>)) instead of
@@ -544,19 +564,18 @@ pub fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
     // evaluated inside a (section …)), so the section field is ignored for them.
     // `args` is the already-formatted inside-parens text (named "(rfbt 220k)" or
     // positional "220k 47k"); empty for a fully-defaulted module.
-    const kind = parseJsonString(body, "\"kind\"") orelse "component";
+    const kind = input.string("kind") orelse "component";
     const is_module = std.mem.eql(u8, kind, "module");
     const sub_name = blk: {
-        const n = parseJsonString(body, "\"name\"") orelse "";
+        const n = input.string("name") orelse "";
         break :blk if (n.len > 0) n else component;
     };
-    const mod_args = parseJsonString(body, "\"args\"") orelse "";
+    const mod_args = input.string("args") orelse "";
     // When the part needs a top-level (import …) to resolve — every module, and
     // any non-family component (an IC) — the client sets "import":true and we
     // splice one in (idempotent) so the rebuilt design evaluates. Component
     // families (cap-0402, res-0805, …) auto-load, so the flag is omitted there.
-    const want_import = std.mem.indexOf(u8, body, "\"import\":true") != null or
-        std.mem.indexOf(u8, body, "\"import\": true") != null;
+    const want_import = input.boolean("import");
 
     // Read source file
     const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
@@ -569,56 +588,36 @@ pub fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
     };
     defer ctx.allocator.free(source);
 
-    // Parse pin assignments from body: "pins":{"1":"VDD","2":"GND"}
-    var pin_str: std.Io.Writer.Allocating = .init(ctx.allocator);
-    const pw = &pin_str.writer;
-    if (std.mem.indexOf(u8, body, json_pins_key)) |pins_start| {
-        // Find the opening brace
-        var pos = pins_start + json_pins_key.len;
-        while (pos < body.len and body[pos] != '{') : (pos += 1) {}
-        if (pos < body.len) {
-            pos += 1; // skip {
-            while (pos < body.len and body[pos] != '}') {
-                // Parse "pin_num":"net_name"
-                while (pos < body.len and body[pos] != '"') : (pos += 1) {}
-                if (pos >= body.len) break;
-                pos += 1;
-                const pin_start = pos;
-                while (pos < body.len and body[pos] != '"') : (pos += 1) {}
-                const pin_num = body[pin_start..pos];
-                pos += 1; // skip closing "
-
-                while (pos < body.len and body[pos] != '"') : (pos += 1) {}
-                if (pos >= body.len) break;
-                pos += 1;
-                const net_start = pos;
-                while (pos < body.len and body[pos] != '"') : (pos += 1) {}
-                const net_name = body[net_start..pos];
-                pos += 1;
-
-                try pw.print("\n    (pin {s} \"{s}\")", .{ pin_num, net_name });
-
-                while (pos < body.len and (body[pos] == ',' or body[pos] == ' ')) : (pos += 1) {}
+    var inst_form: std.Io.Writer.Allocating = .init(ctx.allocator);
+    defer inst_form.deinit();
+    const iw = &inst_form.writer;
+    const escaped = AllocatingWriter{ .writer = iw };
+    if (is_module) {
+        try iw.writeAll("  (sub-block ");
+        try writeSexprString(escaped, sub_name);
+        try iw.print(" ({s}", .{component});
+        if (mod_args.len > 0) try iw.print(" {s}", .{mod_args});
+        try iw.writeAll("))\n");
+    } else {
+        try iw.writeAll("  (instance ");
+        try writeSexprString(escaped, label);
+        if (value.len > 0) {
+            try iw.print(" ({s} ", .{component});
+            try writeSexprString(escaped, value);
+            try iw.writeByte(')');
+        } else {
+            try iw.print(" {s}", .{component});
+        }
+        if (input.root.object.get("pins")) |pins| {
+            var entries = pins.object.iterator();
+            while (entries.next()) |entry| {
+                try iw.writeAll("\n    (pin ");
+                try iw.writeAll(entry.key_ptr.*);
+                try iw.writeByte(' ');
+                try writeSexprString(escaped, entry.value_ptr.string);
+                try iw.writeByte(')');
             }
         }
-    }
-
-    // Build the form — a (sub-block …) for modules, otherwise an (instance …).
-    var inst_form: std.Io.Writer.Allocating = .init(ctx.allocator);
-    const iw = &inst_form.writer;
-    if (is_module) {
-        if (mod_args.len > 0) {
-            try iw.print("  (sub-block \"{s}\" ({s} {s}))\n", .{ sub_name, component, mod_args });
-        } else {
-            try iw.print("  (sub-block \"{s}\" ({s}))\n", .{ sub_name, component });
-        }
-    } else {
-        if (value.len > 0) {
-            try iw.print("  (instance \"{s}\" ({s} \"{s}\")", .{ label, component, value });
-        } else {
-            try iw.print("  (instance \"{s}\" {s}", .{ label, component });
-        }
-        try iw.writeAll(pin_str.written());
         try iw.writeAll(")\n");
     }
 
@@ -679,7 +678,7 @@ pub fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
     }
 
     // Write file
-    atomic_write.writeFile(file_path, new_source.written()) catch {
+    source_transaction.writeFile(ctx.allocator, file_path, new_source.written()) catch {
         res.status = 500;
         res.body = err_cannot_write_file;
         return;
@@ -698,12 +697,21 @@ pub fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
 /// design can be started from the home page / editor instead of hand-writing the
 /// stub. 409 if a design with that basename already exists; 400 on an unsafe name.
 pub fn newDesignApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const body = req.body() orelse {
         res.status = 400;
         res.body = "no body";
         return;
     };
-    const name = parseJsonString(body, "\"name\"") orelse {
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
+
+    const name = input.string("name") orelse {
         res.status = 400;
         res.body = "missing name";
         return;
@@ -726,7 +734,7 @@ pub fn newDesignApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
     }
     // Title is embedded inside a quoted s-expr string; if it carries a char that
     // would need escaping, fall back to the (safe) name rather than risk bad source.
-    const raw_title = parseJsonString(body, "\"title\"") orelse "";
+    const raw_title = input.string("title") orelse "";
     const title = blk: {
         if (raw_title.len == 0) break :blk name;
         if (std.mem.indexOfAny(u8, raw_title, "\"\\\n\r") != null) break :blk name;
@@ -746,7 +754,7 @@ pub fn newDesignApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
 
     const content = try std.fmt.allocPrint(ctx.allocator, "(design-block \"{s}\")\n", .{title});
     defer ctx.allocator.free(content);
-    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = content }) catch {
+    source_transaction.writeFile(ctx.allocator, file_path, content) catch {
         res.status = 500;
         res.body = err_cannot_write_file;
         return;
@@ -899,9 +907,18 @@ pub fn getBoardRoleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
 /// Surgically updates the design-root role, snapshots, and rebuilds so every
 /// role-aware GUI/API consumer observes the change immediately.
 pub fn setBoardRoleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse return sendJsonError(ctx, res, http_not_found, "missing design");
     const body = req.body() orelse return sendJsonError(ctx, res, http_bad_request, "missing body");
-    const role_text = parseJsonString(body, "\"role\"") orelse
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
+
+    const role_text = input.string("role") orelse
         return sendJsonError(ctx, res, http_bad_request, "missing role");
     const role: env_mod.BoardRole = if (std.mem.eql(u8, role_text, "board"))
         .board
@@ -935,11 +952,14 @@ pub fn setBoardRoleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
 /// POST /api/power-plane/:name  Body: {"enabled":true|false}. Updates the
 /// source-level plane policy, then rebuilds before the PCB page reloads.
 pub fn setPowerPlaneApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse return sendJsonError(ctx, res, http_not_found, "missing design");
     const body = req.body() orelse return sendJsonError(ctx, res, http_bad_request, "missing body");
-    const root = std.json.parseFromSliceLeaky(std.json.Value, req.arena, body, .{}) catch
-        return sendJsonError(ctx, res, http_bad_request, "invalid JSON");
-    if (root != .object) return sendJsonError(ctx, res, http_bad_request, "missing enabled");
+    const input = edit_request.decode(req.arena, body) catch
+        return sendJsonError(ctx, res, http_bad_request, "invalid edit JSON or field type");
+    const root = input.root;
     const enabled_v = root.object.get("enabled") orelse
         return sendJsonError(ctx, res, http_bad_request, "missing enabled");
     if (enabled_v != .bool) return sendJsonError(ctx, res, http_bad_request, "enabled must be boolean");
@@ -984,6 +1004,9 @@ fn finishMutation(ctx: *Server, name: []const u8, new_source: []const u8, desc: 
 /// POST /api/add-section/:name  Body: {"section":"Power","subtitle":"3V3 buck"}
 /// Splice an empty `(section "Name" "subtitle"?)` into the design-block.
 pub fn addSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -993,7 +1016,13 @@ pub fn addSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         res.body = "no body";
         return;
     };
-    const section = parseJsonString(body, json_key_section) orelse {
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
+
+    const section = input.string("section") orelse {
         res.status = 400;
         res.body = "missing section";
         return;
@@ -1003,7 +1032,7 @@ pub fn addSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         res.body = "section name is empty";
         return;
     }
-    const subtitle = parseJsonString(body, "\"subtitle\"") orelse "";
+    const subtitle = input.string("subtitle") orelse "";
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
         res.status = 500;
         res.body = err_cannot_read_file;
@@ -1041,6 +1070,9 @@ pub fn addSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
 
 /// POST /api/rename-section/:name  Body: {"from":"Power","to":"Power Rails"}
 pub fn renameSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1050,12 +1082,18 @@ pub fn renameSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
         res.body = "no body";
         return;
     };
-    const from = parseJsonString(body, "\"from\"") orelse {
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
+
+    const from = input.string("from") orelse {
         res.status = 400;
         res.body = "missing from";
         return;
     };
-    const to = parseJsonString(body, "\"to\"") orelse {
+    const to = input.string("to") orelse {
         res.status = 400;
         res.body = err_missing_to;
         return;
@@ -1098,6 +1136,9 @@ pub fn renameSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
 /// POST /api/remove-section/:name  Body: {"section":"Power"}
 /// Deletes an EMPTY section (metadata only); refuses one holding parts (409).
 pub fn removeSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1107,7 +1148,13 @@ pub fn removeSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
         res.body = "no body";
         return;
     };
-    const section = parseJsonString(body, json_key_section) orelse {
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
+
+    const section = input.string("section") orelse {
         res.status = 400;
         res.body = "missing section";
         return;
@@ -1159,6 +1206,9 @@ pub fn removeSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
 
 /// POST /api/add-port/:name  Body: {"net":"VDD","dir":"in"}  (dir: in|out|bidi)
 pub fn addPortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1168,12 +1218,18 @@ pub fn addPortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
         res.body = "no body";
         return;
     };
-    const net = parseJsonString(body, "\"net\"") orelse {
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
+
+    const net = input.string("net") orelse {
         res.status = 400;
         res.body = err_missing_net;
         return;
     };
-    const dir = parseJsonString(body, "\"dir\"") orelse "bidi";
+    const dir = input.string("dir") orelse "bidi";
     const dir_ok = std.mem.eql(u8, dir, "in") or std.mem.eql(u8, dir, "out") or std.mem.eql(u8, dir, "bidi");
     if (net.len == 0 or !dir_ok) {
         res.status = 400;
@@ -1214,6 +1270,9 @@ pub fn addPortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
 
 /// POST /api/remove-port/:name  Body: {"net":"VDD"}
 pub fn removePortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1223,7 +1282,13 @@ pub fn removePortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         res.body = "no body";
         return;
     };
-    const net = parseJsonString(body, "\"net\"") orelse {
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
+
+    const net = input.string("net") orelse {
         res.status = 400;
         res.body = err_missing_net;
         return;
@@ -1262,6 +1327,9 @@ pub fn removePortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
 
 /// POST /api/rename-refdes/:name  Body: {"ref":"C3","to":"C10","srcOff":1234}
 pub fn renameRefdesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1271,12 +1339,18 @@ pub fn renameRefdesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         res.body = "no body";
         return;
     };
-    const ref = parseJsonString(body, "\"ref\"") orelse {
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
+
+    const ref = input.string("ref") orelse {
         res.status = 400;
         res.body = err_missing_ref;
         return;
     };
-    const to = parseJsonString(body, "\"to\"") orelse {
+    const to = input.string("to") orelse {
         res.status = 400;
         res.body = err_missing_to;
         return;
@@ -1286,7 +1360,7 @@ pub fn renameRefdesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         res.body = "new ref is empty";
         return;
     }
-    const src_off = parseSrcOff(body);
+    const src_off = input.offset();
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
         res.status = 500;
         res.body = err_cannot_read_file;
@@ -1302,7 +1376,7 @@ pub fn renameRefdesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         res.body = "another instance already uses that ref";
         return;
     }
-    const open = findInstanceOpen(source, ref, src_off) orelse {
+    const open = findInstanceOpen(req.arena, source, input.string("sourceLabel") orelse ref, src_off, input.string("sourceRevision")) orelse {
         res.status = 404;
         res.body = err_instance_not_found;
         return;
@@ -1312,7 +1386,7 @@ pub fn renameRefdesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         res.body = err_malformed_instance;
         return;
     };
-    const rq = std.mem.indexOfScalarPos(u8, source, lq + 1, '"') orelse {
+    const rq = quotedEnd(source, lq + 1) orelse {
         res.status = 500;
         res.body = err_malformed_instance;
         return;
@@ -1333,6 +1407,9 @@ pub fn renameRefdesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
 /// POST /api/set-dnp/:name  Body: {"ref":"R7","dnp":true,"srcOff":1234}
 /// Toggle a `(dnp)` marker inside an instance (Do-Not-Populate).
 pub fn setDnpApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1342,14 +1419,19 @@ pub fn setDnpApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
         res.body = "no body";
         return;
     };
-    const ref = parseJsonString(body, "\"ref\"") orelse {
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
+
+    const ref = input.string("ref") orelse {
         res.status = 400;
         res.body = err_missing_ref;
         return;
     };
-    const want_dnp = std.mem.indexOf(u8, body, "\"dnp\":true") != null or
-        std.mem.indexOf(u8, body, "\"dnp\": true") != null;
-    const src_off = parseSrcOff(body);
+    const want_dnp = input.boolean("dnp");
+    const src_off = input.offset();
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
         res.status = 500;
         res.body = err_cannot_read_file;
@@ -1357,7 +1439,7 @@ pub fn setDnpApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
     };
     defer ctx.allocator.free(source);
 
-    const open = findInstanceOpen(source, ref, src_off) orelse {
+    const open = findInstanceOpen(req.arena, source, input.string("sourceLabel") orelse ref, src_off, input.string("sourceRevision")) orelse {
         res.status = 404;
         res.body = err_instance_not_found;
         return;
@@ -1401,6 +1483,9 @@ pub fn setDnpApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
 /// POST /api/remove-instance/:name
 /// Body: {"ref":"C3"}
 pub fn removeInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1410,8 +1495,13 @@ pub fn removeInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
         res.body = "no body";
         return;
     };
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
 
-    const ref_des = parseJsonString(body, "\"ref\"") orelse {
+    const ref_des = input.string("ref") orelse {
         res.status = 400;
         res.body = err_missing_ref;
         return;
@@ -1432,8 +1522,8 @@ pub fn removeInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
     // label-declared parts that auto-renumber — e.g. a wizard-added cap whose
     // source ref-des is the component name, not the build-time C4), with the
     // `(instance "REF"` needle as fallback.
-    const src_off = parseSrcOff(body);
-    const inst_pos = findInstanceOpen(source, ref_des, src_off) orelse {
+    const src_off = input.offset();
+    const inst_pos = findInstanceOpen(req.arena, source, input.string("sourceLabel") orelse ref_des, src_off, input.string("sourceRevision")) orelse {
         res.status = 404;
         res.body = if (src_off > 0) err_generated_part else err_instance_not_found;
         return;
@@ -1456,7 +1546,7 @@ pub fn removeInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
     try nw.writeAll(source[0..inst_start]);
     try nw.writeAll(source[inst_end..]);
 
-    atomic_write.writeFile(file_path, new_source.written()) catch {
+    source_transaction.writeFile(ctx.allocator, file_path, new_source.written()) catch {
         res.status = 500;
         res.body = err_cannot_write_file;
         return;
@@ -1487,39 +1577,13 @@ fn sendJsonError(ctx: *Server, res: *httpz.Response, status: u16, msg: []const u
 
 /// Parse the optional numeric `"srcOff":N` field (the component-token offset the
 /// scene graph publishes as `components[].src`). Returns 0 when absent.
-fn parseSrcOff(body: []const u8) usize {
-    const m = std.mem.indexOf(u8, body, json_src_off_key) orelse return 0;
-    var s = m + json_src_off_key.len;
-    while (s < body.len and body[s] == ' ') : (s += 1) {}
-    var e = s;
-    while (e < body.len and body[e] >= '0' and body[e] <= '9') : (e += 1) {}
-    return std.fmt.parseInt(usize, body[s..e], 10) catch 0;
-}
-
 /// Locate the opening '(' of the `(instance "…"` form a part lives in. `src_off`
-/// is the component-token offset the scene graph publishes (`components[].src`);
-/// scanning back to the enclosing `(instance` makes the edit endpoints robust to
-/// instances declared with a descriptive *label* that auto-renumbers to a
-/// different ref-des (e.g. `(instance "expansion" 204928-0601 …)` → U10, so
-/// `(instance "U10"` is never in the source). Falls back to a `(instance "REF"`
-/// needle when no usable offset is given.
-fn findInstanceOpen(source: []const u8, ref_des: []const u8, src_off: usize) ?usize {
-    if (src_off > 0 and src_off <= source.len) {
-        if (std.mem.lastIndexOf(u8, source[0..src_off], instance_head)) |p| {
-            // Confirm it opens `(instance "` (not a comment mention) and that
-            // src_off really sits inside this instance form.
-            var q = p + instance_head.len;
-            while (q < source.len and (source[q] == ' ' or source[q] == '\t')) : (q += 1) {}
-            if (q < source.len and source[q] == '"') {
-                if (findFormEnd(source, p)) |end| {
-                    if (src_off < end) return p;
-                }
-            }
-        }
-    }
-    var buf: [256]u8 = undefined;
-    const needle = std.fmt.bufPrint(&buf, instance_open_template, .{ref_des}) catch return null;
-    return std.mem.indexOf(u8, source, needle);
+/// is only a navigation hint. Resolve the current parsed source label and
+/// require its exact revision whenever an offset was supplied.
+fn findInstanceOpen(allocator: std.mem.Allocator, source: []const u8, identity: []const u8, src_off: usize, revision: ?[]const u8) ?usize {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    return edit_target.resolve(arena.allocator(), source, identity, src_off, revision) catch null;
 }
 
 /// A parsed `(pin …)` form. The leading pin-id tokens are appended to the
@@ -1563,7 +1627,7 @@ fn parsePinForm(
         if (ch == ')') return null; // no net string
         if (ch == '"') {
             const ns = i + 1;
-            const ne = std.mem.indexOfScalarPos(u8, source, ns, '"') orelse return null;
+            const ne = quotedEnd(source, ns) orelse return null;
             var t = ne + 1;
             var clean = true;
             while (t + 1 < form_end) : (t += 1) {
@@ -1601,7 +1665,7 @@ fn instanceLabel(source: []const u8, inst_open: usize) ?[]const u8 {
     while (i < source.len and isPinWs(source[i])) : (i += 1) {}
     if (i >= source.len or source[i] != '"') return null;
     const s = i + 1;
-    const e = std.mem.indexOfScalarPos(u8, source, s, '"') orelse return null;
+    const e = quotedEnd(source, s) orelse return null;
     return source[s..e];
 }
 
@@ -1663,6 +1727,9 @@ fn findInstancePinForm(
 /// POST /api/rewire-pin/:name
 /// Body: {"ref":"U1","pin":"5","net":"VDD_NEW","srcOff":1234}
 pub fn rewirePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1671,20 +1738,25 @@ pub fn rewirePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
         sendJsonError(ctx, res, 400, "no body");
         return;
     };
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
 
-    const ref_des = parseJsonString(body, "\"ref\"") orelse {
+    const ref_des = input.string("ref") orelse {
         sendJsonError(ctx, res, 400, err_missing_ref);
         return;
     };
-    const pin = parseJsonString(body, "\"pin\"") orelse {
+    const pin = input.string("pin") orelse {
         sendJsonError(ctx, res, 400, "missing pin");
         return;
     };
-    const new_net = parseJsonString(body, "\"net\"") orelse {
+    const new_net = input.string("net") orelse {
         sendJsonError(ctx, res, 400, err_missing_net);
         return;
     };
-    const src_off = parseSrcOff(body);
+    const src_off = input.offset();
 
     const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(file_path);
@@ -1697,7 +1769,7 @@ pub fn rewirePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
 
     // Locate the enclosing instance form (by component-token offset, robust to
     // label-declared instances; ref-des needle as fallback).
-    const inst_open = findInstanceOpen(source, ref_des, src_off) orelse {
+    const inst_open = findInstanceOpen(req.arena, source, input.string("sourceLabel") orelse ref_des, src_off, input.string("sourceRevision")) orelse {
         sendJsonError(ctx, res, 404, if (src_off > 0) err_generated_part else err_instance_not_found);
         return;
     };
@@ -1719,9 +1791,11 @@ pub fn rewirePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
         var ins: std.Io.Writer.Allocating = .init(ctx.allocator);
         const iw = &ins.writer;
         try iw.writeAll(source[0..close]);
-        try iw.print("\n    (pin {s} \"{s}\")", .{ pin, new_net });
+        try iw.print("\n    (pin {s} ", .{pin});
+        try writeSexprString(AllocatingWriter{ .writer = iw }, new_net);
+        try iw.writeByte(')');
         try iw.writeAll(source[close..]);
-        infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = ins.written() }) catch {
+        source_transaction.writeFile(ctx.allocator, file_path, ins.written()) catch {
             sendJsonError(ctx, res, 500, err_cannot_write_file);
             return;
         };
@@ -1737,9 +1811,9 @@ pub fn rewirePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
     if (match_tokens.items.len <= 1) {
         // Single-pin form: replace just the net string, preserving any trailing
         // `(as …)`/`(id …)` annotations.
-        try nw.writeAll(source[0..p.net_start]);
-        try nw.writeAll(new_net);
-        try nw.writeAll(source[p.net_end..]);
+        try nw.writeAll(source[0 .. p.net_start - 1]);
+        try writeSexprString(AllocatingWriter{ .writer = nw }, new_net);
+        try nw.writeAll(source[p.net_end + 1 ..]);
     } else {
         // Multi-pin shorthand: split the target pin into its own form, leaving
         // the rest on the original net. Only safe for a clean `(pin … "net")`.
@@ -1757,11 +1831,13 @@ pub fn rewirePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
             try nw.writeAll(tk);
             first = false;
         }
-        try nw.print(" \"{s}\") (pin {s} \"{s}\")", .{ old_net, pin, new_net });
+        try nw.print(" \"{s}\") (pin {s} ", .{ old_net, pin });
+        try writeSexprString(AllocatingWriter{ .writer = nw }, new_net);
+        try nw.writeByte(')');
         try nw.writeAll(source[p.form_end..]);
     }
 
-    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = new_source.written() }) catch {
+    source_transaction.writeFile(ctx.allocator, file_path, new_source.written()) catch {
         sendJsonError(ctx, res, 500, err_cannot_write_file);
         return;
     };
@@ -1779,6 +1855,9 @@ pub fn rewirePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
 /// shared net renders first — and the PCB placer keeps it there too. Body:
 /// `{"ref":"C4","ic":"U2","pin":"6","srcOff":N}`.
 pub fn bindDecoupleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1787,20 +1866,25 @@ pub fn bindDecoupleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         sendJsonError(ctx, res, 400, "no body");
         return;
     };
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
 
-    const ref_des = parseJsonString(body, "\"ref\"") orelse {
+    const ref_des = input.string("ref") orelse {
         sendJsonError(ctx, res, 400, err_missing_ref);
         return;
     };
-    const ic = parseJsonString(body, "\"ic\"") orelse {
+    const ic = input.string("ic") orelse {
         sendJsonError(ctx, res, 400, "missing ic");
         return;
     };
-    const pad = parseJsonString(body, "\"pin\"") orelse {
+    const pad = input.string("pin") orelse {
         sendJsonError(ctx, res, 400, "missing pin");
         return;
     };
-    const src_off = parseSrcOff(body);
+    const src_off = input.offset();
 
     const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(file_path);
@@ -1811,7 +1895,7 @@ pub fn bindDecoupleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
     };
     defer ctx.allocator.free(source);
 
-    const inst_open = findInstanceOpen(source, ref_des, src_off) orelse {
+    const inst_open = findInstanceOpen(req.arena, source, input.string("sourceLabel") orelse ref_des, src_off, input.string("sourceRevision")) orelse {
         sendJsonError(ctx, res, 404, if (src_off > 0) err_generated_part else err_instance_not_found);
         return;
     };
@@ -1832,10 +1916,11 @@ pub fn bindDecoupleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
     var form: std.Io.Writer.Allocating = .init(ctx.allocator);
     defer form.deinit();
     const fw = &form.writer;
-    if (numeric)
-        try fw.print("(decouples \"{s}\" {s})", .{ ic, pad })
-    else
-        try fw.print("(decouples \"{s}\" \"{s}\")", .{ ic, pad });
+    try fw.writeAll("(decouples ");
+    try writeSexprString(AllocatingWriter{ .writer = fw }, ic);
+    try fw.writeByte(' ');
+    if (numeric) try fw.writeAll(pad) else try writeSexprString(AllocatingWriter{ .writer = fw }, pad);
+    try fw.writeByte(')');
 
     var out: std.Io.Writer.Allocating = .init(ctx.allocator);
     const ow = &out.writer;
@@ -1857,7 +1942,7 @@ pub fn bindDecoupleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         try ow.writeAll(source[close..]);
     }
 
-    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = out.written() }) catch {
+    source_transaction.writeFile(ctx.allocator, file_path, out.written()) catch {
         sendJsonError(ctx, res, 500, err_cannot_write_file);
         return;
     };
@@ -1875,6 +1960,9 @@ pub fn bindDecoupleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
 /// gives it a brand-new ref instead of colliding with the original. Body:
 /// `{"ref":"C2","srcOff":N}`.
 pub fn duplicateInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1883,11 +1971,17 @@ pub fn duplicateInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
         sendJsonError(ctx, res, 400, "no body");
         return;
     };
-    const ref_des = parseJsonString(body, "\"ref\"") orelse {
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
+
+    const ref_des = input.string("ref") orelse {
         sendJsonError(ctx, res, 400, err_missing_ref);
         return;
     };
-    const src_off = parseSrcOff(body);
+    const src_off = input.offset();
 
     const file_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(file_path);
@@ -1897,7 +1991,7 @@ pub fn duplicateInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
     };
     defer ctx.allocator.free(source);
 
-    const inst_open = findInstanceOpen(source, ref_des, src_off) orelse {
+    const inst_open = findInstanceOpen(req.arena, source, input.string("sourceLabel") orelse ref_des, src_off, input.string("sourceRevision")) orelse {
         sendJsonError(ctx, res, 404, if (src_off > 0) err_generated_part else err_instance_not_found);
         return;
     };
@@ -1911,7 +2005,7 @@ pub fn duplicateInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
         sendJsonError(ctx, res, 400, err_malformed_instance);
         return;
     };
-    const q2 = std.mem.indexOfScalarPos(u8, source, q1 + 1, '"') orelse {
+    const q2 = quotedEnd(source, q1 + 1) orelse {
         sendJsonError(ctx, res, 400, err_malformed_instance);
         return;
     };
@@ -1954,7 +2048,7 @@ pub fn duplicateInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
     try ow.writeAll(source[id_hi..inst_end]); // closing ")" (id removed)
     try ow.writeAll(source[inst_end..]);
 
-    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = out.written() }) catch {
+    source_transaction.writeFile(ctx.allocator, file_path, out.written()) catch {
         sendJsonError(ctx, res, 500, err_cannot_write_file);
         return;
     };
@@ -1972,6 +2066,9 @@ pub fn duplicateInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
 /// "VDD3V3"). Renaming onto an existing net merges them (intentional). Body:
 /// `{"from":"LED2_DRV","to":"GP11_NET"}`.
 pub fn renameNetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = 404;
         return;
@@ -1980,11 +2077,17 @@ pub fn renameNetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
         sendJsonError(ctx, res, 400, "no body");
         return;
     };
-    const from = parseJsonString(body, "\"from\"") orelse {
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
+
+    const from = input.string("from") orelse {
         sendJsonError(ctx, res, 400, "missing from");
         return;
     };
-    const to = parseJsonString(body, "\"to\"") orelse {
+    const to = input.string("to") orelse {
         sendJsonError(ctx, res, 400, err_missing_to);
         return;
     };
@@ -2020,7 +2123,7 @@ pub fn renameNetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
     };
     defer ctx.allocator.free(out);
 
-    infra_fs.cwd().writeFile(.{ .sub_path = file_path, .data = out }) catch {
+    source_transaction.writeFile(ctx.allocator, file_path, out) catch {
         sendJsonError(ctx, res, 500, err_cannot_write_file);
         return;
     };
@@ -2034,6 +2137,9 @@ pub fn renameNetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
 /// instance. Body: `{"ref":"U1","old_pin":"V11","new_pin":"V12"}`. Returns
 /// HTTP 409 with a structured error if the destination pin is already used.
 pub fn movePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
 
@@ -2047,18 +2153,23 @@ pub fn movePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
         res.body = err_json_no_body;
         return;
     };
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
 
-    const ref_des = parseJsonString(body, "\"ref\"") orelse {
+    const ref_des = input.string("ref") orelse {
         res.status = 400;
         res.body = "{\"error\":\"missing ref\"}";
         return;
     };
-    const old_pin = parseJsonString(body, "\"old_pin\"") orelse {
+    const old_pin = input.string("old_pin") orelse {
         res.status = 400;
         res.body = "{\"error\":\"missing old_pin\"}";
         return;
     };
-    const new_pin = parseJsonString(body, "\"new_pin\"") orelse {
+    const new_pin = input.string("new_pin") orelse {
         res.status = 400;
         res.body = "{\"error\":\"missing new_pin\"}";
         return;
@@ -2110,6 +2221,9 @@ pub fn movePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
 /// Swap the net assignments of two pins on the same instance.
 /// Body: `{"ref":"U1","pin_a":"V11","pin_b":"V12"}`.
 pub fn swapPinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
 
@@ -2123,18 +2237,23 @@ pub fn swapPinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
         res.body = err_json_no_body;
         return;
     };
+    const input = edit_request.decode(req.arena, body) catch {
+        sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+        return;
+    };
+    if (!checkRequestRevision(ctx, req, res, input)) return;
 
-    const ref_des = parseJsonString(body, "\"ref\"") orelse {
+    const ref_des = input.string("ref") orelse {
         res.status = 400;
         res.body = "{\"error\":\"missing ref\"}";
         return;
     };
-    const pin_a = parseJsonString(body, "\"pin_a\"") orelse {
+    const pin_a = input.string("pin_a") orelse {
         res.status = 400;
         res.body = "{\"error\":\"missing pin_a\"}";
         return;
     };
-    const pin_b = parseJsonString(body, "\"pin_b\"") orelse {
+    const pin_b = input.string("pin_b") orelse {
         res.status = 400;
         res.body = "{\"error\":\"missing pin_b\"}";
         return;
@@ -2216,15 +2335,6 @@ fn rebuildAndPush(ctx: *Server, name: []const u8, res: *httpz.Response) HandlerE
     res.body = ok_json_true;
 }
 
-fn parseJsonString(body: []const u8, key: []const u8) ?[]const u8 {
-    const marker = std.mem.indexOf(u8, body, key) orelse return null;
-    var start = marker + key.len;
-    while (start < body.len and body[start] != '"') : (start += 1) {}
-    start += 1; // skip opening quote
-    const end = std.mem.indexOfPos(u8, body, start, "\"") orelse return null;
-    return body[start..end];
-}
-
 /// True when `source` already has a top-level `(import <name>)`. Token-aware so
 /// `(import foo)` does not match a request to import `foobar`.
 fn hasImport(source: []const u8, name: []const u8) bool {
@@ -2255,6 +2365,7 @@ fn hasImport(source: []const u8, name: []const u8) bool {
 // delegate here to remove duplication.
 
 pub const EditError = error{
+    CannotLockProject,
     InstanceNotFound,
     PinNotFound,
     PinAlreadyAssigned,
@@ -2311,6 +2422,8 @@ pub fn writeAndRebuild(
     new_source: []const u8,
     description: ?[]const u8,
 ) EditError!MutationResult {
+    const mutation = try source_transaction.begin(project_dir);
+    defer mutation.unlock();
     const path = try designFilePath(allocator, project_dir, name);
     defer allocator.free(path);
 
@@ -2325,7 +2438,7 @@ pub fn writeAndRebuild(
     // tmp → fsync → rename: the snapshot above is best-effort, so a truncating
     // write is the one step that could leave the design with neither its old
     // nor its new contents.
-    atomic_write.writeFile(path, new_source) catch return error.CannotWriteDesign;
+    source_transaction.writeFile(allocator, path, new_source) catch return error.CannotWriteDesign;
 
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
@@ -2404,7 +2517,7 @@ fn findFormEnd(source: []const u8, open_pos: usize) ?usize {
 /// Error set for the BOM-side MPN/manufacturer edit path. Narrower than
 /// `EditError` because we don't touch the `.sexp` source or rebuild the
 /// design — just patch the `.bom` sidecar via `bom_resolve.setBomProperty`.
-pub const MpnEditError = std.mem.Allocator.Error ||
+pub const MpnEditError = error{CannotLockProject} || std.mem.Allocator.Error ||
     infra_fs.File.OpenError ||
     infra_fs.File.ReadError ||
     infra_fs.File.WriteError ||
@@ -2423,6 +2536,8 @@ pub fn editMpnCore(
     mpn: []const u8,
     manufacturer: []const u8,
 ) MpnEditError!u32 {
+    const mutation = try source_transaction.begin(project_dir);
+    defer mutation.unlock();
     const bom_path = try paths.designSiblingPath(allocator, project_dir, name, ".bom");
     defer allocator.free(bom_path);
 
@@ -2443,6 +2558,9 @@ pub fn editMpnCore(
 /// ones are persisted. Persists to the `.bom` sidecar and bumps the live
 /// version. Returns `{"ok":true,"version":N}`.
 pub fn editMpnApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     const name = req.param("name") orelse {
         res.status = http_not_found;
         return;
@@ -2453,22 +2571,13 @@ pub fn editMpnApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
         return;
     };
 
-    // ref is required.
-    const ref_start = std.mem.indexOf(u8, body, json_ref_key) orelse {
-        res.status = http_bad_request;
-        res.body = err_missing_ref;
-        return;
-    };
-    const ref_val_start = ref_start + json_ref_key.len;
-    const ref_end = std.mem.indexOfPos(u8, body, ref_val_start, "\"") orelse {
-        res.status = http_bad_request;
-        return;
-    };
-    const ref_des = body[ref_val_start..ref_end];
-
-    // mpn + manufacturer are optional (empty string = leave alone).
-    const mpn = parseOptionalStringField(body, "\"mpn\":\"");
-    const manufacturer = parseOptionalStringField(body, "\"manufacturer\":\"");
+    const input = edit_request.decode(req.arena, body) catch
+        return sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+    if (!checkRequestRevision(ctx, req, res, input)) return;
+    const ref_des = input.string("ref") orelse
+        return sendJsonError(ctx, res, 400, "missing ref");
+    const mpn = input.string("mpn") orelse "";
+    const manufacturer = input.string("manufacturer") orelse "";
 
     if (mpn.len == 0 and manufacturer.len == 0) {
         res.status = http_bad_request;
@@ -2488,17 +2597,6 @@ pub fn editMpnApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     res.body = try std.fmt.allocPrint(ctx.allocator, ok_version_json_fmt, .{version});
 }
 
-/// Look for `key` (e.g. `"\"mpn\":\""`) in a tiny JSON body and return the
-/// quoted string value, or "" if the key is missing. Doesn't unescape — the
-/// inputs we accept here (MPN, manufacturer) don't use JSON escapes in
-/// practice. Used by `editMpnApi`.
-fn parseOptionalStringField(body: []const u8, key: []const u8) []const u8 {
-    const start = std.mem.indexOf(u8, body, key) orelse return "";
-    const val_start = start + key.len;
-    const end = std.mem.indexOfPos(u8, body, val_start, "\"") orelse return "";
-    return body[val_start..end];
-}
-
 /// Overwrite (or create) the design's `.sexp` with `new_source`. Validates
 /// syntax via the sexpr parser before writing, snapshots any prior state,
 /// then rebuilds the design.
@@ -2508,6 +2606,8 @@ pub fn writeDesignCore(
     name: []const u8,
     new_source: []const u8,
 ) EditError!MutationResult {
+    const mutation = try source_transaction.begin(project_dir);
+    defer mutation.unlock();
     // Pre-flight: reject obvious syntax errors so a broken file never hits
     // disk. Semantic errors (missing imports, assertion failures) still fall
     // through to the rebuild step — the auto-snapshot serves as undo there.
@@ -2532,6 +2632,8 @@ pub fn restoreDesignCore(
     name: []const u8,
     id: []const u8,
 ) EditError!MutationResult {
+    const mutation = try source_transaction.begin(project_dir);
+    defer mutation.unlock();
     // Snapshot current state first so the restore can be undone.
     const pre_desc = try std.fmt.allocPrint(allocator, "pre-restore {s}", .{id});
     defer allocator.free(pre_desc);
@@ -2589,6 +2691,8 @@ pub fn addSectionNoteCore(
     pdf: []const u8,
     page: u32,
 ) EditError!MutationResult {
+    const mutation = try source_transaction.begin(project_dir);
+    defer mutation.unlock();
     if (text.len == 0) return error.InvalidSource;
     const source = try readDesignSource(allocator, project_dir, name);
     defer allocator.free(source);
@@ -2646,6 +2750,8 @@ pub fn removeSectionNoteCore(
     section_name: []const u8,
     idx: usize,
 ) EditError!MutationResult {
+    const mutation = try source_transaction.begin(project_dir);
+    defer mutation.unlock();
     const source = try readDesignSource(allocator, project_dir, name);
     defer allocator.free(source);
 
@@ -2727,6 +2833,8 @@ pub fn addComponentDatasheetCore(
     component_name: []const u8,
     pdf: []const u8,
 ) EditError!MutationResult {
+    const mutation = try source_transaction.begin(project_dir);
+    defer mutation.unlock();
     if (pdf.len == 0) return error.InvalidSource;
     if (!safeLibName(component_name)) return error.InvalidSource;
     if (!datasheet_ref.isValid(pdf)) return error.InvalidSource;
@@ -2745,7 +2853,7 @@ pub fn addComponentDatasheetCore(
     };
     defer allocator.free(new_source);
 
-    try writeLibComponent(path, new_source);
+    try writeLibComponent(allocator, path, new_source);
     const version = serve_root.bumpLiveVersion(component_name);
     return .{ .version = version, .snapshot = null };
 }
@@ -2759,6 +2867,8 @@ pub fn removeComponentDatasheetCore(
     component_name: []const u8,
     pdf: []const u8,
 ) EditError!MutationResult {
+    const mutation = try source_transaction.begin(project_dir);
+    defer mutation.unlock();
     if (pdf.len == 0) return error.InvalidSource;
     if (!safeLibName(component_name)) return error.InvalidSource;
     if (!datasheet_ref.isValid(pdf)) return error.InvalidSource;
@@ -2786,7 +2896,7 @@ pub fn removeComponentDatasheetCore(
     try w.writeAll(source[0..trim_start]);
     try w.writeAll(source[trim_end..]);
 
-    try writeLibComponent(path, buf.written());
+    try writeLibComponent(allocator, path, buf.written());
     const version = serve_root.bumpLiveVersion(component_name);
     return .{ .version = version, .snapshot = null };
 }
@@ -2795,10 +2905,10 @@ fn libComponentPath(allocator: std.mem.Allocator, project_dir: []const u8, compo
     return std.fmt.allocPrint(allocator, component_path_template, .{ project_dir, component_name });
 }
 
-fn writeLibComponent(path: []const u8, new_source: []const u8) EditError!void {
+fn writeLibComponent(allocator: std.mem.Allocator, path: []const u8, new_source: []const u8) EditError!void {
     // A library component has no history snapshot at all, so the atomic write is
     // the only thing standing between an interrupted save and a lost part.
-    atomic_write.writeFile(path, new_source) catch return error.CannotWriteDesign;
+    source_transaction.writeFile(allocator, path, new_source) catch return error.CannotWriteDesign;
 }
 
 fn safeLibName(name: []const u8) bool {
@@ -2926,6 +3036,8 @@ pub fn movePinCore(
     old_pin: []const u8,
     new_pin: []const u8,
 ) EditError!MutationResult {
+    const mutation = try source_transaction.begin(project_dir);
+    defer mutation.unlock();
     if (old_pin.len == 0 or new_pin.len == 0) return error.InvalidSource;
     // A new pin ID may not contain any character that ENDS a pin-id token, or
     // the scanner that has to find it again would stop short of its end and the
@@ -2972,6 +3084,8 @@ pub fn swapPinsCore(
     pin_a: []const u8,
     pin_b: []const u8,
 ) EditError!MutationResult {
+    const mutation = try source_transaction.begin(project_dir);
+    defer mutation.unlock();
     if (pin_a.len == 0 or pin_b.len == 0) return error.InvalidSource;
     // Same reject set as `movePinCore`, for the same reason.
     for (pin_a) |c| if (isPinTokenEnd(c)) return error.InvalidSource;
@@ -3033,7 +3147,7 @@ pub fn getSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
     const w = &buf.writer;
     try w.writeAll("{\"source\":\"");
     try bom_html.writeJsonEscaped(w, source);
-    try w.writeAll("\"}");
+    try w.print("\",\"sourceRevision\":\"{s}\"}}", .{source_transaction.revision(source)});
     res.body = buf.written();
 }
 
@@ -3042,6 +3156,9 @@ pub fn getSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
 /// `{"ok":true,"version":N,"snapshot":...}` on success or
 /// `{"ok":false,"error":"..."}` with HTTP 400 on invalid source.
 pub fn saveSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
+    defer attachRevision(ctx, req, res);
     res.content_type = .JSON;
     res.header(header_cors_allow_origin, "*");
 
@@ -3056,18 +3173,10 @@ pub fn saveSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         return;
     };
 
-    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, body, .{}) catch {
-        res.status = 400;
-        res.body = "{\"ok\":false,\"error\":\"invalid json\"}";
-        return;
-    };
-    defer parsed.deinit();
-    if (parsed.value != .object) {
-        res.status = 400;
-        res.body = "{\"ok\":false,\"error\":\"body must be a JSON object\"}";
-        return;
-    }
-    const source_val = parsed.value.object.get("source") orelse {
+    const input = edit_request.decode(req.arena, body) catch
+        return sendJsonError(ctx, res, 400, "invalid edit JSON or field type");
+    if (!checkRequestRevision(ctx, req, res, input)) return;
+    const source_val = input.root.object.get("source") orelse {
         res.status = 400;
         res.body = "{\"ok\":false,\"error\":\"missing source\"}";
         return;
@@ -3210,11 +3319,11 @@ test "findComponentTokenInInstance locates the token via ref" {
         \\    (pin 1 "GND")))
     ;
     const inst_off = std.mem.indexOf(u8, src, "(instance \"C4\"").?;
-    const off = findComponentTokenInInstance(src, "C4", "cap-0402").?;
+    const off = findComponentTokenInInstance(std.testing.allocator, src, "C4", "cap-0402").?;
     try std.testing.expect(off > inst_off);
     try std.testing.expectEqualStrings("cap-0402", src[off .. off + "cap-0402".len]);
     // No match for a ref that isn't present.
-    try std.testing.expect(findComponentTokenInInstance(src, "C9", "cap-0402") == null);
+    try std.testing.expect(findComponentTokenInInstance(std.testing.allocator, src, "C9", "cap-0402") == null);
 }
 
 test "datasheetStem keeps a trailing-digit part number intact" {
@@ -3263,11 +3372,11 @@ test "findInstanceOpen finds a label-declared instance by component offset" {
     const head = "(instance \"expansion\"";
     const comp_off = std.mem.indexOf(u8, src, "204928-0601").?;
     // ref-des "U10" is NOT in the source (label auto-renumbers) — offset wins.
-    const open = findInstanceOpen(src, "U10", comp_off).?;
+    const open = findInstanceOpen(std.testing.allocator, src, "expansion", comp_off, &source_transaction.revision(src)).?;
     try std.testing.expectEqualStrings(head, src[open .. open + head.len]);
     // With no offset, falls back to the label/ref-des needle.
-    try std.testing.expectEqual(open, findInstanceOpen(src, "expansion", 0).?);
-    try std.testing.expect(findInstanceOpen(src, "NOPE", 0) == null);
+    try std.testing.expectEqual(open, findInstanceOpen(std.testing.allocator, src, "expansion", 0, null).?);
+    try std.testing.expect(findInstanceOpen(std.testing.allocator, src, "NOPE", 0, null) == null);
 }
 
 test "parsePinForm reads single and multi-pin shorthand forms" {
@@ -3321,11 +3430,10 @@ test "findInstancePinForm finds a pin in a section (pins label) map" {
     try std.testing.expect((try findInstancePinForm(a, src, inst_open, inst_end, "ZZ9", &toks)) == null);
 }
 
-test "parseSrcOff reads the digits that follow the srcOff key" {
-    // `m + JSON_SRC_OFF_KEY.len` steps FORWARD past the key onto the digits;
-    // a `+`->`-` flip rewinds before the key, landing on a non-digit and
-    // yielding 0 instead of the real offset.
-    try std.testing.expectEqual(@as(usize, 42), parseSrcOff("{\"aaaaaaaa\":1,\"srcOff\":42}"));
+test "edit request offset uses the validated JSON integer" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqual(@as(usize, 42), (try edit_request.decode(arena.allocator(), "{\"aaaaaaaa\":1,\"srcOff\":42}")).offset());
 }
 
 test "findPinInForm locates a bareword pin token before any net string" {
@@ -3529,4 +3637,27 @@ test "restoreDesignCore pins the restored revision's minted ids" {
     // back, and pinned it — a restored revision is not left identity-less,
     // whichever of the two id-free revisions the snapshot race hands back.
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, restored, "(id "));
+}
+
+// spec: Web Server - Source mutation adapters return commit failures instead of acknowledging successful saves
+test "source mutation adapters propagate commit failures" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    const missing = try std.fs.path.join(a, &.{ root, "missing", "part.sexp" });
+    const guard = try source_transaction.begin(root);
+    defer guard.unlock();
+    try std.testing.expectError(error.CannotWriteDesign, writeLibComponent(a, missing, "(component test)"));
+    try std.testing.expectError(error.CannotWriteDesign, writeAndRebuild(a, root, "missing", "(design-block \"D\")", null));
+}
+
+// spec: Web Server - Editing an already escaped value finds its complete string and preserves adjacent fields
+test "edit value range skips escaped quotes in labels and values" {
+    const source = "(instance \"R\\\"1\" (res \"a\\\"b\\\\c\") (pin 1 \"NET\"))";
+    const range = findInstanceValueRange(source, 0, source.len).?;
+    try std.testing.expectEqualStrings("a\\\"b\\\\c", source[range[0]..range[1]]);
+    try std.testing.expectEqual(@as(u8, '"'), source[range[1]]);
 }

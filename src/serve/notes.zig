@@ -18,6 +18,7 @@ const logError = std.log.err;
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
 const atomic_write = @import("../infra/atomic_write.zig");
+const source_transaction = @import("../infra/source_transaction.zig");
 const infra_random = @import("../infra/random.zig");
 const clock = @import("../infra/clock.zig");
 const paths = @import("../paths.zig");
@@ -50,7 +51,7 @@ const err_write_notes = "{\"error\":\"cannot write notes\"}";
 const err_not_object = "{\"error\":\"body must be a JSON object\"}";
 const ok_json = "{\"ok\":true}";
 
-pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
+pub const HandlerError = error{CannotLockProject} || std.mem.Allocator.Error || std.Io.Writer.Error ||
     infra_fs.File.WriteError || infra_fs.File.OpenError || infra_fs.File.ReadError ||
     error{ StreamTooLong, EndOfStream };
 
@@ -69,7 +70,7 @@ pub const LoadError = PathError || std.Io.Dir.ReadFileAllocError;
 
 /// One task mutation end to end: load, re-render, atomic rewrite, plus the
 /// secure-RNG failure the note-id generator can report.
-pub const MutateError = LoadError || RenderError || atomic_write.Error ||
+pub const MutateError = error{ CannotLockProject, TransactionRequired, InvalidSource } || LoadError || RenderError || atomic_write.Error ||
     std.Io.RandomSecureError;
 
 pub const NoteStatus = enum { open, done };
@@ -257,12 +258,12 @@ fn writeNotesFile(
     project_dir: []const u8,
     name: []const u8,
     notes: Notes,
-) (PathError || RenderError || atomic_write.Error)!void {
+) (PathError || RenderError || atomic_write.Error || error{ TransactionRequired, InvalidSource })!void {
     const path = try notesPath(allocator, project_dir, name);
     defer allocator.free(path);
     const body = try renderNotes(allocator, notes);
     defer allocator.free(body);
-    try atomic_write.writeFile(path, body);
+    try source_transaction.writeFile(allocator, path, body);
 }
 
 // ── HTTP handlers ────────────────────────────────────────────────────
@@ -326,7 +327,7 @@ pub fn getNotesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
     const w = &buf.writer;
     try w.writeAll("{\"text\":");
     try json_writer.writeString(w, text);
-    try w.writeAll("}");
+    try w.print(",\"revision\":\"{s}\"}}", .{source_transaction.revision(text)});
     res.body = buf.written();
 }
 
@@ -334,6 +335,8 @@ pub fn getNotesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
 /// full file. Kept for the raw textarea editor; the structured ops
 /// below are preferred for programmatic edits.
 pub fn saveNotesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = try source_transaction.begin(ctx.project_dir);
+    defer mutation.unlock();
     setJsonHeaders(res);
 
     const name = req.param("name") orelse return jsonError(res, http_not_found, err_missing_name);
@@ -349,10 +352,18 @@ pub fn saveNotesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
 
     const path = notesPath(ctx.allocator, ctx.project_dir, name) catch return jsonError(res, http_internal_error, err_resolve_path);
     defer ctx.allocator.free(path);
+    const expected = parsed.value.object.get("revision") orelse return jsonError(res, 409, "{\"error\":\"notes revision required; reload\"}");
+    if (expected != .string) return jsonError(res, 400, "{\"error\":\"invalid revision\"}");
+    const current = infra_fs.cwd().readFileAlloc(req.arena, path, max_notes_bytes) catch |err| switch (err) {
+        error.FileNotFound => "",
+        else => return jsonError(res, 500, err_read_notes),
+    };
+    if (!std.mem.eql(u8, expected.string, &source_transaction.revision(current)))
+        return jsonError(res, 409, "{\"error\":\"notes changed; reload before saving\"}");
     // One failure body now: with a staged write there is no longer an "opened
     // but could not fill it" state to report separately — either the whole
     // document replaces the old one or the old one is still there.
-    atomic_write.writeFile(path, text_val.string) catch
+    source_transaction.writeFile(req.arena, path, text_val.string) catch
         return jsonError(res, http_internal_error, err_write_notes);
 
     res.body = ok_json;
@@ -372,7 +383,8 @@ pub fn getTasksApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
     var buf: std.Io.Writer.Allocating = .init(ctx.allocator);
     const w = &buf.writer;
     try writeTasksJson(ctx.allocator, w, notes);
-    res.body = buf.written();
+    const bytes = buf.written();
+    res.body = try std.fmt.allocPrint(req.arena, "{s},\"revision\":\"{s}\"}}", .{ bytes[0 .. bytes.len - 1], source_transaction.revision(raw orelse "") });
 }
 
 /// POST /api/notes/:name/tasks/add — body `{"text":"…"}`. Appends a new
@@ -459,6 +471,8 @@ pub fn addTaskCore(
     name: []const u8,
     text: []const u8,
 ) MutateError!Note {
+    const mutation = try source_transaction.begin(project_dir);
+    defer mutation.unlock();
     var raw: ?[]u8 = null;
     const notes = try loadNotes(allocator, project_dir, name, &raw);
     defer if (raw) |d| allocator.free(d);
@@ -486,6 +500,8 @@ pub fn mutateTaskCore(
     id: []const u8,
     mode: TaskMutation,
 ) MutateError!?bool {
+    const mutation = try source_transaction.begin(project_dir);
+    defer mutation.unlock();
     var raw: ?[]u8 = null;
     const notes = try loadNotes(allocator, project_dir, name, &raw);
     defer if (raw) |d| allocator.free(d);

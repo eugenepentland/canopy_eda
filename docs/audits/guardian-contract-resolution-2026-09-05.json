@@ -1,0 +1,19 @@
+{
+  "project": ".",
+  "violations": 0,
+  "review_items": 1,
+  "findings": [
+    {
+      "check": "edit-identity",
+      "rule": "instance-target-identity",
+      "file": "src/serve/edit.zig",
+      "function": "src/serve/edit.zig::findInstanceOpen",
+      "line": 1586,
+      "confidence": "review",
+      "code": "identity-unverified",
+      "operation": "src/serve/edit_target.zig::resolve",
+      "message": "no preceding declared validator receives both identity and revision before target selection or mutation",
+      "reason": "Semantic review remains visible: resolve checks the exact SHA256 revision and returns only a unique parsed source label. The edit target stale-offset regression tests cover this contract; lexical presence alone cannot prove it."
+    }
+  ]
+}

@@ -579,16 +579,11 @@ min_mutants   = 4    # below this many viable mutants: informational, not gated
 # aliased multiline array values: a second multiline array (here
 # `[fuzz_presence] modules`) reused the buffer the first one's slices pointed
 # into, so `require_guard` was silently reading fuzz_presence's paths and
-# matched no file in this tree. The guardian fix landed with the [[ban]] check
-# and surfaced 16 real unguarded casts that were never gated — accepted into
-# .guardian/baselines/int-from-float-budget.txt as pre-existing debt so the
-# ratchet starts holding today (a 17th raw cast, or a 7th in router.zig, still
-# fails). The `casts` budget snapshot stays at 0 — untouched by that accept.
-# These are NOT dismissed: two of them (src/eval/design_block.zig:2341 from a
-# DSL value, src/kicad_pcb/project_rules.zig:153 from JSON) narrow UNTRUSTED
-# input and are the reason this list names src/eval/ and src/kicad_pcb/ at all.
-# Burn them down with numeric.checkedInt / numeric.toCount; the baseline
-# auto-prunes as they go.
+# matched no file in this tree. The September contract fixes remove all 16
+# previously accepted casts under require_guard. The old global snapshot of 0
+# was unreachable while those strict-path findings returned early; it now
+# freezes the 53 pre-existing casts outside these strict paths. No new cast was
+# added. The strict paths continue to reject every raw cast without a baseline.
 [int_from_float]
 guard_fns = ["checkedInt"]
 require_guard = [
@@ -1532,3 +1527,52 @@ pair_similarity = 0.5
 min_similarity = 0.6
 report_identical = false
 max_lines = 400
+
+# The synchronous source transaction capability needs shared process exclusion
+# and per-thread nesting. All access lives behind begin/Guard.unlock; a directory
+# flock also serializes independent CLI processes. Regression tests exercise it.
+[[allow]]
+check = "ban-globals"
+paths = ["src/infra/source_transaction.zig"]
+
+# Reviewed operation contracts from the September EDA audit. The owners below
+# are backed by failure, concurrency, decoding and stale-target regressions.
+[[contract]]
+name = "layout-durability"
+kind = "durable_write"
+functions = ["src/layout_sidecar_store.zig::writeLayouts*"]
+operations = ["src/layout_sidecar_store.zig::writeFileAll", "src/layout_sidecar_store.zig::writeLayoutsFileJsonRev"]
+reason = "Propagate save failures; acknowledge a new revision only after successful persistence."
+
+[[contract]]
+name = "layout-read-integrity"
+kind = "persistent_read"
+functions = ["src/layout_sidecar_store.zig::readSidecarDoc"]
+operations = ["*.readFileAlloc", "*.parseFromSliceLeaky"]
+reason = "Only FileNotFound is absence; unreadable or malformed saved state must block replacement."
+
+[[contract]]
+name = "source-transactions"
+kind = "transaction"
+functions = ["src/serve/edit.zig::*", "src/serve/notes.zig::*", "src/infra/source_transaction.zig::*"]
+operations = ["*.writeFile", "*.createFile", "src/infra/atomic_write.zig::writeFile"]
+allow = ["src/infra/source_transaction.zig::writeFile"]
+reason = "The source transaction owner requires a held project lock, validates source syntax and commits atomically; adapters hold the lock from read through write."
+
+[[contract]]
+name = "typed-edit-requests"
+kind = "decoder"
+functions = ["src/serve/edit.zig::*", "src/serve/edit_request.zig::*"]
+operations = ["*.parseFromSlice", "*.parseFromSliceLeaky"]
+allow = ["src/serve/edit_request.zig::decode"]
+reason = "One decoder owns edit JSON parsing, escape decoding, duplicate-key rejection and field-type validation."
+
+[[contract]]
+name = "instance-target-identity"
+kind = "identity"
+functions = ["src/serve/edit.zig::findInstanceOpen"]
+operations = ["src/serve/edit_target.zig::resolve"]
+validators = ["src/serve/edit_target.zig::resolve"]
+identity = ["identity"]
+revision = ["revision"]
+reason = "Semantic review remains visible: resolve checks the exact SHA256 revision and returns only a unique parsed source label. The edit target stale-offset regression tests cover this contract; lexical presence alone cannot prove it."

@@ -133,6 +133,7 @@ test {
     _ = @import("import_fold_emit.zig");
     _ = @import("import_kicad.zig");
     _ = @import("infra/atomic_write.zig");
+    _ = @import("infra/source_transaction.zig");
     _ = @import("infra/fs.zig");
     _ = @import("infra/process_alloc.zig");
     _ = @import("infra/random.zig");
@@ -425,6 +426,9 @@ test {
     _ = @import("serve/drc_json.zig");
     _ = @import("serve/drc_rules.zig");
     _ = @import("serve/edit.zig");
+    _ = @import("serve/edit_request.zig");
+    _ = @import("serve/edit_target.zig");
+    _ = @import("serve/edit_contract_tests.zig");
     _ = @import("serve/edit_assist.zig");
     _ = @import("serve/fab_filename.zig");
     _ = @import("serve/footprint_editor.zig");

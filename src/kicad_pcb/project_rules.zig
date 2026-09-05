@@ -4,6 +4,7 @@
 //! will silently score candidates against the wrong constraints.
 
 const std = @import("std");
+const numeric = @import("../numeric.zig");
 const design_settings = "design_settings";
 
 /// Errors returned for malformed JSON, a non-object root, or allocation.
@@ -150,7 +151,8 @@ fn fieldNumber(value: std.json.Value, key: []const u8) f64 {
 fn fieldInt(value: std.json.Value, key: []const u8) i64 {
     if (value != .object) return 0;
     const item = value.object.get(key) orelse return 0;
-    return @intFromFloat(jsonNumber(item) orelse return 0);
+    if (item == .integer) return item.integer;
+    return numeric.checkedInt(i64, @trunc(jsonNumber(item) orelse return 0)) orelse 0;
 }
 
 fn fieldString(value: std.json.Value, key: []const u8) []const u8 {
@@ -184,4 +186,17 @@ test "project rules retain global minima net classes and patterns" {
     try std.testing.expectEqualStrings("RF", got.net_classes[1].name);
     try std.testing.expectEqualStrings("*RF*", got.patterns[0].pattern);
     try std.testing.expectEqual(@as(usize, 1), got.drc_exclusion_count);
+}
+
+// spec: Web Server - Numeric input conversion rejects nonfinite and out-of-range values without trapping or losing integer precision
+test "numeric project priority conversion preserves integers and rejects overflow" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const exact = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"priority\":9007199254740993}", .{});
+    try std.testing.expectEqual(@as(i64, 9007199254740993), fieldInt(exact, "priority"));
+    const huge = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"priority\":1e100}", .{});
+    try std.testing.expectEqual(@as(i64, 0), fieldInt(huge, "priority"));
+    const fractional = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"priority\":-1.9}", .{});
+    try std.testing.expectEqual(@as(i64, -1), fieldInt(fractional, "priority"));
 }

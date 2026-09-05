@@ -12,6 +12,7 @@
 //! clearance *checks* consult the outline.
 
 const std = @import("std");
+const numeric = @import("../numeric.zig");
 const optimizer = @import("optimizer.zig");
 const geometry = @import("geometry.zig");
 const poly_scanline = @import("../poly_scanline.zig");
@@ -316,7 +317,7 @@ pub fn segmentDist(shape: Shape, a: [2]f64, b: [2]f64, window: f64) f64 {
     } else if (a[1] < shape.y0 - window or a[1] > shape.y1 + window) return std.math.inf(f64);
     if (f0 > f1) return std.math.inf(f64);
     const clipped_len = std.math.hypot(dx, dy) * (f1 - f0);
-    const steps: usize = @max(1, @as(usize, @intFromFloat(@ceil(clipped_len / 0.05))));
+    const steps: usize = @max(1, (numeric.checkedInt(usize, @ceil(clipped_len / 0.05)) orelse return 0));
     var best = std.math.inf(f64);
     var i: usize = 0;
     while (i <= steps) : (i += 1) {

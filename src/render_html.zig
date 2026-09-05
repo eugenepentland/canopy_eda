@@ -6,6 +6,7 @@
 //! scene-graph twin is `render_json.zig`.
 
 const std = @import("std");
+const source_transaction = @import("infra/source_transaction.zig");
 const json_writer = @import("json_writer.zig");
 const env_mod = @import("eval/env.zig");
 const rails_mod = @import("eval/rails.zig");
@@ -2171,6 +2172,10 @@ fn writeScripts(
     // link target (modules have a whole-module /pcb-layout view; designs only
     // have per-sub-block scoped views).
     try w.print(";var SCH_VIEW=\"{s}\"", .{if (std.mem.eql(u8, options.schematic_path, "/modules/")) "module" else "design"});
+    try w.writeAll(";var SCH_SOURCE_REVISION=");
+    if (source_transaction.revisionFor(allocator, ctx.project_dir, design_name)) |revision| {
+        try json_writer.writeScriptString(w, &revision);
+    } else try w.writeAll("null");
     try w.writeAll(";var SCH_INDEX=");
     try writeSearchIndex(w, allocator, block, ctx, asserted_fns, check_results);
     try w.writeAll(";var SCH_AUDIT=");
@@ -2478,7 +2483,9 @@ fn emitComponentEntry(
     // Byte offset of the defining form in the design source — the sidebar's
     // "Edit source →" jump target. Omitted when the instance doesn't live in
     // the top-level design file (sub-block children, synthetics).
-    if (inst.src_offset > 0) try w.print(",\"src\":{d}", .{inst.src_offset});
+    try w.writeAll(",\"sourceLabel\":");
+    try json_writer.writeScriptString(w, inst.source.label);
+    if (inst.source.offset > 0) try w.print(",\"src\":{d}", .{inst.source.offset});
 
     if (!std.mem.eql(u8, kind, "hub")) {
         try w.writeAll("}");

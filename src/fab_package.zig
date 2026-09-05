@@ -158,7 +158,7 @@ pub fn refuseEarly(
     before: fab_release.ProjectState,
 ) ?Refusal {
     const refusal = sourceRevisionRefusal(before) orelse return null;
-    const sidecar = sidecar_store.readDesignDoc(arena, project_dir, name);
+    const sidecar = sidecar_store.readDesignDoc(arena, project_dir, name) catch return refusal;
     const has_cache = sidecar_store.cachePoses(arena, sidecar.cache) != null;
     return switch (select(sidecar.layouts, has_cache, layout_arg)) {
         .row, .cache => refusal,

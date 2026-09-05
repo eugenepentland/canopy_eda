@@ -569,7 +569,7 @@ const SceneGraph = struct {
             .y = y,
             .w = passive_bw,
             .h = 20.0,
-            .src_offset = inst.src_offset,
+            .src_offset = inst.source.offset,
             .flip = flip,
             .ref_full = inst.ref_des,
             .decouple_ic = inst.decouple_ic,
@@ -1078,7 +1078,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
             .component = inst.component,
             .value = inst.value,
             .symbol = inst.symbol,
-            .src_offset = inst.src_offset,
+            .src_offset = inst.source.offset,
             .pin_nets = if (pinnet_map.get(inst.ref_des)) |list| list.items else &.{},
         });
     }
@@ -1163,7 +1163,7 @@ fn collectHubData(
         .w = hub_width,
         .h = hub_height,
         .icon = icon,
-        .src_offset = hub.src_offset,
+        .src_offset = hub.source.offset,
         .left_pins = .empty,
         .right_pins = .empty,
     };

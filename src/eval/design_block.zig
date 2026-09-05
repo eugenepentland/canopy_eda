@@ -3893,7 +3893,7 @@ fn setPlanMaxVias(self: *Evaluator, selector: []const Node, wave: *env_mod.PlanW
         self.warnFmt(selector[0].span, "(max-vias N) requires one integer from 0 to 65535 — skipped", .{});
         return;
     }
-    wave.max_vias = @intFromFloat(value.?);
+    wave.max_vias = numeric.checkedInt(u16, value.?) orelse return;
 }
 
 /// The member list a selector `head` targets, or null when the head isn't a

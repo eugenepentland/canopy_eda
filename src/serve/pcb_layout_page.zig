@@ -138,7 +138,7 @@ const parseSavedTexts = sidecar_json.parseSavedTexts;
 const parseOutlinePts = sidecar_json.parseOutlinePts;
 pub const writeJsonStr = sidecar_json.writeJsonStr;
 
-pub const HandlerError = fab_preview.Error || error{
+pub const HandlerError = sidecar_store.StoreError || fab_preview.Error || error{
     InvalidReadinessJson,
     StandaloneAssemblyRenderFailed,
     AssetMissing,
@@ -970,7 +970,7 @@ pub fn renderLayoutPage(
         .part_edits_json = if (lean_read_only)
             "{}"
         else
-            pcb_part_json.buildEditSources(ctx.allocator, eff_block, if (sub_block) |sb| sb.source else name),
+            pcb_part_json.buildEditSources(ctx.allocator, eff_block, .{ .name = if (sub_block) |sb| sb.source else name, .project_dir = ctx.project_dir }),
         .outline_drawn = rv.outline_drawn,
         .saved_outline = rv.outline,
         .saved_fabrication_layers = rv.fabrication_layers,
@@ -2999,9 +2999,9 @@ pub fn solveForRequest(
     // page render inside `std.json`. The page render already worked this way
     // (see `defaultLayoutNameIn`); this is the same discipline for the PNG /
     // describe / thermal path.
-    const design_doc = readDesignDoc(alloc, project_dir, name);
+    const design_doc = (readDesignDoc(alloc, project_dir, name) catch SidecarDoc{});
     // A ?sub= view reads its own per-sub store; unscoped, it IS the design one.
-    const sub_doc: SidecarDoc = if (opts.sub) |s| readSidecarDoc(alloc, project_dir, name, s) else design_doc;
+    const sub_doc: SidecarDoc = if (opts.sub) |s| (readSidecarDoc(alloc, project_dir, name, s) catch SidecarDoc{}) else design_doc;
 
     // With nothing more specific asked for (no ?layout=, no ?regen, no ?rough,
     // not sub-scoped), default to the design's starred (★) saved layout — the
@@ -5299,7 +5299,7 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
     // fast instead of paying for a block resolve first. It decides nothing: the
     // hold below re-reads and re-compares before it writes.
     if (client_rev) |cr| {
-        const seen_rev = readLayoutRev(req.arena, ctx.project_dir, name, sub);
+        const seen_rev = (try readSidecarDoc(req.arena, ctx.project_dir, name, sub)).rev;
         if (cr != seen_rev) {
             res.status = 409;
             res.content_type = .JSON;
@@ -5355,7 +5355,7 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
     const guard = lockSidecar(name, sub);
     defer guard.unlock();
 
-    const disk_rev = readLayoutRev(req.arena, ctx.project_dir, name, sub);
+    const disk_rev = (try readSidecarDoc(req.arena, ctx.project_dir, name, sub)).rev;
     if (client_rev) |cr| if (cr != disk_rev) {
         res.status = 409;
         res.content_type = .JSON;
@@ -5374,7 +5374,7 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
         }
     }
     timer.lap("snapshot");
-    const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
+    const existing = (try readSidecarDoc(req.arena, ctx.project_dir, name, sub)).layouts;
     var out: std.ArrayList(SavedLayout) = .empty;
     // `replaced` = found a matching row (same name, or an auto run of this
     // exact arrangement, promoted to the named keeper). The edited entry is
@@ -5404,7 +5404,7 @@ pub fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
     }
     try out.insert(req.arena, 0, entry);
     starFirstEver(out.items);
-    writeLayoutsSubRev(req.arena, ctx.project_dir, name, sub, out.items, new_rev);
+    try writeLayoutsSubRev(req.arena, ctx.project_dir, name, sub, out.items, new_rev);
     res.content_type = .JSON;
     res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rev\":{d}}}", .{new_rev});
     timer.lap("write");
@@ -5475,11 +5475,11 @@ pub fn restoreLayoutHistoryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Re
     // the overwrite (its row would be neither restored nor recoverable).
     const guard = lockSidecar(name, null);
     defer guard.unlock();
-    const disk_rev = readLayoutRev(req.arena, ctx.project_dir, name, null);
+    const disk_rev = (try readSidecarDoc(req.arena, ctx.project_dir, name, null)).rev;
     if (layoutsSidecar(req.arena, ctx.project_dir, name, null, layouts_ext)) |scp| {
         _ = history.snapshotLayouts(req.arena, ctx.project_dir, name, scp) catch null;
     }
-    writeLayoutsFile(req.arena, ctx.project_dir, name, restored, readCacheSlot(req.arena, ctx.project_dir, name), disk_rev + 1);
+    try writeLayoutsFile(req.arena, ctx.project_dir, name, restored, (try readDesignDoc(req.arena, ctx.project_dir, name)).cache, disk_rev + 1);
     res.content_type = .JSON;
     res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rev\":{d}}}", .{disk_rev + 1});
 }
@@ -5505,11 +5505,11 @@ pub fn mcpRestoreLayoutSnapshot(
     const disk_rev = blk: {
         const guard = lockSidecar(name, null);
         defer guard.unlock();
-        const rev = readLayoutRev(alloc, project_dir, name, null);
+        const rev = (try readSidecarDoc(alloc, project_dir, name, null)).rev;
         if (layoutsSidecar(alloc, project_dir, name, null, layouts_ext)) |sidecar_path| {
             _ = history.snapshotLayouts(alloc, project_dir, name, sidecar_path) catch null;
         }
-        writeLayoutsFile(alloc, project_dir, name, restored, readCacheSlot(alloc, project_dir, name), rev + 1);
+        try writeLayoutsFile(alloc, project_dir, name, restored, (try readDesignDoc(alloc, project_dir, name)).cache, rev + 1);
         break :blk rev;
     };
     out.clearRetainingCapacity();
@@ -5529,7 +5529,11 @@ fn namedLayoutMutationRev(
     sub: ?[]const u8,
     root: std.json.Value,
 ) ?i64 {
-    const disk_rev = readLayoutRev(req.arena, project_dir, design, sub);
+    const disk_rev = (readSidecarDoc(req.arena, project_dir, design, sub) catch {
+        res.status = 500;
+        res.body = "cannot read saved layouts";
+        return null;
+    }).rev;
     const rv = root.object.get("rev") orelse return disk_rev;
     const client_rev: ?i64 = switch (rv) {
         .integer => |i| i,
@@ -5565,14 +5569,14 @@ pub fn commitNamedLayoutMutation(
     sub: ?[]const u8,
     layouts: []const SavedLayout,
     disk_rev: i64,
-) i64 {
+) sidecar_store.StoreError!i64 {
     if (sub == null) {
         if (layoutsSidecar(alloc, project_dir, design, null, layouts_ext)) |sidecar_path| {
             _ = history.snapshotLayouts(alloc, project_dir, design, sidecar_path) catch null;
         }
     }
     const new_rev = disk_rev + 1;
-    writeLayoutsSubRev(alloc, project_dir, design, sub, layouts, new_rev);
+    try writeLayoutsSubRev(alloc, project_dir, design, sub, layouts, new_rev);
     return new_rev;
 }
 
@@ -5633,7 +5637,7 @@ pub fn deleteNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
     const guard = lockSidecar(name, sub);
     defer guard.unlock();
     const disk_rev = namedLayoutMutationRev(req, res, ctx.project_dir, name, sub, root) orelse return;
-    const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
+    const existing = (try readSidecarDoc(req.arena, ctx.project_dir, name, sub)).layouts;
     const remaining = deletedLayoutList(req.arena, existing, nm_v.string) catch |err| switch (err) {
         error.LayoutNotFound => {
             res.status = 404;
@@ -5642,7 +5646,7 @@ pub fn deleteNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
         },
         error.OutOfMemory => return error.OutOfMemory,
     };
-    const new_rev = commitNamedLayoutMutation(req.arena, ctx.project_dir, name, sub, remaining, disk_rev);
+    const new_rev = try commitNamedLayoutMutation(req.arena, ctx.project_dir, name, sub, remaining, disk_rev);
     res.content_type = .JSON;
     res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rev\":{d}}}", .{new_rev});
 }
@@ -5679,7 +5683,7 @@ pub fn renameNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
     const guard = lockSidecar(design, sub);
     defer guard.unlock();
     const disk_rev = namedLayoutMutationRev(req, res, ctx.project_dir, design, sub, root) orelse return;
-    const existing = readLayoutsSub(req.arena, ctx.project_dir, design, sub);
+    const existing = (try readSidecarDoc(req.arena, ctx.project_dir, design, sub)).layouts;
     if (std.mem.eql(u8, old_v.string, new_name)) {
         for (existing) |layout| if (std.mem.eql(u8, layout.name, new_name)) {
             res.content_type = .JSON;
@@ -5704,7 +5708,7 @@ pub fn renameNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
         },
         error.OutOfMemory => return error.OutOfMemory,
     };
-    const new_rev = commitNamedLayoutMutation(req.arena, ctx.project_dir, design, sub, renamed, disk_rev);
+    const new_rev = try commitNamedLayoutMutation(req.arena, ctx.project_dir, design, sub, renamed, disk_rev);
     res.content_type = .JSON;
     res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rev\":{d}}}", .{new_rev});
 }
@@ -5733,14 +5737,14 @@ pub fn setDefaultLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respon
     // happens between the read and the write, so the whole span is held.
     const guard = lockSidecar(name, sub);
     defer guard.unlock();
-    const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
+    const existing = (try readSidecarDoc(req.arena, ctx.project_dir, name, sub)).layouts;
     var out: std.ArrayList(SavedLayout) = .empty;
     for (existing) |L| {
         var e = L;
         e.default = want.len > 0 and std.mem.eql(u8, L.name, want);
         try out.append(req.arena, e);
     }
-    writeLayoutsSub(req.arena, ctx.project_dir, name, sub, out.items);
+    try writeLayoutsSub(req.arena, ctx.project_dir, name, sub, out.items);
     res.content_type = .JSON;
     res.body = ok_json_true;
 }
@@ -5759,7 +5763,7 @@ pub fn setDefaultLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respon
 pub fn rescoreLayoutsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = nameParam(req, res) orelse return;
     const sub = subSlug(req);
-    const existing = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
+    const existing = (try readSidecarDoc(req.arena, ctx.project_dir, name, sub)).layouts;
     if (existing.len == 0) {
         res.content_type = .JSON;
         res.body = "{\"ok\":true,\"rescored\":0}";
@@ -5821,7 +5825,7 @@ pub fn rescoreLayoutsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
     const guard = lockSidecar(name, null);
     defer guard.unlock();
     var merged: std.ArrayList(SavedLayout) = .empty;
-    for (readLayoutsSub(req.arena, ctx.project_dir, name, null)) |L| {
+    for ((try readSidecarDoc(req.arena, ctx.project_dir, name, null)).layouts) |L| {
         var row = L;
         for (out.items) |scored| {
             if (!std.mem.eql(u8, scored.name, L.name)) continue;
@@ -5830,7 +5834,7 @@ pub fn rescoreLayoutsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
         }
         try merged.append(req.arena, row);
     }
-    writeLayouts(req.arena, ctx.project_dir, name, merged.items);
+    try writeLayouts(req.arena, ctx.project_dir, name, merged.items);
 
     res.content_type = .JSON;
     res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"rescored\":{d}}}", .{n});
@@ -5846,7 +5850,7 @@ pub fn rescoreLayoutsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
 pub fn pcbScoreBatchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = nameParam(req, res) orelse return;
     const sub = subSlug(req);
-    const layouts = readLayoutsSub(req.arena, ctx.project_dir, name, sub);
+    const layouts = (try readSidecarDoc(req.arena, ctx.project_dir, name, sub)).layouts;
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
     defer eval.deinit();
@@ -6256,7 +6260,7 @@ fn rekeyRowsToPlacement(
 /// placement from — or null when nothing is starred (or the starred entry has
 /// no poses). Lets the `/pcb-layout` page default to that blessed layout on open.
 fn defaultLayoutName(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) ?[]const u8 {
-    return defaultLayoutNameIn(readLayoutsSub(alloc, project_dir, name, sub));
+    return defaultLayoutNameIn((readSidecarDoc(alloc, project_dir, name, sub) catch return null).layouts);
 }
 
 /// `defaultLayoutName` over an already-parsed layout list — the page render
@@ -6282,7 +6286,7 @@ pub fn readLayoutPosesFor(
     block: *env_mod.DesignBlock,
     sub: ?[]const u8,
 ) ?[]const optimizer.RefPose {
-    return layoutPosesIn(alloc, readLayoutsSub(alloc, project_dir, name, sub), want, block);
+    return layoutPosesIn(alloc, (readSidecarDoc(alloc, project_dir, name, sub) catch return null).layouts, want, block);
 }
 
 /// `readLayoutPosesFor` over an already-parsed layout list (see
@@ -6344,7 +6348,7 @@ pub const readLayoutsSub = sidecar_store.readLayoutsSub;
 /// screenshot draws the same legend the fab silk will (parallels `shownTexts`,
 /// which reads the already-loaded list the page render holds).
 fn layoutTextsFor(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, want: ?[]const u8, sub: ?[]const u8) []const font5x7.BoardText {
-    return layoutTextsIn(readLayoutsSub(alloc, project_dir, name, sub), want);
+    return layoutTextsIn((try readSidecarDoc(alloc, project_dir, name, sub)).layouts, want);
 }
 
 /// `layoutTextsFor` over an already-parsed layout list (see `defaultLayoutNameIn`
@@ -6807,7 +6811,7 @@ fn blessedOutlineIn(layouts: []const SavedLayout, default_name: ?[]const u8) ?Sa
 /// `board_rect`): copper off the board with no DRC error.
 fn blessedOutline(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8) ?SavedOutline {
     if (sub != null) return null;
-    return blessedOutlineIn(readLayouts(alloc, project_dir, name), defaultLayoutName(alloc, project_dir, name, null));
+    return blessedOutlineIn((readSidecarDoc(alloc, project_dir, name, null) catch return null).layouts, defaultLayoutName(alloc, project_dir, name, null));
 }
 
 /// A drawn `SavedOutline` as a `placeFromPoses` outline seed.
@@ -6907,8 +6911,8 @@ const SidecarDoc = sidecar_store.SidecarDoc;
 /// `.autolayout.json` cache fallback `readCacheSlot` applies (design stores
 /// only — sub stores carry no cache slot).
 fn readPageDoc(ctx: *Server, name: []const u8, sub: ?[]const u8) SidecarDoc {
-    if (sub) |s| return readSidecarDoc(ctx.allocator, ctx.project_dir, name, s);
-    return readDesignDoc(ctx.allocator, ctx.project_dir, name);
+    if (sub) |s| return (readSidecarDoc(ctx.allocator, ctx.project_dir, name, s) catch SidecarDoc{});
+    return (readDesignDoc(ctx.allocator, ctx.project_dir, name) catch SidecarDoc{});
 }
 
 /// A design store's sidecar doc plus the legacy `.autolayout.json` cache
@@ -6930,7 +6934,7 @@ fn shownParams(sub: ?[]const u8, tune: Tuning, generated: bool, doc: SidecarDoc)
 /// a fresh auto row (persistGeneratedLayout), so re-read; the common cached /
 /// starred render reuses the doc's single parse.
 fn panelLayouts(ctx: *Server, name: []const u8, sub: ?[]const u8, generated: bool, doc: SidecarDoc) []const SavedLayout {
-    const raw = if (generated) readLayoutsSub(ctx.allocator, ctx.project_dir, name, sub) else doc.layouts;
+    const raw = if (generated) (readSidecarDoc(ctx.allocator, ctx.project_dir, name, sub) catch return doc.layouts).layouts else doc.layouts;
     return displayLayouts(ctx.allocator, ctx.project_dir, name, sub, raw);
 }
 
@@ -7299,7 +7303,7 @@ pub fn subBlockPoseByOriginKey(
     netlist.collectInstances(alloc, resolved.block, "", &flat) catch return null;
     var ok_of = std.StringHashMapUnmanaged([]const u8).empty;
     for (flat.items) |fi| ok_of.put(alloc, fi.ref_des, fi.origin_key) catch return null;
-    const layouts = readLayouts(alloc, project_dir, sub_block.source);
+    const layouts = (readSidecarDoc(alloc, project_dir, sub_block.source, null) catch return null).layouts;
     const choice = chooseModuleSnapshot(layouts, &ok_of) orelse {
         // No snapshot bridges — last resort is the volatile optimizer cache.
         const poses = readAutoPoses(alloc, project_dir, sub_block.source) orelse return null;
@@ -7457,7 +7461,7 @@ pub fn loadSyncPerimeterMask(
 /// optimizer cache exists (it stores poses, never copper) or the chosen snapshot
 /// was never routed.
 pub fn loadSyncRoutes(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?SavedRoutes {
-    const chosen = blessedLayout(readLayouts(alloc, project_dir, name)) orelse return null;
+    const chosen = blessedLayout((readSidecarDoc(alloc, project_dir, name, null) catch return null).layouts) orelse return null;
     const routes = chosen.routes orelse return null;
     var vias: std.ArrayList(SavedVia) = .empty;
     for (routes.vias) |via| {
@@ -7482,9 +7486,9 @@ fn writeAutoCache(alloc: std.mem.Allocator, project_dir: []const u8, name: []con
     {
         const guard = lockSidecar(name, null);
         defer guard.unlock();
-        const doc = readSidecarDoc(alloc, project_dir, name, null);
+        const doc = (readSidecarDoc(alloc, project_dir, name, null) catch return);
         // Refreshing the auto cache is a render-path write — preserve the rev.
-        writeLayoutsFile(alloc, project_dir, name, doc.layouts, .{ .params = params, .parts = parts }, doc.rev);
+        writeLayoutsFile(alloc, project_dir, name, doc.layouts, .{ .params = params, .parts = parts }, doc.rev) catch return;
     }
     if (paths.designSiblingPath(alloc, project_dir, name, auto_ext)) |legacy| {
         defer alloc.free(legacy);
@@ -10571,7 +10575,7 @@ pub fn mcpPersistWorking(
     name: []const u8,
     entry_in: SavedLayout,
     star: bool,
-) void {
+) sidecar_store.StoreError!void {
     var entry = entry_in;
     entry.kind = kind_manual;
     // Every agent mutation is an edit, including an outline/route update to an
@@ -10583,7 +10587,7 @@ pub fn mcpPersistWorking(
     // hold — an agent's CLI write and an open tab's save target one file.
     const guard = lockSidecar(name, null);
     defer guard.unlock();
-    const existing = readLayouts(alloc, project_dir, name);
+    const existing = (try readSidecarDoc(alloc, project_dir, name, null)).layouts;
     var out: std.ArrayList(SavedLayout) = .empty;
     var replaced = false;
     for (existing) |L| {
@@ -10593,15 +10597,15 @@ pub fn mcpPersistWorking(
         } else {
             var e = L;
             if (star) e.default = false;
-            out.append(alloc, e) catch return;
+            out.append(alloc, e) catch return error.OutOfMemory;
         }
     }
     if (!replaced) entry.default = star;
     // Keep the physical history newest-first too, which resolves ties between
     // edits stamped during the same second before the stable display sort.
-    out.insert(alloc, 0, entry) catch return;
+    out.insert(alloc, 0, entry) catch return error.OutOfMemory;
     starFirstEver(out.items);
-    mcpProtectedWrite(alloc, project_dir, name, out.items);
+    try mcpProtectedWrite(alloc, project_dir, name, out.items);
 }
 
 /// Write a sidecar mutated over CLI the way the viewer's Save does: snapshot
@@ -10614,7 +10618,7 @@ pub fn mcpPersistWorking(
 /// Takes no sidecar lock of its own: its only caller (`mcpPersistWorking`)
 /// already holds one across the read this write is modifying, and
 /// `infra_fs.Mutex` is not reentrant.
-fn mcpProtectedWrite(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) void {
+fn mcpProtectedWrite(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) sidecar_store.StoreError!void {
     if (layoutsSidecar(alloc, project_dir, name, null, layouts_ext)) |scp| {
         _ = history.snapshotLayouts(alloc, project_dir, name, scp) catch null;
     }
@@ -10622,9 +10626,9 @@ fn mcpProtectedWrite(alloc: std.mem.Allocator, project_dir: []const u8, name: []
     // read (rough → readAutoPoses, the cache slot — not the starred layout)
     // reflects this write, not the pre-mutation scene (read-after-write bug #2;
     // the solver applies a clean full cache verbatim). Tuning params survive.
-    var cache = readCacheSlot(alloc, project_dir, name) orelse CacheSlot{ .params = .{}, .parts = null };
+    var cache = (try readDesignDoc(alloc, project_dir, name)).cache orelse CacheSlot{ .params = .{}, .parts = null };
     if (blessedLayout(layouts)) |bl| cache.parts = bl.parts;
-    writeLayoutsFile(alloc, project_dir, name, layouts, cache, readLayoutRev(alloc, project_dir, name, null) + 1);
+    try writeLayoutsFile(alloc, project_dir, name, layouts, cache, (try readSidecarDoc(alloc, project_dir, name, null)).rev + 1);
 }
 
 /// Net NAME at flattened-net index `idx` (−1 / out-of-range ⇒ "" — foreign
@@ -11034,7 +11038,7 @@ pub fn mcpSetPartPoses(
         .texts = if (working) |w| w.texts else &.{},
         .dimensions = mcpWorkingDimensions(working),
     };
-    mcpPersistWorking(alloc, project_dir, name, entry, false);
+    try mcpPersistWorking(alloc, project_dir, name, entry, false);
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
@@ -11122,7 +11126,7 @@ pub fn mcpSetBoardOutline(
         .texts = if (working) |wl| wl.texts else &.{},
         .dimensions = mcpWorkingDimensions(working),
     };
-    mcpPersistWorking(alloc, project_dir, name, entry, false);
+    try mcpPersistWorking(alloc, project_dir, name, entry, false);
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
@@ -11266,7 +11270,7 @@ pub fn mcpSetCopperZones(
         .texts = if (working) |w| w.texts else &.{},
         .dimensions = mcpWorkingDimensions(working),
     };
-    mcpPersistWorking(alloc, project_dir, name, entry, false);
+    try mcpPersistWorking(alloc, project_dir, name, entry, false);
 
     const user_zones = userZonesFrom(alloc, solved.placement.rules, zones);
     var tally = fab_readiness.Tally{};
@@ -11690,7 +11694,7 @@ pub fn mcpRoutePcb(
         .texts = if (working) |wl| wl.texts else &.{},
         .dimensions = mcpWorkingDimensions(working),
     };
-    mcpPersistWorking(alloc, project_dir, name, entry, false);
+    try mcpPersistWorking(alloc, project_dir, name, entry, false);
 
     // DRC-check exactly what was persisted unless this is a fast checkpoint.
     // Keep the direct pour-aware call visible at this mutation boundary: the
@@ -11778,7 +11782,7 @@ pub fn mcpSavePcbLayout(
         .texts = working.texts,
         .dimensions = working.dimensions,
     };
-    mcpPersistWorking(alloc, project_dir, name, entry, star);
+    try mcpPersistWorking(alloc, project_dir, name, entry, star);
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
@@ -11913,7 +11917,7 @@ pub fn mcpClearRoutes(
         .texts = working.texts,
         .dimensions = working.dimensions,
     };
-    mcpPersistWorking(alloc, project_dir, name, entry, false);
+    try mcpPersistWorking(alloc, project_dir, name, entry, false);
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
@@ -12614,7 +12618,7 @@ pub fn mcpCleanRouteTopology(
     if (changed) {
         var persisted = try mcpSavedRoutesFrom(alloc, cleaned, solved.placement.nets, saved_routes);
         persisted.zones = saved_routes.zones;
-        mcpPersistWorking(alloc, project_dir, name, .{
+        try mcpPersistWorking(alloc, project_dir, name, .{
             .name = working.name,
             .kind = kind_manual,
             .ts = 0,
@@ -12754,7 +12758,7 @@ pub fn mcpNormalizeJunctions(
     if (changed) {
         var persisted = try mcpSavedRoutesFrom(alloc, candidate, solved.placement.nets, saved_routes);
         persisted.zones = saved_routes.zones;
-        mcpPersistWorking(alloc, project_dir, name, .{
+        try mcpPersistWorking(alloc, project_dir, name, .{
             .name = working.name,
             .kind = kind_manual,
             .ts = 0,
@@ -12908,7 +12912,7 @@ pub fn mcpRepairLandTransit(
             .texts = working.texts,
             .dimensions = working.dimensions,
         };
-        mcpPersistWorking(alloc, project_dir, name, entry, false);
+        try mcpPersistWorking(alloc, project_dir, name, entry, false);
     }
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -12990,7 +12994,7 @@ pub fn mcpStitchGroundPads(
     if (changed) {
         var persisted = try mcpSavedRoutesFrom(alloc, candidate, placement.nets, saved_routes);
         persisted.zones = saved_routes.zones;
-        mcpPersistWorking(alloc, project_dir, name, .{
+        try mcpPersistWorking(alloc, project_dir, name, .{
             .name = working.name,
             .kind = kind_manual,
             .ts = 0,
@@ -13114,7 +13118,7 @@ pub fn mcpAddTracks(
             .texts = if (working) |wl| wl.texts else &.{},
             .dimensions = mcpWorkingDimensions(working),
         };
-        mcpPersistWorking(alloc, project_dir, name, entry, false);
+        try mcpPersistWorking(alloc, project_dir, name, entry, false);
     }
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -13256,7 +13260,7 @@ pub fn fabViewForResolved(
     layout_arg: ?[]const u8,
     block: *env_mod.DesignBlock,
 ) FabViewError!FabView {
-    const sidecar = readDesignDoc(alloc, project_dir, name);
+    const sidecar = (readDesignDoc(alloc, project_dir, name) catch SidecarDoc{});
     // One selection predicate, shared with the fast refusal in `fab_package`:
     // a release that is going to be refused must be able to reach these same
     // two 404s without first paying for the placement below.
@@ -13459,7 +13463,7 @@ test "layouts sidecar round-trips cache slot" {
     refreshed_params.loop_w = 9;
     writeAutoCache(alloc, project, "foo", placement, refreshed_params);
 
-    const doc = readSidecarDoc(alloc, project, "foo", null);
+    const doc = (readSidecarDoc(alloc, project, "foo", null) catch SidecarDoc{});
     try std.testing.expectEqual(@as(i64, 42), doc.rev);
     try std.testing.expectEqual(@as(usize, 1), doc.layouts.len);
     try std.testing.expectEqualStrings("best", doc.layouts[0].name);
@@ -13530,11 +13534,11 @@ test "layout sidecar rev reads back and a save stamps the next rev" {
     // A save stamps disk_rev + 1 = 1; a follow-up read sees it.
     const parts = [_]PartPose{.{ .ref = "U1", .x = 0, .y = 0, .rot = 0 }};
     const layouts = [_]SavedLayout{.{ .name = "layout", .kind = kind_manual, .ts = 1, .score = null, .parts = &parts, .default = true }};
-    writeLayoutsFile(alloc, project, "foo", &layouts, null, 1);
+    try writeLayoutsFile(alloc, project, "foo", &layouts, null, 1);
     try std.testing.expectEqual(@as(i64, 1), readLayoutRev(alloc, project, "foo", null));
 
     // An explicit rev value round-trips too.
-    writeLayoutsFile(alloc, project, "foo", &layouts, null, 42);
+    try writeLayoutsFile(alloc, project, "foo", &layouts, null, 42);
     try std.testing.expectEqual(@as(i64, 42), readLayoutRev(alloc, project, "foo", null));
 }
 
@@ -13559,7 +13563,7 @@ test "readDesignDoc folds in the legacy auto cache like a re-reading readCacheSl
         .data = "{\"parts\":[{\"ref\":\"U1\",\"x\":3,\"y\":4,\"rot\":90}]}",
     });
 
-    const doc = readDesignDoc(alloc, project, "foo");
+    const doc = (readDesignDoc(alloc, project, "foo") catch SidecarDoc{});
     const once = cachePoses(alloc, doc.cache) orelse return error.NoCachedPoses;
     const rereading = readAutoPoses(alloc, project, "foo") orelse return error.NoCachedPoses;
     try std.testing.expectEqual(rereading.len, once.len);
@@ -13602,9 +13606,9 @@ test "CLI persist bumps the sidecar rev and snapshots history" {
     // tab holding the old rev 409s on its next save instead of clobbering.
     const parts = [_]PartPose{.{ .ref = "U1", .x = 1, .y = 2, .rot = 0 }};
     const entry = SavedLayout{ .name = "layout", .kind = kind_manual, .ts = 1, .score = null, .parts = &parts, .default = true };
-    mcpPersistWorking(alloc, project, "foo", entry, true);
+    try mcpPersistWorking(alloc, project, "foo", entry, true);
     try std.testing.expectEqual(@as(i64, 1), readLayoutRev(alloc, project, "foo", null));
-    mcpPersistWorking(alloc, project, "foo", entry, true);
+    try mcpPersistWorking(alloc, project, "foo", entry, true);
     try std.testing.expectEqual(@as(i64, 2), readLayoutRev(alloc, project, "foo", null));
 
     // The pre-write sidecar landed in history/ (recoverable like a viewer Save).
@@ -13638,7 +13642,7 @@ test "CLI persist refreshes the auto cache poses so a default read sees the muta
     // A CLI mutation persists U1 at a distinctive new pose (as set_part_poses does).
     const parts = [_]PartPose{.{ .ref = "U1", .x = 42, .y = 7, .rot = 90 }};
     const entry = SavedLayout{ .name = "layout", .kind = kind_manual, .ts = 1, .score = null, .parts = &parts, .default = true };
-    mcpPersistWorking(alloc, project, "foo", entry, true);
+    try mcpPersistWorking(alloc, project, "foo", entry, true);
 
     // Read-after-write: the cache the default read consults now carries the
     // mutation, not the pre-mutation pose (bug #2 would leave x at 0).
@@ -13796,7 +13800,7 @@ test "the layout selector shows a named snapshot verbatim above the starred defa
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/foo.layouts.json", .data = sel_sidecar });
 
     var block = sel_block;
-    const none = chooseLayout(alloc, null, &block, .{}, .{ .params = .{}, .tuned = false, .regen = false }, readSidecarDoc(alloc, project, "foo", null));
+    const none = chooseLayout(alloc, null, &block, .{}, .{ .params = .{}, .tuned = false, .regen = false }, (readSidecarDoc(alloc, project, "foo", null) catch SidecarDoc{}));
     // Nothing asked for → the ★ default, rendered verbatim.
     try std.testing.expectEqualStrings("star", none.starred_name orelse return error.TestNoStar);
     try std.testing.expect(none.verbatim);
@@ -13805,20 +13809,20 @@ test "the layout selector shows a named snapshot verbatim above the starred defa
     // ?layout=alt names a specific snapshot: it outranks the star (which is no
     // longer even consulted) and still renders verbatim — a direct link must
     // reproduce the saved board exactly, never a re-solve of it.
-    const view = chooseLayout(alloc, null, &block, .{ .view = "alt" }, .{ .params = .{}, .tuned = false, .regen = false }, readSidecarDoc(alloc, project, "foo", null));
+    const view = chooseLayout(alloc, null, &block, .{ .view = "alt" }, .{ .params = .{}, .tuned = false, .regen = false }, (readSidecarDoc(alloc, project, "foo", null) catch SidecarDoc{}));
     try std.testing.expect(view.starred_name == null);
     try std.testing.expect(view.verbatim);
     try std.testing.expectEqual(@as(f64, 9), (view.cached orelse return error.TestNoPoses)[0].x);
 
     // ?refine= seeds from the same snapshot but asks for a re-solve, so it is
     // deliberately NOT verbatim.
-    const refine = chooseLayout(alloc, null, &block, .{ .refine = "alt" }, .{ .params = .{}, .tuned = false, .regen = false }, readSidecarDoc(alloc, project, "foo", null));
+    const refine = chooseLayout(alloc, null, &block, .{ .refine = "alt" }, .{ .params = .{}, .tuned = false, .regen = false }, (readSidecarDoc(alloc, project, "foo", null) catch SidecarDoc{}));
     try std.testing.expect(!refine.verbatim);
     try std.testing.expectEqual(@as(f64, 9), (refine.cached orelse return error.TestNoPoses)[0].x);
 
     // A ?layout= naming nothing resolves no poses — the page turns that into a
     // 404 rather than quietly falling back to a different board.
-    const missing = chooseLayout(alloc, null, &block, .{ .view = "nope" }, .{ .params = .{}, .tuned = false, .regen = false }, readSidecarDoc(alloc, project, "foo", null));
+    const missing = chooseLayout(alloc, null, &block, .{ .view = "nope" }, .{ .params = .{}, .tuned = false, .regen = false }, (readSidecarDoc(alloc, project, "foo", null) catch SidecarDoc{}));
     try std.testing.expect(missing.cached == null);
 }
 

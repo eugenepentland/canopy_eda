@@ -830,6 +830,9 @@
   // version watermark so our own edit doesn't trigger the 2s poll's reload.
   var pendingEdits = 0;
   function postEdit(endpoint, body, reload, onErr, onOk) {
+    if (pendingEdits) { onErr('Wait for the current edit to finish.'); return; }
+    body.sourceRevision = typeof SCH_SOURCE_REVISION === 'string' ? SCH_SOURCE_REVISION : undefined;
+    if (body.ref && compByRef[body.ref]) body.sourceLabel = compByRef[body.ref].sourceLabel || body.ref;
     pendingEdits++;
     var finished = false;
     function finish() {
@@ -855,6 +858,7 @@
           finish();
           onErr((res.j && (res.j.error || res.j.message)) || 'edit failed'); return;
         }
+        if (res.j && res.j.sourceRevision) SCH_SOURCE_REVISION = res.j.sourceRevision;
         if (reload) { finish(); window.location.reload(); return; }
         if (res.j && typeof res.j.version === 'number') lastVersion = res.j.version;
         finish();
@@ -2065,7 +2069,7 @@
       fetch('/api/board-role/' + encodeURIComponent(DESIGN_NAME), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: role })
+        body: JSON.stringify({ role: role, sourceRevision: SCH_SOURCE_REVISION })
       }).then(function (r) {
         return r.text().then(function (body) { return { ok: r.ok, body: body }; });
       }).then(function (resp) {
@@ -2101,7 +2105,7 @@
       }).then(function (j) {
         editSrcBtn.textContent = original;
         editSrcBtn.dataset.busy = '';
-        openSrcEditor((j && typeof j.source === 'string') ? j.source : '');
+        openSrcEditor((j && typeof j.source === 'string') ? j.source : '', j.sourceRevision);
       }).catch(function (e) {
         editSrcBtn.textContent = original;
         editSrcBtn.dataset.busy = '';
@@ -2113,7 +2117,7 @@
   // Modal .sexp editor: a centered overlay with a monospace textarea. Save
   // POSTs the edited source; validation/rebuild errors from the server render
   // inline (red) so the user can fix and retry without losing their edit.
-  function openSrcEditor(src) {
+  function openSrcEditor(src, sourceRevision) {
     var overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;' +
       'display:flex;align-items:center;justify-content:center;';
@@ -2154,7 +2158,7 @@
       fetch('/api/source/' + DESIGN_NAME, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source: ta.value })
+        body: JSON.stringify({ source: ta.value, sourceRevision: sourceRevision })
       }).then(function (r) {
         return r.text().then(function (body) { return { ok: r.ok, body: body }; });
       }).then(function (resp) {
@@ -2442,7 +2446,7 @@
             }
             return;
           }
-          var body = { ref: refs[i] };
+          var body = { ref: refs[i], sourceRevision: SCH_SOURCE_REVISION };
           body[propName] = newVal;
           fetch(endpoint + '/' + DESIGN_NAME, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
             .then(function (r) { return r.json(); })
@@ -2452,6 +2456,7 @@
               // doesn't notice OUR own edit and force a full page reload —
               // we already have the value the user typed, no refresh needed.
               if (d && typeof d.version === 'number') lastVersion = d.version;
+              if (d && typeof d.sourceRevision === 'string') SCH_SOURCE_REVISION = d.sourceRevision;
               i++; next();
             })
             .catch(function () { ok = false; i++; next(); });
@@ -2693,7 +2698,7 @@
         return fetch(base, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: raw }),
+          body: JSON.stringify({ text: raw, revision: j.revision }),
         });
       }).then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -2914,7 +2919,7 @@
       fetch('/api/source/' + DESIGN_NAME, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source: cm.getValue() })
+        body: JSON.stringify({ source: cm.getValue(), sourceRevision: state.sourceRevision })
       })
         .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
         .then(function (res) {
@@ -2942,6 +2947,7 @@
       .then(function (r) { return r.json(); })
       .then(function (j) {
         cm.setValue(typeof j.source === 'string' ? j.source : '');
+        state.sourceRevision = j.sourceRevision;
         state.loaded = true;
         setTimeout(function () { cm.refresh(); }, 0);
       })
@@ -3092,7 +3098,7 @@
       fetch('/api/validate/' + DESIGN_NAME, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source: cm.getValue() })
+        body: JSON.stringify({ source: cm.getValue(), sourceRevision: state.sourceRevision })
       })
         .then(function (r) { return r.json(); })
         .then(function (j) { applyDiagnostics((j && j.diagnostics) || []); })

@@ -1,17 +1,1 @@
 # guardian-snapshot v3
-int-from-float-budget|src/eval/design_block.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn
-int-from-float-budget|src/kicad_pcb/project_rules.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn
-int-from-float-budget|src/placement/bend_smooth.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn
-int-from-float-budget|src/placement/bend_smooth.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn
-int-from-float-budget|src/placement/bend_smooth.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn
-int-from-float-budget|src/placement/bend_smooth.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn
-int-from-float-budget|src/placement/bend_smooth.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn
-int-from-float-budget|src/placement/copper_length.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn
-int-from-float-budget|src/placement/drc_diffpair.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn
-int-from-float-budget|src/placement/pad_shape.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn
-int-from-float-budget|src/placement/router.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn
-int-from-float-budget|src/placement/router.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn
-int-from-float-budget|src/placement/router.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn
-int-from-float-budget|src/placement/router.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn
-int-from-float-budget|src/placement/router.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn
-int-from-float-budget|src/placement/router.zig|unguarded @intFromFloat under require_guard — wrap it in a guard fn

@@ -17,6 +17,7 @@
 //! unrouted-net problem, not a coupling one — so a half-routed board is quiet.
 
 const std = @import("std");
+const numeric = @import("../numeric.zig");
 const optimizer = @import("optimizer.zig");
 const router = @import("router.zig");
 const drc = @import("drc.zig");
@@ -97,7 +98,7 @@ fn appendUncoupled(
     for (tracks) |t| {
         if (t.net != pnet) continue;
         const seg_len = std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
-        const n_samp: usize = @max(@as(usize, 1), @as(usize, @intFromFloat(@ceil(seg_len / step))));
+        const n_samp: usize = @max(@as(usize, 1), (numeric.checkedInt(usize, @ceil(seg_len / step)) orelse continue));
         var run: f64 = 0; // contiguous uncoupled length on this leg
         var run_d: f64 = -1;
         var run_x: f64 = 0;

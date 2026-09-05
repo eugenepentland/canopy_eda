@@ -125,7 +125,7 @@ pub const FlatInst = struct {
     /// "Edit source →" jump. 0 means "no source link": sub-block children
     /// (their offsets point into the module file, which `/api/source/:name`
     /// can't serve) and synthetic instances.
-    src_offset: u32 = 0,
+    source: struct { offset: u32 = 0, label: []const u8 = "" } = .{},
     /// `(decouples "IC" PIN)` binding, copied off the Instance. Lets the
     /// spoke-attachment pass dock a bypass cap on the one hub pad it serves
     /// instead of fanning it onto every pin of the rail (the schematic twin of
@@ -440,7 +440,7 @@ pub const RenderCtx = struct {
                 // Sub-block instances evaluate out of their module file, so
                 // their offsets don't map into the design source — only
                 // top-level (unprefixed) instances get a source link.
-                .src_offset = if (prefix.len == 0) inst.source_offset else 0,
+                .source = .{ .offset = if (prefix.len == 0) inst.source_offset else 0, .label = if (inst.label.len > 0) inst.label else inst.ref_des },
                 .decouple_ic = inst.bind.decouple.ic,
                 .decouple_pin = inst.bind.decouple.pin,
             };
