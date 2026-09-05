@@ -186,7 +186,12 @@ const Mismatch = struct {
 /// `--lib-dir` / `NETLISP_LIB_DIR` root when it differs from both. The bundled
 /// standard library is deliberately NOT a root — it has no directory — and is
 /// consulted only after every root has missed.
-fn libSearchRoots(self: *Evaluator, buf: *[3][]const u8) [][]const u8 {
+/// The on-disk roots a library sub-path is searched under, in priority order:
+/// the project, this evaluator's `lib_dir`, then the `--lib-dir` root. The
+/// standard library is NOT one of them — it is the tail every caller appends
+/// itself, through `stdlib.standard`. Shared with `eval/interfaces.zig` so an
+/// `(interface …)` file resolves exactly where an imported module would.
+pub fn libSearchRoots(self: *Evaluator, buf: *[3][]const u8) [][]const u8 {
     var count: usize = 0;
     buf[count] = self.project_dir;
     count += 1;

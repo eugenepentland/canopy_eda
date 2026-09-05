@@ -60,6 +60,22 @@ Plus the generic board features a first board needs, each with its pinout:
 | `pin-header-1x4` | `pin-header-1x4-2-54mm` | 4-pin 2.54 mm through-hole header |
 | `pin-header-2x5` | `pin-header-2x5-2-54mm` | 2x5 2.54 mm through-hole header |
 
+And the five interface bundles — the named-lane bus vocabularies
+`(port-group …)` expands from, under `lib/interfaces/`:
+
+| Interface | Signals (peripheral perspective) |
+| --- | --- |
+| `spi` | `SCK` in, `MOSI` in, `MISO` out, `CS` in |
+| `i2c` | `SDA` bidi, `SCL` bidi |
+| `uart` | `RX` in, `TX` out, `CTS` in *(optional)*, `RTS` out *(optional)* |
+| `swd` | `SWCLK` in, `SWDIO` bidi, `NRST` in *(optional)*, `SWO` out *(optional)* |
+| `jtag` | `TCK` in, `TMS` in, `TDI` in, `TDO` out, `TRST` in *(optional)* |
+
+`(port-group … (role controller))` mirrors every direction, so one definition
+serves both ends of a link. These resolve through the same order as everything
+else: a project's own `lib/interfaces/spi.sexp` shadows the bundled `spi` by
+name. See [docs/sexpr-language.md § Interface bundles](sexpr-language.md).
+
 No modules and no parts tables are bundled. `lib/modules/` and `lib/parts/`
 resolve through the same order, so a shared `--lib-dir` or a project's own
 directory supplies them.

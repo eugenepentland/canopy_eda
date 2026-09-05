@@ -33,6 +33,7 @@ pub const SpecialForm = enum {
     fmt_,
     id_,
     implements,
+    interface,
 
     pub fn fromAtom(name: []const u8) ?SpecialForm {
         return atom_to_form.get(name);
@@ -65,6 +66,7 @@ const atom_to_form = std.StaticStringMap(SpecialForm).initComptime(.{
     .{ "fmt", .fmt_ },
     .{ "id", .id_ },
     .{ "implements", .implements },
+    .{ "interface", .interface },
 });
 
 /// Arithmetic, comparison, and logic builtin operators. Recognising
@@ -124,6 +126,7 @@ pub const ScopeForm = enum {
     port,
     bus_port,
     diff_port,
+    port_group,
     note,
     section,
     decouple,
@@ -180,6 +183,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "port", .port },
     .{ "bus-port", .bus_port },
     .{ "diff-port", .diff_port },
+    .{ "port-group", .port_group },
     .{ "note", .note },
     .{ "section", .section },
     .{ "decouple", .decouple },
@@ -263,6 +267,7 @@ pub const special_form_schema = blk: {
         .{ .assert_range, .{ .min_args = 4, .max_args = 4 } },
         .{ .fmt_, .{ .min_args = 1, .max_args = null } },
         .{ .implements, .{ .min_args = 1, .max_args = null } },
+        .{ .interface, .{ .min_args = 2, .max_args = null } },
     };
     var table: [@typeInfo(SpecialForm).@"enum".field_names.len]?FormSchema = @splat(null);
     for (pairs) |p| table[@backingInt(p[0])] = p[1];
@@ -405,6 +410,14 @@ pub const special_form_docs = blk: {
             "Canonical implementations prohibit direct board instantiation; recommended " ++
             "implementations warn; examples are discovery-only.",
     };
+    t[@backingInt(SpecialForm.interface)] = .{
+        .syntax = "(interface NAME [\"doc\"] (signal SIGNAL in|out|io|bidi [kind] [optional])…)",
+        .summary = "Define a named bus vocabulary — the SPI/I\u{b2}C/UART/SWD/JTAG lanes that are names " ++
+            "rather than numbered bus lanes. Directions are stated from the PERIPHERAL's point of " ++
+            "view; `(port-group … (role controller))` mirrors them. Valid at the top level of a " ++
+            "design or module file, and resolved on first use from `lib/interfaces/NAME.sexp` " ++
+            "(project, then `--lib-dir`, then the bundled standard library).",
+    };
     break :blk requireAllDocumented(SpecialForm, FormDoc, t);
 };
 
@@ -502,6 +515,15 @@ pub const scope_form_docs = blk: {
             "ports (override the suffixes with `(suffixes …)`), replays every modifier onto both lanes, " ++
             "defaults their kind to `differential`, and records the pairing so ERC holds the two lanes " ++
             "to a both-or-neither connection rule.",
+    } };
+    t[@backingInt(ScopeForm.port_group)] = .{ .scope = tl, .doc = .{
+        .syntax = "(port-group \"PREFIX\" iface [optional] [(role controller|peripheral)] [(rename SIGNAL \"PORTNAME\")]… [(omit SIGNAL…)] port-modifier…)",
+        .summary = "Declare a whole named bus as one line: expands to one `(port …)` per signal of " ++
+            "the interface, named `PREFIX_SIGNAL` (an empty prefix gives bare signal names), replays " ++
+            "every trailing port modifier onto each lane the way `(diff-port …)` does, and records " ++
+            "the bundle so ERC holds it to a both-or-neither rule and a parent can wire it with one " ++
+            "`(bridge-interface …)`. The group is addressed by its prefix — by the interface name " ++
+            "when the prefix is empty. Its options are the \u{201c}Port-group sub-forms\u{201d} table.",
     } };
     t[@backingInt(ScopeForm.note)] = .{ .scope = all, .doc = .{
         .syntax = "(note \"id\" \"text\" [(ref …)])",
@@ -1427,6 +1449,14 @@ pub const sub_block_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
             "with an empty prefix, name the board net outright.",
     },
     .{
+        .name = "bridge-interface",
+        .syntax = "(bridge-interface \"GROUP\" (to \"NET_PREFIX\") | (to-group \"BOARDGROUP\") [(rename SIGNAL \"NET\")]…)",
+        .summary = "Wire one whole `(port-group …)` of the sub-block in a single line: every member " ++
+            "port ties to board net `NET_PREFIX_SIGNAL`, or to the same signal of a board-level " ++
+            "group. Exactly equivalent to the `(bridge …)` lines it replaces. Its own children are " ++
+            "the \u{201c}Bridge-interface sub-forms\u{201d} table.",
+    },
+    .{
         .name = "id",
         .syntax = "(id hex8)",
         .summary = "Stable identity anchor for the sub-block itself.",
@@ -1442,6 +1472,68 @@ pub const sub_block_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
         .syntax = "(reflow)",
         .summary = "Opt this sub-block out of module-layout composition, so the parent lays its contents " ++
             "out from scratch rather than reusing the module's own arrangement.",
+    },
+});
+
+/// Children of an `(interface NAME …)` definition. One row today: the
+/// vocabulary is a list of named lanes and nothing else.
+pub const interface_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
+    .{
+        .name = "signal",
+        .syntax = "(signal SIGNAL in|out|io|bidi [kind] [optional])",
+        .summary = "One named lane of the bundle. The direction is the PERIPHERAL's — `(port-group " ++
+            "… (role controller))` mirrors it, and a bidirectional lane is its own mirror. An " ++
+            "optional signal-type word (`clock`, `data`, …) is replayed onto the expanded port; " ++
+            "`optional` marks a lane a link may legitimately leave unwired.",
+    },
+});
+
+/// Options of a `(port-group "PREFIX" iface …)`. `eval/interfaces.zig` reads
+/// these by head atom; anything else is a trailing port modifier replayed onto
+/// every lane, so this table is the set it must NOT replay.
+pub const port_group_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
+    .{
+        .name = "role",
+        .syntax = "(role controller|peripheral)",
+        .summary = "Which end of the link this block is. `peripheral` (the default) keeps the " ++
+            "interface's own directions; `controller` mirrors every one of them. Unrelated to the " ++
+            "section-scope `(role …)` annotation.",
+    },
+    .{
+        .name = "rename",
+        .syntax = "(rename SIGNAL \"PORTNAME\")",
+        .summary = "Name one lane's port outright instead of `PREFIX_SIGNAL` — how a part whose " ++
+            "datasheet spells chip-select `CSN` keeps that name while still declaring `spi`.",
+    },
+    .{
+        .name = "omit",
+        .syntax = "(omit SIGNAL…)",
+        .summary = "Drop lanes the part does not have, e.g. the `MISO` of a write-only three-wire " ++
+            "SPI peripheral.",
+    },
+});
+
+/// Children of a `(bridge-interface "GROUP" …)` inside a `(sub-block …)`.
+/// `eval/interfaces.zig` derives its accepted set from the direct rows here.
+pub const bridge_interface_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
+    .{
+        .name = "to",
+        .syntax = "(to \"NET_PREFIX\")",
+        .summary = "Board nets for the bundle: member signal S ties to `NET_PREFIX_S`, joined by one " ++
+            "underscore (an empty prefix gives the bare signal names).",
+    },
+    .{
+        .name = "to-group",
+        .syntax = "(to-group \"BOARDGROUP\")",
+        .summary = "Tie the sub-block's bundle to a `(port-group …)` this block declares itself, " ++
+            "signal by signal — how a board passes a bus straight through to its own boundary. A " ++
+            "signal the board group does not carry is simply not tied.",
+    },
+    .{
+        .name = "rename",
+        .syntax = "(rename SIGNAL \"NET\")",
+        .summary = "Name one signal's board net outright, overriding `(to …)`/`(to-group …)` for " ++
+            "that lane — the odd chip-select that lands on a per-device net.",
     },
 });
 
@@ -1666,6 +1758,9 @@ pub const sub_form_tables = [_][]const SubFormDoc{
     instance_form_docs,
     pins_form_docs,
     sub_block_form_docs,
+    interface_form_docs,
+    port_group_form_docs,
+    bridge_interface_form_docs,
     port_form_docs,
     marker_form_docs,
     component_form_docs,

@@ -28,6 +28,7 @@ const net_envelopes = @import("net_envelopes.zig");
 const physical_checks = @import("../req_physical_checks.zig");
 const test_point_mod = @import("test_point.zig");
 const micro_forms = @import("micro_forms.zig");
+const interfaces = @import("interfaces.zig");
 const pin_enrichment = @import("pin_enrichment.zig");
 const forms_mod = @import("forms.zig");
 const board_role_mod = @import("board_role.zig");
@@ -128,6 +129,12 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var sections: std.ArrayList(env_mod.Section) = .empty;
     var net_ties: std.ArrayList(NetTie) = .empty;
     var sub_blocks: std.ArrayList(SubBlock) = .empty;
+    var port_groups: std.ArrayList(env_mod.PortGroup) = .empty;
+    // `(bridge-interface …)` ties are resolved after the whole body has been
+    // walked: a board-level `(port-group …)` a `(to-group …)` names may be
+    // written below the `(sub-block …)` that binds to it.
+    var iface_bridges: std.ArrayList(interfaces.PendingBridge) = .empty;
+    defer iface_bridges.deinit(self.allocator);
     var functions: std.ArrayList(env_mod.FunctionSpec) = .empty;
     var verifications: std.ArrayList(env_mod.Verification) = .empty;
     var test_points: std.ArrayList(env_mod.TestPoint) = .empty;
@@ -195,6 +202,8 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .sections = &sections,
         .net_ties = &net_ties,
         .sub_blocks = &sub_blocks,
+        .port_groups = &port_groups,
+        .iface_bridges = &iface_bridges,
         .functions = &functions,
         .verifications = &verifications,
         .test_points = &test_points,
@@ -217,6 +226,9 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .net_form_sources = &net_form_sources,
     };
     try evalBlockBodyForms(self, body_forms, env, &build);
+    // Every `(port-group …)` in this body now exists, so a sub-block's
+    // `(bridge-interface …)` can be resolved against either end.
+    try interfaces.resolveBridges(self, iface_bridges.items, port_groups.items, &net_ties);
     try applyPowerPlanePolicy(self, board_spec, &stackup_spec);
     // Every instance now exists, so a `(decouples "IC" FUNC)` / `(near "REF"
     // FUNC)` can finally be read against the pinout of the part it names — in
@@ -241,6 +253,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .notes = notes.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .groups = groups.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .sub_blocks = sub_blocks.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+        .port_groups = port_groups.toOwnedSlice(self.allocator) catch &.{},
         .sections = sections.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .functions = functions.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .net_ties = block_ties,
@@ -334,6 +347,8 @@ const BlockBuildState = struct {
     sections: *std.ArrayList(env_mod.Section),
     net_ties: *std.ArrayList(NetTie),
     sub_blocks: *std.ArrayList(SubBlock),
+    port_groups: *std.ArrayList(env_mod.PortGroup),
+    iface_bridges: *std.ArrayList(interfaces.PendingBridge),
     functions: *std.ArrayList(env_mod.FunctionSpec),
     verifications: *std.ArrayList(env_mod.Verification),
     test_points: *std.ArrayList(env_mod.TestPoint),
@@ -473,6 +488,7 @@ fn evalBlockBodyForm(
         },
         .bus_port => try builders.expandTopLevelBusPort(self, form_children, env, build.ports),
         .diff_port => try builders.expandTopLevelDiffPort(self, form_children, env, build.ports),
+        .port_group => try interfaces.expandPortGroup(self, form_children, env, build.ports, build.port_groups),
         .note => try build.notes.append(self.allocator, try builders.buildNote(self, form_children[1..], env)),
         .group => {
             const group = try builders.buildGroup(self, form_children[1..], env);
@@ -485,6 +501,7 @@ fn evalBlockBodyForm(
         .sub_block => {
             const sb = try builders.buildSubBlock(self, form_children, env);
             try evalSubBlockBridges(self, form_children, sb.name, build.net_ties);
+            try interfaces.collectSubBlockBridges(self, form_children, sb, build.iface_bridges);
             try build.sub_blocks.append(self.allocator, sb);
         },
         .section => try evalSection(self, form_children, env, BlockContext.of(build)),
@@ -1335,6 +1352,7 @@ fn evalSectionChild(
         // silent skip is visible).
         .description, .note, .port, .protocol, .calc => {},
         .group,
+        .port_group,
         .function,
         .verifies,
         .decouple_defaults,

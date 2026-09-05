@@ -247,6 +247,7 @@ fn renderSubFormTable(writer: anytype, table: []const forms.SubFormDoc) !void {
 fn renderSubFormSections(writer: anytype) !void {
     try renderInstanceSubForms(writer);
     try renderSubBlockSubForms(writer);
+    try renderInterfaceSubForms(writer);
     try renderPortSubForms(writer);
     try renderMarkerForms(writer);
 }
@@ -310,6 +311,44 @@ fn renderSubBlockSubForms(writer: anytype) !void {
         \\
     );
     try renderSubFormTable(writer, forms.sub_block_form_docs);
+}
+
+/// Render the interface-bundle grammars — the definition, the module-side
+/// `(port-group …)` options, and the board-side `(bridge-interface …)`
+/// children.
+fn renderInterfaceSubForms(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Interface sub-forms
+        \\
+        \\`bus-port`/`bus-net` write a bus whose lanes are NUMBERED. SPI, I²C,
+        \\UART, SWD and JTAG lanes are NAMED, and the names have variants
+        \\(`SCK`/`SCLK`, `MOSI`/`SDI`, `CS`/`CSN`/`NCS`/`SS`). An
+        \\`(interface …)` definition states one vocabulary once. Its body:
+        \\
+    );
+    try renderSubFormTable(writer, forms.interface_form_docs);
+    try writer.writeAll(
+        \\
+        \\`spi`, `i2c`, `uart`, `swd` and `jtag` ship with the binary under
+        \\`stdlib/interfaces/`; a project shadows one by writing its own
+        \\`lib/interfaces/<name>.sexp`, and an `(interface …)` at the top level
+        \\of a design or module file needs no file at all.
+        \\
+        \\A module declares its side of the bus with `(port-group …)`, which
+        \\expands to one `(port …)` per signal and records the bundle. Its
+        \\options:
+        \\
+    );
+    try renderSubFormTable(writer, forms.port_group_form_docs);
+    try writer.writeAll(
+        \\
+        \\A board wires the whole bundle with one `(bridge-interface …)` inside
+        \\the `(sub-block …)`, in place of one `(bridge … (rename …))` per
+        \\signal. Its children:
+        \\
+    );
+    try renderSubFormTable(writer, forms.bridge_interface_form_docs);
 }
 
 /// Render the `(port …)` option grammar.

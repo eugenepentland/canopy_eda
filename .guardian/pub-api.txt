@@ -490,6 +490,8 @@ src/erc.zig::ViolationKind enum_
 src/erc.zig::loadPinoutMap | fn loadPinoutMap(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?std.StringHashMapUnmanaged(PinoutEntry)
 src/erc.zig::runErc | fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8) std.mem.Allocator.Error![]const Violation
 src/erc.zig::writeViolationsJson | fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
+src/erc_interface.zig::Finding struct_
+src/erc_interface.zig::run | fn run(allocator: std.mem.Allocator, block: *const DesignBlock) std.mem.Allocator.Error![]Finding
 src/escape.zig::decodeXmlAlloc | fn decodeXmlAlloc(gpa: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8
 src/escape.zig::writeXml | fn writeXml(w: anytype, s: []const u8) !void
 src/escape.zig::writeXmlHexApos | fn writeXmlHexApos(w: anytype, s: []const u8) !void
@@ -627,6 +629,8 @@ src/eval/env.zig::PlanWaveCorridor struct_
 src/eval/env.zig::PlanWaypoint struct_
 src/eval/env.zig::Port struct_
 src/eval/env.zig::PortDirection enum_
+src/eval/env.zig::PortGroup struct_
+src/eval/env.zig::PortGroupMember struct_
 src/eval/env.zig::PourRules struct_
 src/eval/env.zig::PowerDecl struct_
 src/eval/env.zig::PowerRail struct_
@@ -719,6 +723,7 @@ src/eval/forms.zig::ScopedFormDoc struct_
 src/eval/forms.zig::SpecialForm enum_
 src/eval/forms.zig::StructuralFormDoc struct_
 src/eval/forms.zig::SubFormDoc struct_
+src/eval/forms.zig::bridge_interface_form_docs value
 src/eval/forms.zig::builtin_docs value
 src/eval/forms.zig::component_form_docs value
 src/eval/forms.zig::component_reserved_fields value
@@ -727,12 +732,14 @@ src/eval/forms.zig::fromAtom | fn fromAtom(name: []const u8) ?ScopeForm
 src/eval/forms.zig::fromAtom | fn fromAtom(name: []const u8) ?SpecialForm
 src/eval/forms.zig::instance_form_docs value
 src/eval/forms.zig::instance_reserved_forms value
+src/eval/forms.zig::interface_form_docs value
 src/eval/forms.zig::isDirectSubForm | fn isDirectSubForm(table: []const SubFormDoc, name: []const u8) bool
 src/eval/forms.zig::isRegisteredSubForm | fn isRegisteredSubForm(name: []const u8) bool
 src/eval/forms.zig::isSubForm | fn isSubForm(table: []const SubFormDoc, name: []const u8) bool
 src/eval/forms.zig::marker_form_docs value
 src/eval/forms.zig::pins_form_docs value
 src/eval/forms.zig::port_form_docs value
+src/eval/forms.zig::port_group_form_docs value
 src/eval/forms.zig::requireAllDocumented | fn requireAllDocumented( comptime E: type, comptime T: type, comptime table: [@typeInfo(E).@"enum".field_names.len]?T, ) [@typeInfo(E).@"enum".field_names.len]T
 src/eval/forms.zig::requireWellFormedSubForms | fn requireWellFormedSubForms(comptime table: []const SubFormDoc) []const SubFormDoc
 src/eval/forms.zig::reservedSubFormNames | fn reservedSubFormNames(comptime table: []const SubFormDoc) [reservedSubFormCount(table)][]const u8
@@ -789,12 +796,33 @@ src/eval/instance.zig::parseTrailingArgs | fn parseTrailingArgs(self: *Evaluator
 src/eval/instance.zig::resolveComponent | fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent
 src/eval/instance.zig::resolvePinName | fn resolvePinName( self: *Evaluator, pinout: *const std.StringHashMapUnmanaged([]const u8), name: []const u8, span: ast.Span, ) ?[]const u8
 src/eval/instance.zig::scanAssertedFns | fn scanAssertedFns(self: *Evaluator, tokens: []const Node, env: *Env) EvalError![]const []const u8
+src/eval/interfaces.zig::Def struct_
+src/eval/interfaces.zig::PendingBridge struct_
+src/eval/interfaces.zig::Role enum_
+src/eval/interfaces.zig::Signal struct_
+src/eval/interfaces.zig::Variant struct_
+src/eval/interfaces.zig::Vocabulary struct_
+src/eval/interfaces.zig::collectSubBlockBridges | fn collectSubBlockBridges( self: *Evaluator, form_children: []const Node, sub: env_mod.SubBlock, out: *std.ArrayList(PendingBridge), ) EvalError!void
+src/eval/interfaces.zig::evalDefinition | fn evalDefinition(self: *Evaluator, args: []const Node) EvalError!env_mod.Value
+src/eval/interfaces.zig::expandPortGroup | fn expandPortGroup( self: *Evaluator, form_children: []const Node, env: *Env, ports: *std.ArrayList(Port), groups: *std.ArrayList(PortGroup), ) EvalError!void
+src/eval/interfaces.zig::flip | fn flip(direction: []const u8) []const u8
+src/eval/interfaces.zig::groupName | fn groupName(prefix: []const u8, iface: []const u8) []const u8
+src/eval/interfaces.zig::joinName | fn joinName(allocator: std.mem.Allocator, prefix: []const u8, signal: []const u8) EvalError![]const u8
+src/eval/interfaces.zig::lib_sub_dir value
+src/eval/interfaces.zig::matchSignal | fn matchSignal(vocab: Vocabulary, port_name: []const u8) ?struct { canonical: []const u8, prefix: []const u8 }
+src/eval/interfaces.zig::parseDefinition | fn parseDefinition(self: *Evaluator, args: []const Node) EvalError!Def
+src/eval/interfaces.zig::register | fn register(self: *Evaluator, def: Def) EvalError!void
+src/eval/interfaces.zig::resolve | fn resolve(self: *Evaluator, name: []const u8) EvalError!?Def
+src/eval/interfaces.zig::resolveBridges | fn resolveBridges( self: *Evaluator, pending: []const PendingBridge, board_groups: []const PortGroup, net_ties: *std.ArrayList(Evaluator.NetTie), ) EvalError!void
+src/eval/interfaces.zig::signal | fn signal(self: Def, name: []const u8) ?Signal
+src/eval/interfaces.zig::vocabularies value
 src/eval/micro_forms.zig::Kind enum_
 src/eval/micro_forms.zig::emit | fn emit( self: *Evaluator, kind: Kind, form_children: []const Node, env: *Env, instances: *std.ArrayList(Instance), pin_nets: *std.ArrayList(PinNetDecl), ) EvalError!void
 src/eval/modules.zig::callModule | fn callModule(self: *Evaluator, mod: BlockDef, call_args: []const Node, call_span: ast.Span, caller_env: *Env) EvalError!Value
 src/eval/modules.zig::evalDefmodule | fn evalDefmodule(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/modules.zig::evalImport | fn evalImport(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/modules.zig::instantiateStandalone | fn instantiateStandalone(self: *Evaluator, name: []const u8) EvalError!Value
+src/eval/modules.zig::libSearchRoots | fn libSearchRoots(self: *Evaluator, buf: *[3][]const u8) [][]const u8
 src/eval/modules.zig::loadComponent | fn loadComponent(self: *Evaluator, name: []const u8, node: Node) EvalError!void
 src/eval/modules.zig::loadComponentFamily | fn loadComponentFamily(self: *Evaluator, name: []const u8, node: Node) EvalError!void
 src/eval/modules.zig::loadPassivesPrelude | fn loadPassivesPrelude(self: *Evaluator, env: *Env) void

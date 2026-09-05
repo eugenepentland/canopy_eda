@@ -31,6 +31,7 @@ Arguments are passed un-evaluated; each form decides what to evaluate.
 | `(fmt "template" args…)` | 1+ | Format a string. See the “String formatting directives” table for the `~X` specifiers. |
 | `(id <hex8>)` | — | Stable 8-char identifier auto-inserted by the build. Evaluator short-circuits to `.nil`. |
 | `(implements component [(policy canonical\|recommended\|example)] [(role name)])` | 1+ | Declare that the enclosing module implements a primary component. Canonical implementations prohibit direct board instantiation; recommended implementations warn; examples are discovery-only. |
+| `(interface NAME ["doc"] (signal SIGNAL in\|out\|io\|bidi [kind] [optional])…)` | 2+ | Define a named bus vocabulary — the SPI/I²C/UART/SWD/JTAG lanes that are names rather than numbered bus lanes. Directions are stated from the PERIPHERAL's point of view; `(port-group … (role controller))` mirrors them. Valid at the top level of a design or module file, and resolved on first use from `lib/interfaces/NAME.sexp` (project, then `--lib-dir`, then the bundled standard library). |
 
 ## Structural control flow
 
@@ -129,6 +130,7 @@ where each is accepted: **D** = design-block top level,
 | `(port "name" [net] dir [kind] [optional] [role R] [protocol P] [class C] sub-form…)` | DSs | Declare a block boundary signal. A power/rf port's direction (or an explicit (side …)) tells the PCB rough placer where the net enters/leaves the module — in → left, out → right. The parenthesised options are the “Port sub-forms” table. |
 | `(bus-port "prefix" lo hi [(suffixes S…)] port-modifier…)` | DSs | Declare a multi-bit boundary bus that expands to one port per lane. `(suffixes …)` emits one port per lane per suffix, e.g. a differential `P`/`N` pair. |
 | `(diff-port "BASE" [net] dir [kind] [optional] [(rated lo hi)] [(side …)] [(suffixes P N)])` | DSs | Declare a differential boundary pair as one line: expands to the `BASE_P`/`BASE_N` ports (override the suffixes with `(suffixes …)`), replays every modifier onto both lanes, defaults their kind to `differential`, and records the pairing so ERC holds the two lanes to a both-or-neither connection rule. |
+| `(port-group "PREFIX" iface [optional] [(role controller\|peripheral)] [(rename SIGNAL "PORTNAME")]… [(omit SIGNAL…)] port-modifier…)` | D·· | Declare a whole named bus as one line: expands to one `(port …)` per signal of the interface, named `PREFIX_SIGNAL` (an empty prefix gives bare signal names), replays every trailing port modifier onto each lane the way `(diff-port …)` does, and records the bundle so ERC holds it to a both-or-neither rule and a parent can wire it with one `(bridge-interface …)`. The group is addressed by its prefix — by the interface name when the prefix is empty. Its options are the “Port-group sub-forms” table. |
 | `(note "id" "text" [(ref …)])` | DSs | Attach a design-time note to the surrounding scope. |
 | `(section "name" ["subtitle"] form…)` | DSs | Functional subsystem card. Inside `(section …)` nests one level into a sub-section. |
 | `(decouple "NET" [(comp "val")] COUNT per-pin [REF\|auto] PIN…) \| (decouple "NET" (per-pin (comp "val") FN…)… (bulk (comp "val") COUNT)… (bypass …)…)` | DSs | Emit COUNT decoupling caps per listed host pin. Component and REF may come from (decouple-defaults …); a trailing `auto` expands to the pins already declared on the net. The compact rail form takes sub-forms instead: `(per-pin …)` bypasses each named pin function (inferring the host), `(bulk COMPONENT COUNT)` adds shared rail capacitance, and `(bypass …)` takes the positional item list. |
@@ -237,9 +239,46 @@ list — they stay wired through the consolidated `(net …)` rail forms.
 | --- | --- |
 | `(bridge "PREFIX" PORT… [(rename PORT SUFFIX)]…)` | Wire the sub-block's ports to board nets without one `(net …)` line each: every bridged port P ties board net `PREFIX<suffix>` to module net `<name>/P`, with <suffix> defaulting to P. With an empty PREFIX and a `(rename …)` per port the form reads as a port-to-net map. Power and ground ports are normally left out and wired by the consolidated `(net …)` rails instead. |
 | `(bridge … (rename PORT SUFFIX))` | Override one port's board-side suffix, so SPI `CS` can reach board net `…NCS` — or, with an empty prefix, name the board net outright. |
+| `(bridge-interface "GROUP" (to "NET_PREFIX") \| (to-group "BOARDGROUP") [(rename SIGNAL "NET")]…)` | Wire one whole `(port-group …)` of the sub-block in a single line: every member port ties to board net `NET_PREFIX_SIGNAL`, or to the same signal of a board-level group. Exactly equivalent to the `(bridge …)` lines it replaces. Its own children are the “Bridge-interface sub-forms” table. |
 | `(id hex8)` | Stable identity anchor for the sub-block itself. |
 | `(ids ("origin-key" hex8)…)` | Sidecar pinning the identities of children minted inside this sub-block. Designs that declare `(hierarchical-ids)` derive them from the form id instead and need no sidecar. |
 | `(reflow)` | Opt this sub-block out of module-layout composition, so the parent lays its contents out from scratch rather than reusing the module's own arrangement. |
+
+## Interface sub-forms
+
+`bus-port`/`bus-net` write a bus whose lanes are NUMBERED. SPI, I²C,
+UART, SWD and JTAG lanes are NAMED, and the names have variants
+(`SCK`/`SCLK`, `MOSI`/`SDI`, `CS`/`CSN`/`NCS`/`SS`). An
+`(interface …)` definition states one vocabulary once. Its body:
+
+| Form | Summary |
+| --- | --- |
+| `(signal SIGNAL in\|out\|io\|bidi [kind] [optional])` | One named lane of the bundle. The direction is the PERIPHERAL's — `(port-group … (role controller))` mirrors it, and a bidirectional lane is its own mirror. An optional signal-type word (`clock`, `data`, …) is replayed onto the expanded port; `optional` marks a lane a link may legitimately leave unwired. |
+
+`spi`, `i2c`, `uart`, `swd` and `jtag` ship with the binary under
+`stdlib/interfaces/`; a project shadows one by writing its own
+`lib/interfaces/<name>.sexp`, and an `(interface …)` at the top level
+of a design or module file needs no file at all.
+
+A module declares its side of the bus with `(port-group …)`, which
+expands to one `(port …)` per signal and records the bundle. Its
+options:
+
+| Form | Summary |
+| --- | --- |
+| `(role controller\|peripheral)` | Which end of the link this block is. `peripheral` (the default) keeps the interface's own directions; `controller` mirrors every one of them. Unrelated to the section-scope `(role …)` annotation. |
+| `(rename SIGNAL "PORTNAME")` | Name one lane's port outright instead of `PREFIX_SIGNAL` — how a part whose datasheet spells chip-select `CSN` keeps that name while still declaring `spi`. |
+| `(omit SIGNAL…)` | Drop lanes the part does not have, e.g. the `MISO` of a write-only three-wire SPI peripheral. |
+
+A board wires the whole bundle with one `(bridge-interface …)` inside
+the `(sub-block …)`, in place of one `(bridge … (rename …))` per
+signal. Its children:
+
+| Form | Summary |
+| --- | --- |
+| `(to "NET_PREFIX")` | Board nets for the bundle: member signal S ties to `NET_PREFIX_S`, joined by one underscore (an empty prefix gives the bare signal names). |
+| `(to-group "BOARDGROUP")` | Tie the sub-block's bundle to a `(port-group …)` this block declares itself, signal by signal — how a board passes a bus straight through to its own boundary. A signal the board group does not carry is simply not tied. |
+| `(rename SIGNAL "NET")` | Name one signal's board net outright, overriding `(to …)`/`(to-group …)` for that lane — the odd chip-select that lands on a per-device net. |
 
 ## Port sub-forms
 

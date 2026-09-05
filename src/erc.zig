@@ -25,6 +25,7 @@ const lod = @import("diagram/lod.zig");
 const membership = @import("diagram/membership.zig");
 const component_classification = @import("component_classification.zig");
 const canonical_module_check = @import("canonical_module_check.zig");
+const erc_interface = @import("erc_interface.zig");
 const lib_limits = @import("lib_limits.zig");
 const stdlib = @import("stdlib.zig");
 const DesignBlock = env_mod.DesignBlock;
@@ -85,6 +86,8 @@ pub const ViolationKind = enum {
     components_not_grouped,
     verification_orphaned,
     diff_pair_half_connected,
+    interface_half_connected,
+    interface_naming,
 };
 
 /// One electrical-rule-check finding. `kind` selects the rule, `severity`
@@ -111,6 +114,7 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkFloatingNets(allocator, block, &violations);
     try checkUnconnectedPorts(allocator, block, &violations);
     try checkDiffPortPairs(allocator, block, &violations);
+    try checkInterfaceGroups(allocator, block, &violations);
     try checkMissingValues(allocator, block, &violations);
     try checkMissingFootprints(allocator, block, &violations);
     try checkMissingDecoupling(allocator, block, &violations);
@@ -1133,6 +1137,25 @@ fn collectConnectedPortNets(
         try out.put(allocator, na.baseNetName(nt.a), {});
         try out.put(allocator, na.baseNetName(nt.b), {});
     }
+}
+
+/// The two `(port-group …)` rules, from `erc_interface.zig`: the bundle's
+/// both-or-neither connection contract, and the info-severity advisory that
+/// names an interface a module spelled out port by port. Kept in their own
+/// module so this file does not also carry the signal-naming vocabulary.
+fn checkInterfaceGroups(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayList(Violation),
+) !void {
+    const findings = try erc_interface.run(allocator, block);
+    defer if (findings.len > 0) allocator.free(findings);
+    for (findings) |finding| try violations.append(allocator, .{
+        .kind = if (finding.naming) .interface_naming else .interface_half_connected,
+        .severity = finding.severity,
+        .message = finding.message,
+        .net = finding.net,
+    });
 }
 
 /// `(diff-port …)` states a both-or-neither contract: wiring one lane of a
