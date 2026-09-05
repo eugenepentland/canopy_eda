@@ -244,9 +244,32 @@ pub const Evaluator = struct {
     /// into a confusing downstream symptom.
     authored_refs: std.StringHashMapUnmanaged(AuthoredRef) = .empty,
 
+    /// Assembly-variant selection for this evaluation. See `VariantState`.
+    variants: VariantState = .{},
+
     /// Where a ref-des was authored: the span of the form that declared it,
     /// plus the file that form lives in (a module body's forms are not in the
     /// design file). Recorded per block scope in `authored_refs`.
+    /// Which assembly variant this evaluation builds, and the space it was
+    /// chosen from. One field rather than three because a caller only ever sets
+    /// `requested`, and everything else is derived from the root design.
+    pub const VariantState = struct {
+        /// The variant the CALLER asked for, set between `init` and the first
+        /// evaluation (`--variant NAME`, `?variant=NAME`, a tool's `variant`
+        /// argument). Null selects the design's `(default)` variant, else the
+        /// base. A name the root design never declares is a build error, not a
+        /// silent fallback.
+        requested: ?[]const u8 = null,
+        /// The root design's declarations plus the resolved selection, installed
+        /// by `materializeBlock` for the ROOT block only and live for the whole
+        /// materialization — module bodies included, which is what lets an
+        /// instance inside a `(sub-block …)` name a variant the root declared.
+        scope: env_mod.VariantScope = .{},
+        /// `materializeBlock` nesting depth. 0 means the block about to be built
+        /// IS the root — the one whose `(variant …)` forms define the space.
+        root_depth: u32 = 0,
+    };
+
     pub const AuthoredRef = struct {
         span: ast.Span,
         file: []const u8,

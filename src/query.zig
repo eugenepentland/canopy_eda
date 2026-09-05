@@ -53,6 +53,7 @@ fn optArg(args: []const []const u8, flag: []const u8) ?[]const u8 {
 fn isValueFlag(a: []const u8) bool {
     return std.mem.eql(u8, a, "--project-dir") or
         std.mem.eql(u8, a, "--category") or
+        std.mem.eql(u8, a, "--variant") or
         std.mem.eql(u8, a, "--section");
 }
 
@@ -113,14 +114,36 @@ fn emit(bytes: []const u8) infra_fs.File.WriteError!void {
 
 /// `netlisp instances <design>` — every placed part as JSON.
 pub fn cmdInstances(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void {
-    const name = nthPositional(args, 0) orelse usage("instances [--project-dir <d>] [--top-level] <design>");
+    const name = nthPositional(args, 0) orelse usage("instances [--project-dir <d>] [--top-level] [--variant <v>] <design>");
+    const listing = try instancesJson(allocator, projectDir(args), name, .{
+        .scope = scopeOf(args),
+        .variant = optArg(args, "--variant"),
+    });
+    try emit(listing.text);
+    if (!listing.ok) exit.failure();
+}
+
+/// A read command's document plus whether the underlying query succeeded, so
+/// the `cmd*` wrapper owns the process exit code and the document itself stays
+/// testable — the same split `designsJson` is written for.
+pub const Listing = struct { text: []const u8, ok: bool };
+
+/// The `{[variants,] instances:[…]}` document `netlisp instances` prints,
+/// built without touching stdout. A design that cannot be resolved yields an
+/// `ok = false` listing carrying the tool's own error text, exactly as the
+/// server and the structured tool report it; only an allocation or writer
+/// failure is fatal, because at that point there is no document to print.
+pub fn instancesJson(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    opts: mcp_tools.InstanceOpts,
+) QueryError!Listing {
     var buf: std.Io.Writer.Allocating = .init(allocator);
-    const w = &buf.writer;
-    const ok = mcp_tools.listInstances(allocator, projectDir(args), name, scopeOf(args), w) catch |e| {
+    const ok = mcp_tools.listInstances(allocator, project_dir, name, opts, &buf.writer) catch |e| {
         exit.fatal("instances: {s}: {s}\n", .{ name, @errorName(e) });
     };
-    try emit(buf.written());
-    if (!ok) exit.failure();
+    return .{ .text = buf.written(), .ok = ok };
 }
 
 /// `netlisp net <design> <net>` — every pin + passive on a net, as JSON.
@@ -264,7 +287,10 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
 
 // ── Design listing ───────────────────────────────────────────────────
 
-const DesignRow = struct { name: []const u8, title: []const u8 };
+const DesignRow = struct { name: []const u8, title: []const u8, variants: []const []const u8 };
+
+/// Head of an assembly-variant declaration, as it is written in source.
+const variant_marker = "(variant ";
 
 fn designRowLess(_: void, a: DesignRow, b: DesignRow) bool {
     return std.mem.lessThan(u8, a.name, b.name);
@@ -309,6 +335,7 @@ pub fn designsJson(a: std.mem.Allocator, project_dir: []const u8) QueryError![]c
         try rows.append(a, .{
             .name = try a.dupe(u8, stem),
             .title = try extractTitle(a, src, db),
+            .variants = try extractVariants(a, src[db..]),
         });
     }
     std.mem.sort(DesignRow, rows.items, {}, designRowLess);
@@ -322,10 +349,42 @@ pub fn designsJson(a: std.mem.Allocator, project_dir: []const u8) QueryError![]c
         try json_writer.writeString(w, r.name);
         try w.writeAll(",\"title\":");
         try json_writer.writeString(w, r.title);
+        // Omitted entirely for a design that declares no variants, so a
+        // single-assembly listing reads exactly as it always has.
+        if (r.variants.len > 0) {
+            try w.writeAll(",\"variants\":[");
+            for (r.variants, 0..) |v, vi| {
+                if (vi > 0) try w.writeAll(",");
+                try json_writer.writeString(w, v);
+            }
+            try w.writeAll("]");
+        }
         try w.writeAll("}");
     }
     try w.writeAll("]}");
     return buf.written();
+}
+
+/// Every assembly-variant name declared in `body`, in source order — the
+/// quoted string after each `(variant ` head. Read off the text like the title
+/// is: `netlisp designs` deliberately does not evaluate, so it stays a
+/// directory walk rather than a full build of every design in the project.
+fn extractVariants(allocator: std.mem.Allocator, body: []const u8) ![]const []const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, body, at, variant_marker)) |hit| {
+        at = hit + variant_marker.len;
+        var i = at;
+        while (i < body.len and std.ascii.isWhitespace(body[i])) : (i += 1) {}
+        if (i >= body.len or body[i] != '"') continue;
+        i += 1;
+        const start = i;
+        while (i < body.len and body[i] != '"') : (i += 1) {}
+        if (i >= body.len) break;
+        try names.append(allocator, try allocator.dupe(u8, body[start..i]));
+        at = i;
+    }
+    return names.toOwnedSlice(allocator);
 }
 
 /// Extract the quoted title immediately after `(design-block` at `db_idx`.
@@ -338,4 +397,48 @@ fn extractTitle(allocator: std.mem.Allocator, src: []const u8, db_idx: usize) ![
     const start = i;
     while (i < src.len and src[i] != '"') : (i += 1) {}
     return allocator.dupe(u8, src[start..i]);
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+// spec: query - instancesJson returns an unresolved design as a failed listing rather than exiting
+test "instancesJson reports an unresolvable design as a failed listing" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const listing = try instancesJson(arena_state.allocator(), "/nonexistent-netlisp-project", "nope", .{});
+    try testing.expect(!listing.ok);
+    try testing.expect(listing.text.len > 0);
+}
+
+// spec: query - The designs listing reads every declared assembly variant name out of the source text in order
+test "extractVariants reads declared assembly variant names in source order" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const src =
+        \\(design-block "Board"
+        \\  (variant "Lite" "no radio")
+        \\  (variant "Pro" (default))
+        \\  (instance "R1" (res-0402 "10k") (only-in "Pro")))
+    ;
+    const names = try extractVariants(a, src);
+    try testing.expectEqual(@as(usize, 2), names.len);
+    try testing.expectEqualStrings("Lite", names[0]);
+    try testing.expectEqualStrings("Pro", names[1]);
+
+    // A design with no declaration yields no names at all, which is what keeps
+    // the `variants` key out of a single-assembly listing.
+    try testing.expectEqual(@as(usize, 0), (try extractVariants(a, "(design-block \"Plain\")")).len);
+}
+
+// spec: query - The instances subcommand takes --variant as a value flag so the design name stays the positional
+test "cmdInstances argument parsing separates the variant flag from the design name" {
+    const args = [_][]const u8{ "--project-dir", "proj", "--variant", "Lite", "board" };
+    try testing.expect(isValueFlag("--variant"));
+    try testing.expectEqualStrings("board", nthPositional(&args, 0).?);
+    try testing.expectEqualStrings("Lite", optArg(&args, "--variant").?);
+    try testing.expectEqualStrings("proj", projectDir(&args));
 }

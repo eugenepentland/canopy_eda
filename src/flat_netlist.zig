@@ -47,8 +47,13 @@ pub const FlatInstance = struct {
     properties: []const Property,
     uuid: []const u8,
     /// Do Not Populate — carried from the source instance's `(dnp)` flag.
-    /// Default false so literal builders may omit it.
+    /// Default false so literal builders may omit it. Already reflects the
+    /// SELECTED assembly variant; `variants` below says why.
     dnp: bool = false,
+    /// The part's assembly-variant clauses, carried from the source instance so
+    /// a flattened listing can report the population matrix. Default empty so
+    /// literal builders may omit it.
+    variants: env_mod.InstanceVariants = .{},
     /// The part's authored PLACEMENT bindings — the hub pad a cap `(decouples …)`
     /// and the pad a passive declares itself `(near …)` — carried straight from
     /// the source instance (`env_mod.InstanceBinds`, which documents each).
@@ -175,6 +180,7 @@ pub fn collectInstances(
             .properties = inst.properties,
             .uuid = effective_uuid,
             .dnp = inst.dnp,
+            .variants = inst.variants,
             // A `(decouples "IC" …)` / `(near "REF" …)` names a ref in the
             // part's OWN block, so it takes exactly the prefix the part's
             // ref-des takes — anything else would resolve to a same-named part

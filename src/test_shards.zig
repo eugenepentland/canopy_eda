@@ -570,6 +570,8 @@ pub const shards: []const []const []const u8 = &.{
         "eval.net_suggest.test.",
         "eval.suggest.test.",
         "eval.value_kind.test.",
+        "eval.variants.test.",
+        "query.test.",
         "eval.footprint_pads.test.",
         "export_kicad.test.",
         "export_kicad_sch.test.",

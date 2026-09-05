@@ -717,7 +717,10 @@ fn toolListInstances(allocator: std.mem.Allocator, project_dir: []const u8, args
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
     defer out.* = aw.toArrayList();
-    return listInstances(allocator, project_dir, name, scopeArg(args_val), &aw.writer);
+    return listInstances(allocator, project_dir, name, .{
+        .scope = scopeArg(args_val),
+        .variant = optionalString(args_val, "variant"),
+    }, &aw.writer);
 }
 
 fn toolListFreePins(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
@@ -1457,14 +1460,24 @@ pub const FreePinOpts = struct { filter: ?[]const u8 = null, scope: Scope = .fla
 /// Return a pointer to the evaluated DesignBlock for `name`, or an error string
 /// written to `w` and null return. Caller must call `eval.deinit()` on the
 /// returned evaluator pointer's memory arena (via `defer` in the caller).
+/// What an instances listing is asked for: which scope, and which assembly
+/// variant to evaluate the design in. One struct rather than two parameters so
+/// the CLI, the HTTP surface and the tool all pass the same shape.
+pub const InstanceOpts = struct {
+    scope: Scope = .flat,
+    /// Null selects the design's `(default)` variant, else the base.
+    variant: ?[]const u8 = null,
+};
+
 pub fn listInstances(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
-    scope: Scope,
+    opts: InstanceOpts,
     w: anytype,
 ) !bool {
     var eval = Evaluator.init(allocator, project_dir);
+    eval.variants.requested = opts.variant;
     defer eval.deinit();
     const nb = evalNamedBlock(allocator, project_dir, name, &eval) catch |e| switch (e) {
         error.NotADesign => {
@@ -1477,9 +1490,11 @@ pub fn listInstances(
         },
     };
     const block = nb.block;
-    if (scope == .flat) return mcp_flatten.listInstancesFlat(allocator, &eval, block, w);
+    if (opts.scope == .flat) return mcp_flatten.listInstancesFlat(allocator, &eval, block, w);
 
-    try w.writeAll("{\"instances\":[");
+    try w.writeAll("{");
+    try mcp_flatten.writeVariantHeader(w, block);
+    try w.writeAll("\"instances\":[");
     for (block.instances, 0..) |inst, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll(ref_des_field_prefix);
@@ -1494,7 +1509,9 @@ pub fn listInstances(
         try json_writer.writeString(w, inst.value);
 
         const pin_count = mcp_flatten.instancePinCount(&eval, inst.component, inst.symbol, inst.parts);
-        try w.print(",\"pin_count\":{d}}}", .{pin_count});
+        try w.print(",\"pin_count\":{d}", .{pin_count});
+        try mcp_flatten.writePopulatedIn(w, block, inst.variants, inst.dnp);
+        try w.writeAll("}");
     }
     try w.writeAll("]}");
     return true;
@@ -2557,7 +2574,7 @@ test "read tools reuse build's stable refdes assignments after insertion" {
     }
 
     var instances_out: std.Io.Writer.Allocating = .init(alloc);
-    try std.testing.expect(try listInstances(alloc, project, "board", .flat, &instances_out.writer));
+    try std.testing.expect(try listInstances(alloc, project, "board", .{}, &instances_out.writer));
     try std.testing.expect(std.mem.indexOf(u8, instances_out.written(), "\"ref_des\":\"U3\",\"origin\":\"NEW\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, instances_out.written(), "\"ref_des\":\"U1\",\"origin\":\"OLD_A\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, instances_out.written(), "\"ref_des\":\"U2\",\"origin\":\"OLD_B\"") != null);

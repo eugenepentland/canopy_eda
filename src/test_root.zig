@@ -97,7 +97,9 @@ test {
     _ = @import("eval/section_maturity.zig");
     _ = @import("eval/stackup_presets.zig");
     _ = @import("eval/suggest.zig");
+    _ = @import("query.zig");
     _ = @import("eval/value_kind.zig");
+    _ = @import("eval/variants.zig");
     _ = @import("eval/footprint_pads.zig");
     _ = @import("eval/test_point.zig");
     _ = @import("eval/thermal.zig");

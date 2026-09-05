@@ -29,6 +29,7 @@ const test_point_mod = @import("test_point.zig");
 const micro_forms = @import("micro_forms.zig");
 const pin_enrichment = @import("pin_enrichment.zig");
 const forms_mod = @import("forms.zig");
+const variants = @import("variants.zig");
 const board_role_mod = @import("board_role.zig");
 const board_keepout_mod = @import("board_keepout.zig");
 const net_analysis = @import("net_analysis.zig");
@@ -155,6 +156,21 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     ids.prescanRefDes(self, body_forms);
     ids.prescanIds(self, body_forms);
 
+    // Assembly variants are a property of the ROOT design, not of each module:
+    // the block being built at depth 0 owns the variant space, and every module
+    // body it reaches resolves `(only-in …)` & co. against these declarations.
+    // Pre-scanned (rather than read in body order) so an instance may name a
+    // variant the file declares further down.
+    const is_root_block = self.variants.root_depth == 0;
+    const saved_scope = self.variants.scope;
+    self.variants.root_depth += 1;
+    defer {
+        self.variants.root_depth -= 1;
+        if (is_root_block) self.variants.scope = saved_scope;
+    }
+    if (is_root_block)
+        self.variants.scope = try variants.install(self, body_forms, bodySpan(body_forms));
+
     // Ref-des uniqueness is per BLOCK: two modules may each name their own
     // "R1" (the sub-block pass renumbers them apart later), but one block
     // declaring "R1" twice is an authoring error. Swap in this block's own
@@ -258,6 +274,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .net_classes = net_class_specs.toOwnedSlice(self.allocator) catch &.{},
         .design_rules = design_rules_spec,
         .pcb_plan = pcb_plan_spec,
+        .variants = self.variants.scope,
     };
 
     // Auto-assign ref_des for instances with descriptive labels
@@ -641,6 +658,10 @@ fn evalBlockBodyForm(
         .design_rules => build.design_rules_spec.* = parseDesignRules(self, form_children),
         .pcb_plan => build.pcb_plan_spec.* = try takeFirstPcbPlan(self, form_children, form.span, build.pcb_plan_spec.*),
         .module_policy => try parseModulePolicy(self, form_children, build.net_class_pins),
+        // Declarations were read by `variants.install` before this body ran —
+        // an instance may name a variant declared further down the file. All
+        // that is left here is refusing one inside a module body.
+        .variant => try rejectNestedVariant(self, form),
         // Section-only forms are ignored at the top level — a
         // design-block body shouldn't carry status/description/pins
         // directly. The exhaustive switch is the contract; the warning
@@ -653,6 +674,30 @@ fn evalBlockBodyForm(
             self.warnFmt(form.span, "({s} …) is section-only — ignored at design-block top level", .{form_name});
         },
     }
+}
+
+/// A location to hang a diagnostic that belongs to the block as a whole
+/// (an unselectable `--variant` name) rather than to any one form in it.
+fn bodySpan(body_forms: []const Node) ast.Span {
+    if (body_forms.len > 0) return body_forms[0].span;
+    return ast.Span.zero;
+}
+
+/// Refuse a `(variant …)` inside a module body. Variants are design-level: the
+/// same module is embedded in boards whose variant names have nothing in
+/// common, so a module that declared its own would either collide with its
+/// host's or need a mapping layer. A module's instances name the ROOT design's
+/// variants instead.
+fn rejectNestedVariant(self: *Evaluator, form: Node) EvalError!void {
+    if (self.variants.root_depth <= 1) return;
+    const children = form.asList() orelse return;
+    const name = if (children.len > 1) (children[1].asString() orelse "?") else "?";
+    self.setErrorFmt(
+        form.span,
+        "(variant \"{s}\") inside a module body — assembly variants are design-level; declare it in the design that instantiates this module",
+        .{name},
+    );
+    return EvalError.InvalidForm;
 }
 
 /// Read the path from a `(kicad-pcb "<absolute path>")` form — the on-disk
@@ -1336,6 +1381,7 @@ fn evalSection(
             .design_rules,
             .pcb_plan,
             .module_policy,
+            .variant,
             => self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name}),
         }
     }

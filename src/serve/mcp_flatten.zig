@@ -16,6 +16,7 @@ const json_writer = @import("../json_writer.zig");
 const export_kicad = @import("../export_kicad.zig");
 const netlist_mod = @import("../export_kicad_netlist.zig");
 const net_names = @import("../net_name.zig");
+const variants = @import("../eval/variants.zig");
 
 const FlatInstance = export_kicad.FlatInstance;
 const FlatNet = export_kicad.FlatNet;
@@ -25,6 +26,55 @@ const FlatPin = export_kicad.FlatPin;
 fn writeRefDesOpen(w: anytype, ref: []const u8) !void {
     try w.writeAll("{\"ref_des\":");
     try json_writer.writeString(w, ref);
+}
+
+// ── Assembly variants ──────────────────────────────────────────────────
+
+/// Emit the design's `"variants"` catalog and the `"variant"` this listing was
+/// evaluated with, as the leading keys of an instances document.
+///
+/// Both keys are OMITTED for a design that declares none, so every design in
+/// the corpus keeps the exact document it emitted before variants existed —
+/// the reader learns "this design has one assembly" from their absence.
+pub fn writeVariantHeader(w: anytype, block: *const env_mod.DesignBlock) !void {
+    if (block.variants.decls.len == 0) return;
+    try w.writeAll("\"variants\":[");
+    for (block.variants.decls, 0..) |d, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try json_writer.writeString(w, d.name);
+        try w.writeAll(",\"doc\":");
+        try json_writer.writeString(w, d.doc);
+        try w.print(",\"default\":{s}}}", .{if (d.is_default) "true" else "false"});
+    }
+    try w.writeAll("],\"variant\":");
+    try json_writer.writeString(w, block.variants.activeName());
+    try w.writeAll(",");
+}
+
+/// Emit one instance's `,"populated_in":[…]` — every declared variant the part
+/// is stuffed in, base included as `""`. Omitted (like the header) for a design
+/// that declares no variants.
+pub fn writePopulatedIn(
+    w: anytype,
+    block: *const env_mod.DesignBlock,
+    inst_variants: env_mod.InstanceVariants,
+    dnp: bool,
+) !void {
+    if (block.variants.decls.len == 0) return;
+    // `dnp` here is the SELECTED variant's answer, so an unconditional `(dnp)`
+    // has to be read off the clauses: a part with no clauses that is DNP anyway
+    // is DNP in every variant.
+    const base_dnp = dnp and inst_variants.rules.len == 0;
+    try w.writeAll(",\"populated_in\":[");
+    var written: usize = 0;
+    for (block.variants.decls) |d| {
+        if (!variants.populatedIn(inst_variants.rules, base_dnp, d.name)) continue;
+        if (written > 0) try w.writeAll(",");
+        try json_writer.writeString(w, d.name);
+        written += 1;
+    }
+    try w.writeAll("]");
 }
 
 // ── Pin classification (shared with the top-level list_free_pins) ───────
@@ -245,7 +295,9 @@ pub fn listInstancesFlat(
     var list: std.ArrayList(FlatInstance) = .empty;
     try netlist_mod.collectInstances(allocator, block, "", &list);
 
-    try w.writeAll("{\"instances\":[");
+    try w.writeAll("{");
+    try writeVariantHeader(w, block);
+    try w.writeAll("\"instances\":[");
     for (list.items, 0..) |fi, i| {
         if (i > 0) try w.writeAll(",");
         try writeRefDesOpen(w, fi.ref_des);
@@ -258,7 +310,9 @@ pub fn listInstancesFlat(
         try w.writeAll(",\"value\":");
         try json_writer.writeString(w, fi.value);
         const pc = instancePinCount(eval, fi.component, fi.symbol, &.{});
-        try w.print(",\"pin_count\":{d}}}", .{pc});
+        try w.print(",\"pin_count\":{d}", .{pc});
+        try writePopulatedIn(w, block, fi.variants, fi.dnp);
+        try w.writeAll("}");
     }
     try w.writeAll("]}");
     return true;
