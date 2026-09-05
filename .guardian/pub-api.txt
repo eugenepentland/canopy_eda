@@ -4862,6 +4862,24 @@ src/serve/pcb_layout_chrome.zig::writeReadOnlyEmbedChrome | fn writeReadOnlyEmbe
 src/serve/pcb_layout_chrome.zig::writeRightDock | fn writeRightDock( w: *std.Io.Writer, alloc: std.mem.Allocator, embed: bool, edit_embed: bool, pd: PanelData, ) std.Io.Writer.Error!void
 src/serve/pcb_layout_chrome.zig::writeSidebar | fn writeSidebar(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, sch_base: []const u8, o: SidebarOpts) HandlerError!void
 src/serve/pcb_layout_chrome.zig::writeStage | fn writeStage(w: *std.Io.Writer, view: View, embed: bool) std.Io.Writer.Error!void
+src/serve/pcb_layout_fab.zig::FabAuthored struct_
+src/serve/pcb_layout_fab.zig::FabReleaseTestSupport struct_
+src/serve/pcb_layout_fab.zig::FabSelectionTestSupport struct_
+src/serve/pcb_layout_fab.zig::FabView struct_
+src/serve/pcb_layout_fab.zig::FabViewError value
+src/serve/pcb_layout_fab.zig::fabViewFor | fn fabViewFor(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layout_arg: ?[]const u8) FabViewError!FabView
+src/serve/pcb_layout_fab.zig::fabViewForResolved | fn fabViewForResolved( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layout_arg: ?[]const u8, block: *env_mod.DesignBlock, ) FabViewError!FabView
+src/serve/pcb_layout_fab.zig::git value
+src/serve/pcb_layout_fab.zig::pcbCentroidApi | fn pcbCentroidApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_fab.zig::pcbDrillApi | fn pcbDrillApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_fab.zig::pcbFabReadinessApi | fn pcbFabReadinessApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_fab.zig::pcbGerbersApi | fn pcbGerbersApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_fab.zig::readiness value
+src/serve/pcb_layout_fab.zig::readiness_response value
+src/serve/pcb_layout_fab.zig::setup value
+src/serve/pcb_layout_fab.zig::standaloneDossierReviewBoardHtml | fn standaloneDossierReviewBoardHtml(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, fv: FabView) HandlerError![]const u8
+src/serve/pcb_layout_fab.zig::standaloneReleaseAssemblyHtml | fn standaloneReleaseAssemblyHtml( ctx: *Server, req: *httpz.Request, name: []const u8, block: *const env_mod.DesignBlock, fv: FabView, identity: standalone_assembly.ReleaseIdentity, ) HandlerError![]const u8
+src/serve/pcb_layout_fab.zig::write value
 src/serve/pcb_layout_import.zig::writeImportedStarredLayout | fn writeImportedStarredLayout( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, imported: import_layout.Imported, ) bool
 src/serve/pcb_layout_mcp.zig::McpExistingCopper struct_
 src/serve/pcb_layout_mcp.zig::addTracksFixture | fn addTracksFixture(parts: []optimizer.Part, nets: []const export_kicad.FlatNet, rules: []const optimizer.NetRule) optimizer.Placement
@@ -4893,10 +4911,9 @@ src/serve/pcb_layout_mcp.zig::normalizeJunctionsApi | fn normalizeJunctionsApi(c
 src/serve/pcb_layout_mcp.zig::scopeFixture | fn scopeFixture(parts: *[1]optimizer.Part) struct { placement: optimizer.Placement, block: env_mod.DesignBlock }
 src/serve/pcb_layout_page.zig::CacheSlot value
 src/serve/pcb_layout_page.zig::DeferredJob struct_
-src/serve/pcb_layout_page.zig::FabAuthored struct_
-src/serve/pcb_layout_page.zig::FabReleaseTestSupport struct_
-src/serve/pcb_layout_page.zig::FabSelectionTestSupport struct_
-src/serve/pcb_layout_page.zig::FabView struct_
+src/serve/pcb_layout_page.zig::FabAuthored value
+src/serve/pcb_layout_page.zig::FabReleaseTestSupport value
+src/serve/pcb_layout_page.zig::FabView value
 src/serve/pcb_layout_page.zig::FabViewError value
 src/serve/pcb_layout_page.zig::GroupKnobs struct_
 src/serve/pcb_layout_page.zig::HandlerError value
@@ -4919,6 +4936,7 @@ src/serve/pcb_layout_page.zig::SavedLayout value
 src/serve/pcb_layout_page.zig::SavedOutline value
 src/serve/pcb_layout_page.zig::SavedPartEdgeDimension value
 src/serve/pcb_layout_page.zig::SavedRoutes value
+src/serve/pcb_layout_page.zig::SavedRoutesEvidence struct_
 src/serve/pcb_layout_page.zig::SavedTrack value
 src/serve/pcb_layout_page.zig::SavedVia value
 src/serve/pcb_layout_page.zig::SavedZone value
@@ -4937,15 +4955,18 @@ src/serve/pcb_layout_page.zig::Toggles struct_
 src/serve/pcb_layout_page.zig::View struct_
 src/serve/pcb_layout_page.zig::addSubcircuitRouteSeeds | fn addSubcircuitRouteSeeds( alloc: std.mem.Allocator, project_dir: []const u8, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, options: *route_policy.Options, ) std.mem.Allocator.Error!SubcircuitRouteSeedStats
 src/serve/pcb_layout_page.zig::applyDeferred | fn applyDeferred(ctx: *Server, name: []const u8, placement: optimizer.Placement, view: *ShownView) void
+src/serve/pcb_layout_page.zig::applyFabricationLayerOverrides | fn applyFabricationLayerOverrides(alloc: std.mem.Allocator, placement: *optimizer.Placement, overrides: []const SavedFabricationLayer) bool
 src/serve/pcb_layout_page.zig::bodyParam | fn bodyParam(req: *httpz.Request, res: *httpz.Response) ?[]const u8
 src/serve/pcb_layout_page.zig::commitNamedLayoutMutation | fn commitNamedLayoutMutation( alloc: std.mem.Allocator, project_dir: []const u8, design: []const u8, sub: ?[]const u8, layouts: []const SavedLayout, disk_rev: i64, ) sidecar_store.StoreError!i64
+src/serve/pcb_layout_page.zig::ct_hdr value
 src/serve/pcb_layout_page.zig::deleteNamedLayoutApi | fn deleteNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::descendToSub | fn descendToSub( allocator: std.mem.Allocator, block: *env_mod.DesignBlock, sub_slug: []const u8, ) ?env_mod.SubBlock
 src/serve/pcb_layout_page.zig::diagnoseWithSubcircuitSeeds | fn diagnoseWithSubcircuitSeeds( alloc: std.mem.Allocator, project_dir: []const u8, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, base_options: route_policy.Options, ) std.mem.Allocator.Error!struct { diagnostic: route_plan.PlannedDiagnostic, seeds: SubcircuitRouteSeedStats = .{} }
-src/serve/pcb_layout_page.zig::fabViewFor | fn fabViewFor(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layout_arg: ?[]const u8) FabViewError!FabView
-src/serve/pcb_layout_page.zig::fabViewForResolved | fn fabViewForResolved( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layout_arg: ?[]const u8, block: *env_mod.DesignBlock, ) FabViewError!FabView
+src/serve/pcb_layout_page.zig::dnpMode | fn dnpMode(req: *httpz.Request) export_fab.DnpMode
+src/serve/pcb_layout_page.zig::drawnSource | fn drawnSource(o: SavedOutline) optimizer.OutlineSource
+src/serve/pcb_layout_page.zig::fabViewFor value
+src/serve/pcb_layout_page.zig::fabViewForResolved value
 src/serve/pcb_layout_page.zig::fabrication_layers_open value
-src/serve/pcb_layout_page.zig::git value
 src/serve/pcb_layout_page.zig::hasSavedLayout value
 src/serve/pcb_layout_page.zig::init | fn init(p: optimizer.Placement) View
 src/serve/pcb_layout_page.zig::kind_manual value
@@ -4980,6 +5001,7 @@ src/serve/pcb_layout_page.zig::name_open value
 src/serve/pcb_layout_page.zig::netIndexByName | fn netIndexByName(placement: optimizer.Placement, name: []const u8) ?i32
 src/serve/pcb_layout_page.zig::net_json_key value
 src/serve/pcb_layout_page.zig::no_block_msg value
+src/serve/pcb_layout_page.zig::no_saved_layout_msg value
 src/serve/pcb_layout_page.zig::no_sub_msg value
 src/serve/pcb_layout_page.zig::normalizeJunctionsApi value
 src/serve/pcb_layout_page.zig::origin_open value
@@ -4991,11 +5013,11 @@ src/serve/pcb_layout_page.zig::parseSavedRoutes value
 src/serve/pcb_layout_page.zig::parseScenario | fn parseScenario(s: ?[]const u8) ?thermal_scenarios.Scenario
 src/serve/pcb_layout_page.zig::parts_open value
 src/serve/pcb_layout_page.zig::pcbCamJsonApi | fn pcbCamJsonApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbCentroidApi | fn pcbCentroidApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbCentroidApi value
 src/serve/pcb_layout_page.zig::pcbDrcApi | fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbDrillApi | fn pcbDrillApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbFabReadinessApi | fn pcbFabReadinessApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::pcbGerbersApi | fn pcbGerbersApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pcbDrillApi value
+src/serve/pcb_layout_page.zig::pcbFabReadinessApi value
+src/serve/pcb_layout_page.zig::pcbGerbersApi value
 src/serve/pcb_layout_page.zig::pcbLayoutHistoryApi | fn pcbLayoutHistoryApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbLayoutJsonApi | fn pcbLayoutJsonApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbLayoutPage | fn pcbLayoutPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -5013,6 +5035,7 @@ src/serve/pcb_layout_page.zig::pngRequestFromQuery | fn pngRequestFromQuery(aren
 src/serve/pcb_layout_page.zig::posesFromPlacement | fn posesFromPlacement(alloc: std.mem.Allocator, p: optimizer.Placement) ?[]PartPose
 src/serve/pcb_layout_page.zig::prepareRouteFromJson | fn prepareRouteFromJson( alloc: std.mem.Allocator, in: RoutePrepInputs, eval: *Evaluator, module_res: *?modules_mod.ResolvedBlock, ) RoutePrepError!RoutePrep
 src/serve/pcb_layout_page.zig::queryFlag value
+src/serve/pcb_layout_page.zig::queryKeepDnp | fn queryKeepDnp(req: *httpz.Request) bool
 src/serve/pcb_layout_page.zig::queryOpt value
 src/serve/pcb_layout_page.zig::readAutoParams | fn readAutoParams(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?optimizer.Params
 src/serve/pcb_layout_page.zig::readCacheSlot value
@@ -5020,9 +5043,8 @@ src/serve/pcb_layout_page.zig::readLayoutPosesFor | fn readLayoutPosesFor( alloc
 src/serve/pcb_layout_page.zig::readLayoutRev value
 src/serve/pcb_layout_page.zig::readLayouts value
 src/serve/pcb_layout_page.zig::readLayoutsSub value
-src/serve/pcb_layout_page.zig::readiness value
-src/serve/pcb_layout_page.zig::readiness_response value
 src/serve/pcb_layout_page.zig::refPosesFromPartPoses | fn refPosesFromPartPoses(alloc: std.mem.Allocator, parts: []const PartPose) std.mem.Allocator.Error![]optimizer.RefPose
+src/serve/pcb_layout_page.zig::rekeyPosesByOrigin | fn rekeyPosesByOrigin( alloc: std.mem.Allocator, block: *env_mod.DesignBlock, parts: []const PartPose, ) ?[]const optimizer.RefPose
 src/serve/pcb_layout_page.zig::rekeyRowsToPlacement | fn rekeyRowsToPlacement( alloc: std.mem.Allocator, layouts: []const SavedLayout, p: optimizer.Placement, ) []const SavedLayout
 src/serve/pcb_layout_page.zig::renameNamedLayoutApi | fn renameNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::renderDesignPng | fn renderDesignPng( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, deps: ?*?page_cache.FileSet, ) PngError![]u8
@@ -5039,17 +5061,17 @@ src/serve/pcb_layout_page.zig::route_source_autorouter value
 src/serve/pcb_layout_page.zig::route_source_human value
 src/serve/pcb_layout_page.zig::route_source_imported value
 src/serve/pcb_layout_page.zig::routesWithPerimeter | fn routesWithPerimeter(alloc: std.mem.Allocator, placement: optimizer.Placement, base: ?SavedRoutes) ?SavedRoutes
+src/serve/pcb_layout_page.zig::routesWithPerimeterEvidence | fn routesWithPerimeterEvidence(alloc: std.mem.Allocator, placement: optimizer.Placement, base: ?SavedRoutes) SavedRoutesEvidence
 src/serve/pcb_layout_page.zig::saveNamedLayoutApi | fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::savePcbCourtyardApi | fn savePcbCourtyardApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::setDefaultLayoutApi | fn setDefaultLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
-src/serve/pcb_layout_page.zig::setup value
 src/serve/pcb_layout_page.zig::shownLayoutCopper | fn shownLayoutCopper( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, placement: optimizer.Placement, ) ShownCopper
 src/serve/pcb_layout_page.zig::shownZones | fn shownZones(saved: ?SavedRoutes) []const SavedZone
 src/serve/pcb_layout_page.zig::sidecar_max_bytes value
 src/serve/pcb_layout_page.zig::silkKeepoutsFrom | fn silkKeepoutsFrom(alloc: std.mem.Allocator, zones: []const SavedZone) []const subcircuit_silkscreen.Keepout
 src/serve/pcb_layout_page.zig::solveForRequest | fn solveForRequest( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, eval: *Evaluator, module_res: *?modules_mod.ResolvedBlock, ) PngError!SolvedRequest
-src/serve/pcb_layout_page.zig::standaloneDossierReviewBoardHtml | fn standaloneDossierReviewBoardHtml(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, fv: FabView) HandlerError![]const u8
-src/serve/pcb_layout_page.zig::standaloneReleaseAssemblyHtml | fn standaloneReleaseAssemblyHtml( ctx: *Server, req: *httpz.Request, name: []const u8, block: *const env_mod.DesignBlock, fv: FabView, identity: standalone_assembly.ReleaseIdentity, ) HandlerError![]const u8
+src/serve/pcb_layout_page.zig::standaloneDossierReviewBoardHtml value
+src/serve/pcb_layout_page.zig::standaloneReleaseAssemblyHtml value
 src/serve/pcb_layout_page.zig::starFirstEver | fn starFirstEver(layouts: []SavedLayout) void
 src/serve/pcb_layout_page.zig::subBlockPoseByOriginKey | fn subBlockPoseByOriginKey( alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock, ) ?SubBlockSeeds
 src/serve/pcb_layout_page.zig::subSlug value
@@ -5060,7 +5082,6 @@ src/serve/pcb_layout_page.zig::thermalHeatsink | fn thermalHeatsink(solved: Solv
 src/serve/pcb_layout_page.zig::unknownLayoutMsg | fn unknownLayoutMsg( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, want: []const u8, ) []const u8
 src/serve/pcb_layout_page.zig::viasForPoses | fn viasForPoses( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, seed: optimizer.PoseSeed, params: optimizer.Params, ) ?[]const SyncVia
 src/serve/pcb_layout_page.zig::worldPad | fn worldPad(pt: optimizer.Part, pad: optimizer.PadRect) [2]f64
-src/serve/pcb_layout_page.zig::write value
 src/serve/pcb_layout_page.zig::writeFreshRfPathsJson | fn writeFreshRfPathsJson(w: *std.Io.Writer, outcomes: []const rf_port_report.Outcome, nets: []const export_kicad.FlatNet) std.Io.Writer.Error!void
 src/serve/pcb_layout_page.zig::writeJsonStr value
 src/serve/pcb_layout_page.zig::writeLayoutsFileJsonRev value
