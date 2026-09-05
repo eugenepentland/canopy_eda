@@ -501,19 +501,9 @@ const VoltageRange = struct { min: f64, max: f64 };
 /// envelope table is keyed by the flat name exactly as the netlist spells it,
 /// so `buck_5v75/VIN_F` matches there and nowhere else.
 fn railVoltage(placement: optimizer.Placement, name: []const u8) ?VoltageRange {
-    if (net_analysis.isRatingZeroVolts(name)) return .{ .min = 0, .max = 0 };
-    const base = net_analysis.baseNetName(name);
-    for (placement.rules.physical.rail_model.specs) |rail| {
-        const minimum = rail.rated_voltage.min orelse rail.nominal orelse continue;
-        const maximum = rail.rated_voltage.max orelse rail.nominal orelse continue;
-        const range = VoltageRange{ .min = @min(minimum, maximum), .max = @max(minimum, maximum) };
-        if (std.ascii.eqlIgnoreCase(base, rail.name)) return range;
-        for (rail.aliases) |alias| if (std.ascii.eqlIgnoreCase(base, alias)) return range;
-    }
-    for (placement.rules.physical.rail_model.net_envelopes) |envelope| {
-        if (std.ascii.eqlIgnoreCase(base, envelope.net)) return .{ .min = envelope.min, .max = envelope.max };
-    }
-    return null;
+    const model = placement.rules.physical.rail_model;
+    const found = net_envelopes.lookupIn(model.specs, model.net_envelopes, name) orelse return null;
+    return .{ .min = found.min, .max = found.max };
 }
 
 /// The series-correlation domain `eval/net_envelopes` derived `name`'s

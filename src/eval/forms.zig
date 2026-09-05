@@ -775,7 +775,13 @@ pub const scope_form_docs = blk: {
             "bridged onto it and a module-internal node is nameable as \"sub-block/NET\". The optional " ++
             "trailing string records why. A declaration that fails to COVER the envelope the design " ++
             "already proves for that net is a failed assertion, not a silent override — declaring an " ++
-            "enable at 3.3 V on a net a 5 V rail also reaches states something untrue.",
+            "enable at 3.3 V on a net a 5 V rail also reaches states something untrue. " ++
+            "MODULES OWN THEIR OWN NODES: written inside a `(defmodule …)`/`(block …)` body the net is " ++
+            "MODULE-LOCAL and LO/HI are evaluated expressions of the module's parameters " ++
+            "((rated (* vout 0.97) (* vout 1.03))), so a SET/FB/bias node is stated ONCE in the module " ++
+            "and applies to `sub-block/NET` at every instantiation, at that instantiation's numbers. " ++
+            "A board declaration for the same flattened net may restate or WIDEN what the module " ++
+            "claims; narrowing it is the same failed assertion, because the module owns the node.",
     } };
     t[@backingInt(ScopeForm.fabrication_layer)] = .{ .scope = tl, .doc = .{
         .syntax = "(fabrication-layer \"FILE.gbr\" (side top|bottom) (material \"NAME\") (thickness MM) " ++

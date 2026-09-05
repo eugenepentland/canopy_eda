@@ -16,6 +16,7 @@ const json_writer = @import("../json_writer.zig");
 const export_kicad = @import("../export_kicad.zig");
 const netlist_mod = @import("../export_kicad_netlist.zig");
 const net_names = @import("../net_name.zig");
+const net_envelopes = @import("../eval/net_envelopes.zig");
 
 const FlatInstance = export_kicad.FlatInstance;
 const FlatNet = export_kicad.FlatNet;
@@ -335,6 +336,33 @@ fn mergedByRawPin(merged: []const FlatNet, p: FlatPin) ?usize {
     return null;
 }
 
+/// Emit the `envelope` member of a `get_net` payload: the worst-case DC
+/// potential window `eval/net_envelopes` proves for this net, how it was
+/// established, and the ferrite-class root it was resolved on.
+///
+/// `null` when the design declares nothing that bounds the net — the honest
+/// answer, and the same one `(cap-rating …)` reports as `unproven`. `source`
+/// separates an author's `(net-envelope …)` claim (`authored`) from a
+/// consequence of declarations the design already makes (`derived`), and
+/// `origin` names the rule and what it rests on.
+pub fn writeNetEnvelope(
+    w: anytype,
+    block: *const env_mod.DesignBlock,
+    net: []const u8,
+) !void {
+    try w.writeAll(",\"envelope\":");
+    const found = net_envelopes.lookup(block, net) orelse return w.writeAll("null");
+    try w.print("{{\"lo\":{d},\"hi\":{d},\"source\":", .{ found.min, found.max });
+    try json_writer.writeString(w, if (found.origin == .declared) "authored" else "derived");
+    try w.writeAll(",\"origin\":");
+    try json_writer.writeString(w, found.provenance.rule);
+    try w.writeAll(",\"why\":");
+    try json_writer.writeString(w, found.provenance.why);
+    try w.writeAll(",\"path\":");
+    try json_writer.writeString(w, if (found.provenance.root.len > 0) found.provenance.root else found.net);
+    try w.writeAll("}");
+}
+
 /// Flattened `get_net`: every pin on the merged rail (flattened refs +
 /// resolved function names) plus the passives on it. `query` accepts the
 /// canonical merged name or a sub-scoped spelling.
@@ -359,6 +387,7 @@ pub fn getNetFlat(
 
     try w.writeAll("{\"name\":");
     try json_writer.writeString(w, net.name);
+    try writeNetEnvelope(w, block, net.name);
     try w.writeAll(",\"pins\":[");
 
     var passive_refs: std.StringHashMapUnmanaged(void) = .empty;

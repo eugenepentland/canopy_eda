@@ -5533,6 +5533,7 @@ Public functions: analyze
 - kicad-pcb form captures the literal path on the design block
 - stackup form captures layer count and plane assignments on the design block
 - net-envelope form publishes an authored voltage envelope on the design block
+- net-envelope rated bounds are evaluated so a module can express them from its own parameters
 - pdn form captures an explicit AC-domain target and source model
 - stackup captures per-layer copper foil and core/prepreg construction details
 - stackup process entries capture stepped soldermask and per-layer trapezoidal etch geometry
@@ -5663,7 +5664,7 @@ Public functions: isActiveSemiconductor, isPassThroughConnector
 - completeness-waiver: panic-free (every path is a bounded slice comparison over caller-owned memory with no indexing beyond a length-checked loop)
 ## eval/net-envelopes
 
-Public functions: build
+Public functions: build, ferriteBridges, lookup, lookupIn
 
 - Derives a voltage envelope for a sub-block-internal net across a module-internal ferrite bead
 - An internal input port's rated range is a pin tolerance and does not widen the net it sits on
@@ -5677,6 +5678,9 @@ Public functions: build
 - A divider tap anchored by two different known nets is refused rather than guessed
 - A DNP series resistor is absent copper and derives nothing
 - An inductor between two unknown nets is a switching coil and merges nothing
+- A module's own net-envelope declaration applies to the flattened sub-block/NET name
+- A board declaration narrower than the module's own claim about the same net is a contradiction
+- lookup reads a net's proven potential from rails, ground-class names and the envelope table alike
 - completeness-waiver: empty inputs (a design with no sub-blocks, no rated ports and no declarations returns both slices empty, which is the covered no-envelopes-proven case)
 - completeness-waiver: large inputs (one flatten plus a near-linear union-find over its nets, the same pass the netlist exporter already runs on every board)
 - completeness-waiver: unauthorized access (a pure derivation over an already-evaluated block; it opens no file, reaches no network, and consults no external state)

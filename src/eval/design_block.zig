@@ -138,7 +138,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var stackup_spec: env_mod.StackupSpec = .{};
     var pdn_intents: std.ArrayList(env_mod.PdnIntent) = .empty;
     var net_class_pins: std.ArrayList(env_mod.NetClassPin) = .empty;
-    var envelope_decls: std.ArrayList(net_envelopes.Declaration) = .empty;
+    var envelope_decls: std.ArrayList(env_mod.NetEnvelopeDecl) = .empty;
     var fabrication_layers: std.ArrayList(env_mod.FabricationLayerSpec) = .empty;
     var net_class_specs: std.ArrayList(env_mod.NetClassSpec) = .empty;
     var pll_loop_specs: std.ArrayList(pll_loop.Spec) = .empty;
@@ -303,14 +303,19 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     // other net the supply tree cannot name. Authored `(net-envelope …)` forms
     // join here, and any that understates what the design already proves is
     // recorded as a failed assertion rather than silently believed.
-    const envelopes = net_envelopes.build(self.allocator, block, build.envelope_decls.items) catch
-        return EvalError.OutOfMemory;
-    block.net_envelopes = envelopes.envelopes;
+    // The block publishes its own declarations FIRST: an enclosing design lifts
+    // them under its `sub-block/` prefix, which is how a module owns the
+    // envelope of its own SET/FB node once instead of per instantiation.
+    block.envelopes.declared = envelope_decls.toOwnedSlice(self.allocator) catch &.{};
+    const envelopes = net_envelopes.build(self.allocator, block, .{
+        .declarations = block.envelopes.declared,
+    }) catch return EvalError.OutOfMemory;
+    block.envelopes.published = envelopes.envelopes;
     for (envelopes.contradictions) |bad| {
         const msg = std.fmt.allocPrint(
             self.allocator,
-            "(net-envelope \"{s}\" (rated {d} {d})) does not cover the {d}–{d} V this design already declares for that net",
-            .{ bad.net, bad.declared_min, bad.declared_max, bad.derived_min, bad.derived_max },
+            "(net-envelope \"{s}\" (rated {d} {d})) [{s}] does not cover the {d}–{d} V this design already declares for that net",
+            .{ bad.net, bad.declared_min, bad.declared_max, bad.rule, bad.derived_min, bad.derived_max },
         ) catch return EvalError.OutOfMemory;
         self.assertions.append(self.allocator, .{ .passed = false, .message = msg }) catch
             return EvalError.OutOfMemory;
@@ -344,7 +349,7 @@ const BlockBuildState = struct {
     stackup_spec: *env_mod.StackupSpec,
     pdn_intents: *std.ArrayList(env_mod.PdnIntent),
     net_class_pins: *std.ArrayList(env_mod.NetClassPin),
-    envelope_decls: *std.ArrayList(net_envelopes.Declaration),
+    envelope_decls: *std.ArrayList(env_mod.NetEnvelopeDecl),
     fabrication_layers: *std.ArrayList(env_mod.FabricationLayerSpec),
     net_class_specs: *std.ArrayList(env_mod.NetClassSpec),
     pll_loop_specs: *std.ArrayList(pll_loop.Spec),
@@ -614,7 +619,7 @@ fn evalBlockBodyForm(
         .stackup => build.stackup_spec.* = try parseStackup(self, form_children),
         .pdn => if (parsePdnIntent(self, form_children)) |intent|
             build.pdn_intents.append(self.allocator, intent) catch return EvalError.OutOfMemory,
-        .net_envelope => if (parseNetEnvelope(self, form_children)) |decl|
+        .net_envelope => if (try parseNetEnvelope(self, form_children, env)) |decl|
             build.envelope_decls.append(self.allocator, decl) catch return EvalError.OutOfMemory,
         .fabrication_layer => if (try parseFabricationLayer(self, form_children)) |layer|
             build.fabrication_layers.append(self.allocator, layer) catch return EvalError.OutOfMemory,
@@ -2759,7 +2764,7 @@ fn parsePdnIntent(self: *Evaluator, c: []const Node) ?env_mod.PdnIntent {
 ///
 /// A malformed form is a warning and no declaration, matching every other
 /// declaration parser here: a typo must not silently narrow a proof.
-fn parseNetEnvelope(self: *Evaluator, c: []const Node) ?net_envelopes.Declaration {
+fn parseNetEnvelope(self: *Evaluator, c: []const Node, env: *Env) EvalError!?env_mod.NetEnvelopeDecl {
     if (c.len < 3) {
         self.warnFmt(c[0].span, "(net-envelope …) needs a net and (rated LO HI)", .{});
         return null;
@@ -2768,7 +2773,7 @@ fn parseNetEnvelope(self: *Evaluator, c: []const Node) ?net_envelopes.Declaratio
         self.warnFmt(c[1].span, "(net-envelope …) net must be a string", .{});
         return null;
     };
-    var out: ?net_envelopes.Declaration = null;
+    var out: ?env_mod.NetEnvelopeDecl = null;
     var rationale: []const u8 = "";
     for (c[2..]) |node| {
         if (node.asString()) |text| {
@@ -2778,8 +2783,8 @@ fn parseNetEnvelope(self: *Evaluator, c: []const Node) ?net_envelopes.Declaratio
         const sc = node.asList() orelse continue;
         const name = if (sc.len > 0) sc[0].asAtom() orelse "" else "";
         if (std.mem.eql(u8, name, "rated") and sc.len >= 3) {
-            const lo = sc[1].asNumber();
-            const hi = sc[2].asNumber();
+            const lo = try envelopeBound(self, sc[1], env);
+            const hi = try envelopeBound(self, sc[2], env);
             if (lo == null or hi == null or !(hi.? >= lo.?)) {
                 self.warnFmt(node.span, "(net-envelope \"{s}\" (rated LO HI)) needs two numbers with HI >= LO", .{net});
                 return null;
@@ -2793,6 +2798,15 @@ fn parseNetEnvelope(self: *Evaluator, c: []const Node) ?net_envelopes.Declaratio
     }
     self.warnFmt(c[1].span, "(net-envelope \"{s}\" …) needs a (rated LO HI) envelope", .{net});
     return null;
+}
+
+/// One side of a `(rated LO HI)` bound, EVALUATED — so a module can express its
+/// own node's envelope as arithmetic over its parameters
+/// (`(rated (* vout 0.97) (* vout 1.03))`) instead of a board restating the
+/// number per instantiation. A bare literal evaluates to itself, and the raw
+/// node is the fallback for anything the evaluator hands back non-numeric.
+fn envelopeBound(self: *Evaluator, node: Node, env: *Env) EvalError!?f64 {
+    return (try self.evalNode(node, env)).asNumber() orelse node.asNumber();
 }
 
 /// Parse a top-level `(stackup N …)` custom construction or
@@ -4411,11 +4425,46 @@ test "design-block captures (net-envelope …)" {
     const block = (try evalDesignBlock(&eval, form_children[1..], &scope)).design_block;
     // The second form is malformed — a warning and no declaration, so exactly
     // one envelope reaches the block and the typo cannot narrow a proof.
-    try testing.expectEqual(@as(usize, 1), block.net_envelopes.len);
-    try testing.expectEqualStrings("EN_BUCK", block.net_envelopes[0].net);
-    try testing.expectEqual(@as(f64, 3.3), block.net_envelopes[0].max);
-    try testing.expectEqual(env_mod.NetEnvelope.Origin.declared, block.net_envelopes[0].origin);
-    try testing.expectEqualStrings("driven by a 3.3 V GPIO", block.net_envelopes[0].rationale);
+    try testing.expectEqual(@as(usize, 1), block.envelopes.published.len);
+    try testing.expectEqualStrings("EN_BUCK", block.envelopes.published[0].net);
+    try testing.expectEqual(@as(f64, 3.3), block.envelopes.published[0].max);
+    try testing.expectEqual(env_mod.NetEnvelope.Origin.declared, block.envelopes.published[0].origin);
+    try testing.expectEqualStrings("driven by a 3.3 V GPIO", block.envelopes.published[0].provenance.why);
+}
+
+// spec: eval/design_block - net-envelope rated bounds are evaluated so a module can express them from its own parameters
+test "design-block evaluates (net-envelope … (rated EXPR EXPR))" {
+    const a = std.heap.page_allocator;
+    // The parameterized-module shape: the envelope of the node a module owns is
+    // arithmetic over the module's parameter, not a literal a board restates.
+    const src =
+        \\(design-block "test"
+        \\  (let vout 5.0)
+        \\  (instance "R1" fakeres (pin 1 "SET") (pin 2 "GND"))
+        \\  (net-envelope "SET" (rated (* vout 0.97) (* vout 1.03)) "100 uA into R_SET"))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    try eval.component_cache.put(a, "fakeres", .{
+        .name = "fakeres",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    var scope = env_mod.Env.init(a, null);
+    defer scope.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &scope)).design_block;
+    // Published for the parent to lift under its own `sub-block/` prefix …
+    try testing.expectEqual(@as(usize, 1), block.envelopes.declared.len);
+    try testing.expectEqualStrings("SET", block.envelopes.declared[0].net);
+    try testing.expectApproxEqAbs(@as(f64, 4.85), block.envelopes.declared[0].min, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5.15), block.envelopes.declared[0].max, 1e-9);
+    // … and applied to this block's own table too.
+    try testing.expectEqual(@as(usize, 1), block.envelopes.published.len);
+    try testing.expectApproxEqAbs(@as(f64, 5.15), block.envelopes.published[0].max, 1e-9);
 }
 
 // spec: eval/design_block - pdn form captures an explicit AC-domain target and source model

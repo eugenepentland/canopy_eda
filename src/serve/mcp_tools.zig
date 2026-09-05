@@ -1646,6 +1646,7 @@ pub fn getNet(
 
     try w.writeAll(name_field_prefix);
     try json_writer.writeString(w, net.name);
+    try mcp_flatten.writeNetEnvelope(w, block, net.name);
     try w.writeAll(",\"pins\":[");
 
     var passive_refs: std.StringHashMapUnmanaged(void) = .empty;

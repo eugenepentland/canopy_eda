@@ -48,28 +48,94 @@ const Span = struct {
     min: f64,
     max: f64,
     origin: NetEnvelope.Origin,
-    rationale: []const u8,
+    provenance: NetEnvelope.Provenance,
 
     fn widen(self: *Span, other: Span) void {
         self.min = @min(self.min, other.min);
         self.max = @max(self.max, other.max);
-        // A declared rationale is the only text worth carrying, and the first
+        // A declared provenance is the only text worth carrying, and the first
         // one wins so output is independent of hash-map iteration order.
         if (self.origin == .derived and other.origin == .declared) {
             self.origin = .declared;
-            self.rationale = other.rationale;
+            self.provenance = other.provenance;
         }
     }
 };
 
+/// Provenance text for the 0 V every rating surface grants a ground-class name.
+pub const ground_rule = "ground-class name";
+
 /// One authored `(net-envelope "NET" (rated LO HI) ["why"])`, before the net
-/// name has been resolved against the flattened netlist.
-pub const Declaration = struct {
-    net: []const u8,
-    min: f64,
-    max: f64,
-    rationale: []const u8 = "",
+/// name has been resolved against the flattened netlist. Declared in `env` so
+/// a block can carry its own forward for its parent to lift — see
+/// `env.NetEnvelopeTable`.
+pub const Declaration = env_mod.NetEnvelopeDecl;
+
+/// Everything a `build` run is told beyond the block itself.
+///
+/// The two declaration lists are separate because they are checked against
+/// different baselines, which is the whole precedence rule: a MODULE-scope
+/// declaration is measured against what the topology derives, and the board's
+/// own declarations are then measured against that result. So a board may
+/// widen what a module claims about its own insides and may restate it, but a
+/// board declaration NARROWER than the module's own is a failed assertion —
+/// the module owns the envelope of the node it owns.
+pub const Input = struct {
+    /// `(net-envelope …)` forms written in this block's own body.
+    declarations: []const Declaration = &.{},
 };
+
+/// Read one net's proven potential the way every rating surface must read it:
+/// a ground-class name is 0 V by definition, then the design's declared RAILS
+/// (and their aliases) by base name, then the derived envelope table. Both
+/// scans are case-insensitive on `net_analysis.baseNetName`, which strips a
+/// `.ref.pin` split-net suffix but NOT a `sub-block/` prefix — a rail is always
+/// top-level, an envelope is keyed by the flat name exactly as the netlist
+/// spells it, and that asymmetry is the whole reason both tables are consulted.
+///
+/// One function so `req_physical_checks`' `(cap-rating …)` and
+/// `fab_readiness`' release gate can never disagree about what a net reaches.
+pub fn lookupIn(
+    rails: []const env_mod.PowerRail,
+    envelopes: []const NetEnvelope,
+    net: []const u8,
+) ?NetEnvelope {
+    if (na.isRatingZeroVolts(net)) return .{
+        .net = net,
+        .min = 0,
+        .max = 0,
+        .provenance = .{ .rule = ground_rule, .root = net },
+    };
+    const base = na.baseNetName(net);
+    for (rails) |rail| {
+        const low = rail.rated_voltage.min orelse rail.nominal orelse continue;
+        const high = rail.rated_voltage.max orelse rail.nominal orelse continue;
+        var hit = std.ascii.eqlIgnoreCase(base, rail.name);
+        if (!hit) for (rail.aliases) |alias| {
+            if (std.ascii.eqlIgnoreCase(base, alias)) {
+                hit = true;
+                break;
+            }
+        };
+        if (!hit) continue;
+        return .{
+            .net = net,
+            .min = @min(low, high),
+            .max = @max(low, high),
+            .provenance = .{ .rule = "rail", .root = rail.name },
+        };
+    }
+    for (envelopes) |envelope| {
+        if (std.ascii.eqlIgnoreCase(base, envelope.net)) return envelope;
+    }
+    return null;
+}
+
+/// `lookupIn` against a design block's own tables — the form every consumer
+/// holding a `DesignBlock` should use.
+pub fn lookup(block: *const DesignBlock, net: []const u8) ?NetEnvelope {
+    return lookupIn(block.rails, block.envelopes.published, net);
+}
 
 /// A `.declared` envelope that fails to cover the envelope the design's own
 /// declarations already prove for the same net. Reported by the caller as a
@@ -80,6 +146,9 @@ pub const Contradiction = struct {
     declared_max: f64,
     derived_min: f64,
     derived_max: f64,
+    /// The declaration's provenance text — which body the form was written in,
+    /// so the assertion can say whether the board or a module made the claim.
+    rule: []const u8 = "",
 };
 
 /// The full result: the envelope set to publish on the block, plus any authored
@@ -99,7 +168,7 @@ pub const Result = struct {
 pub fn build(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
-    declarations: []const Declaration,
+    input: Input,
 ) std.mem.Allocator.Error!Result {
     var nets: std.ArrayList(flat_netlist.FlatNet) = .empty;
     defer nets.deinit(allocator);
@@ -129,21 +198,32 @@ pub fn build(
 
     var contradictions: std.ArrayList(Contradiction) = .empty;
     defer contradictions.deinit(allocator);
-    for (declarations) |decl| {
-        if (!(decl.max >= decl.min)) continue;
-        const root = rootOf(&aliases, &parent, decl.net);
-        const span = Span{ .min = decl.min, .max = decl.max, .origin = .declared, .rationale = decl.rationale };
-        if (derived_roots.get(root)) |derived| {
-            if (decl.min > derived.min or decl.max < derived.max) try contradictions.append(allocator, .{
-                .net = decl.net,
-                .declared_min = decl.min,
-                .declared_max = decl.max,
-                .derived_min = derived.min,
-                .derived_max = derived.max,
-            });
-        }
-        try put(allocator, &by_root, root, span);
-    }
+
+    // MODULE-scope declarations first, against the purely derived baseline:
+    // a module states the envelope of a node it owns, and the parent's own
+    // topology is the only thing that can contradict it.
+    var scoped: std.ArrayList(Declaration) = .empty;
+    defer scoped.deinit(allocator);
+    try collectScoped(allocator, block, "", &scoped);
+    try applyDeclarations(allocator, scoped.items, .{
+        .aliases = &aliases,
+        .parent = &parent,
+        .by_root = &by_root,
+        .baseline = &derived_roots,
+        .contradictions = &contradictions,
+    });
+
+    // Then this block's own, against the module-informed result: a board may
+    // widen or restate what a module claims about its insides, never narrow it.
+    var proven_roots = try by_root.clone(allocator);
+    defer proven_roots.deinit(allocator);
+    try applyDeclarations(allocator, input.declarations, .{
+        .aliases = &aliases,
+        .parent = &parent,
+        .by_root = &by_root,
+        .baseline = &proven_roots,
+        .contradictions = &contradictions,
+    });
 
     // Series-domain derivation runs LAST, over everything already known —
     // seeds and authored declarations alike — and only ever fills nets that
@@ -164,7 +244,7 @@ pub fn build(
             .min = span.min,
             .max = span.max,
             .origin = span.origin,
-            .rationale = span.rationale,
+            .provenance = .{ .rule = span.provenance.rule, .why = span.provenance.why, .root = root },
             .domain = derived.domain,
             .bounded = derived.bounded,
         });
@@ -178,6 +258,81 @@ pub fn build(
 
 fn lessThanEnvelope(_: void, a: NetEnvelope, b: NetEnvelope) bool {
     return std.mem.order(u8, a.net, b.net) == .lt;
+}
+
+/// The maps one declaration pass reads and writes. Grouped so the pass keeps
+/// one parameter per ROLE rather than six positional pointers.
+const DeclPass = struct {
+    aliases: *const flat_netlist.CanonicalNetMap,
+    parent: *std.StringHashMapUnmanaged([]const u8),
+    by_root: *std.StringHashMapUnmanaged(Span),
+    /// What each declaration must COVER to be believed. Never the live
+    /// `by_root`, which the pass itself widens — comparing against that would
+    /// measure a declaration against itself.
+    baseline: *const std.StringHashMapUnmanaged(Span),
+    contradictions: *std.ArrayList(Contradiction),
+};
+
+/// Fold one list of authored declarations into the envelope set, recording any
+/// that fails to cover what `baseline` already proves for the same net.
+fn applyDeclarations(
+    allocator: std.mem.Allocator,
+    declarations: []const Declaration,
+    pass: DeclPass,
+) std.mem.Allocator.Error!void {
+    for (declarations) |decl| {
+        if (!(decl.max >= decl.min)) continue;
+        const root = rootOf(pass.aliases, pass.parent, decl.net);
+        if (pass.baseline.get(root)) |known| {
+            if (decl.min > known.min or decl.max < known.max) try pass.contradictions.append(allocator, .{
+                .net = decl.net,
+                .declared_min = decl.min,
+                .declared_max = decl.max,
+                .derived_min = known.min,
+                .derived_max = known.max,
+                .rule = decl.rule,
+            });
+        }
+        try put(allocator, pass.by_root, root, .{
+            .min = decl.min,
+            .max = decl.max,
+            .origin = .declared,
+            .provenance = .{ .rule = decl.rule, .why = decl.rationale },
+        });
+    }
+}
+
+/// Walk the sub-block tree and lift every module's own `(net-envelope …)` form
+/// into a declaration keyed by the FLAT name its instantiation gives it, so a
+/// module can state the envelope of its SET/FB/bias node once instead of every
+/// board restating the same datasheet arithmetic per instantiation.
+///
+/// The block's OWN declarations are deliberately not collected here: they are
+/// board-scope and are applied later, against the result this pass produces.
+/// `prefix` is the `sub-block/…` path of `block` ("" at the top).
+fn collectScoped(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    prefix: []const u8,
+    out: *std.ArrayList(Declaration),
+) std.mem.Allocator.Error!void {
+    for (block.sub_blocks) |sb| {
+        const path = if (prefix.len == 0)
+            try allocator.dupe(u8, sb.name)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, sb.name });
+        const rule = try std.fmt.allocPrint(allocator, "declared in module {s}", .{path});
+        for (sb.block.envelopes.declared) |decl| {
+            try out.append(allocator, .{
+                .net = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, decl.net }),
+                .min = decl.min,
+                .max = decl.max,
+                .rationale = decl.rationale,
+                .rule = rule,
+            });
+        }
+        try collectScoped(allocator, sb.block, path, out);
+    }
 }
 
 /// Follow a hierarchy-local name to its canonical flat name, then to its
@@ -219,7 +374,7 @@ fn seedRails(
     for (block.rails) |rail| {
         const low = rail.rated_voltage.min orelse rail.nominal orelse continue;
         const high = rail.rated_voltage.max orelse rail.nominal orelse continue;
-        const span = Span{ .min = @min(low, high), .max = @max(low, high), .origin = .derived, .rationale = "" };
+        const span = Span{ .min = @min(low, high), .max = @max(low, high), .origin = .derived, .provenance = .{ .rule = "rail" } };
         try put(allocator, by_root, rootOf(aliases, parent, rail.name), span);
         for (rail.aliases) |alias| try put(allocator, by_root, rootOf(aliases, parent, alias), span);
     }
@@ -251,7 +406,7 @@ fn portSpan(port: env_mod.Port, supply_side: bool) ?Span {
         .{ null, null };
     const lo = low orelse return null;
     const hi = high orelse return null;
-    return .{ .min = @min(lo, hi), .max = @max(lo, hi), .origin = .derived, .rationale = "" };
+    return .{ .min = @min(lo, hi), .max = @max(lo, hi), .origin = .derived, .provenance = .{ .rule = if (supply_side) "port-supply" else "port-nominal" } };
 }
 
 /// Walk every port at every depth, seeding the ones `portSpan` accepts. The
@@ -415,7 +570,7 @@ fn isInertForDomains(component: []const u8) bool {
 /// span, or the 0 V every rating surface grants ground-class names.
 fn seedSpanOf(by_root: *const std.StringHashMapUnmanaged(Span), root: []const u8) ?Span {
     if (by_root.get(root)) |span| return span;
-    if (na.isRatingZeroVolts(root)) return .{ .min = 0, .max = 0, .origin = .derived, .rationale = "" };
+    if (na.isRatingZeroVolts(root)) return .{ .min = 0, .max = 0, .origin = .derived, .provenance = .{ .rule = ground_rule } };
     return null;
 }
 
@@ -623,7 +778,7 @@ const DomainPass = struct {
                 .min = entry.span_min,
                 .max = entry.span_max,
                 .origin = .derived,
-                .rationale = "",
+                .provenance = .{ .rule = "series-domain" },
             });
             try domains.put(self.allocator, root, .{
                 .domain = idgop.value_ptr.*,
@@ -716,7 +871,7 @@ test "build carries a rail envelope across a module-internal ferrite" {
         .sub_blocks = &sbs,
         .net_ties = &ties,
     };
-    const result = try build(alloc, &outer, &.{});
+    const result = try build(alloc, &outer, .{});
     const filtered = envelopeFor(result, "buck/VIN_F") orelse return error.TestExpectedEnvelope;
     try testing.expectEqual(@as(f64, 11.4), filtered.min);
     try testing.expectEqual(@as(f64, 12.6), filtered.max);
@@ -755,7 +910,7 @@ test "build ignores an internal input port's rated range" {
         .sub_blocks = &sbs,
         .net_ties = &ties,
     };
-    const result = try build(alloc, &outer, &.{});
+    const result = try build(alloc, &outer, .{});
     const rail = envelopeFor(result, "V_5VA") orelse return error.TestExpectedEnvelope;
     try testing.expectEqual(@as(f64, 4.75), rail.min);
     try testing.expectEqual(@as(f64, 5.25), rail.max);
@@ -778,7 +933,7 @@ test "build emits nothing for a flat design with no declared voltages" {
         .groups = &.{},
         .sub_blocks = &.{},
     };
-    const result = try build(alloc, &outer, &.{});
+    const result = try build(alloc, &outer, .{});
     try testing.expectEqual(@as(usize, 0), result.envelopes.len);
     try testing.expectEqual(@as(usize, 0), result.contradictions.len);
 }
@@ -801,11 +956,11 @@ test "build accepts a declared envelope for an underivable signal net" {
         .sub_blocks = &.{},
     };
     const decls = [_]Declaration{.{ .net = "EN_BUCK", .min = 0, .max = 3.3, .rationale = "3.3 V GPIO" }};
-    const result = try build(alloc, &outer, &decls);
+    const result = try build(alloc, &outer, .{ .declarations = &decls });
     const declared = envelopeFor(result, "EN_BUCK") orelse return error.TestExpectedEnvelope;
     try testing.expectEqual(@as(f64, 3.3), declared.max);
     try testing.expectEqual(NetEnvelope.Origin.declared, declared.origin);
-    try testing.expectEqualStrings("3.3 V GPIO", declared.rationale);
+    try testing.expectEqualStrings("3.3 V GPIO", declared.provenance.why);
     try testing.expectEqual(@as(usize, 0), result.contradictions.len);
 }
 
@@ -828,13 +983,13 @@ test "build reports a declared envelope narrower than the derived one" {
         .sub_blocks = &.{},
     };
     const decls = [_]Declaration{.{ .net = "V_12V", .min = 0, .max = 5.0 }};
-    const result = try build(alloc, &outer, &decls);
+    const result = try build(alloc, &outer, .{ .declarations = &decls });
     try testing.expectEqual(@as(usize, 1), result.contradictions.len);
     try testing.expectEqualStrings("V_12V", result.contradictions[0].net);
     try testing.expectEqual(@as(f64, 12.6), result.contradictions[0].derived_max);
     // A covering declaration is not a contradiction, and widens the result.
     const wide = [_]Declaration{.{ .net = "V_12V", .min = 0, .max = 30.0 }};
-    const covering = try build(alloc, &outer, &wide);
+    const covering = try build(alloc, &outer, .{ .declarations = &wide });
     try testing.expectEqual(@as(usize, 0), covering.contradictions.len);
     const merged = envelopeFor(covering, "V_12V") orelse return error.TestExpectedEnvelope;
     try testing.expectEqual(@as(f64, 30.0), merged.max);
@@ -882,7 +1037,7 @@ test "series resistor derives the RC filter node from its rail" {
     };
     const ports = [_]env_mod.Port{.{ .name = "V_3V3", .net = "V_3V3", .direction = "in", .kind = "power", .rated_min = 3.135, .rated_max = 3.465 }};
     const outer = flatBlock(&instances, &nets, &ports);
-    const result = try build(alloc, &outer, &.{});
+    const result = try build(alloc, &outer, .{});
     const filt = envelopeFor(result, "FILT") orelse return error.TestExpectedEnvelope;
     try testing.expectEqual(@as(f64, 3.135), filt.min);
     try testing.expectEqual(@as(f64, 3.465), filt.max);
@@ -911,7 +1066,7 @@ test "series derivation refuses a divider strung between two rails" {
     };
     const ports = [_]env_mod.Port{.{ .name = "V5", .net = "V5", .direction = "in", .kind = "power", .rated_min = 4.75, .rated_max = 5.25 }};
     const outer = flatBlock(&instances, &nets, &ports);
-    const result = try build(alloc, &outer, &.{});
+    const result = try build(alloc, &outer, .{});
     try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(result, "TAP"));
 }
 
@@ -935,7 +1090,7 @@ test "series derivation widens a driven domain by the driver's supplies" {
     };
     const ports = [_]env_mod.Port{.{ .name = "V12", .net = "V12", .direction = "in", .kind = "power", .rated_min = 11.4, .rated_max = 12.6 }};
     const outer = flatBlock(&instances, &nets, &ports);
-    const result = try build(alloc, &outer, &.{});
+    const result = try build(alloc, &outer, .{});
     const out_net = envelopeFor(result, "OUT") orelse return error.TestExpectedEnvelope;
     const vtune = envelopeFor(result, "VTUNE") orelse return error.TestExpectedEnvelope;
     try testing.expectEqual(@as(f64, 0), out_net.min);
@@ -961,7 +1116,7 @@ test "series derivation refuses a domain driven by an unbounded device" {
     };
     const ports = [_]env_mod.Port{.{ .name = "V5", .net = "V5", .direction = "in", .kind = "power", .rated_min = 4.75, .rated_max = 5.25 }};
     const outer = flatBlock(&instances, &nets, &ports);
-    const result = try build(alloc, &outer, &.{});
+    const result = try build(alloc, &outer, .{});
     try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(result, "NODE"));
 }
 
@@ -980,7 +1135,7 @@ test "series derivation ignores a DNP resistor" {
     };
     const ports = [_]env_mod.Port{.{ .name = "V5", .net = "V5", .direction = "in", .kind = "power", .rated_min = 4.75, .rated_max = 5.25 }};
     const outer = flatBlock(&instances, &nets, &ports);
-    const result = try build(alloc, &outer, &.{});
+    const result = try build(alloc, &outer, .{});
     try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(result, "FILT"));
 }
 
@@ -1002,7 +1157,7 @@ test "series derivation crosses a bias-tee inductor" {
     };
     const ports = [_]env_mod.Port{.{ .name = "V_3V3", .net = "V_3V3", .direction = "in", .kind = "power", .rated_min = 3.135, .rated_max = 3.465 }};
     const outer = flatBlock(&instances, &nets, &ports);
-    const result = try build(alloc, &outer, &.{});
+    const result = try build(alloc, &outer, .{});
     const bias = envelopeFor(result, "LO_BIAS") orelse return error.TestExpectedEnvelope;
     try testing.expectEqual(@as(f64, 3.135), bias.min);
     try testing.expectEqual(@as(f64, 3.465), bias.max);
@@ -1029,9 +1184,136 @@ test "series derivation does not merge unknown nets across an inductor" {
     };
     const ports = [_]env_mod.Port{.{ .name = "V_22V", .net = "V_22V", .direction = "out", .kind = "power", .rated_min = 21.5, .rated_max = 22.13 }};
     const outer = flatBlock(&instances, &nets, &ports);
-    const result = try build(alloc, &outer, &.{});
+    const result = try build(alloc, &outer, .{});
     // Neither coil end derives: VIN must not inherit the output's ceiling,
     // and SW (an energy-storage node) has no series-resistor correlation.
     try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(result, "VIN_UNDECLARED"));
     try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(result, "SW"));
+}
+
+// ── Module-scope declaration tests ──────────────────────────────────────
+
+/// A one-instance module block whose own `(net-envelope …)` forms are already
+/// parsed — the shape `design_block.materializeBlock` publishes.
+fn moduleBlock(
+    name: []const u8,
+    instances: []const env_mod.Instance,
+    nets: []const env_mod.Net,
+    ports: []const env_mod.Port,
+    declared: []const Declaration,
+) DesignBlock {
+    return .{
+        .name = name,
+        .instances = instances,
+        .nets = nets,
+        .ports = ports,
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .envelopes = .{ .declared = declared },
+    };
+}
+
+// spec: eval/net-envelopes - A module's own net-envelope declaration applies to the flattened sub-block/NET name
+test "a module-scope declaration reaches the net its instantiation names" {
+    var scratch = arena();
+    defer scratch.deinit();
+    const alloc = scratch.allocator();
+    // The LT3045 shape: the module owns its SET node's envelope, so the board
+    // never states it. `vout` is the module's own parameter, already evaluated.
+    const instances = [_]env_mod.Instance{passive("R_SET", "res-0402", "49.9k")};
+    const nets = [_]env_mod.Net{
+        .{ .name = "SET", .pins = &[_]env_mod.PinRef{.{ .ref_des = "R_SET", .pin = "1" }} },
+        .{ .name = "GND", .pins = &[_]env_mod.PinRef{.{ .ref_des = "R_SET", .pin = "2" }} },
+    };
+    const declared = [_]Declaration{.{
+        .net = "SET",
+        .min = 4.85,
+        .max = 5.15,
+        .rationale = "100 uA into R_SET",
+        .rule = "declared in module ldo_5v",
+    }};
+    var inner = moduleBlock("ldo", &instances, &nets, &.{}, &declared);
+    const sbs = [_]env_mod.SubBlock{.{ .name = "ldo_5v", .block = &inner }};
+    const outer: DesignBlock = .{
+        .name = "outer",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &sbs,
+    };
+    const result = try build(alloc, &outer, .{});
+    const set = envelopeFor(result, "ldo_5v/SET") orelse return error.TestExpectedEnvelope;
+    try testing.expectEqual(@as(f64, 4.85), set.min);
+    try testing.expectEqual(@as(f64, 5.15), set.max);
+    try testing.expectEqual(NetEnvelope.Origin.declared, set.origin);
+    try testing.expectEqualStrings("declared in module ldo_5v", set.provenance.rule);
+    try testing.expectEqual(@as(usize, 0), result.contradictions.len);
+}
+
+// spec: eval/net-envelopes - A board declaration narrower than the module's own claim about the same net is a contradiction
+test "the module owns its node's envelope and a board may only widen it" {
+    var scratch = arena();
+    defer scratch.deinit();
+    const alloc = scratch.allocator();
+    const instances = [_]env_mod.Instance{passive("R_SET", "res-0402", "33k")};
+    const nets = [_]env_mod.Net{
+        .{ .name = "SET", .pins = &[_]env_mod.PinRef{.{ .ref_des = "R_SET", .pin = "1" }} },
+        .{ .name = "GND", .pins = &[_]env_mod.PinRef{.{ .ref_des = "R_SET", .pin = "2" }} },
+    };
+    const declared = [_]Declaration{.{ .net = "SET", .min = 3.2, .max = 3.4, .rule = "declared in module ldo_3v3" }};
+    var inner = moduleBlock("ldo", &instances, &nets, &.{}, &declared);
+    const sbs = [_]env_mod.SubBlock{.{ .name = "ldo_3v3", .block = &inner }};
+    const outer: DesignBlock = .{
+        .name = "outer",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &sbs,
+    };
+    // Narrower than the module's own claim: the two statements cannot both hold.
+    const narrow = [_]Declaration{.{ .net = "ldo_3v3/SET", .min = 3.23, .max = 3.37 }};
+    const clash = try build(alloc, &outer, .{ .declarations = &narrow });
+    try testing.expectEqual(@as(usize, 1), clash.contradictions.len);
+    try testing.expectEqual(@as(f64, 3.2), clash.contradictions[0].derived_min);
+    // Widening is not a contradiction, and the union is what gets published.
+    const wide = [_]Declaration{.{ .net = "ldo_3v3/SET", .min = 0, .max = 3.6 }};
+    const merged = try build(alloc, &outer, .{ .declarations = &wide });
+    try testing.expectEqual(@as(usize, 0), merged.contradictions.len);
+    const set = envelopeFor(merged, "ldo_3v3/SET") orelse return error.TestExpectedEnvelope;
+    try testing.expectEqual(@as(f64, 0), set.min);
+    try testing.expectEqual(@as(f64, 3.6), set.max);
+}
+
+// spec: eval/net-envelopes - lookup reads a net's proven potential from rails, ground-class names and the envelope table alike
+test "lookup answers from every table a rating surface must consult" {
+    const envelopes = [_]NetEnvelope{.{ .net = "buck/VIN_F", .min = 11.4, .max = 12.6 }};
+    const rails = [_]env_mod.PowerRail{.{ .name = "V_3V3", .nominal = 3.3, .rated_voltage = .{ .min = 3.135, .max = 3.465 } }};
+    const block: DesignBlock = .{
+        .name = "outer",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .rails = &rails,
+        .envelopes = .{ .published = &envelopes },
+    };
+    // A ground-class name is 0 V without any declaration.
+    const gnd = lookup(&block, "GND") orelse return error.TestExpectedEnvelope;
+    try testing.expectEqual(@as(f64, 0), gnd.max);
+    try testing.expectEqualStrings(ground_rule, gnd.provenance.rule);
+    // A rail resolves even when the envelope table never named it …
+    const rail = lookup(&block, "V_3V3") orelse return error.TestExpectedEnvelope;
+    try testing.expectEqual(@as(f64, 3.465), rail.max);
+    // … and a module-internal name resolves only in the envelope table, whose
+    // `.ref.pin` split-net suffix is stripped exactly as a rail's is.
+    const filtered = lookup(&block, "buck/VIN_F.U1.IN") orelse return error.TestExpectedEnvelope;
+    try testing.expectEqual(@as(f64, 12.6), filtered.max);
+    try testing.expectEqual(@as(?NetEnvelope, null), lookup(&block, "NOWHERE"));
 }

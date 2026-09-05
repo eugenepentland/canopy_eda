@@ -585,6 +585,8 @@ src/eval/env.zig::Net struct_
 src/eval/env.zig::NetClassPin struct_
 src/eval/env.zig::NetClassSpec struct_
 src/eval/env.zig::NetEnvelope struct_
+src/eval/env.zig::NetEnvelopeDecl struct_
+src/eval/env.zig::NetEnvelopeTable struct_
 src/eval/env.zig::NetTie struct_
 src/eval/env.zig::Note struct_
 src/eval/env.zig::NoteRef struct_
@@ -622,6 +624,7 @@ src/eval/env.zig::PourRules struct_
 src/eval/env.zig::PowerDecl struct_
 src/eval/env.zig::PowerRail struct_
 src/eval/env.zig::Property struct_
+src/eval/env.zig::Provenance struct_
 src/eval/env.zig::RatedVoltage struct_
 src/eval/env.zig::Requirement struct_
 src/eval/env.zig::Revision struct_
@@ -808,10 +811,14 @@ src/eval/net_analysis.zig::schematic_ground_names value
 src/eval/net_analysis.zig::subBlockNetHasCap | fn subBlockNetHasCap(block: *const DesignBlock, net_path: []const u8) bool
 src/eval/net_analysis.zig::subNetHostRef | fn subNetHostRef(name: []const u8) ?[]const u8
 src/eval/net_envelopes.zig::Contradiction struct_
-src/eval/net_envelopes.zig::Declaration struct_
+src/eval/net_envelopes.zig::Declaration value
+src/eval/net_envelopes.zig::Input struct_
 src/eval/net_envelopes.zig::Result struct_
-src/eval/net_envelopes.zig::build | fn build( allocator: std.mem.Allocator, block: *const DesignBlock, declarations: []const Declaration, ) std.mem.Allocator.Error!Result
+src/eval/net_envelopes.zig::build | fn build( allocator: std.mem.Allocator, block: *const DesignBlock, input: Input, ) std.mem.Allocator.Error!Result
 src/eval/net_envelopes.zig::ferriteBridges | fn ferriteBridges( allocator: std.mem.Allocator, instances: []const flat_netlist.FlatInstance, nets: []const flat_netlist.FlatNet, ) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]const u8)
+src/eval/net_envelopes.zig::ground_rule value
+src/eval/net_envelopes.zig::lookup | fn lookup(block: *const DesignBlock, net: []const u8) ?NetEnvelope
+src/eval/net_envelopes.zig::lookupIn | fn lookupIn( rails: []const env_mod.PowerRail, envelopes: []const NetEnvelope, net: []const u8, ) ?NetEnvelope
 src/eval/net_suggest.zig::didYouMean | fn didYouMean(name: []const u8, candidates: []const []const u8) ?[]const u8
 src/eval/net_suggest.zig::establishedNets | fn establishedNets( allocator: std.mem.Allocator, block: *const env_mod.DesignBlock, ) std.mem.Allocator.Error![]const []const u8
 src/eval/net_suggest.zig::hint | fn hint( allocator: std.mem.Allocator, name: []const u8, candidates: []const []const u8, ) []const u8
@@ -4476,6 +4483,7 @@ src/serve/mcp_flatten.zig::getNetFlat | fn getNetFlat( allocator: std.mem.Alloca
 src/serve/mcp_flatten.zig::instancePinCount | fn instancePinCount( eval: *Evaluator, component: []const u8, symbol: []const u8, parts: []const env_mod.Part, ) usize
 src/serve/mcp_flatten.zig::listFreePinsFlat | fn listFreePinsFlat( allocator: std.mem.Allocator, eval: *Evaluator, block: *const env_mod.DesignBlock, ref_des: []const u8, filter: ?[]const u8, w: anytype, ) !bool
 src/serve/mcp_flatten.zig::listInstancesFlat | fn listInstancesFlat( allocator: std.mem.Allocator, eval: *Evaluator, block: *const env_mod.DesignBlock, w: anytype, ) !bool
+src/serve/mcp_flatten.zig::writeNetEnvelope | fn writeNetEnvelope( w: anytype, block: *const env_mod.DesignBlock, net: []const u8, ) !void
 src/serve/mcp_import_tools.zig::toolBenchmarkKicadRouting | fn toolBenchmarkKicadRouting( allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/mcp_import_tools.zig::toolImportKicad | fn toolImportKicad( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/mcp_import_tools.zig::toolInspectKicadLayout | fn toolInspectKicadLayout( allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool

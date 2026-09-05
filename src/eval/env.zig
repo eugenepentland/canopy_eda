@@ -1210,13 +1210,30 @@ pub const NetEnvelope = struct {
     /// design already makes, `declared` is an author's `(net-envelope …)`.
     pub const Origin = enum { derived, declared };
 
+    /// The audit trail behind one envelope, grouped so the envelope itself
+    /// stays a small record. Every field is free text meant for a human or a
+    /// JSON reader: nothing downstream branches on it.
+    pub const Provenance = struct {
+        /// The rule that established the envelope and what it rests on —
+        /// `"rail V_12V"`, `"series-domain via V_3V3"`, `"set-resistor U1.SET
+        /// through R_SET"`, `"declared in module ldo_5v"`. Empty only for an
+        /// envelope built by a caller that states no rule (test fixtures).
+        rule: []const u8 = "",
+        /// Free text from a `(net-envelope … "why")`; empty when derived.
+        why: []const u8 = "",
+        /// The ferrite-class ROOT net this envelope was resolved on — the one
+        /// DC node a bead's two nets share. Equal to the net's own name when
+        /// no bead bridges it, which is the common case.
+        root: []const u8 = "",
+    };
+
     /// Flattened (`sub-block/`-scoped, net-tie-canonicalised) net name.
     net: []const u8,
     min: f64,
     max: f64,
     origin: Origin = .derived,
-    /// Free text from a `(net-envelope … "why")`; empty when derived.
-    rationale: []const u8 = "",
+    /// How this envelope came to be — see `Provenance`.
+    provenance: Provenance = .{},
     /// Correlation class for envelopes derived through series resistors and
     /// inductors (`eval/net_envelopes`' series-domain pass). Nets sharing a
     /// nonzero `domain` are ONE DC node reached through series conductors, so
@@ -1231,6 +1248,42 @@ pub const NetEnvelope = struct {
     /// may prove safety against such a bound, but must not report the bound
     /// itself as an exposure the part experiences.
     bounded: bool = false,
+};
+
+/// One authored `(net-envelope "NET" (rated LO HI) ["why"])` form, exactly as
+/// written. `net` is the name the AUTHOR wrote: module-local inside a module
+/// body, flat (`sub-block/NET`) when a board reaches into a module. Resolution
+/// against the flattened netlist happens in `eval/net_envelopes.build`.
+pub const NetEnvelopeDecl = struct {
+    net: []const u8,
+    min: f64,
+    max: f64,
+    /// Free text from the optional trailing string.
+    rationale: []const u8 = "",
+    /// Provenance text for the envelope this declaration produces — how the
+    /// published entry says WHO claimed it. A module's own declarations are
+    /// restamped `declared in module <path>` as the parent lifts them.
+    rule: []const u8 = "declared on the board",
+};
+
+/// A design block's two envelope halves.
+///
+/// `published` is the answer: worst-case DC voltage per FLAT net name, derived
+/// by `eval/net_envelopes.build` from rails, ports, ferrite classes, series
+/// domains and every declaration in scope. Separate from `rails` on purpose —
+/// a rail is a node in the supply tree (it gets a test point, a current budget,
+/// a PDN screen), while an envelope is only "what potential does copper on this
+/// net reach", which is also true of a filtered pin node and of a signal whose
+/// driver the author declared.
+///
+/// `declared` is this block's OWN `(net-envelope …)` forms, unresolved. A
+/// module publishes them so its PARENT can re-apply each one under the
+/// `sub-block/` prefix the instantiation gives it: that is what lets a module
+/// own the envelope of its own SET/FB node once instead of every board that
+/// instantiates it restating the same datasheet arithmetic.
+pub const NetEnvelopeTable = struct {
+    published: []const NetEnvelope = &.{},
+    declared: []const NetEnvelopeDecl = &.{},
 };
 
 /// Board-level transient intent for one physical power domain. Unlike the DC
@@ -2256,13 +2309,12 @@ pub const DesignBlock = struct {
     /// `evalDesignBlock`. Empty for blocks with no regulator sub-blocks or
     /// board-edge power ports.
     rails: []const PowerRail = &.{},
-    /// Worst-case DC voltage envelopes per FLAT net name, populated by
-    /// `eval/net_envelopes.build`. Separate from `rails` on purpose: a rail is
-    /// a node in the supply tree (it gets a test point, a current budget, a PDN
-    /// screen), while an envelope is only "what potential does copper on this
-    /// net reach", which is also true of a filtered pin node and of a signal
-    /// whose driver the author declared.
-    net_envelopes: []const NetEnvelope = &.{},
+    /// Everything this block says about net potentials — see
+    /// `NetEnvelopeTable`. The two halves travel together because the
+    /// declarations are the INPUT a parent re-derives its own published table
+    /// from, and a block that lost one while keeping the other would publish
+    /// an envelope set no enclosing design could reproduce.
+    envelopes: NetEnvelopeTable = .{},
     /// Author-pinned placement classes from `(module-policy (net-class …))`,
     /// consulted before the name heuristic by the placer, the ERC info row and
     /// the describe facts. Named like envelopes: the flattened net name, or a
