@@ -244,6 +244,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.component_info.test.",
         "serve.datasheet.test.",
         "serve.design_rules_edit.test.",
+        "serve.design_settings_target.test.",
         "serve.edit_assist.test.",
         "serve.footprint_preview.test.",
         "serve.mcp_arg_names.test.",

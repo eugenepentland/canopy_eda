@@ -4605,6 +4605,32 @@ src/serve/design_diff.zig::historyApi | fn historyApi(ctx: *Server, req: *httpz.
 src/serve/design_diff.zig::writeDiffJson | fn writeDiffJson(w: anytype, diff: DesignDiff) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
 src/serve/design_rules_edit.zig::editDesignRulesApi | fn editDesignRulesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) std.mem.Allocator.Error!void
 src/serve/design_rules_edit.zig::editStackupPlanesApi | fn editStackupPlanesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) std.mem.Allocator.Error!void
+src/serve/design_settings_target.zig::Conflict struct_
+src/serve/design_settings_target.zig::Container enum_
+src/serve/design_settings_target.zig::PatchError value
+src/serve/design_settings_target.zig::Resolution union_
+src/serve/design_settings_target.zig::ResolveError value
+src/serve/design_settings_target.zig::Span struct_
+src/serve/design_settings_target.zig::Target struct_
+src/serve/design_settings_target.zig::appendTopLevel | fn appendTopLevel(allocator: std.mem.Allocator, source: []const u8, text: []const u8) PatchError![]u8
+src/serve/design_settings_target.zig::childIndent | fn childIndent(self: Container) []const u8
+src/serve/design_settings_target.zig::deinit | fn deinit(self: Resolution, allocator: std.mem.Allocator) void
+src/serve/design_settings_target.zig::deinit | fn deinit(self: Target, allocator: std.mem.Allocator) void
+src/serve/design_settings_target.zig::designBlockSpan | fn designBlockSpan(source: []const u8) ?Span
+src/serve/design_settings_target.zig::directChild | fn directChild(source: []const u8, parent: Span, head: []const u8) ?Span
+src/serve/design_settings_target.zig::formEnd | fn formEnd(source: []const u8, open: usize) ?usize
+src/serve/design_settings_target.zig::formHead | fn formHead(source: []const u8, open: usize, end: usize) []const u8
+src/serve/design_settings_target.zig::formIndent | fn formIndent(source: []const u8, span: Span, fallback: []const u8) []const u8
+src/serve/design_settings_target.zig::formSpan | fn formSpan(source: []const u8, container: Container, head: []const u8) ?Span
+src/serve/design_settings_target.zig::indent | fn indent(self: Container) []const u8
+src/serve/design_settings_target.zig::isSidecar | fn isSidecar(self: Target) bool
+src/serve/design_settings_target.zig::max_source_bytes value
+src/serve/design_settings_target.zig::patchTopLevel | fn patchTopLevel( allocator: std.mem.Allocator, source: []const u8, head: []const u8, replacement: []const u8, ) PatchError![]u8
+src/serve/design_settings_target.zig::replaceSpan | fn replaceSpan(allocator: std.mem.Allocator, source: []const u8, span: Span, replacement: []const u8) PatchError![]u8
+src/serve/design_settings_target.zig::resolve | fn resolve( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, heads: []const []const u8, ) ResolveError!Resolution
+src/serve/design_settings_target.zig::sidecarAtomArg | fn sidecarAtomArg( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, head: []const u8, ) ?[]u8
+src/serve/design_settings_target.zig::skipStringOrComment | fn skipStringOrComment(source: []const u8, cursor: *usize, limit: usize) void
+src/serve/design_settings_target.zig::topLevelForm | fn topLevelForm(source: []const u8, head: []const u8) ?Span
 src/serve/diag_format.zig::Diagnostic struct_
 src/serve/diag_format.zig::build | fn build( allocator: std.mem.Allocator, file_path: []const u8, source: []const u8, err_name: []const u8, last_error: ?evaluator_mod.EvalDiagnostic, ) std.mem.Allocator.Error!Diagnostic
 src/serve/diag_format.zig::caretLine | fn caretLine(allocator: std.mem.Allocator, source_line: []const u8, col: u32) std.mem.Allocator.Error![]u8
@@ -4693,6 +4719,7 @@ src/serve/edit.zig::EditError value
 src/serve/edit.zig::HandlerError value
 src/serve/edit.zig::MpnEditError value
 src/serve/edit.zig::MutationResult struct_
+src/serve/edit.zig::SourceFile enum_
 src/serve/edit.zig::addComponentDatasheetCore | fn addComponentDatasheetCore( allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8, pdf: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::addInstanceApi | fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::addPortApi | fn addPortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -4704,11 +4731,13 @@ src/serve/edit.zig::editFootprintApi | fn editFootprintApi(ctx: *Server, req: *h
 src/serve/edit.zig::editMpnApi | fn editMpnApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::editMpnCore | fn editMpnCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, mpn: []const u8, manufacturer: []const u8, ) MpnEditError!u32
 src/serve/edit.zig::editValueApi | fn editValueApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::ext | fn ext(self: SourceFile) []const u8
 src/serve/edit.zig::getBoardRoleApi | fn getBoardRoleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::getSourceApi | fn getSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::movePinApi | fn movePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::movePinCore | fn movePinCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, old_pin: []const u8, new_pin: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::newDesignApi | fn newDesignApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::parse | fn parse(spelling: ?[]const u8) SourceFile
 src/serve/edit.zig::rebuildDesign value
 src/serve/edit.zig::removeComponentDatasheetCore | fn removeComponentDatasheetCore( allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8, pdf: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::removeInstanceApi | fn removeInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -4727,7 +4756,8 @@ src/serve/edit.zig::setPowerPlaneApi | fn setPowerPlaneApi(ctx: *Server, req: *h
 src/serve/edit.zig::swapPinsApi | fn swapPinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::swapPinsCore | fn swapPinsCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, pin_a: []const u8, pin_b: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::writeAndRebuild | fn writeAndRebuild( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, new_source: []const u8, description: ?[]const u8, ) EditError!MutationResult
-src/serve/edit.zig::writeDesignCore | fn writeDesignCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, new_source: []const u8, ) EditError!MutationResult
+src/serve/edit.zig::writeFileAndRebuild | fn writeFileAndRebuild( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, write_path: []const u8, new_source: []const u8, description: ?[]const u8, ) EditError!MutationResult
+src/serve/edit.zig::writeSourceFileCore | fn writeSourceFileCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, file: SourceFile, new_source: []const u8, ) EditError!MutationResult
 src/serve/edit_assist.zig::libIndexApi | fn libIndexApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit_assist.zig::saveDiagramLayoutApi | fn saveDiagramLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit_assist.zig::validateSourceApi | fn validateSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void

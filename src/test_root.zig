@@ -449,6 +449,7 @@ test {
     _ = @import("serve/dossier_jobs.zig");
     _ = @import("serve/design_diff.zig");
     _ = @import("serve/design_rules_edit.zig");
+    _ = @import("serve/design_settings_target.zig");
     _ = @import("serve/diag_format.zig");
     _ = @import("serve/digikey.zig");
     _ = @import("serve/drc_json.zig");

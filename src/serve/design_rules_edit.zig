@@ -1,15 +1,23 @@
 //! Surgical board-rule and stackup-plane editing for the PCB Design Settings
 //! drawer. The endpoints change only the source forms they own, preserving
 //! comments, ordering, construction details, and forms the GUI does not know.
+//!
+//! Both forms are eligible to live in the design's `<name>.layout.sexp`
+//! sidecar, so neither endpoint assumes `src/<name>.sexp`:
+//! `design_settings_target.resolve` names the file that actually holds the
+//! form (and the shape that file stores it in — a `(design-block …)` child, or
+//! a top-level form), and the patch is applied to THAT file at THAT file's byte
+//! spans. A form nobody has authored yet is created in the layout sidecar when
+//! the design has one, and in the design file when it does not.
 
 const std = @import("std");
 const httpz = @import("httpz");
 const rule_fields = @import("../design_rule_fields.zig");
 const infra_fs = @import("../infra/fs.zig");
-const paths = @import("../paths.zig");
 const serve_root = @import("../serve.zig");
 const edit = @import("edit.zig");
-const sidecars = @import("../eval/sidecars.zig");
+const target = @import("design_settings_target.zig");
+const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 
 const Server = serve_root.Server;
 const max_source_bytes: usize = 10 * 1024 * 1024;
@@ -37,179 +45,68 @@ fn jsonNumber(value: std.json.Value) ?f64 {
     return if (std.math.isFinite(n) and n >= 0 and n <= 1000) n else null;
 }
 
-fn skipStringOrComment(source: []const u8, cursor: *usize, limit: usize) void {
-    if (source[cursor.*] == ';') {
-        while (cursor.* < limit and source[cursor.*] != '\n') cursor.* += 1;
-        return;
-    }
-    cursor.* += 1;
-    while (cursor.* < limit and source[cursor.*] != '"') : (cursor.* += 1) {
-        if (source[cursor.*] == '\\' and cursor.* + 1 < limit) cursor.* += 1;
-    }
-    if (cursor.* < limit) cursor.* += 1;
+const Span = target.Span;
+const Container = target.Container;
+
+const skipStringOrComment = target.skipStringOrComment;
+const formEnd = target.formEnd;
+const formHead = target.formHead;
+const replaceSpan = target.replaceSpan;
+
+/// The `(design-rules …)` form as `container` stores it: a `(design-block …)`
+/// child in the design file, a top-level form in a sidecar.
+fn designRulesSpan(source: []const u8, container: Container) ?Span {
+    return target.formSpan(source, container, "design-rules");
 }
 
-fn formEnd(source: []const u8, open: usize) ?usize {
-    var cursor = open;
-    var depth: usize = 0;
-    while (cursor < source.len) {
-        const ch = source[cursor];
-        if (ch == '"' or ch == ';') {
-            skipStringOrComment(source, &cursor, source.len);
-            continue;
-        }
-        if (ch == '(') depth += 1;
-        if (ch == ')') {
-            if (depth == 0) return null;
-            depth -= 1;
-            if (depth == 0) return cursor + 1;
-        }
-        cursor += 1;
-    }
-    return null;
-}
-
-fn formHead(source: []const u8, open: usize, end: usize) []const u8 {
-    var cursor = open + 1;
-    while (cursor < end and std.ascii.isWhitespace(source[cursor])) : (cursor += 1) {}
-    const start = cursor;
-    while (cursor < end and !headEnd(source[cursor])) : (cursor += 1) {}
-    return source[start..cursor];
-}
-
-fn headEnd(ch: u8) bool {
-    return std.ascii.isWhitespace(ch) or ch == '(' or ch == ')';
-}
-
-const Span = struct { start: usize, end: usize };
-
-fn directChild(source: []const u8, parent: Span, head: []const u8) ?Span {
-    var cursor = parent.start + 1;
-    var depth: usize = 0;
-    while (cursor + 1 < parent.end) {
-        const ch = source[cursor];
-        if (ch == '"' or ch == ';') {
-            skipStringOrComment(source, &cursor, parent.end);
-            continue;
-        }
-        if (ch == '(') {
-            if (depth == 0) {
-                const end = formEnd(source, cursor) orelse return null;
-                if (end > parent.end) return null;
-                if (std.mem.eql(u8, formHead(source, cursor, end), head)) return .{ .start = cursor, .end = end };
-                cursor = end;
-                continue;
-            }
-            depth += 1;
-        } else if (ch == ')') {
-            if (depth == 0) break;
-            depth -= 1;
-        }
-        cursor += 1;
-    }
-    return null;
-}
-
-fn replaceSpan(allocator: std.mem.Allocator, source: []const u8, span: Span, replacement: []const u8) ![]u8 {
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    try out.writer.writeAll(source[0..span.start]);
-    try out.writer.writeAll(replacement);
-    try out.writer.writeAll(source[span.end..]);
-    return out.toOwnedSlice();
-}
-
-/// A top-level `(head …)` form in a file that has no `(design-block …)`
-/// wrapper — i.e. a sidecar. Scans at depth zero only, so a `(stackup …)`
-/// nested inside some other form is not mistaken for the design's own.
-fn topLevelForm(source: []const u8, head: []const u8) ?Span {
-    var cursor: usize = 0;
-    while (cursor < source.len) {
-        const ch = source[cursor];
-        if (ch == '"' or ch == ';') {
-            skipStringOrComment(source, &cursor, source.len);
-            continue;
-        }
-        if (ch == '(') {
-            const end = formEnd(source, cursor) orelse return null;
-            if (std.mem.eql(u8, formHead(source, cursor, end), head)) return .{ .start = cursor, .end = end };
-            cursor = end;
-            continue;
-        }
-        cursor += 1;
-    }
-    return null;
-}
-
-/// True when this design keeps `head` in its `<name>.layout.sexp` sidecar
-/// rather than in the design file (see `eval/sidecars.zig`).
-///
-/// These endpoints patch the design source's own text, and create the form
-/// when it is missing. On a design that `split-design` has moved the form out
-/// of, that would write a SECOND copy — and `stackup`, `board`, `pcb-plan`,
-/// `design-rules` and `diagram-layout` are singletons the sidecar loader
-/// refuses to see twice, so the board would stop evaluating altogether.
-/// Refuse instead, naming the file that owns the form. (Patching the sidecar
-/// in place is the better answer and is not implemented here yet.)
-fn livesInLayoutSidecar(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    name: []const u8,
-    head: []const u8,
-) bool {
-    const path = paths.designSiblingPath(allocator, project_dir, name, sidecars.Kind.layout.ext()) catch return false;
-    defer allocator.free(path);
-    const source = infra_fs.cwd().readFileAlloc(allocator, path, max_source_bytes) catch return false;
-    defer allocator.free(source);
-    return topLevelForm(source, head) != null;
-}
-
-fn designBlockSpan(source: []const u8) ?Span {
-    const open = std.mem.indexOf(u8, source, "(design-block") orelse return null;
-    return .{ .start = open, .end = formEnd(source, open) orelse return null };
-}
-
-fn designRulesSpan(source: []const u8) ?Span {
-    const block = designBlockSpan(source) orelse return null;
-    return directChild(source, block, "design-rules");
-}
-
-fn addDesignRules(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+/// Author an empty `(design-rules)` into a file that has none, in that file's
+/// own shape — before the design-block's closing paren, or appended to the
+/// sidecar.
+fn addDesignRules(allocator: std.mem.Allocator, source: []const u8, container: Container) ![]u8 {
+    if (container == .top_level) return target.appendTopLevel(allocator, source, "(design-rules)");
     const open = std.mem.indexOf(u8, source, "(design-block") orelse return error.MalformedSource;
     const end = formEnd(source, open) orelse return error.MalformedSource;
     return replaceSpan(allocator, source, .{ .start = end - 1, .end = end - 1 }, "\n\n  (design-rules)\n");
 }
 
-fn patchForm(allocator: std.mem.Allocator, source: []const u8, head: []const u8, args: []const u8) ![]u8 {
+fn patchForm(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    container: Container,
+    head: []const u8,
+    args: []const u8,
+) ![]u8 {
     var owned_source: ?[]u8 = null;
     defer if (owned_source) |owned| allocator.free(owned);
-    const rules = designRulesSpan(source) orelse blk: {
-        owned_source = try addDesignRules(allocator, source);
-        break :blk designRulesSpan(owned_source.?) orelse return error.MalformedSource;
+    const rules = designRulesSpan(source, container) orelse blk: {
+        owned_source = try addDesignRules(allocator, source, container);
+        break :blk designRulesSpan(owned_source.?, container) orelse return error.MalformedSource;
     };
     const working = owned_source orelse source;
     const replacement = try std.fmt.allocPrint(allocator, "({s} {s})", .{ head, args });
     defer allocator.free(replacement);
-    if (directChild(working, rules, head)) |child|
+    if (target.directChild(working, rules, head)) |child|
         return replaceSpan(allocator, working, child, replacement);
 
-    const insertion = try std.fmt.allocPrint(allocator, "\n    {s}", .{replacement});
+    const own_indent = target.formIndent(working, rules, container.indent());
+    const insertion = try std.fmt.allocPrint(allocator, "\n{s}  {s}", .{ own_indent, replacement });
     defer allocator.free(insertion);
     return replaceSpan(allocator, working, .{ .start = rules.end - 1, .end = rules.end - 1 }, insertion);
 }
 
-fn patchScalar(allocator: std.mem.Allocator, source: []const u8, rule: Rule, value: f64) ![]u8 {
+fn patchScalar(allocator: std.mem.Allocator, source: []const u8, container: Container, rule: Rule, value: f64) ![]u8 {
     const args = try std.fmt.allocPrint(allocator, "{d}", .{value});
     defer allocator.free(args);
-    return patchForm(allocator, source, rule.head, args);
+    return patchForm(allocator, source, container, rule.head, args);
 }
 
-fn patchVia(allocator: std.mem.Allocator, source: []const u8, dia: f64, drill: f64) ![]u8 {
+fn patchVia(allocator: std.mem.Allocator, source: []const u8, container: Container, dia: f64, drill: f64) ![]u8 {
     const args = try std.fmt.allocPrint(allocator, "{d} {d}", .{ dia, drill });
     defer allocator.free(args);
-    return patchForm(allocator, source, "via", args);
+    return patchForm(allocator, source, container, "via", args);
 }
 
-fn patchRules(allocator: std.mem.Allocator, source: []const u8, rules: std.json.ObjectMap) ![]u8 {
+fn patchRules(allocator: std.mem.Allocator, source: []const u8, container: Container, rules: std.json.ObjectMap) ![]u8 {
     var current = try allocator.dupe(u8, source);
     errdefer allocator.free(current);
     var changed = false;
@@ -228,14 +125,14 @@ fn patchRules(allocator: std.mem.Allocator, source: []const u8, rules: std.json.
             continue;
         }
         const rule = ruleForKey(key) orelse return error.UnknownRule;
-        const next = try patchScalar(allocator, current, rule, value);
+        const next = try patchScalar(allocator, current, container, rule, value);
         allocator.free(current);
         current = next;
         changed = true;
     }
     if (via_dia != null or via_drill != null) {
         if (via_dia == null or via_drill == null or via_drill.? > via_dia.?) return error.InvalidVia;
-        const next = try patchVia(allocator, current, via_dia.?, via_drill.?);
+        const next = try patchVia(allocator, current, container, via_dia.?, via_drill.?);
         allocator.free(current);
         current = next;
         changed = true;
@@ -306,9 +203,9 @@ fn writeSexprString(w: *std.Io.Writer, value: []const u8) !void {
     try w.writeByte('"');
 }
 
-fn writePlaneForms(w: *std.Io.Writer, planes: []const PlaneAssignment) !void {
+fn writePlaneForms(w: *std.Io.Writer, planes: []const PlaneAssignment, indent: []const u8) !void {
     for (planes) |plane| {
-        try w.print("    (plane {d} ", .{plane.index});
+        try w.print("{s}(plane {d} ", .{ indent, plane.index });
         try writeSexprString(w, plane.net);
         try w.writeAll(")\n");
     }
@@ -317,24 +214,34 @@ fn writePlaneForms(w: *std.Io.Writer, planes: []const PlaneAssignment) !void {
 /// Replace only a stackup's electrical roles. Physical copper/dielectric
 /// construction, preset selection, thickness, comments, and ordering remain
 /// byte-for-byte. With no authored stackup, saving the visible implicit model
-/// makes it explicit as `(stackup N …)` so add/delete has durable semantics.
+/// makes it explicit as `(stackup N …)` so add/delete has durable semantics —
+/// authored in whichever of the design's files `container` names.
 fn patchStackupPlanes(
     allocator: std.mem.Allocator,
     source: []const u8,
+    container: Container,
     layers: u8,
     planes: []const PlaneAssignment,
 ) ![]u8 {
-    const block = designBlockSpan(source) orelse return error.MalformedSource;
-    const stackup = directChild(source, block, "stackup") orelse {
+    const stackup = target.formSpan(source, container, "stackup") orelse {
         var replacement: std.Io.Writer.Allocating = .init(allocator);
         errdefer replacement.deinit();
-        try replacement.writer.print("\n\n  (stackup {d}\n", .{layers});
-        try writePlaneForms(&replacement.writer, planes);
-        try replacement.writer.writeAll("  )\n");
+        try replacement.writer.print("(stackup {d}\n", .{layers});
+        try writePlaneForms(&replacement.writer, planes, container.childIndent());
+        try replacement.writer.print("{s})", .{container.indent()});
         const owned = try replacement.toOwnedSlice();
         defer allocator.free(owned);
-        return replaceSpan(allocator, source, .{ .start = block.end - 1, .end = block.end - 1 }, owned);
+        if (container == .top_level) return target.appendTopLevel(allocator, source, owned);
+        const block = target.designBlockSpan(source) orelse return error.MalformedSource;
+        const framed = try std.fmt.allocPrint(allocator, "\n\n{s}{s}\n", .{ container.indent(), owned });
+        defer allocator.free(framed);
+        return replaceSpan(allocator, source, .{ .start = block.end - 1, .end = block.end - 1 }, framed);
     };
+    // Indent the rewritten rows to match the form as it actually sits in THIS
+    // file: a `split-design` move keeps the indentation the design file gave it.
+    const own_indent = target.formIndent(source, stackup, container.indent());
+    const child_indent = try std.fmt.allocPrint(allocator, "{s}  ", .{own_indent});
+    defer allocator.free(child_indent);
     const roles = try electricalRoleSpans(allocator, source, stackup);
     defer allocator.free(roles);
 
@@ -348,8 +255,8 @@ fn patchStackupPlanes(
     }
     try out.writer.writeAll(source[cursor .. stackup.end - 1]);
     if (out.written().len > 0 and out.written()[out.written().len - 1] != '\n') try out.writer.writeByte('\n');
-    try writePlaneForms(&out.writer, planes);
-    try out.writer.writeAll("  ");
+    try writePlaneForms(&out.writer, planes, child_indent);
+    try out.writer.writeAll(own_indent);
     try out.writer.writeAll(source[stackup.end - 1 ..]);
     return out.toOwnedSlice();
 }
@@ -400,6 +307,46 @@ fn jsonError(res: *httpz.Response, status: u16, message: []const u8) void {
     res.body = message;
 }
 
+/// The one state no writer can resolve on its own: the same singleton declared
+/// in two of the design's files. The loader refuses that board outright, so the
+/// answer names both files rather than picking one to patch.
+fn conflictError(
+    allocator: std.mem.Allocator,
+    res: *httpz.Response,
+    head: []const u8,
+    conflict: target.Conflict,
+) std.mem.Allocator.Error!void {
+    res.status = 409;
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(
+        allocator,
+        "{{\"error\":\"({s} …) is declared in both {s} and {s} — a design may declare it once; delete one copy\"}}",
+        .{ head, std.fs.path.basename(conflict.first), std.fs.path.basename(conflict.second) },
+    );
+}
+
+/// Resolve the file that owns `head`, answering the HTTP error itself when the
+/// design cannot be read or declares the form twice.
+fn settingsTarget(
+    ctx: *Server,
+    res: *httpz.Response,
+    name: []const u8,
+    head: []const u8,
+) std.mem.Allocator.Error!?target.Target {
+    const resolution = target.resolve(ctx.allocator, ctx.project_dir, name, &.{head}) catch {
+        jsonError(res, 404, "{\"error\":\"design source not found\"}");
+        return null;
+    };
+    switch (resolution) {
+        .conflict => |c| {
+            defer resolution.deinit(ctx.allocator);
+            try conflictError(ctx.allocator, res, head, c);
+            return null;
+        },
+        .target => |t| return t,
+    }
+}
+
 /// POST /api/design-rules/:name — patch the supplied board-level numeric rules,
 /// preserving every unrelated source form, then rebuild the design.
 pub fn editDesignRulesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) std.mem.Allocator.Error!void {
@@ -412,15 +359,12 @@ pub fn editDesignRulesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
     const values = parsed.value.object.get("rules") orelse return jsonError(res, 400, "{\"error\":\"missing rules\"}");
     if (values != .object) return jsonError(res, 400, "{\"error\":\"rules must be an object\"}");
 
-    if (livesInLayoutSidecar(ctx.allocator, ctx.project_dir, name, "design-rules"))
-        return jsonError(res, 409, "{\"error\":\"(design-rules …) lives in this design's .layout.sexp sidecar — edit it there\"}");
-    const path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch
-        return jsonError(res, 404, "{\"error\":\"design source not found\"}");
-    defer ctx.allocator.free(path);
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, path, max_source_bytes) catch
+    const where = try settingsTarget(ctx, res, name, "design-rules") orelse return;
+    defer where.deinit(ctx.allocator);
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, where.path, max_source_bytes) catch
         return jsonError(res, 404, "{\"error\":\"cannot read design source\"}");
     defer ctx.allocator.free(source);
-    const updated = patchRules(ctx.allocator, source, values.object) catch |err| {
+    const updated = patchRules(ctx.allocator, source, where.container, values.object) catch |err| {
         const message = switch (err) {
             error.InvalidValue => "{\"error\":\"rule values must be finite numbers from 0 to 1000 mm\"}",
             error.UnknownRule => "{\"error\":\"unknown design rule\"}",
@@ -432,7 +376,7 @@ pub fn editDesignRulesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
         return jsonError(res, 400, message);
     };
     defer ctx.allocator.free(updated);
-    const result = edit.writeAndRebuild(ctx.allocator, ctx.project_dir, name, updated, "edit design rules from PCB settings") catch
+    const result = edit.writeFileAndRebuild(ctx.allocator, ctx.project_dir, name, where.path, updated, "edit design rules from PCB settings") catch
         return jsonError(res, 500, "{\"error\":\"could not save and rebuild design rules\"}");
     res.content_type = .JSON;
     res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
@@ -461,15 +405,12 @@ pub fn editStackupPlanesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
     };
     defer ctx.allocator.free(planes);
 
-    if (livesInLayoutSidecar(ctx.allocator, ctx.project_dir, name, "stackup"))
-        return jsonError(res, 409, "{\"error\":\"(stackup …) lives in this design's .layout.sexp sidecar — edit it there\"}");
-    const path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch
-        return jsonError(res, 404, "{\"error\":\"design source not found\"}");
-    defer ctx.allocator.free(path);
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, path, max_source_bytes) catch
+    const where = try settingsTarget(ctx, res, name, "stackup") orelse return;
+    defer where.deinit(ctx.allocator);
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, where.path, max_source_bytes) catch
         return jsonError(res, 404, "{\"error\":\"cannot read design source\"}");
     defer ctx.allocator.free(source);
-    const updated = patchStackupPlanes(ctx.allocator, source, layers, planes) catch |err| {
+    const updated = patchStackupPlanes(ctx.allocator, source, where.container, layers, planes) catch |err| {
         const message = switch (err) {
             error.MalformedSource => "{\"error\":\"malformed design-block or stackup\"}",
             else => "{\"error\":\"could not update whole-layer planes\"}",
@@ -477,7 +418,7 @@ pub fn editStackupPlanesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
         return jsonError(res, 400, message);
     };
     defer ctx.allocator.free(updated);
-    const result = edit.writeAndRebuild(ctx.allocator, ctx.project_dir, name, updated, "edit whole-layer copper planes from PCB settings") catch
+    const result = edit.writeFileAndRebuild(ctx.allocator, ctx.project_dir, name, where.path, updated, "edit whole-layer copper planes from PCB settings") catch
         return jsonError(res, 500, "{\"error\":\"could not save and rebuild stackup planes\"}");
     res.content_type = .JSON;
     res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
@@ -496,7 +437,7 @@ test "design settings patch rules without replacing comments or unrelated forms"
     ;
     var parsed = try std.json.parseFromSlice(std.json.Value, a, "{\"clearance\":0.125,\"mask_relief_corner_radius\":0.3,\"via_dia\":0.5,\"via_drill\":0.25,\"via_plating\":0.02}", .{});
     defer parsed.deinit();
-    const got = try patchRules(a, source, parsed.value.object);
+    const got = try patchRules(a, source, .design_block, parsed.value.object);
     defer a.free(got);
     try std.testing.expect(std.mem.indexOf(u8, got, ";; Keep this explanation.") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "(clearance 0.125)") != null);
@@ -512,7 +453,7 @@ test "design settings create a design-rules form when the source has none" {
     const a = std.testing.allocator;
     var parsed = try std.json.parseFromSlice(std.json.Value, a, "{\"mask_web\":0.18}", .{});
     defer parsed.deinit();
-    const got = try patchRules(a, "(design-block \"board\"\n  (section \"RF\"))\n", parsed.value.object);
+    const got = try patchRules(a, "(design-block \"board\"\n  (section \"RF\"))\n", .design_block, parsed.value.object);
     defer a.free(got);
     try std.testing.expect(std.mem.indexOf(u8, got, "(design-rules\n    (mask-web 0.18))") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "(section \"RF\")") != null);
@@ -536,7 +477,7 @@ test "design settings surgically replace whole-layer stackup planes" {
         .{ .index = 2, .net = "AGND" },
         .{ .index = 3, .net = "V_3V3D" },
     };
-    const got = try patchStackupPlanes(a, source, 4, &planes);
+    const got = try patchStackupPlanes(a, source, .design_block, 4, &planes);
     defer a.free(got);
     try std.testing.expect(std.mem.indexOf(u8, got, ";; Keep the fabrication explanation.") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "(copper 1 (thickness 0.035))") != null);
@@ -557,14 +498,14 @@ test "design settings materialize implicit planes and can delete every assignmen
         .{ .index = 2, .net = "GND" },
         .{ .index = 3, .net = "V_SUPPLY" },
     };
-    const authored = try patchStackupPlanes(a, source, 4, &initial);
+    const authored = try patchStackupPlanes(a, source, .design_block, 4, &initial);
     defer a.free(authored);
     try std.testing.expect(std.mem.indexOf(u8, authored, "(stackup 4") != null);
     try std.testing.expect(std.mem.indexOf(u8, authored, "(plane 2 \"GND\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, authored, "(plane 3 \"V_SUPPLY\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, authored, "(section \"Power\")") != null);
 
-    const cleared = try patchStackupPlanes(a, authored, 4, &.{});
+    const cleared = try patchStackupPlanes(a, authored, .design_block, 4, &.{});
     defer a.free(cleared);
     try std.testing.expect(std.mem.indexOf(u8, cleared, "(stackup 4") != null);
     try std.testing.expect(std.mem.indexOf(u8, cleared, "(plane ") == null);
@@ -577,44 +518,201 @@ test "whole-layer plane input rejects duplicate layers and escapes source string
     try std.testing.expectError(error.DuplicateLayer, parsePlaneAssignments(a, duplicate_json.value, 4));
 
     const planes = [_]PlaneAssignment{.{ .index = 2, .net = "rail\\\"name" }};
-    const got = try patchStackupPlanes(a, "(design-block \"b\")", 4, &planes);
+    const got = try patchStackupPlanes(a, "(design-block \"b\")", .design_block, 4, &planes);
     defer a.free(got);
     try std.testing.expect(std.mem.indexOf(u8, got, "(plane 2 \"rail\\\\\\\"name\")") != null);
 }
 
-// spec: Web Server - Design Settings refuses to author a second copy of a rule form the design keeps in its .layout.sexp sidecar
-test "design settings defer to a split design's layout sidecar" {
+// spec: Web Server - Design Settings patches a rule form that lives in the design's layout sidecar in that sidecar, at that file's own byte spans, leaving the design file untouched
+test "design settings patch a split design's layout sidecar in place" {
     const a = std.testing.allocator;
+    const sidecar =
+        \\; Layout sidecar.
+        \\(design-rules
+        \\  ;; Keep this explanation.
+        \\  (clearance 0.15))
+        \\(stackup 4
+        \\  (copper 1 (thickness 0.035))
+        \\  (plane 2 "GND")
+        \\  (thickness 1.6))
+        \\
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, "{\"clearance\":0.2,\"mask_web\":0.18}", .{});
+    defer parsed.deinit();
+    const rules = try patchRules(a, sidecar, .top_level, parsed.value.object);
+    defer a.free(rules);
+    try std.testing.expect(std.mem.indexOf(u8, rules, ";; Keep this explanation.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rules, "(clearance 0.2)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rules, "(mask-web 0.18)") != null);
+    // Exactly one design-rules form: a sidecar patch never authors a second.
+    try std.testing.expect(std.mem.indexOf(u8, rules, "(design-rules") ==
+        std.mem.lastIndexOf(u8, rules, "(design-rules"));
+    try std.testing.expect(std.mem.indexOf(u8, rules, "(design-block") == null);
+
+    const planes = [_]PlaneAssignment{.{ .index = 3, .net = "V_3V3D" }};
+    const stack = try patchStackupPlanes(a, sidecar, .top_level, 4, &planes);
+    defer a.free(stack);
+    try std.testing.expect(std.mem.indexOf(u8, stack, "(copper 1 (thickness 0.035))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stack, "(plane 3 \"V_3V3D\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stack, "(plane 2 \"GND\")") == null);
+    try std.testing.expect(std.mem.indexOf(u8, stack, "(design-rules") != null);
+}
+
+// spec: Web Server - Design Settings authors a missing rule form into the layout sidecar of a design that has one, rather than into the design file
+test "design settings author a missing form at the sidecar's top level" {
+    const a = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, "{\"mask_web\":0.18}", .{});
+    defer parsed.deinit();
+    const rules = try patchRules(a, "; Layout sidecar.\n(stackup 4)\n", .top_level, parsed.value.object);
+    defer a.free(rules);
+    try std.testing.expect(std.mem.indexOf(u8, rules, "(design-rules\n  (mask-web 0.18))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rules, "(stackup 4)") != null);
+
+    const planes = [_]PlaneAssignment{.{ .index = 2, .net = "GND" }};
+    const stack = try patchStackupPlanes(a, "; Layout sidecar.\n", .top_level, 4, &planes);
+    defer a.free(stack);
+    try std.testing.expect(std.mem.indexOf(u8, stack, "(stackup 4\n  (plane 2 \"GND\")\n)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stack, "; Layout sidecar.") != null);
+}
+
+// ── Endpoint-level: the whole write path against a split design ───────
+
+/// Evaluate `src/<name>.sexp` under `root` the way `netlisp` does, so the
+/// autoloaded sidecars are spliced in. Hoisted out of the test bodies because
+/// unwrapping the evaluator's `Value` needs a switch.
+fn evalDesign(
+    allocator: std.mem.Allocator,
+    eval: *Evaluator,
+    root: []const u8,
+    name: []const u8,
+) !*const @import("../eval/env.zig").DesignBlock {
+    const design_path = try std.fmt.allocPrint(allocator, "{s}/src/{s}.sexp", .{ root, name });
+    return switch (try eval.evalFile(design_path)) {
+        .design_block => |b| b,
+        else => error.NotADesign,
+    };
+}
+
+const split_design_src = "(design-block \"Split\"\n  (board-role board)\n  (section \"RF\"))\n";
+/// Exactly the shape `split-design` writes: a banner, then each moved form
+/// lifted byte for byte — indentation from the design file included.
+const split_layout_src =
+    \\; Layout sidecar — autoloaded and spliced into the design body.
+    \\; See docs/sexpr-language.md → "Sidecar files".
+    \\
+    \\  (design-rules
+    \\    ;; Keep this explanation.
+    \\    (clearance 0.15))
+    \\  (stackup 4
+    \\    (copper 1 (thickness 0.035))
+    \\    (plane 2 "GND")
+    \\    (thickness 1.6))
+    \\
+;
+
+// spec: Web Server - A Design Settings save on a split design rewrites the layout sidecar, leaves the design file byte-identical, and the re-evaluated board reports the new rule
+test "design settings endpoint edits the sidecar of a split design end to end" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(std.testing.io, "src");
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "src/split.sexp",
-        .data = "(design-block \"Split\"\n  (section \"RF\"))\n",
-    });
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "src/split.layout.sexp",
-        .data =
-        \\; Layout sidecar.
-        \\(design-rules (clearance 0.15))
-        \\(stackup 4 (thickness 1.6))
-        ,
-    });
-    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
-    defer a.free(project);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/split.sexp", .data = split_design_src });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/split.layout.sexp", .data = split_layout_src });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    var state = serve_root.ServerState{};
+    var srv = Server{ .allocator = a, .project_dir = root, .auth_dir = root, .state = &state };
 
-    // Both forms the Design Settings drawer owns now live next door; writing
-    // either into the design file would make it a duplicate singleton and stop
-    // the board evaluating.
-    try std.testing.expect(livesInLayoutSidecar(a, project, "split", "design-rules"));
-    try std.testing.expect(livesInLayoutSidecar(a, project, "split", "stackup"));
-    // A form the sidecar does not carry is still the design file's to author.
-    try std.testing.expect(!livesInLayoutSidecar(a, project, "split", "pcb-plan"));
-    // A design with no sidecar at all keeps the unchanged behaviour.
-    try std.testing.expect(!livesInLayoutSidecar(a, project, "nosuch", "design-rules"));
+    var request = httpz.testing.init(.{});
+    defer request.deinit();
+    request.param("name", "split");
+    request.body("{\"rules\":{\"clearance\":0.22,\"mask_web\":0.18}}");
+    try editDesignRulesApi(&srv, request.req, request.res);
+    try std.testing.expectEqual(@as(u16, 200), request.res.status);
 
-    // The scan is top-level only: a `(stackup …)` nested inside another form
-    // is not the design's own declaration.
-    try std.testing.expect(topLevelForm("(board (stackup 4))", "stackup") == null);
-    try std.testing.expect(topLevelForm("; (stackup 4)\n(design-rules)", "stackup") == null);
+    // The design file is byte-identical: no second (design-rules …) was authored.
+    const design_after = try tmp.dir.readFileAlloc(std.testing.io, "src/split.sexp", a, .limited(4096));
+    try std.testing.expectEqualStrings(split_design_src, design_after);
+
+    // The sidecar carries the edit, its comment, and still exactly one form.
+    const sidecar_after = try tmp.dir.readFileAlloc(std.testing.io, "src/split.layout.sexp", a, .limited(4096));
+    try std.testing.expect(std.mem.indexOf(u8, sidecar_after, "(clearance 0.22)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sidecar_after, "(mask-web 0.18)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sidecar_after, ";; Keep this explanation.") != null);
+    try std.testing.expectEqual(
+        std.mem.indexOf(u8, sidecar_after, "(design-rules"),
+        std.mem.lastIndexOf(u8, sidecar_after, "(design-rules"),
+    );
+    // The new row nests inside the form as it actually sits in THIS file — the
+    // indentation `split-design` carried over, not the container's default.
+    try std.testing.expect(std.mem.indexOf(u8, sidecar_after, "\n    (mask-web 0.18)") != null);
+
+    // Re-evaluating the design — the splice included — sees the saved rule.
+    var eval = Evaluator.init(a, root);
+    defer eval.deinit();
+    const block = try evalDesign(a, &eval, root, "split");
+    try std.testing.expectApproxEqAbs(@as(f64, 0.22), block.design_rules.clearance, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.18), block.design_rules.mask.web, 1e-9);
+}
+
+// spec: Web Server - A Design Settings save on a board whose stackup has no authored form yet writes it into the layout sidecar the design already has
+test "design settings endpoint authors a stackup into the existing layout sidecar" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/bare.sexp", .data = split_design_src });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/bare.layout.sexp",
+        .data = "; Layout sidecar.\n(design-rules (clearance 0.15))\n",
+    });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    var state = serve_root.ServerState{};
+    var srv = Server{ .allocator = a, .project_dir = root, .auth_dir = root, .state = &state };
+
+    var request = httpz.testing.init(.{});
+    defer request.deinit();
+    request.param("name", "bare");
+    request.body("{\"layers\":4,\"planes\":[{\"index\":2,\"net\":\"GND\"}]}");
+    try editStackupPlanesApi(&srv, request.req, request.res);
+    try std.testing.expectEqual(@as(u16, 200), request.res.status);
+
+    try std.testing.expectEqualStrings(split_design_src, try tmp.dir.readFileAlloc(std.testing.io, "src/bare.sexp", a, .limited(4096)));
+    const sidecar_after = try tmp.dir.readFileAlloc(std.testing.io, "src/bare.layout.sexp", a, .limited(4096));
+    try std.testing.expect(std.mem.indexOf(u8, sidecar_after, "(stackup 4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sidecar_after, "(plane 2 \"GND\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sidecar_after, "(design-rules (clearance 0.15))") != null);
+}
+
+// spec: Web Server - A Design Settings save is refused with 409 naming both files only when the design really does declare the same singleton twice
+test "design settings endpoint refuses the genuinely ambiguous two-file state" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    const both = "(design-block \"Both\"\n  (design-rules (clearance 0.1)))\n";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/both.sexp", .data = both });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/both.layout.sexp",
+        .data = "(design-rules (clearance 0.2))\n",
+    });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    var state = serve_root.ServerState{};
+    var srv = Server{ .allocator = a, .project_dir = root, .auth_dir = root, .state = &state };
+
+    var request = httpz.testing.init(.{});
+    defer request.deinit();
+    request.param("name", "both");
+    request.body("{\"rules\":{\"clearance\":0.3}}");
+    try editDesignRulesApi(&srv, request.req, request.res);
+    try std.testing.expectEqual(@as(u16, 409), request.res.status);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "both.sexp") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.res.body, "both.layout.sexp") != null);
+    // Neither file was touched.
+    try std.testing.expectEqualStrings(both, try tmp.dir.readFileAlloc(std.testing.io, "src/both.sexp", a, .limited(4096)));
 }
