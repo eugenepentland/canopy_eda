@@ -1,4 +1,3 @@
 # guardian-snapshot v3
 init-deinit-symmetry|src/render_svg/context.zig|pub struct 'RenderCtx' owns an allocator field but has no pub fn deinit
 init-deinit-symmetry|src/serve.zig|pub struct 'Server' owns an allocator field but has no pub fn deinit
-init-deinit-symmetry|src/serve/mcp.zig|pub struct 'Client' owns an allocator field but has no pub fn deinit

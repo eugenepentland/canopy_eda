@@ -3,6 +3,4 @@ boundaries|src/kicad_pcb/import_layout_command.zig|forbidden import 'src/serve/p
 boundaries|src/placement/congestion.zig|forbidden import 'src/fab_readiness.zig' (rule: src/placement/*)
 boundaries|src/placement/fine_accept.zig|forbidden import 'src/fab_readiness.zig' (rule: src/placement/*)
 boundaries|src/placement/net_open.zig|forbidden import 'src/fab_readiness.zig' (rule: src/placement/*)
-boundaries|src/placement/net_open.zig|forbidden import 'src/fab_readiness.zig' (rule: src/placement/*)
-boundaries|src/placement/progress.zig|forbidden import 'src/fab_readiness.zig' (rule: src/placement/*)
 boundaries|src/placement/route_close.zig|forbidden import 'src/fab_readiness.zig' (rule: src/placement/*)

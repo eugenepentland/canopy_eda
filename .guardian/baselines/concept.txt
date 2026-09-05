@@ -1,5 +1,4 @@
 # guardian-snapshot v3
-concept|src/drc_session.zig|design-rule-field-names
 concept|src/eval/design_block.zig|design-rule-field-names
 concept|src/eval/env.zig|design-rule-field-names
 concept|src/eval/forms.zig|gerber-suffixes

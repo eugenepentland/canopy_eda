@@ -1,10 +1,1 @@
 # guardian-snapshot v3
-test-no-conditional|src/bom_resolve.zig|setBomProperty escapes a value with a quote and reloads cleanly|loop
-test-no-conditional|src/eval/design_block.zig|design-block captures (design-rules …)|switch
-test-no-conditional|src/eval/design_block.zig|design-block captures (kicad-pcb path)|switch
-test-no-conditional|src/eval/design_block.zig|design-block captures (net-class …) rules|switch
-test-no-conditional|src/eval/design_block.zig|design-block captures (stackup …)|switch
-test-no-conditional|src/eval/design_block.zig|design-block captures a plane-less (stackup 2)|switch
-test-no-conditional|src/eval/design_block.zig|design-block without (design-rules …) has no rules present|switch
-test-no-conditional|src/kicad_pcb/format.zig|sexprEscape escapes quotes and backslashes, passes clean text through|while
-test-no-conditional|src/kicad_pcb/writer.zig|applyOpsToSource escapes a set_field value containing a quote and backslash|while
