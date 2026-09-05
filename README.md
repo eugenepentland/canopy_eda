@@ -169,6 +169,20 @@ zig build run -- import-kicad-layout --project-dir my-board my-board
 - [ZIG_TOOLCHAIN.md](ZIG_TOOLCHAIN.md): the pinned compiler, mirrors and checksums
 - [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md): how agents and contributors are expected to work in this repository (worktrees, Guardian, the spec ledger)
 
+## Contributing
+
+Pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first — two
+things about this repository will otherwise surprise you: every `zig build`
+runs a code-quality gate that has no bypass, and work happens on a branch in
+its own worktree rather than in the `main` checkout. It also covers the
+`SPEC.md` test-tag contract, the audit ledger, and what makes a bug report
+about a misbehaving design actionable.
+
+Participation is governed by our [Code of Conduct](CODE_OF_CONDUCT.md).
+Security issues go through GitHub's private reporting, never a public issue —
+see [SECURITY.md](SECURITY.md). Release notes live in
+[CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 [MIT](LICENSE) © 2026 Eugene Pentland. Vendored Zig packages under
