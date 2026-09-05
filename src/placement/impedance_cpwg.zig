@@ -5,7 +5,7 @@
 const std = @import("std");
 const elliptic = @import("elliptic_integral.zig");
 
-const Error = error{OutOfDomain};
+pub const Error = error{OutOfDomain};
 const eta0: f64 = 120.0 * std.math.pi;
 
 /// Quasi-static grounded-CPWG result.  The effective permittivity is exposed

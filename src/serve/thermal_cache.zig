@@ -85,7 +85,7 @@ fn keyOf(alloc: std.mem.Allocator, k: Key) std.mem.Allocator.Error![]u8 {
 }
 
 /// One design's solved ladder plus everything needed to know it is still true.
-const Entry = struct {
+pub const Entry = struct {
     results: []thermal_scenarios.ScenarioResult,
     files: page_cache.FileSet,
     live_version: u32,

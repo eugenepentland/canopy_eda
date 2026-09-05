@@ -194,8 +194,18 @@ pub fn uploadPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
         };
     }
 
-    // Write component definition (overwrites any existing one — see contract)
-    _ = upload.writeComponentFile(ctx.allocator, ctx.project_dir, safe_name, safe_name, fp_name_final, sym_data.?);
+    // Write component definition (overwrites any existing one — see contract).
+    // The result is NOT discardable: `.write_failed` is the one failure that
+    // loses the artifact this whole upload exists to produce, so it answers
+    // like every other write failure above rather than reporting success.
+    switch (upload.writeComponentFile(ctx.allocator, ctx.project_dir, safe_name, safe_name, fp_name_final, sym_data.?)) {
+        .created, .replaced => {},
+        .write_failed => {
+            res.status = http_internal_error;
+            res.body = "Cannot write component";
+            return;
+        },
+    }
 
     // Save STEP model to lib/models/ if provided
     if (step_data) |sd| {
@@ -223,4 +233,93 @@ pub fn uploadPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     };
     std.debug.print(upload_log_template, .{msg});
     res.body = msg;
+}
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+const test_symbol =
+    \\(kicad_symbol_lib (version 20211014) (generator test)
+    \\  (symbol "PART-1"
+    \\    (property "Reference" "U")
+    \\    (property "Manufacturer_Part_Number" "PART-1")
+    \\    (pin passive line (at 0 0 0) (length 1.27)
+    \\      (name "PORT_1") (number "1"))
+    \\  )
+    \\)
+;
+
+// No `(layer …)` / `(layers …)` forms: the converter reads the name, the
+// description and the pad geometry, and every KiCad layer spelling is owned by
+// `board_layers` rather than restated in a fixture.
+const test_footprint =
+    \\(module "PART1"
+    \\  (descr "test footprint")
+    \\  (pad 1 smd rect (at 0 0) (size 1 1))
+    \\)
+;
+
+const test_boundary = "netlispPackageBoundary";
+
+/// The multipart body the upload form posts: one `symbol` part and one
+/// `footprint` part, fenced by `test_boundary`.
+fn packageForm(allocator: std.mem.Allocator) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "--{s}\r\nContent-Disposition: form-data; name=\"symbol\"; filename=\"part.kicad_sym\"\r\n\r\n{s}\r\n" ++
+            "--{s}\r\nContent-Disposition: form-data; name=\"footprint\"; filename=\"part.kicad_mod\"\r\n\r\n{s}\r\n" ++
+            "--{s}--\r\n",
+        .{ test_boundary, test_symbol, test_boundary, test_footprint, test_boundary },
+    );
+}
+
+/// POST the fixture package into `project_dir` through the real route and
+/// return the status the handler answered with.
+fn postPackage(allocator: std.mem.Allocator, project_dir: []const u8) !u16 {
+    var state = serve_root.ServerState{};
+    var srv = Server{
+        .allocator = allocator,
+        .project_dir = project_dir,
+        .auth_dir = project_dir,
+        .state = &state,
+    };
+    var ht = httpz.testing.init(.{});
+    defer ht.deinit();
+    ht.header("content-type", "multipart/form-data; boundary=" ++ test_boundary);
+    ht.body(try packageForm(allocator));
+    try uploadPackageApi(&srv, ht.req, ht.res);
+    return ht.res.status;
+}
+
+// spec: Web Server - A package upload whose component definition cannot be written answers a 500 instead of reporting the upload succeeded
+test "a package upload that cannot write its component reports the failure" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Control: a writable project takes the same upload and mints the component.
+    {
+        var writable = std.testing.tmpDir(.{});
+        defer writable.cleanup();
+        const project_dir = try writable.dir.realPathFileAlloc(std.testing.io, ".", arena);
+        try std.testing.expectEqual(@as(u16, 200), try postPackage(arena, project_dir));
+        try writable.dir.access(std.testing.io, "lib/components/part-1.sexp", .{});
+    }
+
+    // Now the same upload into a project where `lib/components` is occupied by
+    // a FILE, so `writeComponentFile` cannot create the directory and returns
+    // `.write_failed`. Discarding that result answered 200 with a "Created …"
+    // body while the component definition the upload exists to produce was
+    // never written — the one failure in this handler that reported success.
+    var blocked = std.testing.tmpDir(.{});
+    defer blocked.cleanup();
+    const project_dir = try blocked.dir.realPathFileAlloc(std.testing.io, ".", arena);
+    const lib_dir = try std.fmt.allocPrint(arena, "{s}/lib", .{project_dir});
+    try infra_fs.cwd().makePath(lib_dir);
+    const occupied_path = try std.fmt.allocPrint(arena, "{s}/components", .{lib_dir});
+    var occupied = try infra_fs.cwd().createFile(occupied_path, .{});
+    occupied.close();
+
+    try std.testing.expectEqual(@as(u16, 500), try postPackage(arena, project_dir));
+    // The pinout still landed, so the run really did reach the component write.
+    try blocked.dir.access(std.testing.io, "lib/pinouts/part-1.sexp", .{});
 }

@@ -7751,6 +7751,7 @@ is what makes the predicate exact rather than approximately right.
 - The 3D viewer validates its `:footprint` route param after percent-decoding, so a decoded name carrying traversal or markup reaches neither a read path nor the page
 - The staged-upload temp path is minted from a timestamp and a process-unique counter with no request input in it, so an uploaded archive cannot steer where it is written
 - A library import ignores the client's X-Filename header entirely, so two uploads of one archive under different filenames produce identical results
+- A package upload whose component definition cannot be written answers a 500 instead of reporting the upload succeeded
 - One shared parser reads the client DRC board payload, so the stateless check and the session probe see identical parts, pads and net rules
 - The session parse copies every string out of the payload buffer so a loaded board survives the buffer being reused
 - The WASM DRC session probe enforces an RF net's declared keepout halo, so the mid-drag gate refuses the copper the full check flags

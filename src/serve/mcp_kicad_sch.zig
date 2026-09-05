@@ -61,7 +61,7 @@ const DirDenial = enum {
 /// Fence an agent-supplied export directory. Absolute, traversal-free, and
 /// outside the project tree; see the module header for why the last rule is
 /// not negotiable.
-pub fn validateOutputDir(dir: []const u8, project_dir: []const u8) ?DirDenial {
+fn validateOutputDir(dir: []const u8, project_dir: []const u8) ?DirDenial {
     if (dir.len == 0) return .empty;
     if (dir.len > max_path_bytes) return .too_long;
     if (!std.fs.path.isAbsolute(dir)) return .not_absolute;

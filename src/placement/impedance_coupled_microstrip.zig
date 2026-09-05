@@ -9,7 +9,7 @@
 const std = @import("std");
 const microstrip = @import("impedance_microstrip.zig");
 
-const Error = error{OutOfDomain};
+pub const Error = error{OutOfDomain};
 const eta0: f64 = 120.0 * std.math.pi;
 
 /// Even/odd modal values and their differential/common-mode combinations.

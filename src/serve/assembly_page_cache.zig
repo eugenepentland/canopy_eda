@@ -20,7 +20,7 @@ const cache_header = "X-Netlisp-Assembly-Page-Cache";
 
 const Identity = struct { layout: ?[]const u8 };
 
-const Entry = struct {
+pub const Entry = struct {
     html: []const u8,
     files: page_cache.FileSet,
     live_version: u32,
@@ -61,7 +61,7 @@ fn cacheKey(allocator: std.mem.Allocator, name: []const u8, ident: Identity) std
     return std.fmt.allocPrint(allocator, "{s}\x00default", .{name});
 }
 
-const ServeIn = struct {
+pub const ServeIn = struct {
     scratch: std.mem.Allocator,
     name: []const u8,
     live_version: u32,

@@ -74,7 +74,7 @@ pub const DeferredTerminals = struct {
     runs: std.ArrayList(Run) = .empty,
 };
 
-const GroupRender = struct {
+pub const GroupRender = struct {
     hub_ref: []const u8,
     group: PinGroup,
     stub_x: f64,

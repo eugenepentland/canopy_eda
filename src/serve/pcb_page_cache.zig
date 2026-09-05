@@ -71,7 +71,7 @@ pub const WarmKind = enum {
     }
 };
 
-const Entry = struct {
+pub const Entry = struct {
     html: []const u8,
     content_type: httpz.ContentType,
     files: page_cache.FileSet,
@@ -152,7 +152,7 @@ pub const Retain = struct {
 /// What the cache lookup path reads off a request: the design name, the
 /// request/response pair to answer into, and the live version captured before
 /// rendering (so a miss records it for the store that follows).
-const ServeIn = struct {
+pub const ServeIn = struct {
     scratch: std.mem.Allocator,
     name: []const u8,
     live_version: u32,

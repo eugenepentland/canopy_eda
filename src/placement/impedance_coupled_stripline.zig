@@ -4,7 +4,7 @@
 const std = @import("std");
 const elliptic = @import("elliptic_integral.zig");
 
-const Error = error{OutOfDomain};
+pub const Error = error{OutOfDomain};
 const eta0: f64 = 120.0 * std.math.pi;
 
 fn positive(v: f64) bool {

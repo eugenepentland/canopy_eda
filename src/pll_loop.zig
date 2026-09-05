@@ -110,7 +110,7 @@ pub const Spec = struct {
     design: DesignMode = .{},
 };
 
-const ParseError = error{InvalidForm};
+pub const ParseError = error{InvalidForm};
 
 /// Parse the documented top-level form. Values are literal SI-scaled numbers;
 /// component names are local instance labels or assigned ref-deses.

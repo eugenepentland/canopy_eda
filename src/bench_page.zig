@@ -564,7 +564,7 @@ const LoadWatch = struct {
 
 /// Render the corpus table a reviewer reads. Columns are the phase medians in
 /// milliseconds; the trailing flags call out the states a number can't show.
-pub fn writeTable(w: *std.Io.Writer, results: []const BoardResult, reps: usize, load: ?LoadReport) std.Io.Writer.Error!void {
+fn writeTable(w: *std.Io.Writer, results: []const BoardResult, reps: usize, load: ?LoadReport) std.Io.Writer.Error!void {
     try w.print("phase medians over {d} rep(s), ms — eval ⊂ solve ⊂ pcbPage; other pages are independent cold renders\n", .{reps});
     try w.print("{s:<24} {s:>5} {s:>9} {s:>8} {s:>8} {s:>8} {s:>8} {s:>8} {s:>9} {s:>9} {s:>9} {s:>9} {s:>9} {s:>13}\n", .{
         "board", "parts", "sidecar", "eval", "sidecar", "solve", "drcRep", "drcGeom", "pcbPage", "assembly", "thermal", "schematic", "pcb_kb", "drc e/t/open",
@@ -614,7 +614,7 @@ pub fn writeTable(w: *std.Io.Writer, results: []const BoardResult, reps: usize, 
 /// `load` object (and a flagged board's `load_contended`) is what lets
 /// perf_gate.sh --record refuse a contended run instead of enshrining it;
 /// the baseline loader ignores both.
-pub fn writeResultsJson(w: *std.Io.Writer, results: []const BoardResult, load: ?LoadReport) json_writer.WriteError!void {
+fn writeResultsJson(w: *std.Io.Writer, results: []const BoardResult, load: ?LoadReport) json_writer.WriteError!void {
     try w.writeAll("{\"boards\":[");
     for (results, 0..) |r, i| {
         if (i > 0) try w.writeAll(",");
