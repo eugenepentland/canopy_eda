@@ -1,127 +1,173 @@
 # Netlisp
 
-*Schematics as S-expressions — written by an agent, compiled to KiCad.*
+*Schematics as S-expressions, written by an agent, compiled to KiCad.*
 
-A CLI-driven electronic design automation tool. Schematics are written
-as S-expressions (no GUI capture), built into a live web viewer with
-review, ERC, and BOM, and exported to KiCad for PCB layout. The server
-also syncs an existing KiCad PCB back to match the design source in place
-(`POST /api/sync-kicad-pcb/:name`; see [KiCad sync](#kicad-sync)).
+Netlisp is a command-line electronic design automation tool. A design is a
+set of `.sexp` text files, not a drawing: you (or an agent) write the
+schematic as S-expressions, and one binary evaluates it into a live web
+viewer with electrical rule checks, a BOM, PCB placement and routing with
+design-rule checks, Gerber and KiCad export, and design-review reports.
+There is no GUI capture step; the browser is a viewer and review surface.
+
+- **Language:** a small S-expression DSL with components, parameterised
+  component families, modules with closures, nets inferred from pin
+  connections, sections, assertions and formatting directives.
+  See [docs/sexp-language.md](docs/sexp-language.md) and the generated
+  reference [docs/language-forms.md](docs/language-forms.md).
+- **Outputs:** HTML schematic with inline SVG, ERC and requirement checks,
+  BOM resolution, PCB layout (placement, autorouting, copper pours, DRC),
+  Gerber/drill fabrication packages, KiCad netlist + footprints + a full
+  hierarchical `.kicad_sch` project, PDF reviews, thermal FEM cases.
+- **Agent-first:** every operation is a structured CLI tool with a JSON
+  schema (`netlisp tool list`), so an agent can drive the whole flow
+  without a browser or a server.
+
+Status: early public release. Linux x86_64 is the platform the test suite
+runs on. Toolchain archives for macOS and aarch64 Linux are mirrored, but
+those builds are untested.
+
+## Prerequisites
+
+| Tool | Version | Needed for |
+| --- | --- | --- |
+| Zig | exactly the snapshot in [`.zigversion`](.zigversion) | everything; `scripts/install-zig.sh` installs it |
+| Node.js | 20 or newer | build-time asset gates and JS unit tests run by `zig build` |
+| Python | 3.11 or newer | two build-time policy checks (`tomllib`) |
+| git | any recent | build-identity stamps and the Guardian gate |
+
+Optional: `strip`/`readelf` (binutils) for release builds, Playwright for the
+browser performance scripts, KiCad 8 for the board sync workflows, and
+ElmerSolver for thermal comparisons. See
+[ZIG_TOOLCHAIN.md](ZIG_TOOLCHAIN.md) for the full toolchain story.
 
 ## Quick start
 
-Requires exactly **Zig `0.17.0-dev.1683+5ceec001b`**. See
-[ZIG_TOOLCHAIN.md](ZIG_TOOLCHAIN.md) for the official archive URL, checksum,
-installation convention, and the Zig 0.17 build-option spellings. The build
-rejects a different compiler so a moving master snapshot cannot silently
-change the application or its dependencies.
-
-**Prerequisites (a bare clone is not enough):**
-
-- **Guardian** — a sibling `../guardian-zig` checkout next to this repo.
-  Guardian is an unpinned relative-path dependency (`build.zig.zon`) that gates
-  every build, so clone it alongside `netlisp` first, e.g.
-  `git clone <guardian-url> ../guardian-zig`.
-- **Ward** — a sibling `../../ward` checkout providing session-cookie and
-  OAuth-bearer verification. It is also a relative-path dependency and must be
-  checked out at the Zig-master-compatible revision used by this repository.
-- **A designs directory** — `projects/` is gitignored, so `projects/designs`
-  is empty on a fresh clone. Point `--project-dir` at your own designs repo (or
-  create `projects/designs/{src,lib}` with at least one `.sexp` design) before
-  `serve` will show anything.
-
 ```bash
-zig build --seed=1
-zig build run -- serve --project-dir projects/designs
-# open http://localhost:7050
+git clone https://github.com/eugenepentland/netlisp.git
+cd netlisp
+scripts/install-zig.sh --link     # downloads and verifies the pinned Zig
+zig build --seed=1                # first build fetches the Guardian gate once (network), ~2 min cold
+zig build run -- serve --project-dir test/fixtures/stdlib-smoke
 ```
 
-`zig build` runs the [Guardian](https://github.com/eugenepentland/guardian-zig)
-checks (formatting, file size, boundaries, …) alongside the test suite.
+Open <http://127.0.0.1:7050>. The server binds loopback and treats local
+requests as an admin, so nothing needs configuring for a laptop. The first
+`zig build` downloads one dependency (the
+[Guardian](https://github.com/eugenepentland/guardian-zig) code-quality gate,
+pinned by URL and hash in `build.zig.zon`); every later build is offline.
+Cold builds compile that gate at ReleaseSafe, warm rebuilds take seconds.
 
-Every structured automation operation is available locally through the CLI;
-no server connection is required:
+## Your first project
+
+A project is a directory with `src/` holding designs and an optional `lib/`
+holding your own components, footprints, pinouts and modules:
+
+```text
+my-board/
+  src/
+    my-board.sexp
+  lib/            # optional; overrides the bundled library entry by entry
+    components/
+    footprints/
+    modules/
+```
+
+Common passives (chip capacitors, resistors, inductors, ferrites and LEDs in
+0201 to 0805 packages) come from the **bundled standard library**, so a
+first design needs no library at all. Anything in your project's `lib/`
+takes precedence over the bundled copy, `--lib-dir` (or `NETLISP_LIB_DIR`)
+adds a shared library between the two, and `NETLISP_STDLIB_DIR` swaps the
+bundled set for a directory of your own. The passive families need no
+`(import …)`; test points, mounting holes and pin headers do. See
+[docs/standard-library.md](docs/standard-library.md).
+
+[`test/fixtures/stdlib-smoke`](test/fixtures/stdlib-smoke) is a complete
+minimal project. Build it, check it, and hand it to KiCad:
+
+```bash
+zig build run -- build --project-dir test/fixtures/stdlib-smoke stdlib-smoke
+zig build run -- check --project-dir test/fixtures/stdlib-smoke --profile preflight stdlib-smoke
+zig build run -- export-kicad --project-dir test/fixtures/stdlib-smoke \
+    --output-dir out/kicad --with-schematic stdlib-smoke
+```
+
+`netlisp help` lists every command; `netlisp reference [section]` prints the
+language grammar from the binary itself.
+
+## Driving it from an agent
+
+Every structured operation is available locally with no server:
 
 ```bash
 zig build run -- tool list
-zig build run -- tool run_checks --project-dir projects/designs \
-  --args '{"name":"my-board","profile":"preflight"}'
-zig build run -- tool get_pcb_layout_image --project-dir projects/designs \
-  --args '{"name":"my-board"}' --output my-board.png
+zig build run -- tool run_checks --project-dir my-board \
+    --args '{"name":"my-board","profile":"preflight"}'
+zig build run -- tool get_pcb_layout_image --project-dir my-board \
+    --args '{"name":"my-board"}' --output my-board.png
 ```
 
-Use `--args-file request.json` for larger JSON requests. Text results are
-written directly to stdout; image tools return base64 JSON unless `--output`
-is supplied, in which case the decoded image is written there.
+Use `--args-file request.json` for larger requests. Text results go to
+stdout; image tools return base64 JSON unless `--output` is given. The
+tool schemas are the contract an agent should read first.
 
-### Build-mode policy
+## Serving beyond localhost
 
-Use the self-hosted **Debug** build for every internal workflow: application
-development, tests (including the full suite), dev servers, render/export
-tools, mutation testing, solver work, and benchmarks. A plain `zig build` is
-Debug; write `-Doptimize=debug` only when an explicit spelling helps. Do not
-manually build ReleaseSafe for development or internal benchmarking.
+Netlisp has no accounts, sessions or passwords. It binds `127.0.0.1`, admits
+a loopback request that did not pass through a proxy as an admin, and
+answers everything else with `403`. To publish it, put an authenticating
+reverse proxy in front and start the server with `--allow-remote`, which
+makes **every** request it receives an admin. `--bind <addr>` widens the
+listening socket. Details and the plugin-token path for the KiCad sync
+endpoint are in [docs/auth.md](docs/auth.md).
 
-The sole netlisp ReleaseSafe build belongs to the deployment boundary.
-`.githooks/prepare-release.sh` creates it with the pinned official compiler and
-forces its self-hosted x86-64 backend while the Debug test suite runs. The
-deploy hook validates the exact compiler and candidate SHA-256 before atomically
-installing it; systemd only
-runs that verified artifact and never compiles during restart. The server parses
-untrusted input, so ReleaseSafe turns any residual unguarded cast/overflow into
-a panic that `Restart=always` recovers in ~2s, rather than the silent UB (a
-wrong board) a safety-off build would emit. Editing the unit requires
-`systemctl --user daemon-reload && systemctl --user restart netlisp.service` to
-take effect; production builds must go through `.githooks/prepare-release.sh`.
-
-That production executable is explicitly stripped and then inspected before
-publication; this keeps ReleaseSafe's runtime safety checks while omitting
-symbols that are useful only during development. Debug applications, tests,
-tools, and benchmarks remain unstripped. Deployment supplies the exact
-nine-character commit ID at runtime
-from checksum-verified candidate metadata, so changing only docs or release
-plumbing no longer injects a new git hash into the compiler cache key.
-
-To rebuild a single design and live-push it to a running server:
+## Building and testing
 
 ```bash
-zig build run -- build --project-dir projects/designs --push <design-name>
+zig build --seed=1                       # Debug, self-hosted backend (default)
+zig build --seed=1 -Doptimize=safe       # ReleaseSafe, still self-hosted, ~25 s
+zig build --seed=1 -Doptimize=safe -Dllvm  # opt into LLVM codegen, minutes
+zig build --seed=1 test                  # full suite plus the Guardian gate, ~5 min
+zig build test-affected                  # only the tests your diff touches
+zig build docs                           # regenerate docs/language-forms.md after a DSL change
 ```
 
-## KiCad sync
+`zig build` and `zig build test` fail when `docs/language-forms.md` is stale
+or when Guardian finds a new violation; `guardian-check explain <check>`
+says why. [docs/build-and-run.md](docs/build-and-run.md),
+[docs/build-system.md](docs/build-system.md) and
+[docs/testing-guide.md](docs/testing-guide.md) cover the build graph, test
+filters, sharding and mutation tiers.
 
-The schematic is canonical; the board is updated to match. Open a design's
-schematic viewer and use the **Push to KiCad PCB** button — the server reads
-the `.kicad_pcb` declared by the design's `(kicad-pcb "<path>")` form, diffs
-it against the flattened netlist, and writes the updated board in place
-(`POST /api/sync-kicad-pcb/:name`). Footprint placements, pad nets, and field
-values are preserved; new instances land in a per-section staging area.
+## KiCad round trips
 
-For the reverse review workflow, declare the same `(kicad-pcb "<path>")`, open
-the design's **PCB Layout** page, and choose **Sync from KiCad**. The editor
-first previews footprint/net mismatches, dropped copper, unusual vias, zones,
-and outline fallbacks. Confirming imports the board's placement, routed tracks,
-vias, and Edge.Cuts into the netlisp tool as its starred layout, then reloads the
-PCB review. The KiCad board is opened read-only; the previous netlisp layout is
-saved in layout history. KiCad zones and keepouts are reported but are not
-currently imported as rendered copper.
+The schematic is canonical; the board is updated to match. Declare
+`(kicad-pcb "<path>")` in a design and use **Push to KiCad PCB** in the
+schematic viewer (`POST /api/sync-kicad-pcb/:name`): the server diffs the
+board against the flattened netlist and rewrites it in place, preserving
+placements, pad nets and field values, with new instances staged per
+section.
 
-The same inbound operation is available without a browser:
+For the reverse direction, the design's **PCB Layout** page offers **Sync
+from KiCad**, which previews mismatches and then imports the board's
+placement, tracks, vias and outline as the design's starred layout. The
+same import runs without a browser:
 
 ```bash
-zig build run -- import-kicad-layout --project-dir projects/designs <design>
-
-# Recover layouts that survive only in history/ or git and append them as named rows
-zig build run -- backfill-layouts --project-dir projects/designs [--dry-run] [--limit <n>]
+zig build run -- import-kicad-layout --project-dir my-board stdlib-smoke
 ```
 
-## Architecture
+## Documentation
 
-The pipeline (tokenize → parse → evaluate → build DesignBlock → render
-HTML / export KiCad / run ERC) and per-module entry points are
-documented in [`CLAUDE.md`](CLAUDE.md). [`SPEC.md`](SPEC.md) tracks the
-public function signatures.
+- [docs/architecture.md](docs/architecture.md): what the tool does and how the pipeline fits together
+- [docs/sexp-language.md](docs/sexp-language.md): the design language, with [docs/language-forms.md](docs/language-forms.md) as the machine-checked reference
+- [docs/standard-library.md](docs/standard-library.md): the bundled components and how overrides resolve
+- [docs/webserver-api.md](docs/webserver-api.md): every HTTP route and structured tool
+- [docs/auth.md](docs/auth.md): the local-only security model
+- [ZIG_TOOLCHAIN.md](ZIG_TOOLCHAIN.md): the pinned compiler, mirrors and checksums
+- [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md): how agents and contributors are expected to work in this repository (worktrees, Guardian, the spec ledger)
 
 ## License
 
-[MIT](LICENSE) © 2026 Eugene Pentland.
+[MIT](LICENSE) © 2026 Eugene Pentland. Vendored Zig packages under
+`vendor/` and the browser libraries under `src/serve/assets/` keep their
+own licenses.
