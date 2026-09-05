@@ -222,7 +222,7 @@ adopt_candidate() {
 
 dirty="$(git status --porcelain)"
 if [ -n "$dirty" ]; then
-  echo "prepare-release: refusing dirty worktree; commit generated templates and source first:" >&2
+  echo "prepare-release: refusing dirty worktree; commit or clean these paths first:" >&2
   printf '%s\n' "$dirty" >&2
   exit 1
 fi
@@ -306,21 +306,8 @@ ls -1dt "$COMMON_DIR"/release-cache/tree-* 2>/dev/null | tail -n +4 |
   done
 
 started="$(date +%s)"
-echo "[$(ts)] prepare-release: $SHORT_HASH — generating templates once"
-if ! "$ZIG" build --seed=1 templates; then
-  echo "prepare-release: template generation failed" >&2
-  exit 1
-fi
-
-dirty="$(git status --porcelain)"
-if [ -n "$dirty" ]; then
-  echo "prepare-release: generated templates are stale; commit these updates before release:" >&2
-  printf '%s\n' "$dirty" >&2
-  exit 1
-fi
-
 echo "[$(ts)] prepare-release: running the whole-tree Guardian gate"
-if ! "$ZIG" build --seed=1 -Dtemplates-prepared=true guardian -- all . --gate --full; then
+if ! "$ZIG" build --seed=1 guardian -- all . --gate --full; then
   echo "prepare-release: Guardian gate failed" >&2
   exit 1
 fi
@@ -329,12 +316,12 @@ echo "[$(ts)] prepare-release: starting full tests and ReleaseSafe build togethe
 jobs_started="$(date +%s)"
 start_release_job "$staging/test.status" "$staging/test.log" \
   env GUARDIAN_SKIP_CHECKS=1 ZIG_LOCAL_CACHE_DIR="$TREE_CACHE/test" \
-  "$ZIG" build --seed=1 -Dtemplates-prepared=true test
+  "$ZIG" build --seed=1 test
 test_pid=$release_job_pid
 
 start_release_job "$staging/build.status" "$staging/build.log" \
   env GUARDIAN_SKIP_CHECKS=1 ZIG_LOCAL_CACHE_DIR="$TREE_CACHE/build" \
-  "$ZIG" build --seed=1 -Dtemplates-prepared=true -Doptimize=safe --prefix "$staging/install"
+  "$ZIG" build --seed=1 -Doptimize=safe --prefix "$staging/install"
 build_pid=$release_job_pid
 
 wait "$test_pid"

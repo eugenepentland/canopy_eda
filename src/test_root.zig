@@ -859,7 +859,7 @@ test "gated full test invocations pin the Zig build seed" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         release,
-        "\"$ZIG\" build --seed=1 -Dtemplates-prepared=true test",
+        "\"$ZIG\" build --seed=1 test",
     ) != null);
 }
 

@@ -123,21 +123,6 @@ pub fn build(b: *std.Build) void {
     // progress display, per-test failure attribution, and --fuzz support.
     const test_runner = guardian.testRunner(guardian_dep);
 
-    // `src/serve/templates/*.zig` used to be generated from `.zt` sources by a
-    // third-party template compiler, and every consumer of the tree — the exe,
-    // the test binaries, the compile probe, Guardian, the fmt check — had to be
-    // ordered behind that codegen and its auto-fmt or race it on a fresh
-    // worktree. The templates are hand-maintained Zig now, so there is no
-    // generation step and no ordering to arrange: they are read like any other
-    // source file.
-    //
-    // `.githooks/prepare-release.sh` (owned outside this change) still runs
-    // `zig build templates` and passes `-Dtemplates-prepared=true`. Both are
-    // kept here as no-ops so that hook keeps working; delete them in the same
-    // commit that drops those lines from it.
-    _ = b.option(bool, "templates-prepared", "Accepted and ignored: the templates are hand-maintained sources");
-    _ = b.step("templates", "No-op: src/serve/templates/*.zig are hand-maintained sources");
-
     // Client-side WASM DRC. Compiles the SAME placement/drc.zig engine to
     // wasm32-freestanding (the fs/eval paths in optimizer.zig are lazily skipped
     // by Zig's analysis) and exposes a JSON bridge (src/wasm_drc.zig) so the

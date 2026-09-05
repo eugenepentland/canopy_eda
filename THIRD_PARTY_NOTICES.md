@@ -614,6 +614,15 @@ claim worth recording evidence for:
   and cites standards bodies and vendor application notes (IPC, IEC, Infineon)
   in short attributed fragments; it reproduces no standard.
 
+## `vendor/ward/` — first-party
+
+`vendor/ward/` is a client-only subset of the maintainer's own Ward
+authentication library (Eugene Pentland, commit `6d6c7c5d`), copied into this
+tree so the optional `NETLISP_AUTH=ward` hosting mode builds without a sibling
+checkout. It is the same author and the same MIT licence as the rest of this
+repository; see `vendor/ward/README.netlisp.md` for what was and was not
+bundled.
+
 # KiCad
 
 netlisp **writes and reads KiCad file formats** — netlists, footprints,
