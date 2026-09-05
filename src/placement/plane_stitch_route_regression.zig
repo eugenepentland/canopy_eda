@@ -11,6 +11,10 @@ const route_policy = @import("route_policy.zig");
 const bypass_open = @import("bypass_open.zig");
 const pin_roles = @import("pin_roles.zig");
 
+/// Slack in board millimetres on the shared x band: a sample this far outside
+/// it is still on the band, so a track riding the boundary is not miscounted.
+const band_eps_mm: f64 = 1e-6;
+
 const testing = std.testing;
 
 /// Does any of `net`'s copper cross the gap between the two lands, inside the x
@@ -25,7 +29,7 @@ fn crossesGap(tracks: []const router.Track, net: i32, gap: [2]f64, band: [2]f64)
             const y = t.y1 + f * (t.y2 - t.y1);
             if (y < gap[0] or y > gap[1]) continue;
             const x = t.x1 + f * (t.x2 - t.x1);
-            if (x >= band[0] - 1e-6 and x <= band[1] + 1e-6) return true;
+            if (x >= band[0] - band_eps_mm and x <= band[1] + band_eps_mm) return true;
         }
     }
     return false;

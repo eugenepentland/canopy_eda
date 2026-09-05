@@ -2087,7 +2087,7 @@ pub fn routableTally(
 pub fn summarizeConnectivity(arena: std.mem.Allocator, conn: []const NetStatus) std.mem.Allocator.Error!Tally {
     var t = Tally{};
     var open: std.ArrayList([]const u8) = .empty;
-    var logical = std.StringArrayHashMapUnmanaged(bool).empty;
+    var logical = std.array_hash_map.String(bool).empty;
     for (conn) |ns| {
         t.coarsened = t.coarsened or ns.coarsened;
         t.hairline_gaps += ns.hairline_gaps;

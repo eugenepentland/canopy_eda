@@ -45,6 +45,11 @@ const router = @import("placement/router.zig");
 const modules_mod = @import("serve/modules.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 
+/// Completion floor inside a geometric mean: a zero-completion board would
+/// send a plain product to zero and `@log(0)` to -inf, so it is credited one
+/// net's worth instead. Not a tolerance — a floor.
+const min_scored_completion: f64 = 1e-6;
+
 /// Largest design source this harness will read when scanning the corpus.
 const max_design_bytes: usize = 4 * 1024 * 1024;
 /// Marker that tells a design file apart from a library/module file.
@@ -180,7 +185,7 @@ pub fn geomeanCompletion(results: []const BoardResult) f64 {
         if (!r.scorable()) continue;
         // A zero-completion board would send a plain product to zero; the log
         // form needs the same guard, so floor it at one net's worth of credit.
-        const c = @max(r.completion(), 1e-6);
+        const c = @max(r.completion(), min_scored_completion);
         sum += @log(c);
         n += 1;
     }
@@ -854,9 +859,9 @@ fn checkBaseline(
         // shared denominator so a routed drop (or gain) is what moves the score.
         const comp_now = if (r.nets.total == 0) 1 else @as(f64, @floatFromInt(r.nets.routed)) / @as(f64, @floatFromInt(r.nets.total));
         const comp_ref = if (r.nets.total == 0) 1 else @as(f64, @floatFromInt(b)) / @as(f64, @floatFromInt(r.nets.total));
-        sum_now += @log(@max(comp_now, 1e-6));
+        sum_now += @log(@max(comp_now, min_scored_completion));
         n_now += 1;
-        sum_ref += @log(@max(comp_ref, 1e-6));
+        sum_ref += @log(@max(comp_ref, min_scored_completion));
         n_ref += 1;
     }
     const geomean_now = if (n_now == 0) 0 else @exp(sum_now / @as(f64, @floatFromInt(n_now)));

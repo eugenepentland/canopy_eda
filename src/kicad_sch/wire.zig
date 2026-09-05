@@ -121,7 +121,7 @@ pub fn junctions(
     arena: std.mem.Allocator,
     segs: []const Seg,
 ) std.mem.Allocator.Error![]const Point {
-    var counts: std.AutoArrayHashMapUnmanaged(i64, u32) = .empty;
+    var counts: std.array_hash_map.Auto(i64, u32) = .empty;
     defer counts.deinit(arena);
     for (segs) |s| {
         try bump(arena, &counts, s.a);
@@ -452,7 +452,7 @@ fn isEnd(s: Seg, p: Point) bool {
 
 fn bump(
     arena: std.mem.Allocator,
-    counts: *std.AutoArrayHashMapUnmanaged(i64, u32),
+    counts: *std.array_hash_map.Auto(i64, u32),
     p: Point,
 ) std.mem.Allocator.Error!void {
     const gop = try counts.getOrPut(arena, pointKey(p));

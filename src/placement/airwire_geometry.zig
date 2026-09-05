@@ -1,5 +1,9 @@
 const std = @import("std");
 
+/// Coordinate coincidence tolerance in board millimetres: two points closer
+/// together than this are one point as far as airwire topology is concerned.
+const point_eps_mm: f64 = 1e-6;
+
 /// A two-dimensional point in board millimetres.
 pub const Point = struct { x: f64, y: f64 };
 pub const max_wire_points: usize = 64;
@@ -53,7 +57,7 @@ fn orient(p: [2]f64, q: [2]f64, r: [2]f64) f64 {
 }
 
 fn pointEqual(p: [2]f64, q: [2]f64) bool {
-    return @abs(p[0] - q[0]) < 1e-6 and @abs(p[1] - q[1]) < 1e-6;
+    return @abs(p[0] - q[0]) < point_eps_mm and @abs(p[1] - q[1]) < point_eps_mm;
 }
 
 /// Rectilinear minimum spanning tree length (Prim, Manhattan metric). RMST is

@@ -57,6 +57,11 @@ const path_copper = @import("placement/path_copper.zig");
 const variable_width_copper = @import("placement/variable_width_copper.zig");
 const na = @import("eval/net_analysis.zig");
 
+/// Numeric-noise floor for this renderer's comparisons: device pixels when an
+/// arc radius is guarded against divide-by-zero, board millimetres when a grid
+/// line is tested against the view bound.
+const geom_eps: f64 = 1e-6;
+
 /// Replace an RF path's compact editor handles with conservative physical
 /// chords/collars for auxiliary capsule-based bounds. Actual pixels use the
 /// exact swept polygons below. Re-lowering first removes every proof-owned
@@ -1353,7 +1358,7 @@ const Ctx = struct {
         // θ ≤ 2·acos(1 - tol/r). Guarded for a radius smaller than the
         // tolerance (the whole arc is then one step) and clamped so a huge
         // radius still gets a few segments.
-        const r_px = @max(self.len(circle.radius), 1e-6);
+        const r_px = @max(self.len(circle.radius), geom_eps);
         const step = if (r_px <= arc_flatten_px)
             std.math.pi
         else
@@ -1546,7 +1551,7 @@ const Ctx = struct {
         const left = self.xpx(self.minx - view_margin_mm);
         const right = self.xpx(self.p.maxx + view_margin_mm);
         var gx = @ceil((self.minx - view_margin_mm) / step) * step;
-        while (gx <= self.p.maxx + view_margin_mm + 1e-6) : (gx += step) {
+        while (gx <= self.p.maxx + view_margin_mm + geom_eps) : (gx += step) {
             const px = self.xpx(gx);
             self.cv.line(px, top, px, bot, self.pw(0.4), grid_col, 0.5, .butt);
             var buf: [16]u8 = undefined;
@@ -1554,7 +1559,7 @@ const Ctx = struct {
             self.cv.text(px, bot - self.pw(9), s, self.pw(7), text_dim, 0.7, .middle);
         }
         var gy = @ceil((self.miny - view_margin_mm) / step) * step;
-        while (gy <= self.p.maxy + view_margin_mm + 1e-6) : (gy += step) {
+        while (gy <= self.p.maxy + view_margin_mm + geom_eps) : (gy += step) {
             const py = self.ypx(gy);
             self.cv.line(left, py, right, py, self.pw(0.4), grid_col, 0.5, .butt);
             var buf: [16]u8 = undefined;

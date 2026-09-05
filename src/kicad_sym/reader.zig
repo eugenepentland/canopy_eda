@@ -127,7 +127,7 @@ const Acc = struct {
 };
 
 /// Unit contents keyed by unit number, in first-seen order.
-const Units = std.AutoArrayHashMapUnmanaged(u32, Acc);
+const Units = std.array_hash_map.Auto(u32, Acc);
 
 fn readSymbol(arena: std.mem.Allocator, node: Node) ReadError!?Symbol {
     const cl = node.asList() orelse return null;

@@ -420,7 +420,7 @@ pub fn generate(alloc: std.mem.Allocator, p: optimizer.Placement) std.mem.Alloca
 }
 
 fn sameVia(a: router.Via, b: router.Via) bool {
-    return a.net == b.net and std.math.hypot(a.x - b.x, a.y - b.y) < 1e-6;
+    return a.net == b.net and std.math.hypot(a.x - b.x, a.y - b.y) < drc.eps;
 }
 
 /// Whether a via barrel overlaps the exact authored copper of a same-net pad.
@@ -501,8 +501,8 @@ pub fn isGenerated(p: optimizer.Placement, via: router.Via) bool {
     if (!declared(p)) return false;
     const net = netIndex(p) orelse return false;
     const f = p.rules.perimeter_fence;
-    return via.net == net and @abs(via.dia - f.via_dia) < 1e-6 and
-        @abs(via.drill - f.via_drill) < 1e-6 and
+    return via.net == net and @abs(via.dia - f.via_dia) < drc.eps and
+        @abs(via.drill - f.via_drill) < drc.eps and
         @abs(signedInsetOf(p, via.x, via.y) - f.edge_offset) < 1e-5;
 }
 

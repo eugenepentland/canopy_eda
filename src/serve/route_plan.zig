@@ -51,6 +51,10 @@ const topo_lower = @import("../placement/topo_lower.zig");
 const pad_neck_shape = @import("../pad_neck_shape.zig");
 const net_name = @import("../net_name.zig");
 
+/// Residual-cost tie tolerance: a candidate must beat the baseline by more
+/// than this to count as better, so floating-point noise never flips a retry.
+const cost_eps: f64 = 1e-6;
+
 /// A lowered plan: the router options plus whether an authored plan applied
 /// and how many selector warnings resolution produced (for result reporting).
 pub const Lowered = struct {
@@ -5466,7 +5470,7 @@ fn mergeNetIndexMetadata(
 
 fn residualBetter(candidate: router.RouteResult, baseline: router.RouteResult) bool {
     if (candidate.routed != baseline.routed) return candidate.routed > baseline.routed;
-    return residualCost(candidate) < residualCost(baseline) - 1e-6;
+    return residualCost(candidate) < residualCost(baseline) - cost_eps;
 }
 
 /// One via costs the same as 20 mm of trace, which prevents a residual retry

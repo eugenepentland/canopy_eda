@@ -28,6 +28,19 @@ test "parseMicroFarads" {
         req.parseMicroFarads("10µF").?,
         1e-9,
     );
+    // The two large suffixes nothing else pinned. `mF` and a bare `F` are the
+    // only branches that scale UP from the µF base, so a transposed exponent
+    // there would read a 1 F supercap as 1 µF and pass every bulk check.
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 1000.0),
+        req.parseMicroFarads("1mF").?,
+        1e-9,
+    );
+    try std.testing.expectApproxEqAbs(
+        @as(f64, 1000000.0),
+        req.parseMicroFarads("1F").?,
+        1e-9,
+    );
     try std.testing.expect(req.parseMicroFarads("garbage") == null);
 }
 
@@ -75,6 +88,12 @@ test "parseMicroHenries" {
     try expectMicroHenries(1.0, "1uH");
     try expectMicroHenries(2.2, "2.2µH");
     try expectMicroHenries(0.1, "100nH");
+    // `pH` scales pico to the µH base, so it is 1e-6 and NOT 1e-12 — the one
+    // suffix whose factor reads wrong until the base unit is remembered.
+    try expectMicroHenries(0.0001, "100pH");
+    // The two suffixes that scale UP from µH.
+    try expectMicroHenries(1000.0, "1mH");
+    try expectMicroHenries(1000000.0, "1H");
     try std.testing.expect(req.parseMicroHenries("garbage") == null);
 }
 

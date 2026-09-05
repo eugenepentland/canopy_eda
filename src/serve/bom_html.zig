@@ -717,12 +717,12 @@ pub fn writeNetsJson(allocator: std.mem.Allocator, w: anytype, block: *const env
 
     // Collect pins grouped by resolved base net name, preserving order
     const PinRef = struct { ref_des: []const u8, pin: []const u8 };
-    var grouped = std.StringArrayHashMapUnmanaged(std.ArrayList(PinRef)).empty;
+    var grouped = std.array_hash_map.String(std.ArrayList(PinRef)).empty;
 
     // Helper to resolve and group a net
     const addNet = struct {
         fn add(
-            g: *std.StringArrayHashMapUnmanaged(std.ArrayList(PinRef)),
+            g: *std.array_hash_map.String(std.ArrayList(PinRef)),
             alloc: std.mem.Allocator,
             name: []const u8,
             pfx: []const u8,

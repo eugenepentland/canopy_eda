@@ -331,8 +331,8 @@ fn copperCount(row: std.json.Value, field: []const u8) i64 {
 /// `name` → `title` for every row of a design listing, whatever the listing's
 /// shape: the CLI answers `{"designs":[…]}` and the two server surfaces answer
 /// a bare array, so the comparison is over the pairs, not the bytes.
-fn designTitles(alloc: std.mem.Allocator, listing: std.json.Value) !std.StringArrayHashMapUnmanaged([]const u8) {
-    var out: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+fn designTitles(alloc: std.mem.Allocator, listing: std.json.Value) !std.array_hash_map.String([]const u8) {
+    var out: std.array_hash_map.String([]const u8) = .empty;
     const rows = switch (listing) {
         .array => |a| a.items,
         .object => |o| o.get("designs").?.array.items,

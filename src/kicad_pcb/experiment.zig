@@ -10,6 +10,11 @@ const std = @import("std");
 const snapshot_mod = @import("snapshot.zig");
 const project_mod = @import("project_rules.zig");
 
+/// Pose equality tolerance for snapshot comparison — board millimetres for a
+/// coordinate, degrees for a rotation. Both are read back from decimal text,
+/// so equal values can differ in the last bit.
+const pose_eps: f64 = 1e-6;
+
 /// Compact copper burden for a selected set of nets.
 pub const CopperMetrics = struct {
     nets: usize = 0,
@@ -279,15 +284,15 @@ fn fixedGeometryMismatches(
 
 fn samePose(a: snapshot_mod.Footprint, b: snapshot_mod.Footprint) bool {
     return std.mem.eql(u8, a.layer, b.layer) and a.pads.len == b.pads.len and
-        @abs(a.at.x - b.at.x) <= 1e-6 and @abs(a.at.y - b.at.y) <= 1e-6 and
-        @abs(a.at.rotation_deg - b.at.rotation_deg) <= 1e-6;
+        @abs(a.at.x - b.at.x) <= pose_eps and @abs(a.at.y - b.at.y) <= pose_eps and
+        @abs(a.at.rotation_deg - b.at.rotation_deg) <= pose_eps;
 }
 
 fn sameBounds(a: snapshot_mod.Bounds, b: snapshot_mod.Bounds) bool {
     if (a.valid != b.valid) return false;
     if (!a.valid) return true;
-    return @abs(a.min.x - b.min.x) <= 1e-6 and @abs(a.min.y - b.min.y) <= 1e-6 and
-        @abs(a.max.x - b.max.x) <= 1e-6 and @abs(a.max.y - b.max.y) <= 1e-6;
+    return @abs(a.min.x - b.min.x) <= pose_eps and @abs(a.min.y - b.min.y) <= pose_eps and
+        @abs(a.max.x - b.max.x) <= pose_eps and @abs(a.max.y - b.max.y) <= pose_eps;
 }
 
 fn hardRuleViolations(

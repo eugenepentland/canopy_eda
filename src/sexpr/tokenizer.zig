@@ -41,14 +41,24 @@ pub const Token = struct {
 /// their existing dimension/atom meanings.
 pub const SiScale = struct { letter: u8, multiplier: f64, bare: bool };
 
+/// The SI decimal prefixes this tokenizer accepts, named so a table row reads
+/// as its prefix rather than as a bare exponent.
+const kilo: f64 = 1e3;
+const mega: f64 = 1e6;
+const giga: f64 = 1e9;
+const milli: f64 = 1e-3;
+const micro: f64 = 1e-6;
+const nano: f64 = 1e-9;
+const pico: f64 = 1e-12;
+
 pub const si_scales = [_]SiScale{
-    .{ .letter = 'k', .multiplier = 1e3, .bare = true },
-    .{ .letter = 'M', .multiplier = 1e6, .bare = true },
-    .{ .letter = 'G', .multiplier = 1e9, .bare = true },
-    .{ .letter = 'm', .multiplier = 1e-3, .bare = false },
-    .{ .letter = 'u', .multiplier = 1e-6, .bare = true },
-    .{ .letter = 'n', .multiplier = 1e-9, .bare = true },
-    .{ .letter = 'p', .multiplier = 1e-12, .bare = true },
+    .{ .letter = 'k', .multiplier = kilo, .bare = true },
+    .{ .letter = 'M', .multiplier = mega, .bare = true },
+    .{ .letter = 'G', .multiplier = giga, .bare = true },
+    .{ .letter = 'm', .multiplier = milli, .bare = false },
+    .{ .letter = 'u', .multiplier = micro, .bare = true },
+    .{ .letter = 'n', .multiplier = nano, .bare = true },
+    .{ .letter = 'p', .multiplier = pico, .bare = true },
 };
 
 /// Unit letters accepted after a scale letter (or alone): they carry no

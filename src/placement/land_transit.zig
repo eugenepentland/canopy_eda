@@ -60,6 +60,11 @@
 const std = @import("std");
 const pad_shape = @import("pad_shape.zig");
 
+/// Slack in board millimetres on "is this point on the land's copper": a point
+/// this far outside the outline still counts as on it. Distinct from `eps`,
+/// which is this module's degenerate-quantity guard.
+const on_land_eps_mm: f64 = 1e-6;
+
 /// How far off the pad's centre a run's aim may sit and still count as that
 /// pad's own connection (mm).
 ///
@@ -435,7 +440,7 @@ pub fn dirtied(
 /// Is `p` on the land's real copper? Used by callers that must not report a
 /// finding against a point the outline says is not metal.
 pub fn onLand(land: Land, p: [2]f64) bool {
-    return pad_shape.pointDist(land.x0, land.y0, land.x1, land.y1, land.poly, p[0], p[1], 1) <= 1e-6;
+    return pad_shape.pointDist(land.x0, land.y0, land.x1, land.y1, land.poly, p[0], p[1], 1) <= on_land_eps_mm;
 }
 
 const testing = std.testing;

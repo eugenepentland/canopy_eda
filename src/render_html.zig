@@ -1150,7 +1150,7 @@ fn renderGroupedHubSvgs(
     h: HubAnalysis,
 ) !void {
     const ctx = page_render.svg;
-    var buckets: std.StringArrayHashMapUnmanaged(std.ArrayList(PinGroup)) = .empty;
+    var buckets: std.array_hash_map.String(std.ArrayList(PinGroup)) = .empty;
     defer {
         var it = buckets.iterator();
         while (it.next()) |e| e.value_ptr.deinit(allocator);
@@ -1259,7 +1259,7 @@ fn analyzeHub(
 
     // Bucket pin_ids by `(pins ref (group "X") ...)` feature label so each
     // bucket can render as its own SVG with the label as a heading.
-    var buckets: std.StringArrayHashMapUnmanaged(std.ArrayList([]const u8)) = .empty;
+    var buckets: std.array_hash_map.String(std.ArrayList([]const u8)) = .empty;
     defer {
         var it = buckets.iterator();
         while (it.next()) |e| e.value_ptr.deinit(allocator);

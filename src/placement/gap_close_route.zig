@@ -25,6 +25,10 @@ const pad_shape = @import("pad_shape.zig");
 const flat_netlist = @import("../flat_netlist.zig");
 const numeric = @import("../numeric.zig");
 
+/// Endpoint coincidence tolerance in board millimetres: a track end this close
+/// to a pad centre counts as touching it.
+const endpoint_eps_mm: f64 = 1e-6;
+
 const testing = std.testing;
 
 const Part = optimizer.Part;
@@ -94,8 +98,8 @@ fn gapBridgePlacement(arena: std.mem.Allocator, b_side: optimizer.Side) std.mem.
 /// the pads it claims to join.
 fn touchesPoint(tracks: []const Track, x: f64, y: f64) bool {
     for (tracks) |t| {
-        if (@abs(t.x1 - x) < 1e-6 and @abs(t.y1 - y) < 1e-6) return true;
-        if (@abs(t.x2 - x) < 1e-6 and @abs(t.y2 - y) < 1e-6) return true;
+        if (@abs(t.x1 - x) < endpoint_eps_mm and @abs(t.y1 - y) < endpoint_eps_mm) return true;
+        if (@abs(t.x2 - x) < endpoint_eps_mm and @abs(t.y2 - y) < endpoint_eps_mm) return true;
     }
     return false;
 }
