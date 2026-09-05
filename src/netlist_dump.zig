@@ -22,8 +22,8 @@
 //! with an unconnected pin, and no assertion, no ERC rule and no DRC count
 //! moves. Here it is one changed line:
 //!
-//!   netlisp netlist-dump barracuda > base.txt   # built from the base binary
-//!   netlisp netlist-dump barracuda > cand.txt   # …and from the candidate
+//!   netlisp netlist-dump board-a > base.txt   # built from the base binary
+//!   netlisp netlist-dump board-a > cand.txt   # …and from the candidate
 //!   diff -I '^#' base.txt cand.txt              # must be empty
 //!
 //! `#`-prefixed lines carry the wall time and the summary counts, so
@@ -184,10 +184,10 @@ test "netlist-dump CLI parses flags and positionals" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const parsed = try parseArgs(arena, &.{ "--project-dir", "p", "barracuda", "cyclops" });
+    const parsed = try parseArgs(arena, &.{ "--project-dir", "p", "board-a", "board-b" });
     try testing.expectEqualStrings("p", parsed.project_dir);
     try testing.expectEqual(@as(usize, 2), parsed.names.len);
-    try testing.expectEqualStrings("barracuda", parsed.names[0]);
+    try testing.expectEqualStrings("board-a", parsed.names[0]);
     // A dump naming no design, or carrying an unknown flag, is a usage error
     // rather than a silent empty dump that would "pass" any diff.
     try testing.expectError(error.NetlistDumpUsage, parseArgs(arena, &.{"--project-dir"}));

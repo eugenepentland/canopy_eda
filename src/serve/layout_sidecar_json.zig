@@ -1145,7 +1145,7 @@ pub fn parseSavedRoutes(alloc: std.mem.Allocator, v: ?std.json.Value) ?page.Save
 /// evidence tests below.
 const crumb_track_rows =
     "{\"x1\":0,\"y1\":0,\"x2\":4,\"y2\":0,\"w\":0.2,\"net\":\"N\",\"id\":\"seg-line\"}," ++
-    // Exactly the barracuda crumb: a segment dragged onto its own end.
+    // Exactly the board-a crumb: a segment dragged onto its own end.
     "{\"x1\":182.21,\"y1\":93.1,\"x2\":182.21,\"y2\":93.1,\"l\":1,\"w\":0.127,\"net\":\"N\",\"id\":\"seg-zero\"}," ++
     // Sub-micron but not exactly zero — still nothing a fabricator can make.
     "{\"x1\":1,\"y1\":1,\"x2\":1.0004,\"y2\":1.0003,\"w\":0.2,\"net\":\"N\",\"id\":\"seg-sub\"}," ++

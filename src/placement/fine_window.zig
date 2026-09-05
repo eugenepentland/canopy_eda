@@ -1,7 +1,7 @@
 //! Windowed fine-grid local retry — planning for the router's last-resort rescue.
 //!
 //! The whole-board maze grid pitch is `track_width + clearance` (0.254 mm for
-//! barracuda's 0.127 nets) and pads sit off-grid, so an interior pad of a
+//! board-a's 0.127 nets) and pads sit off-grid, so an interior pad of a
 //! fine-pitch package can be impossible to escape at that raster even when the
 //! copper corridor beside it is empty — the hand reference threads such hops on
 //! sub-grid geometry. After every escalate / rip-up phase, the router asks this
@@ -50,7 +50,7 @@ pub const max_window_expansions: usize = 250_000;
 /// sized so an automatic window always gets ONE FULL SWEEP of its own lattice
 /// (60k cells x 2 signal layers = 120k, comfortably inside 250k), so it never
 /// actually binds; a declared 283k-cell window truncates at 44 % of its lattice
-/// instead. Measured on barracuda's `SPI_SCK`: at 250k the maze exhausts the
+/// instead. Measured on board-a's `SPI_SCK`: at 250k the maze exhausts the
 /// budget having never reached the goal — the declaration reads as "no path
 /// exists at 0.05 mm" when what happened was "the search was cut off". So a
 /// declared window gets its full sweep too (`declaredWindowBudget`), and the
@@ -67,7 +67,7 @@ pub fn declaredWindowBudget(layers: usize, cells: usize) usize {
 }
 
 /// Board-scale cell ceiling for the router's quantization-only full-board fine
-/// pass. Barracuda's ~62x25 mm board is ~400k cells at quarter pitch; a
+/// pass. Board A's ~62x25 mm board is ~400k cells at quarter pitch; a
 /// half-million cap admits it while bounding that pass to a small, fixed
 /// multiple of the ordinary whole-board grid.
 pub const max_fine_board_cells: usize = 500_000;
@@ -131,7 +131,7 @@ pub fn windowCells(rect: WindowRect, g: f64) usize {
 /// null when it declared none.
 ///
 /// A declared pitch is an author's statement that this net needs geometry the
-/// adaptive tiers cannot express — barracuda's `SPI_SCK` has a legal detour
+/// adaptive tiers cannot express — board-a's `SPI_SCK` has a legal detour
 /// clearing its obstacles by 0.07-0.20 mm, which no ordering or priority can
 /// help because the lattice cannot put a centerline there. It is honoured as
 /// the FIRST tier so the net gets what it asked for before the defaults.
@@ -173,7 +173,7 @@ fn tierWindows(box: WindowRect, base: f64, declared: ?f64, declared_cap: usize) 
 /// Cell budget for a whole-net window at a pitch the design DECLARED.
 ///
 /// A declared pitch is not a guess — the author asked for it — so it is allowed
-/// a wider window than an automatic retry. Measured 2026-08-05 on barracuda's
+/// a wider window than an automatic retry. Measured 2026-08-05 on board-a's
 /// `SPI_SCK`, the net the `(resolution …)` form was written for: its terminal
 /// box grows to 51.0 x 13.8 mm, which is **283,094 cells** at the 0.05 mm it
 /// declares. At the automatic 60k cap that window was silently dropped, so the
@@ -398,7 +398,7 @@ test "a board-spanning declared window is admitted over-cap on the whole net onl
     placement.maxx = 60;
     placement.maxy = 20;
     // A ~35 mm span at 0.05 mm needs far more cells than an AUTOMATIC retry is
-    // allowed — the exact shape of barracuda's SPI_SCK, which is why the form
+    // allowed — the exact shape of board-a's SPI_SCK, which is why the form
     // was inert on the one net it was written for.
     const a = router.NetPt{ .x = 0, .y = 0, .layer = 0 };
     const b = router.NetPt{ .x = 35, .y = 5, .layer = 0 };

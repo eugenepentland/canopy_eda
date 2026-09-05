@@ -951,10 +951,10 @@ test "route-space CLI selects field and defaults to lattice" {
     var default_args = try parseArgs(testing.allocator, &.{});
     defer default_args.cli.named.deinit(testing.allocator);
     try testing.expectEqualStrings("lattice", default_args.route_space);
-    var field_args = try parseArgs(testing.allocator, &.{ "--route-space", "field", "barracuda" });
+    var field_args = try parseArgs(testing.allocator, &.{ "--route-space", "field", "board-a" });
     defer field_args.cli.named.deinit(testing.allocator);
     try testing.expectEqualStrings("field", field_args.route_space);
-    try testing.expectEqualStrings("barracuda", field_args.cli.named.items[0]);
+    try testing.expectEqualStrings("board-a", field_args.cli.named.items[0]);
 }
 
 // spec: bench-route - a board's completion fraction is its routed share of routable nets, and a board with nothing to route counts complete
@@ -1016,7 +1016,7 @@ test "an unplaced board is listed but not scored" {
 test "json output carries every board and the geomean" {
     const results = [_]BoardResult{
         .{
-            .name = "barracuda",
+            .name = "board-a",
             .ok = true,
             .placed = true,
             .nets = .{ .routed = 86, .total = 90 },
@@ -1036,7 +1036,7 @@ test "json output carries every board and the geomean" {
     var w = std.Io.Writer.fixed(&buf);
     try writeJson(&w, &results);
     const s = w.buffered();
-    try testing.expect(std.mem.indexOf(u8, s, "\"name\":\"barracuda\"") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "\"name\":\"board-a\"") != null);
     try testing.expect(std.mem.indexOf(u8, s, "\"routed\":86") != null);
     try testing.expect(std.mem.indexOf(u8, s, "\"connected_trace_mm\":1100.25") != null);
     try testing.expect(std.mem.indexOf(u8, s, "\"open_trace_mm\":50.25") != null);
@@ -1080,7 +1080,7 @@ test "open trace length is identified by the connectivity oracle's net names" {
 test "json output names the open nets in sorted order" {
     const open = [_][]const u8{ "SPI_SCK", "EN_BUCK6V", "V_3V3A" };
     const results = [_]BoardResult{.{
-        .name = "barracuda",
+        .name = "board-a",
         .ok = true,
         .placed = true,
         .nets = .{ .routed = 88, .total = 91, .open = sortedOpen(testing.allocator, &open) },

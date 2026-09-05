@@ -678,7 +678,7 @@ const NamedLayer = struct { name: []const u8, sig: u8 };
 /// there for the wave's nets (the router's `zoneBlocksPoint`; its gap pass
 /// excludes such layers outright), the terminals force the outer faces back
 /// in, and the wave routes byte-identically to having no layer policy at all —
-/// barracuda's In2.Cu under three rail pours cost real iterations before
+/// board-a's In2.Cu under three rail pours cost real iterations before
 /// anyone measured that. The blocking is pour honesty working; the silence is
 /// the defect, so name WHICH layer is reserved by WHICH pours.
 fn reservedLayerWarning(
@@ -1882,7 +1882,7 @@ test "a wave restricted to a fully poured inner layer warns that the selection i
     const zones = [_]pour.UserZone{.{ .net = "V_3V3A", .layer = 3, .poly = &covering }};
     const ctx = Context{ .placement = p, .zones = &zones };
 
-    // The barracuda shape: a signal wave allowed only onto the poured layer.
+    // The board-a shape: a signal wave allowed only onto the poured layer.
     const waves = [_]env.PlanWave{.{ .name = "spi", .nets = &.{"SIG"}, .allowed_layers = &.{"In2.Cu"} }};
     const plan = try resolve(arena, .{ .route = &waves }, ctx);
     var found: ?Warning = null;

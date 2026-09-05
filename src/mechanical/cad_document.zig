@@ -312,7 +312,7 @@ pub fn write(writer: *std.Io.Writer, document: Document) json_writer.WriteError!
 }
 
 test "blank mechanical document is valid and canonical" {
-    const source = "{\"schema\":\"netlisp-mechanical-v2\",\"boards\":[{\"name\":\"barracuda\",\"z\":5}],\"sketches\":[],\"extrusions\":[]}";
+    const source = "{\"schema\":\"netlisp-mechanical-v2\",\"boards\":[{\"name\":\"board-a\",\"z\":5}],\"sketches\":[],\"extrusions\":[]}";
     var parsed = try parse(std.testing.allocator, source);
     defer parsed.deinit();
     try std.testing.expectEqual(@as(usize, 0), parsed.value.extrusions.len);

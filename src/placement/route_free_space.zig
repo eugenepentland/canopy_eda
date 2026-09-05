@@ -20,7 +20,7 @@ const router = @import("router.zig");
 const Point = [2]f64;
 
 /// Default route-space sampling pitch. It matches the historical Route Lab
-/// field and is 8.8x finer than Barracuda's widest-class 0.4394 mm lattice.
+/// field and is 8.8x finer than Board A's widest-class 0.4394 mm lattice.
 const default_pitch_mm: f64 = 0.05;
 /// Same safety ceiling as a pour field. One attempt owns scratch memory and
 /// releases it before the next leg, so this bounds peak rather than cumulative

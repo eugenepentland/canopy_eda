@@ -56,7 +56,7 @@ pub const Lines = struct {
 ///
 /// The reconciliation is the point. A datasheet θJA is measured on the JEDEC
 /// 2s2p board (76 x 114 mm), so the lumped screen is systematically optimistic
-/// on a smaller board — on barracuda it reads "passive OK" while the
+/// on a smaller board — on board-a it reads "passive OK" while the
 /// board-coupled ladder puts the same board's hottest junction 56 °C past its
 /// limit in still air. Two verdicts printed side by side, one of them wrong,
 /// is worse than either alone: so when a ladder exists it GOVERNS the headline

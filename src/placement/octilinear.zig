@@ -165,7 +165,7 @@ pub fn elbow(a: [2]f64, b: [2]f64, seam: anytype) ?[2]f64 {
     // this costs nothing; it only decides which way the L is folded. It is the
     // same principle as the RF straight-escape reserve, applied to every pad.
     //
-    // Measured on barracuda: taking whichever cleared first cost one net
+    // Measured on board-a: taking whichever cleared first cost one net
     // (`V_3V3_ID`, which failed to close) because early bends near fine-pitch
     // pads consume the lanes their neighbours must escape through.
     var cand = elbows(a, b);

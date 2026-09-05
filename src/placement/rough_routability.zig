@@ -147,7 +147,7 @@ const cut_halo_mm: f64 = 0.2;
 /// 3 % sits in a measured gap, not a guessed one. Priced over the 36-module
 /// corpus (2026-08-10) the accepted soft rounds cost, per net seated:
 /// `straps-mixer` 0.6 %, `bcuda-synth-lmx2595` 1.2 %, `bcuda-lt3045-ldo` 2.8 %,
-/// `straps-synth-lmx2595` 4.5 %, `bcuda-pll-adf4159` 5.3 %, `cyclops-xband-lo`
+/// `straps-synth-lmx2595` 4.5 %, `bcuda-pll-adf4159` 5.3 %, `board-b-xband-lo`
 /// 8.8 %. The first three also moved the layout TOWARD the hand reference (or
 /// left it alone) — `bcuda-lt3045-ldo` gained 7.2 style and 14.3 area points —
 /// while the last three all moved it away, costing 2.2, 1.7 and 6.0 style

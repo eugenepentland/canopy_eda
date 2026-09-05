@@ -55,7 +55,7 @@ pub const NetRule = struct {
     /// adaptive default). A hand places exact geometry; the maze must put a
     /// centerline on a lattice, so a net whose only legal path clears its
     /// obstacles by less than the grid pitch cannot be routed at ANY ordering
-    /// or priority — barracuda's `SPI_SCK` has a legal detour clearing by
+    /// or priority — board-a's `SPI_SCK` has a legal detour clearing by
     /// 0.07-0.20 mm that a 0.11 mm raster provably cannot represent. Declaring
     /// `(net-class … (resolution 0.05))` buys that net a finer window; the cost
     /// is paid only by nets that ask.

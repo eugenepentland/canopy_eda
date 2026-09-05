@@ -668,9 +668,9 @@ test "parseBindAddress accepts an ip literal and refuses anything else" {
 
 // spec: Web Server - the retired /pcb-route-lab page 302-redirects to the /pcb-layout page for the same design
 test "retired Route Lab path redirects to the PCB layout page" {
-    const loc = try routeLabLocation(std.testing.allocator, "barracuda");
+    const loc = try routeLabLocation(std.testing.allocator, "board-a");
     defer std.testing.allocator.free(loc);
-    try std.testing.expectEqualStrings("/pcb-layout/barracuda", loc);
+    try std.testing.expectEqualStrings("/pcb-layout/board-a", loc);
 }
 
 // spec: Web Server - the live scene graph is answered only for the design it was pushed for

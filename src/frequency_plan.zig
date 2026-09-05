@@ -819,14 +819,14 @@ fn warning(context: *Context, screen_id: Screen, comptime fmt: []const u8, args:
 
 const parser = @import("sexpr/parser.zig");
 
-/// The real Barracuda plan: HMC733 swept X-band source behind a 12.9 GHz
+/// The real Board A plan: HMC733 swept X-band source behind a 12.9 GHz
 /// filter pair, fixed LMX2595 LO into a Marki MM1-0626 mixer, 50-1500 MHz IF
 /// through the 6 GHz low-pass pair. `lo_hz` is the one number the release has
 /// an open conflict over — 10.95 GHz per the architecture, 10.00 GHz per a
 /// firmware note — so the fixture takes it as an argument.
-fn barracudaSpec(lo_hz: f64, mode: Mode) Spec {
+fn boardASpec(lo_hz: f64, mode: Mode) Spec {
     return .{
-        .name = "Barracuda Band 1",
+        .name = "Board A Band 1",
         .mode = mode,
         .mode_declared = true,
         .plan = .{
@@ -910,12 +910,12 @@ const Run = struct {
 };
 
 // spec: frequency-plan - the required RF window is checked against the delivered passband, so a fixed LO that closes the commanded band passes and one 950 MHz lower fails naming the uncovered sub-interval and the output frequencies it costs
-test "band closure decides the Barracuda LO between 10.95 and 10.00 GHz" {
+test "band closure decides the Board A LO between 10.95 and 10.00 GHz" {
     const allocator = std.testing.allocator;
 
     var good = Run{};
     defer good.deinit(allocator);
-    const closes = try good.go(allocator, barracudaSpec(10.95e9, .gate));
+    const closes = try good.go(allocator, boardASpec(10.95e9, .gate));
     try std.testing.expectEqual(Outcome.screened, closes.outcome);
     try std.testing.expectEqual(@as(usize, 1), closes.plans.len);
     const window = closes.plans[0].rf;
@@ -928,7 +928,7 @@ test "band closure decides the Barracuda LO between 10.95 and 10.00 GHz" {
 
     var bad = Run{};
     defer bad.deinit(allocator);
-    const misses = try bad.go(allocator, barracudaSpec(10.0e9, .gate));
+    const misses = try bad.go(allocator, boardASpec(10.0e9, .gate));
     const short = misses.plans[0].rf;
     try std.testing.expect(!short.covered);
     try std.testing.expect(short.uncovered_high.isEmpty());
@@ -951,11 +951,11 @@ test "advisory and gate modes differ only in severity" {
     const allocator = std.testing.allocator;
     var advisory = Run{};
     defer advisory.deinit(allocator);
-    const soft = try advisory.go(allocator, barracudaSpec(10.0e9, .advisory));
+    const soft = try advisory.go(allocator, boardASpec(10.0e9, .advisory));
 
     var gate = Run{};
     defer gate.deinit(allocator);
-    const hard = try gate.go(allocator, barracudaSpec(10.0e9, .gate));
+    const hard = try gate.go(allocator, boardASpec(10.0e9, .gate));
 
     try std.testing.expectEqual(Mode.advisory, soft.mode);
     try std.testing.expectEqual(Status.warn, verdictOf(soft, .band_closure).?.status);
@@ -970,7 +970,7 @@ test "spur classification separates co-channel, rejected and out-of-band product
     const allocator = std.testing.allocator;
     var run = Run{};
     defer run.deinit(allocator);
-    const report = try run.go(allocator, barracudaSpec(10.95e9, .gate));
+    const report = try run.go(allocator, boardASpec(10.95e9, .gate));
     const plan = report.plans[0];
 
     // Two leakage rows first, then the 3x3 square, in (m, then n) order.
@@ -1015,7 +1015,7 @@ test "a product that crosses DC inside the sweep is split and lands in band" {
     const allocator = std.testing.allocator;
     // A 1000 MHz LO delivering 50-700 MHz sweeps RF over 1050-1700 MHz, so
     // 3·RF − 4·LO runs −850 … +1100 MHz: the sign changes inside the sweep.
-    var spec = barracudaSpec(10.95e9, .gate);
+    var spec = boardASpec(10.95e9, .gate);
     spec.mixer.lo.frequency_hz = 1000e6;
     spec.plan.output_band = .{ .lo_hz = 50e6, .hi_hz = 700e6 };
     spec.plan.source = .{};
@@ -1048,7 +1048,7 @@ test "spur-table levels are asserted only where they are declared" {
     const nodes_over = try parser.parse(allocator, "(product 2 2 -55)");
     defer parser.freeNodes(allocator, nodes_over);
 
-    var at_limit = barracudaSpec(10.95e9, .gate);
+    var at_limit = boardASpec(10.95e9, .gate);
     at_limit.spurs.in_band_limit_dbc = -60;
     at_limit.spurs.limit_declared = true;
     at_limit.spurs.table_nodes = nodes_at_limit;
@@ -1076,7 +1076,7 @@ test "spur-table levels are asserted only where they are declared" {
     // level screen is emitted and the coverage warning says so plainly.
     var run_none = Run{};
     defer run_none.deinit(allocator);
-    const bare = try run_none.go(allocator, barracudaSpec(10.95e9, .gate));
+    const bare = try run_none.go(allocator, boardASpec(10.95e9, .gate));
     try std.testing.expectEqual(@as(?Verdict, null), verdictOf(bare, .spur_levels));
     try std.testing.expect(!productOf(bare.plans[0], 2, 2).level.declared);
     try std.testing.expectEqual(LevelVerdict.unclaimed, productOf(bare.plans[0], 2, 2).level.verdict);
@@ -1095,7 +1095,7 @@ test "the diagonal count follows the band it is taken over" {
         .{ .band = .{ .lo_hz = 800e6, .hi_hz = 1000e6 }, .count = 0, .clean_hz = 500e6 },
     };
     for (cases) |case| {
-        var spec = barracudaSpec(10.95e9, .gate);
+        var spec = boardASpec(10.95e9, .gate);
         spec.plan.output_band = case.band;
         var run = Run{};
         defer run.deinit(allocator);
@@ -1116,7 +1116,7 @@ test "the image band is reported rejected only when something declared removes i
     const allocator = std.testing.allocator;
     var run = Run{};
     defer run.deinit(allocator);
-    const report = try run.go(allocator, barracudaSpec(10.95e9, .gate));
+    const report = try run.go(allocator, boardASpec(10.95e9, .gate));
     const image = report.plans[0].image;
     // 10.95 − 1.5 … 10.95 − 0.05 GHz, which overlaps the 10.5-12.9 GHz
     // delivered passband and sits under the 12.9 GHz RF low-pass: nothing
@@ -1127,7 +1127,7 @@ test "the image band is reported rejected only when something declared removes i
     try std.testing.expectEqual(Status.fail, verdictOf(report, .image_band).?.status);
 
     // Add an RF high-pass above the image and it is rejected.
-    var filtered = barracudaSpec(10.95e9, .gate);
+    var filtered = boardASpec(10.95e9, .gate);
     filtered.plan.filters.rf_high_pass_hz = 10.95e9;
     var run_hp = Run{};
     defer run_hp.deinit(allocator);
@@ -1139,7 +1139,7 @@ test "the image band is reported rejected only when something declared removes i
 // spec: frequency-plan - each declaration publishes a typed report whose plans concatenate back into assertion order, one verdict per screen matching that assertion's pass/warn/fail, and (sideband either) publishes both sidebands high side first
 test "the typed report agrees with the assertion text it accompanies" {
     const allocator = std.testing.allocator;
-    var spec = barracudaSpec(10.95e9, .gate);
+    var spec = boardASpec(10.95e9, .gate);
     spec.mixer.sideband = .either;
     var run = Run{};
     defer run.deinit(allocator);
@@ -1179,7 +1179,7 @@ test "the typed report agrees with the assertion text it accompanies" {
 // spec: frequency-plan - evaluating one declaration twice produces byte-identical assertions and structurally identical reports, so the analysis is a pure function of what was declared
 test "evaluation is deterministic" {
     const allocator = std.testing.allocator;
-    var spec = barracudaSpec(10.95e9, .gate);
+    var spec = boardASpec(10.95e9, .gate);
     spec.mixer.sideband = .either;
     spec.spurs.max_order = 5;
 
@@ -1241,11 +1241,11 @@ test "the parser holds its documented bounds" {
     }
 }
 
-// spec: frequency-plan - the authored Barracuda declaration round-trips through the parser into the same plan the fixture screens, with SI-suffixed frequencies and signed dBm resolved
+// spec: frequency-plan - the authored Board A declaration round-trips through the parser into the same plan the fixture screens, with SI-suffixed frequencies and signed dBm resolved
 test "the authored form parses into the screened plan" {
     const allocator = std.testing.allocator;
     const text =
-        \\(frequency-plan "Barracuda Band 1"
+        \\(frequency-plan "Board A Band 1"
         \\  (mode advisory)
         \\  (output-band 50M 1500M)
         \\  (source (range 10G 20G) (delivered 10.5G 12.9G))
@@ -1260,7 +1260,7 @@ test "the authored form parses into the screened plan" {
     defer parser.freeNodes(allocator, nodes);
     const spec = try parse(nodes[0].asList().?);
 
-    try std.testing.expectEqualStrings("Barracuda Band 1", spec.name);
+    try std.testing.expectEqualStrings("Board A Band 1", spec.name);
     try std.testing.expectEqual(Mode.advisory, spec.mode);
     try std.testing.expectEqual(@as(f64, 10.95e9), spec.mixer.lo.frequency_hz);
     try std.testing.expectEqual(@as(f64, 21), spec.mixer.lo.drive_dbm);
@@ -1282,7 +1282,7 @@ test "the authored form parses into the screened plan" {
 // spec: frequency-plan - a low-side plan under an LO below the commanded band is refused as unrealizable rather than screened against a negative RF window
 test "an unrealizable sideband is refused rather than screened" {
     const allocator = std.testing.allocator;
-    var spec = barracudaSpec(10.95e9, .gate);
+    var spec = boardASpec(10.95e9, .gate);
     spec.mixer.sideband = .low;
     spec.mixer.lo.frequency_hz = 1000e6;
     spec.plan.source = .{};

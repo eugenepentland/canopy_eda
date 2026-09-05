@@ -242,7 +242,7 @@ const differential_fixture = struct {
     };
 };
 
-/// A one-net design carrying `classes`, with barracuda's real four-layer
+/// A one-net design carrying `classes`, with board-a's real four-layer
 /// buildup when `stackup` is true.
 fn fixture(classes: []const env.NetClassSpec, stackup: bool) DesignBlock {
     return .{

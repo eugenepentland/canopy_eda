@@ -170,12 +170,12 @@ fn padGatewayFan(
 /// Pull a leg's copper off a pad-buried start. `stampStubOcc`/`stampViaOcc` mark
 /// this net's clearance HALO, not just its centreline, so Dijkstra can seed a leg
 /// at a node a FOREIGN land swallows — and `emitSeg` then draws the run's first
-/// segment out of that land (barracuda's `LMX_VTUNE` over `U17`'s ground pad, and
+/// segment out of that land (board-a's `LMX_VTUNE` over `U17`'s ground pad, and
 /// three rail stubs grazing their neighbours' ground pads).
 ///
 /// Refusing the seed is the obvious fix and the wrong one: `tryMazeTerminalTree`
 /// gives up on the WHOLE net when one leg cannot reach the net's copper, which
-/// measured at nine lost nets and double the route time on barracuda. So keep the
+/// measured at nine lost nets and double the route time on board-a. So keep the
 /// route and shorten the copper — trim the source-end segment back to its first
 /// clearing point (`trimStub` walked from the far end). The leg stays routed, the
 /// illegal metal is gone, and the residue is a sub-millimetre gap the (probed)
@@ -354,7 +354,7 @@ pub const OctiJoin = struct {
     /// (never a candidate, so `elbow` returns before probing it) and the
     /// direct-segment fallback taken when neither elbow clears — and this is
     /// the join every pad centre and plane-via site leaves the board through.
-    /// On barracuda that drew `V_1V8A` out of `adf4159/C116.1` straight at the
+    /// On board-a that drew `V_1V8A` out of `adf4159/C116.1` straight at the
     /// cap's own GND pad, 0.094 mm into a 0.127 mm rule. An elbow leg that
     /// `clear` already approved is untouched (that test is strictly stronger
     /// than this one), so only the unprobed paths change: they now stop at the
@@ -558,7 +558,7 @@ pub const BudgetInput = struct {
     /// search expands far more nodes for the same path, so a guided leg on the
     /// whole-board budget runs out of expansions on a path an unguided leg
     /// finds easily: the guide is meant to shape the route, not to make it fail.
-    /// Measured on barracuda, where guiding a net set cost nets it had routed
+    /// Measured on board-a, where guiding a net set cost nets it had routed
     /// unguided. Guided legs therefore take the targeted floor, like escapes.
     guided: bool = false,
 };
@@ -586,7 +586,7 @@ pub fn expansionBudget(in: BudgetInput) usize {
 /// The `occ == net` scan is deliberately NOT filtered by `foreignPadAt`, though a
 /// stamped node CAN be illegal copper (the halo reaches past the centreline).
 /// Dropping those sources does remove the resulting violations, but measured on
-/// barracuda it costs NINE connected nets and doubles the route time:
+/// board-a it costs NINE connected nets and doubles the route time:
 /// `tryMazeTerminalTree` fails the whole net when one leg cannot reach the net's
 /// existing copper, and those failures cascade into rip-up escalation. Seeding
 /// only the legal marks when any exist measured identical — the legs that die
@@ -795,7 +795,7 @@ pub fn dijkstra(
     // what makes the guarantee hold for all of them. The trim used to live at
     // the terminal tree's own call site, so every OTHER pass — the pour
     // terminal (`routeNetToZone`), the gap hops, the via-seeded retries — had
-    // none. Measured on barracuda: two `V_5VA` legs out of `routeNetToZone`
+    // none. Measured on board-a: two `V_5VA` legs out of `routeNetToZone`
     // ended on grid nodes inside a `hmc733` ground land and an `ldo_3v3a`
     // divider pad, and no later pass removed them.
     const start = trimBuriedStart(ctx, net, source, prior, tracks, vias.items);
@@ -1197,7 +1197,7 @@ test "trimBuriedStart pulls a leg's first segment out of the foreign pad it star
     const grid = Grid{ .ox = 0, .oy = 0, .g = 0.254, .nx = 20, .ny = 20 };
     const nodes = grid.nx * grid.ny;
     // A foreign (net 1) land swallowing node (2,2) and reaching a little to its
-    // right — barracuda's `U17` ground pad beside the `LMX_VTUNE` escape. The
+    // right — board-a's `U17` ground pad beside the `LMX_VTUNE` escape. The
     // halo of net 0's own copper still marks (2,2) as net 0's, so Dijkstra may
     // seed there; the run it draws must not start inside the land.
     const pad = [_]PadObs{.{
@@ -1257,7 +1257,7 @@ test "dijkstra pulls a leg off the foreign land its source was buried in" {
     const grid = Grid{ .ox = 0, .oy = 0, .g = 0.254, .nx = 20, .ny = 20 };
     const nodes = grid.nx * grid.ny;
     // A foreign (net 1) land swallowing node (2,2) but stopping short of (3,2),
-    // so the maze can still step right out of it. This is the shape barracuda's
+    // so the maze can still step right out of it. This is the shape board-a's
     // poured `V_5VA` hit: `routeNetToZone` seeds from the net's own `occ` marks,
     // `stampStubOcc` painted (2,2) net 0 as part of an earlier leg's clearance
     // HALO, and the pass does no trimming of its own.
@@ -1360,7 +1360,7 @@ test "weldToNetCopper refuses a bridge that crosses a foreign pad" {
     const grid = Grid{ .ox = 0, .oy = 0, .g = 0.254, .nx = 20, .ny = 20 };
     const nodes = grid.nx * grid.ny;
     // A foreign (net 1) pad sitting between the weld node (4,3) and the prior
-    // copper at row 2 — barracuda's LDO ground paddle, which the unprobed
+    // copper at row 2 — board-a's LDO ground paddle, which the unprobed
     // bridge used to be drawn straight across.
     const pad = [_]PadObs{.{
         .x0 = grid.worldX(4) - 0.2,
@@ -1397,7 +1397,7 @@ test "OctiJoin trims a join that aims at a two-pad passive's sibling pad" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    // barracuda's `adf4159/C116` to scale: a 0402-class cap turned 90 degrees,
+    // board-a's `adf4159/C116` to scale: a 0402-class cap turned 90 degrees,
     // so its own pad (net 0) and its GND pad (net 1) sit 0.64 mm apart in y with
     // 0.230 mm half-heights. The maze's entry node for the V_1V8A pad lies
     // straight up the inter-pad lane, so the join is already octilinear — the

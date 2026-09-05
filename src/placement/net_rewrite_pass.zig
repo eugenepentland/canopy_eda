@@ -5,7 +5,7 @@
 //!
 //!   • **Scope.** In a scoped re-route an unselected net's copper is the
 //!     caller's retained board, echoed back "unchanged". Rewriting it returns a
-//!     different board than the caller submitted, and did — a scoped barracuda
+//!     different board than the caller submitted, and did — a scoped board-a
 //!     re-route once straightened and amputated out-of-scope copper and reopened
 //!     six connected nets.
 //!   • **Diff pairs.** A pair's two legs move in lock-step; a pass that rewrites
@@ -37,7 +37,7 @@ const Board = router.CleanupBoard;
 /// fair game (the whole-board route). In a SCOPED route every unselected net's
 /// copper is the caller's retained board (`stampExistingCopper` echoes it into
 /// the result "unchanged") — so rewriting it here would return a different
-/// board than the caller submitted, and did: a scoped barracuda re-route
+/// board than the caller submitted, and did: a scoped board-a re-route
 /// straightened/amputated out-of-scope copper and reopened six connected nets.
 /// Foreign copper (net < 0) is likewise retained caller copper in a scoped run,
 /// and is refused BEFORE the selection is consulted so an unnetted track is

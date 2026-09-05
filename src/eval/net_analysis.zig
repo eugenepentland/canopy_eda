@@ -93,7 +93,7 @@ pub fn isGroundName(name: []const u8) bool {
 /// `CHASSIS_GND` — the chassis/shield reference: a connector's metal shell, a
 /// shield can, an enclosure stud. Deliberately ABSENT from `ground_tokens`,
 /// and that absence is the point. `ground_tokens` is what the plane stitcher,
-/// the pour and the DRC judge a board by, and on a design like `barracuda-base`
+/// the pour and the DRC judge a board by, and on a design like `board-a-base`
 /// the chassis node is an ISOLATION BARRIER — the RJ45's metal shell reaches
 /// system ground only through a 1 nF / 2 kV capacitor and a 1 M bleeder. Listing
 /// it as a ground token would pour it into the ground plane and stitch the
@@ -109,7 +109,7 @@ pub const chassis_ground = "CHASSIS_GND";
 /// net see?" must say 0 V: the barrier components are specified against the
 /// system ground they bridge to, and with no potential on either side the
 /// release gate could not prove their ratings at all — `C_chassis`/`R_chassis`
-/// on `barracuda-base` were unprovable for that reason alone. The kilovolt
+/// on `board-a-base` were unprovable for that reason alone. The kilovolt
 /// rating on that capacitor is a surge/HiPot spec; this gate models the DC
 /// operating point, where both sides are 0 V.
 pub fn isRatingZeroVolts(name: []const u8) bool {

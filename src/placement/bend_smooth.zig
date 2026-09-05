@@ -94,7 +94,7 @@ const shallow_kink_max = 0.5;
 /// walk) therefore measures metal that is never fabricated, and admits copper
 /// the exact DRC then refuses by up to `emit_sagitta_mm`.
 ///
-/// Measured on barracuda (2026-08-18): `adf4159/ADF_FB_RF_AC`'s smoothed corner
+/// Measured on board-a (2026-08-18): `adf4159/ADF_FB_RF_AC`'s smoothed corner
 /// came out as R = 0.369 mm chords sweeping 22.3° apiece — a 7.0 µm sagitta —
 /// and one of them passed 0.2175 mm from `adf4159/U19` pad 4, a gap of 0.1258
 /// against the 0.127 rule. The circle through that chord's midpoint clears by
@@ -466,7 +466,7 @@ const GeomProbe = struct {
     /// Sampled along the CHORD POLYLINE the emitters draw, not along the ideal
     /// circle. The two differ by up to `emit_sagitta_mm` on the concave side —
     /// the side an obstacle crowding the corner is on — and it is the chords
-    /// that get fabricated (see `emit_sagitta_mm` for the barracuda case this
+    /// that get fabricated (see `emit_sagitta_mm` for the board-a case this
     /// cost). Sampling stays fine enough that the Lipschitz slack (half the
     /// inter-sample spacing) is near a hundredth of the clearance, so a legal
     /// bend is never vetoed by sampling coarseness.
@@ -1277,7 +1277,7 @@ fn arcMid(O: [2]f64, r: f64, start: [2]f64, sweep: f64) [2]f64 {
 /// this polyline as real copper — `straighten` directly, `smoothChain` as the
 /// legs between its arcs — and each one's own probe never sees the change,
 /// because both only probe the shortcuts and arcs THEY choose. That is how
-/// barracuda's CP_FILT run ended up 0.09 mm inside the op-amp's ground pad on a
+/// board-a's CP_FILT run ended up 0.09 mm inside the op-amp's ground pad on a
 /// board every other stage had verified. A collapse the probe refuses simply
 /// keeps its jog.
 pub fn simplifyChain(arena: std.mem.Allocator, raw: Chain, probe: anytype) std.mem.Allocator.Error!Chain {
@@ -2654,7 +2654,7 @@ test "a jog collapse that drags a long run onto a foreign pad is refused" {
     defer arena_i.deinit();
     const arena = arena_i.allocator();
 
-    // barracuda's CP_FILT in miniature: a 4 mm run into the op-amp, ending in a
+    // board-a's CP_FILT in miniature: a 4 mm run into the op-amp, ending in a
     // 0.09 mm pad-entry jog — under half the 0.2 mm width, so the collapse rule
     // wants to slide the joint onto the chain's end point. Doing so tilts the
     // WHOLE 4 mm run, which is what swept it across the neighbouring ground pad.

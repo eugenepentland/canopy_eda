@@ -340,7 +340,7 @@ test "each penalty dimension is monotonically non-increasing" {
 }
 
 // spec: placement/route-score - the display score can trade an additional completed net for geometry and is not an adoption policy
-test "display score can trade a completed net for sixteen vias on Barracuda" {
+test "display score can trade a completed net for sixteen vias on Board A" {
     const fewer = score(.{ .routed = 119, .total = 130, .vias = 0, .trace_mm = 0, .drc_errors = 0 });
     const more = score(.{ .routed = 120, .total = 130, .vias = 16, .trace_mm = 0, .drc_errors = 0 });
     try testing.expect(more < fewer);

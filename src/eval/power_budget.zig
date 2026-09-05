@@ -212,7 +212,7 @@ fn creditExportedRails(
         // same current: `(pin 7 "V_5V75A" (i-typ 0.145) (i-max 0.180))` on J1
         // IS this port's export, and it has a physical pad the current solve
         // can place. Crediting the port as well counted the rail's exit twice
-        // — barracuda's V_5V75A demanded 0.641 A typical where the board draws
+        // — board-a's V_5V75A demanded 0.641 A typical where the board draws
         // 0.496 A — and the phantom half had no pad of its own.
         if (passThroughLoadOn(tally, root)) continue;
         const path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ export_terminal_prefix, port.name });

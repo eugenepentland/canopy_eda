@@ -694,7 +694,7 @@ test "closeGaps refuses a slot narrower than its clearance and clears the one it
 /// spare, but both divisor-2 nodes sit 0.2265 mm from a wall tip — inside the
 /// 0.254 mm the exact clearance test demands — and every diagonal between
 /// them passes at 0.239 mm or closer, so no legal crossing is representable
-/// at the standard gap pitch. This is barracuda's J1 contention in miniature:
+/// at the standard gap pitch. This is board-a's J1 contention in miniature:
 /// the corridor is real, the lattice just has no lane in it.
 fn offLatticeSlotWall(arena: std.mem.Allocator) std.mem.Allocator.Error![]const Track {
     const out = try arena.alloc(Track, 4);

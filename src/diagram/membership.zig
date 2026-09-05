@@ -270,7 +270,7 @@ fn emptyAttachBlock(name: []const u8) DesignBlock {
 
 // spec: diagram/membership - Excludes power-classified nets so a power-producer sub-block is not adopted into a consuming section
 test "computeSubBlockAttachments keeps a power producer out of a consuming section" {
-    // Mirrors cyclops-analog: the "1.8 V LDO" section *consumes* V_RF_3P3
+    // Mirrors board-b-analog: the "1.8 V LDO" section *consumes* V_RF_3P3
     // via `(port "V_RF_3P3" in power 3.3)`, while the buck33 sub-block
     // *produces* that rail. A separate USB section consumes a buck-
     // independent signal from the usb sub-block. Adoption must follow the
@@ -301,7 +301,7 @@ test "computeSubBlockAttachments keeps a power producer out of a consuming secti
         .{ .a = "usb/DP", .b = "USB_DP" }, // usb drives the signal
     };
 
-    var block = emptyAttachBlock("cyclops-analog");
+    var block = emptyAttachBlock("board-b-analog");
     block.sections = &sections;
     block.sub_blocks = &sub_blocks;
     block.net_ties = &net_ties;

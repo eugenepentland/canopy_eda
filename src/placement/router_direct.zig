@@ -1358,14 +1358,14 @@ pub const direct_span_mm: f64 = 6.0;
 pub const direct_probe_budget: usize = 200_000;
 /// A failed hard guide's immediate whole-board fine retry runs inline before
 /// lower-priority nets get a turn. Keep its off-grid escape experiment small:
-/// Barracuda's first failed guide spent the entire 270-second board allowance
+/// Board A's first failed guide spent the entire 270-second board allowance
 /// in this one retry at the ordinary 200k ceiling. The maze still gets its
 /// bounded fine-grid search; only the multiplicative exact-dogleg fallback is
 /// shortened here.
 pub const immediate_fine_probe_budget: usize = 8_192;
 /// Under a whole-board deadline, a hard waypoint is a quick authored attempt,
 /// not permission to monopolize the transaction. A valid coarse guide needs
-/// a bounded allowance for every leg; Barracuda's seven-leg control guides
+/// a bounded allowance for every leg; Board A's seven-leg control guides
 /// exhausted both the former 512-probe ceiling and a later 2,048-probe ceiling
 /// before reaching their final pad. 8,192 matches the already-bounded
 /// immediate fine retry and lets the cheap exact attempt finish before the
@@ -1767,7 +1767,7 @@ const rebuildCopperIndex = router_ctx.rebuildCopperIndex;
 const viaAllowed = router_ctx.viaAllowed;
 const viaClearsPadDrills = router_ctx.viaClearsPadDrills;
 
-/// A routing context carrying ONE through pad on net 1 — the barracuda shape:
+/// A routing context carrying ONE through pad on net 1 — the board-a shape:
 /// `buck_6v/U22` pad 5, a 0.30 mm land over a 0.20 mm bore, on the same rail
 /// (`V_6VA`) the router is dropping barrels for. The copper tests all skip the
 /// routing net's own pads, so this pad is invisible to everything except the
@@ -1793,7 +1793,7 @@ test "a via site beside a same-net through pad is refused by the bore wall" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    // The measured barracuda site: a 0.20 mm bore at (5,5) and a 0.30 mm barrel
+    // The measured board-a site: a 0.20 mm bore at (5,5) and a 0.30 mm barrel
     // 0.202 mm away, a −0.048 mm wall against the design's 0.200 mm rule.
     const obs = [_]PadObs{.{ .x0 = 4.85, .y0 = 4.85, .x1 = 5.15, .y1 = 5.15, .net = 1, .thru = true }};
     const holes = [_]pad_exit.Hole{.{ .x = 5, .y = 5, .r = 0.1 }};

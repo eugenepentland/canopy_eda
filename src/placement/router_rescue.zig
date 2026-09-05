@@ -148,7 +148,7 @@ const shape_max_sites: usize = 4000;
 /// Radius (mm) of the fine disc of via candidates offered around EACH terminal,
 /// and the pitch it is sampled at. See `shapeTerminalSites` for the measurement
 /// that sets them: a terminal's own free-space pocket is 0.2-3.6 mm across on
-/// barracuda's refusals, so a candidate has to be sampled at well under a
+/// board-a's refusals, so a candidate has to be sampled at well under a
 /// millimetre and within a couple of millimetres of the pad to land in one.
 const shape_term_radius_mm: f64 = 2.0;
 pub const shape_term_pitch_mm: f64 = 0.2;
@@ -162,7 +162,7 @@ const shape_gate_ns: i128 = 15 * clock.ns_per_s;
 /// after it (see `closeOneGap`).
 ///
 /// Measured, and deliberately above the longest join the maze is known to close
-/// here: barracuda's `V_1V8A` closes ONLY through its 37 mm whole-net gate join,
+/// here: board-a's `V_1V8A` closes ONLY through its 37 mm whole-net gate join,
 /// so a threshold below that would reorder a hop the raster demonstrably wins.
 /// The residual joins the maze never closes on that board start at 42.5 mm
 /// (`SPI_LMX_CSN`), run through 49.6 (`TXDATA_ADF`) and end at 55.3
@@ -200,7 +200,7 @@ pub fn shapeTierAffordable(ctx: *const Ctx, nets_left: usize) bool {
 /// sizes a corridor raster to the cells it is willing to allocate, and for a
 /// 1 mm gap in congested copper that box leaves nowhere to detour and no room
 /// for a legal via site — which is what made `found no channel` the dominant
-/// verdict on barracuda's first census. The mesh has no cells to allocate: its
+/// verdict on board-a's first census. The mesh has no cells to allocate: its
 /// cost follows the obstacle count, and a whole board's busiest layer meshes in
 /// 1.41 s. So the bow allowance is sized from the hop's own geometry, and the
 /// only hard limit is the board, past which there is nothing to route through.
@@ -549,7 +549,7 @@ pub fn shapeViaSites(
 /// the ones `directViaClear` rejects, so the surviving supply retreats to open
 /// board.
 ///
-/// Measured on barracuda (2026-08-17), on every `found no channel` hop: the
+/// Measured on board-a (2026-08-17), on every `found no channel` hop: the
 /// nearest site OFFERED was 1.5-4.6 mm from the terminal and the terminal's own
 /// reachable free-space pocket (0.2-3.6 mm across) held NO via node at all,
 /// while a 0.1 mm probe of the same 2 mm disc found 12-193 legal barrels. With
@@ -1369,7 +1369,7 @@ fn gateAccepts(run: FineRescueRun, net_i: usize, keep_t: usize, keep_v: usize) s
 /// `escapeDirectRescue` sweeps the direct lattice unbounded for any net whose
 /// reserve is armed, on the premise that those are the few an author declared
 /// RF — false here, where the reserve is SYNTHETIC. Measured 2026-08-05 on
-/// barracuda: one still-failing net's four windows burnt 4.30 M probes / 21.9 s
+/// board-a: one still-failing net's four windows burnt 4.30 M probes / 21.9 s
 /// and rescued nothing, 88 % of the board's routing time (15.9 M / 78 s for two
 /// such nets under a topology plan). Only THIS context carries the ceiling, so
 /// every whole-board route is untouched.
@@ -1773,7 +1773,7 @@ test "the shape tier's via sites are anchored on the terminals, not only on the 
     const sites = try shapeViaSites(arena, run, rect, from, to);
     // Both terminals carry a dense local supply — the layer change a sealed
     // pocket needs can only come from a candidate inside the pocket, and the
-    // pockets measured on barracuda are a fraction of the lattice pitch across.
+    // pockets measured on board-a are a fraction of the lattice pitch across.
     const s_from = nearSiteStats(sites, from, 1.0);
     const s_to = nearSiteStats(sites, to, 1.0);
     try testing.expect(s_from.near <= shape_term_pitch_mm);

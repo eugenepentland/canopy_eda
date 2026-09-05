@@ -12,7 +12,7 @@
 //! pour is joined by the pour whether or not a single track comes back: strip
 //! its tracks and the net stays WHOLE, because `stripNets` only ever removes
 //! tracks and vias — the zones ride through the transaction untouched. Measured
-//! on barracuda's `auto-full-v2`: `GND` sits in two islands behind a 2.3 mm
+//! on board-a's `auto-full-v2`: `GND` sits in two islands behind a 2.3 mm
 //! bridge the maze cannot walk, the LDO pocket's bottom layer is held by 44
 //! elements of `V_6VA` (poured on both `B.Cu` and `In2.Cu`), and the standard
 //! tier nominates only the two short control stubs beside it — which is exactly
@@ -219,7 +219,7 @@ pub const Seed = struct {
 pub const Limits = struct {
     /// Most nets one cheap transaction vacates. Each has to come back whole in
     /// the same transaction, so a wide subset is both slow and unlikely to
-    /// survive the gate. Three is the measured shape of the barracuda case: one
+    /// survive the gate. Three is the measured shape of the board-a case: one
     /// poured rail plus the two control stubs beside it.
     max_nets: usize = 3,
     /// Most elements a net may carry and still count as a `short_stub`. Above
@@ -237,7 +237,7 @@ pub const Limits = struct {
     /// the RISK of moving a net (it stays whole with its tracks gone); it does
     /// not discount the WORK.
     ///
-    /// Measured on barracuda: the pocket holds `V_6VA` (44 elements, poured) and
+    /// Measured on board-a: the pocket holds `V_6VA` (44 elements, poured) and
     /// `V_5VA` (53, poured) beside two 2-4 element control stubs. Ranked on
     /// cheapness alone the two rails fill a 3-net cap and squeeze the stubs out,
     /// and the transaction then has to re-lay ~100 elements — `V_5VA` came back
@@ -282,7 +282,7 @@ pub const Decision = rank_admit.Decision(Nomination, Refused);
 /// unconditionally above. And for a poured net the guard has nothing to protect
 /// anyway: its connectivity does not depend on the tracks, so the transaction
 /// cannot leave it worse off than a pour-fed rail already is. Applying the rule
-/// to poured copper would refuse barracuda's `V_6VA` — class `power`,
+/// to poured copper would refuse board-a's `V_6VA` — class `power`,
 /// `(priority 3)`, against an unclassed `GND` seed — which is the only net whose
 /// removal closes that board.
 ///
@@ -332,7 +332,7 @@ pub fn judgeAll(f: NetFacts, seeds: []const Seed, lim: Limits) Verdict {
     // being taken away — it is re-laid by the constructor its own class
     // declared, inside a transaction that rolls back whole unless the pair
     // comes back coupled. A declared pair almost always outranks the stuck
-    // control net whose corridor it seals (barracuda: `lvds-ref` priority 5
+    // control net whose corridor it seals (board-a: `lvds-ref` priority 5
     // over `control` priority 2), so applying the rule here would refuse every
     // pair negotiation on principle.
     if (f.protected.diff_pair == .recouplable) return .{ .accept = .pair_recouple };
@@ -485,7 +485,7 @@ test "the guarded classes are refused whatever their cheapness" {
 // spec: placement/vacate-policy - a diff-pair member is nominated as pair_recouple only when the caller will re-lay the whole pair coupled, and the pair's other protections still refuse it
 test "a recouplable pair is nominated and an unclaimed one stays refused" {
     const seed = Seed{ .net_i = 1, .priority = 2 };
-    // barracuda's shape: `lvds-ref` priority 5 sealing a `control` priority 2
+    // board-a's shape: `lvds-ref` priority 5 sealing a `control` priority 2
     // net's corridor, 18 elements across the leg — far past `stub_max_elements`.
     const leg = NetFacts{
         .net_i = 4,

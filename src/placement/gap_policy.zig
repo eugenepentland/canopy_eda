@@ -159,7 +159,7 @@ pub const GapJudge = struct {
 ///
 /// The gap raster is otherwise the WHOLE board re-gridded at `grid_divisor`, so
 /// each finer rung costs the square of the divisor over the entire placement:
-/// on barracuda divisor 4 is ~433k cells per layer, and a divisor-8 rung built
+/// on board-a divisor 4 is ~433k cells per layer, and a divisor-8 rung built
 /// that way ran for over 50 minutes without returning and had to be removed.
 /// But a hop that fails on a lattice problem needs resolution only in its OWN
 /// corridor — the copper twenty millimetres away is irrelevant to it. Bounding
@@ -285,7 +285,7 @@ pub const TerminalVia = enum {
     banned,
     /// Only inside a THROUGH-HOLE terminal; an SMD terminal is free.
     ///
-    /// Measured on barracuda's J1, a 0.635 mm-pitch bottom-side board-to-board
+    /// Measured on board-a's J1, a 0.635 mm-pitch bottom-side board-to-board
     /// row: the lane between two adjacent pads is 0.285 mm, narrower than a
     /// minimum track plus two clearances (0.381 mm), so nothing can leave such
     /// a pad sideways — the only exit is a via at the pad. Every net that IS
@@ -299,7 +299,7 @@ pub const TerminalVia = enum {
     ///
     /// It is nonetheless OPT-IN, because it is not free: made the default for
     /// every hop of a whole `close_open_nets` pass it shifts which copper wins
-    /// each contested channel from round 0 onward, and on barracuda's pour
+    /// each contested channel from round 0 onward, and on board-a's pour
     /// priority-6 fixture that cost a net (87/90 → 86/90, `V_6VA` newly open)
     /// while the DRC gate held at 11/8. So the escape is offered to the passes
     /// that need it — a targeted re-route of one stuck net — and the ordinary
@@ -335,7 +335,7 @@ pub const rip_tiers: usize = ripup_reaches.len + 1;
 /// The multi-net rip is deliberately NOT part of a hop's first attempt. It is
 /// an extra maze sweep on every hop that fails, and on a board where most
 /// failing hops are failing for reasons no rip addresses that is pure cost —
-/// measured on barracuda, running the unions up front added ~50% to the pass's
+/// measured on board-a, running the unions up front added ~50% to the pass's
 /// wall clock and changed not one net. So the first attempt stays exactly as
 /// cheap as it was, and the breadth only opens up once the caller has escalated
 /// (`GapOptions.rip_from`), which it does only for a hop whose narrow rip was
@@ -410,14 +410,14 @@ pub const gap_grid_divisor: f64 = 2;
 // with real headroom, with the threshold lifted so every one of them armed:
 //
 //   * BOTH rungs: black-canyon 50 → 51, everything else unchanged, for
-//     barracuda +8.9 s (+72 %), black-canyon +4.6 s, xband +5.6 s, straps
+//     board-a +8.9 s (+72 %), black-canyon +4.6 s, xband +5.6 s, straps
 //     +29.9 s (+98 %).
-//   * `rippable_frontier` ALONE: **no** net anywhere, barracuda +8.8 s,
+//   * `rippable_frontier` ALONE: **no** net anywhere, board-a +8.8 s,
 //     black-canyon +3.0 s, straps +1.5 s. It is never armed for that reason.
-//   * `capped_flood` ALONE: black-canyon's net, barracuda −0.2 s (its residual
+//   * `capped_flood` ALONE: black-canyon's net, board-a −0.2 s (its residual
 //     has no capped flood at all), straps +26.7 s, xband +5.5 s.
 //   * `capped_flood` + `spenders = 4`: black-canyon's net kept at +1.0 s
-//     (+8.3 %), barracuda −0.1 s, xband +0.04 s, straps +5.7 s — the per-board
+//     (+8.3 %), board-a −0.1 s, xband +0.04 s, straps +5.7 s — the per-board
 //     spend cap cuts the one board that pays by 4.7x while the win survives.
 //
 // So: one rung, gated on the residual's WIDTH and capped by how many of its
@@ -466,11 +466,11 @@ pub const LastKRungs = struct {
 ///
 /// `rippable_frontier` is deliberately NOT armed. Measured alone over the four
 /// boards with real headroom (`bench-route`, ReleaseSafe, threshold lifted so
-/// it armed on all of them) it closed **no** net and cost barracuda +8.8 s
+/// it armed on all of them) it closed **no** net and cost board-a +8.8 s
 /// (+71 %) and black-canyon +3.0 s — the reachable region a rip could have
 /// opened is not where these boards are stuck. `capped_flood` is the rung that
-/// pays: it is the one that closes black-canyon's extra net, and on barracuda
-/// it costs nothing at all because barracuda's residual has no capped flood.
+/// pays: it is the one that closes black-canyon's extra net, and on board-a
+/// it costs nothing at all because board-a's residual has no capped flood.
 pub fn lastKRungs(failed: usize, lim: LastK) LastKRungs {
     if (failed == 0 or failed > lim.nets) return .{};
     return .{ .capped_flood = true, .wide_rip = true };

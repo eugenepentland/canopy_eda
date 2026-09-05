@@ -4,7 +4,7 @@
 //! The lever it turns is the one `(pcb-plan (route (wave …)))` already exposes:
 //! earlier waves route first and claim the cleanest space, so which of two nets
 //! contending for one corridor goes first can decide whether the other closes at
-//! all. Moving barracuda's `v3v3a-pour` wave above `control-clock-escape` — ONE
+//! all. Moving board-a's `v3v3a-pour` wave above `control-clock-escape` — ONE
 //! transposition — is worth two closed nets and halves the DRC error count,
 //! because closing `V_3V3A` cascades into `GND`, `V_5VA`, `BOOST22_SW` and an
 //! ADF chip-select. That was found by hand, one experiment at a time. This tool
@@ -122,7 +122,7 @@ const Pair = struct { blocked: usize, blocker: usize };
 /// direction (both ways, because "route the blocker first so it stops being in
 /// the way" and "route the victim first so it never has to fight" are both real
 /// fixes and the board decides which), pours vs. signals, whole-cluster
-/// reversal, single-net promotion/demotion (the shape of the barracuda fix: one
+/// reversal, single-net promotion/demotion (the shape of the board-a fix: one
 /// wave lifted over its neighbours), then adjacent transpositions.
 fn candidateOrderings(
     arena: std.mem.Allocator,
@@ -356,7 +356,7 @@ fn editDistance(order: []const usize) usize {
 ///
 /// Both tiebreaks are about what gets recommended, not about the copper. The
 /// edit-size one matters because different orderings routinely land the
-/// identical board — on barracuda's six-net cluster two candidates both hit
+/// identical board — on board-a's six-net cluster two candidates both hit
 /// 81/90 at 20 DRC errors, one by moving five waves and one by lifting a single
 /// pour above two signals — and the one-wave edit is the one a human should be
 /// handed. The index one keeps the baseline (trial 0, edit distance 0) ahead of
@@ -394,7 +394,7 @@ const Claim = struct { net_i: usize, score: f64 };
 /// standing in each other's way, which is precisely the set an order change can
 /// resolve, and the reason `SPI_SCK` (blocker of six nets) and `V_3V3A` (stuck,
 /// and blocked by copper that `SPI_SCK` also blocks) surface together on
-/// barracuda.
+/// board-a.
 fn deriveCluster(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -748,7 +748,7 @@ fn runSearch(out: *std.ArrayList(u8), search: *Search, req: Request) HandlerErro
     // Deriving the cluster costs one WHOLE-BOARD diagnostic route, because the
     // stuck diagnoses are what name the nets standing in each other's way. A
     // caller who already knows the cluster (`nets=[…]`) is spared it entirely —
-    // on barracuda that is 156 s of the call's wall clock not spent.
+    // on board-a that is 156 s of the call's wall clock not spent.
     const explicit = try argNames(alloc, req.args, "nets");
     var probe: ?route_plan.PlannedDiagnostic = null;
     var probe_ms: i64 = 0;
@@ -784,7 +784,7 @@ fn runSearch(out: *std.ArrayList(u8), search: *Search, req: Request) HandlerErro
     // full scope where it deals the identical priorities: the diagnostic path
     // routes ONE live core (it has to, to flood the grid the copper landed on)
     // while a trial routes through `routeLowered`, which layers the finer-grid
-    // retry on top. Measured on barracuda that retry is worth a net — the probe
+    // retry on top. Measured on board-a that retry is worth a net — the probe
     // reads 76/90 where a trial of the same ordering reads 77/90 — so reusing it
     // would have credited every candidate a phantom +1 over the authored plan.
     progress("{s}: baseline route ({s} scope)", .{ search.design, @tagName(search.scope) });
@@ -1020,7 +1020,7 @@ fn writeNetNames(w: *std.Io.Writer, search: Search, order: []const usize) std.Io
 /// the signature of a question not asked rather than of an answer: with the rest
 /// of the board frozen the cluster's nets can route past each other without
 /// competing, so no permutation changes a single millimetre. Measured on
-/// barracuda's SPI_SCK / V_3V3_LMX / V_3V3A cluster, all six orderings came back
+/// board-a's SPI_SCK / V_3V3_LMX / V_3V3A cluster, all six orderings came back
 /// 72/90 with 87 DRC errors and the same copper to the micron — while the same
 /// six under full scope spread from 77/90 (51 DRC errors) to 81/90 (20).
 fn flatResult(trials: []const Trial) bool {
@@ -1214,7 +1214,7 @@ test "a search trial records its ordering, score and scope" {
     const search = Search{
         .alloc = arena,
         .project_dir = "",
-        .design = "barracuda",
+        .design = "board-a",
         .board = .{ .placement = orderFixturePlacement(&nets), .params = .{} },
         .base_net = &.{},
         .effort = .standard,
@@ -1321,7 +1321,7 @@ test "route_order_search seeds a big cluster from blockers and pours" {
     const pours_first = findLabel(cands, "pours-first").?;
     try testing.expectEqualSlices(usize, &.{ 2, 3, 0, 1, 4 }, pours_first);
     // Promotion is a MOVE, not a swap: everything else keeps its relative order.
-    // This is the shape of the measured barracuda fix (one wave lifted over two).
+    // This is the shape of the measured board-a fix (one wave lifted over two).
     try testing.expectEqualSlices(usize, &.{ 4, 0, 1, 2, 3 }, findOrderStartingWith(cands, &.{ 4, 0, 1 }).?);
 }
 
@@ -1369,7 +1369,7 @@ test "route_order_search prefers the smallest edit among tied orderings" {
     const arena = arena_state.allocator();
     const same = Outcome{ .routed = 81, .total = 90, .drc_errors = 20, .trace_mm = 923 };
     // Both land the identical board; the first shuffles five members, the second
-    // lifts one net over two — the barracuda case, where the second is the edit
+    // lifts one net over two — the board-a case, where the second is the edit
     // a human should be handed.
     const big = [_]usize{ 0, 2, 3, 4, 5, 1 };
     const small = [_]usize{ 2, 0, 1, 3, 4, 5 };

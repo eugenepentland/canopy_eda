@@ -339,7 +339,7 @@ fn runMiss(land: Land, pts: []const [2]f64, r: Run) ?f64 {
 /// not already put there. This is what a hand-drawn entry that misses the
 /// centre by a few hundredths looks like, and what a connection to a long
 /// connector finger (too narrow to be a `paddle`, far too long for its centre
-/// to be the anchor) looks like. The 2026-08 barracuda/barracuda-base audit
+/// to be the anchor) looks like. The 2026-08 board-a/board-a-base audit
 /// measured hand-routed entries missing the ray by 0.03–0.4 mm while staying
 /// wholly inside their land's column — half the boards' own-land findings —
 /// with zero of them putting copper in a corridor. A fly-through that crosses

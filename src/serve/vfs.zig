@@ -1447,9 +1447,9 @@ test "checkAcl denies writes to history and out" {
 
 // spec: serve/mcp_tools - CLI virtual-file mutations refuse .layouts.json sidecars and direct callers to protected PCB layout tools
 test "layout sidecars are read-only through every VFS mutation path" {
-    try std.testing.expectEqual({}, try checkAcl("src/barracuda.layouts.json", .read));
-    try std.testing.expectError(error.PermissionDenied, checkAcl("src/barracuda.layouts.json", .write));
-    const hint = denialHint("src/barracuda.layouts.json", .write) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual({}, try checkAcl("src/board-a.layouts.json", .read));
+    try std.testing.expectError(error.PermissionDenied, checkAcl("src/board-a.layouts.json", .write));
+    const hint = denialHint("src/board-a.layouts.json", .write) orelse return error.TestExpectedEqual;
     try std.testing.expect(std.mem.indexOf(u8, hint, "save_pcb_layout") != null);
     try std.testing.expect(std.mem.indexOf(u8, hint, "restore_layout_snapshot") != null);
 }

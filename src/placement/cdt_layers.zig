@@ -4,7 +4,7 @@
 //! `cdt_route` triangulates ONE layer's free space and pulls a taut path across
 //! it, which answers "is there a sub-grid channel here?" but not "is there a way
 //! through at all?". A net the maze cannot thread often has no single-layer
-//! answer: barracuda's remaining opens thread a neck whose walls are fixed RF
+//! answer: board-a's remaining opens thread a neck whose walls are fixed RF
 //! parts, and the room they need is on another layer. This module is that
 //! search — one navmesh per allowed signal layer over the SAME window, joined at
 //! via sites, a single Dijkstra over the resulting (triangle, layer) channel
@@ -714,7 +714,7 @@ test "layered CDT escapes a sealed terminal pocket only through a site inside it
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_i.deinit();
     const a = arena_i.allocator();
-    // The exact refusal shape measured on barracuda: the START terminal sits in
+    // The exact refusal shape measured on board-a: the START terminal sits in
     // a small pocket of layer-0 free space walled off by foreign pads, layer 1
     // is clear, and the goal is out in the open. The dive is the only way out.
     const pads = try penPads(a, 0, .{ 2.0, 5.0 }, 0.6, 0.4);

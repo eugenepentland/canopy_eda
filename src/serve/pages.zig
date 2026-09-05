@@ -313,8 +313,8 @@ test "home design cards keep issue counts inside schematic progress" {
 // spec: Web Server - The home page lists every `src/systems/` review workspace as its own card kind, from the same enumeration `/api/systems` serves, so a system is reachable without knowing its URL
 test "home system cards carry the workspace link, identity and filter kind" {
     const entry: home_template.SystemHomeEntry = .{
-        .name = "barracuda",
-        .title = "Barracuda OC-303-1-01",
+        .name = "board-a",
+        .title = "Board A OC-303-1-01",
         .part_number = "OC-303-1-01",
         .revision = "B3",
         .boards = 2,
@@ -323,16 +323,16 @@ test "home system cards carry the workspace link, identity and filter kind" {
     };
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
-    try home_template.SystemCard.render(.{ entry, "system barracuda" }, &aw.writer);
+    try home_template.SystemCard.render(.{ entry, "system board-a" }, &aw.writer);
     const html = aw.written();
 
     // The whole point of the card: a route into the workspace. Before this,
     // /systems/:name was reachable only by typing the URL — nothing in the UI
     // linked it and /systems itself 404s.
-    try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/systems/barracuda\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/systems/board-a\"") != null);
     // Its own kind, so the Systems filter button selects exactly these.
     try std.testing.expect(std.mem.indexOf(u8, html, "data-kind=\"system\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "Barracuda OC-303-1-01") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "Board A OC-303-1-01") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "OC-303-1-01 rev B3") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "2 boards") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "19 documents") != null);
@@ -345,8 +345,8 @@ test "home system cards carry the workspace link, identity and filter kind" {
 // spec: Web Server - A system card's search text leads with its kind word and carries its identity, so the home page's existing search box and its Systems filter both surface it with no extra client script
 test "home system search text and filter tab make a system findable by name and kind" {
     const entry: home_template.SystemHomeEntry = .{
-        .name = "barracuda",
-        .title = "Barracuda OC-303-1-01",
+        .name = "board-a",
+        .title = "Board A OC-303-1-01",
         .part_number = "OC-303-1-01",
         .revision = "B3",
         .boards = 2,
@@ -357,7 +357,7 @@ test "home system search text and filter tab make a system findable by name and 
     defer std.testing.allocator.free(search);
     // The leading tag word mirrors the visible tag the way design/module
     // haystacks do, so a query of "system" surfaces exactly these cards.
-    try std.testing.expect(std.mem.startsWith(u8, search, "system barracuda"));
+    try std.testing.expect(std.mem.startsWith(u8, search, "system board-a"));
     try std.testing.expect(std.mem.indexOf(u8, search, "OC-303-1-01") != null);
     try std.testing.expect(std.mem.indexOf(u8, search, "B3") != null);
     try std.testing.expect(std.mem.indexOf(u8, search, "attested") != null);

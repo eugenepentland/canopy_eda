@@ -924,7 +924,7 @@ fn parseSyncSchArgs(args: []const []const u8) SyncSchArgs {
 }
 
 /// CLI entry point for `netlisp sync-kicad-sch`. Exports the design's schematic
-/// under its KiCad PROJECT's name (`Cyclops Digital.kicad_sch`, not
+/// under its KiCad PROJECT's name (`Board B Digital.kicad_sch`, not
 /// `stm32n6.kicad_sch`) and writes it into the directory holding the board the
 /// design declares, so the KiCad project carries both halves.
 ///
@@ -1460,20 +1460,20 @@ fn pushToServer(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
 
 // spec: system-review - CLI system review commands share project, system, and output argument parsing
 test "system review CLI accepts project and output flags around the system name" {
-    const args = [_][]const u8{ "barracuda", "--output", "review.zip", project_dir_flag, "projects/designs" };
+    const args = [_][]const u8{ "board-a", "--output", "review.zip", project_dir_flag, "projects/designs" };
     const parsed = try parseSystemReviewArgs(&args, true);
     try std.testing.expectEqualStrings("projects/designs", parsed.project_dir);
-    try std.testing.expectEqualStrings("barracuda", parsed.name);
+    try std.testing.expectEqualStrings("board-a", parsed.name);
     try std.testing.expectEqualStrings("review.zip", parsed.output.?);
 }
 
 // spec: system-review - CLI system review commands reject unknown flags, missing option values, duplicate positionals, and draft output flags on readiness checks
 test "system review CLI rejects ambiguous and command-specific arguments" {
-    try std.testing.expectError(error.UnknownOption, parseSystemReviewArgs(&.{ "barracuda", "--wat" }, true));
-    try std.testing.expectError(error.MissingOptionValue, parseSystemReviewArgs(&.{ "barracuda", "--output" }, true));
-    try std.testing.expectError(error.TooManyPositionals, parseSystemReviewArgs(&.{ "barracuda", "another" }, true));
-    try std.testing.expectError(error.OutputNotAllowed, parseSystemReviewArgs(&.{ "barracuda", "--output", "review.zip" }, false));
-    try std.testing.expectError(error.DuplicateOption, parseSystemReviewArgs(&.{ project_dir_flag, "one", project_dir_flag, "two", "barracuda" }, true));
+    try std.testing.expectError(error.UnknownOption, parseSystemReviewArgs(&.{ "board-a", "--wat" }, true));
+    try std.testing.expectError(error.MissingOptionValue, parseSystemReviewArgs(&.{ "board-a", "--output" }, true));
+    try std.testing.expectError(error.TooManyPositionals, parseSystemReviewArgs(&.{ "board-a", "another" }, true));
+    try std.testing.expectError(error.OutputNotAllowed, parseSystemReviewArgs(&.{ "board-a", "--output", "review.zip" }, false));
+    try std.testing.expectError(error.DuplicateOption, parseSystemReviewArgs(&.{ project_dir_flag, "one", project_dir_flag, "two", "board-a" }, true));
 }
 
 test "parseSyncSchArgs: flags in any order, lone positional is the design" {

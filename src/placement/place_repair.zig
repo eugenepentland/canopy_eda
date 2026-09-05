@@ -232,7 +232,7 @@ pub fn plan(
         // Two pads of ONE part is not a movable wall. The mesh sees two distinct
         // obstacle polygons and reports them as two sides, but a footprint is
         // rigid: translating it carries both pads and leaves the gap between
-        // them exactly as it was. Measured on barracuda — the `V_1V8A` channel
+        // them exactly as it was. Measured on board-a — the `V_1V8A` channel
         // pinched between two pads of `adf4159/R58` produced a legal-looking
         // 0.13 mm move that could not possibly have opened it, and cost a whole
         // trial route to disprove.

@@ -1296,7 +1296,7 @@ fn decorateCachedDossier(
 /// is what keeps this page and the `draft.zip` member byte-identical.
 ///
 /// It waits rather than polls, and that is a correctness requirement, not a
-/// politeness one. Measured against the real Barracuda system: a minute-long
+/// politeness one. Measured against the real Board A system: a minute-long
 /// composition survives an occasional concurrent request, but a status poll
 /// every two seconds moved the boards' consumed-input closure under it on
 /// nearly every run — a different content lock each time, and `analyze`'s own
@@ -1669,8 +1669,8 @@ pub fn systemCadMeshApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
 }
 
 test "system review API path and asset policy rejects traversal and active content" {
-    try std.testing.expect(isSimpleName("barracuda_2"));
-    try std.testing.expect(!isSimpleName("../barracuda"));
+    try std.testing.expect(isSimpleName("board-a_2"));
+    try std.testing.expect(!isSimpleName("../board-a"));
     try std.testing.expect(system_review_assets.validFilename("scope-front.png"));
     try std.testing.expect(!system_review_assets.validFilename("../scope.png"));
     try std.testing.expect(!system_review_assets.validFilename("active.svg"));
@@ -1683,9 +1683,9 @@ test "system review API path and asset policy rejects traversal and active conte
 }
 
 test "system mechanical documents stay beside their manifest" {
-    const path = try cadDocumentRelativePath(std.testing.allocator, "barracuda");
+    const path = try cadDocumentRelativePath(std.testing.allocator, "board-a");
     defer std.testing.allocator.free(path);
-    try std.testing.expectEqualStrings("src/systems/barracuda/mechanical.json", path);
+    try std.testing.expectEqualStrings("src/systems/board-a/mechanical.json", path);
 }
 
 test "system mechanical document API persists validated canonical JSON" {
@@ -1809,7 +1809,7 @@ test "system review API denies document mutation without authenticated write rol
     };
     var request = httpz.testing.init(.{});
     defer request.deinit();
-    request.param("name", "barracuda");
+    request.param("name", "board-a");
     request.param("doc", "overview");
     request.header(mutation_header_name, mutation_header_value);
     request.body("# Unauthorized edit\n");

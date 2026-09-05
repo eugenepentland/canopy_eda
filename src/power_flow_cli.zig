@@ -17,7 +17,7 @@
 //! JSON is the default because the interesting question ("which load has zero
 //! contacts?") is a filter, not a read:
 //!
-//!   netlisp power-flow --project-dir projects/designs barracuda-base \
+//!   netlisp power-flow --project-dir projects/designs board-a-base \
 //!     | jq '.rails[] | select(.flow.typical.status != "solved")
 //!           | {net, loads: [.flow.loads[] | select(.contacts == 0) | .ref]}'
 //!
@@ -325,15 +325,15 @@ const testing = std.testing;
 
 // spec: power-flow - the CLI parses the project dir, the saved layout, the rail filter and the text-output flag with one positional design name
 test "power-flow CLI parses flags and one positional" {
-    const parsed = try parseArgs(&.{ "--project-dir", "p", "--layout", "star", "--net", "V_3V3D", "--text", "barracuda-base" });
+    const parsed = try parseArgs(&.{ "--project-dir", "p", "--layout", "star", "--net", "V_3V3D", "--text", "board-a-base" });
     try testing.expectEqualStrings("p", parsed.project_dir);
     try testing.expectEqualStrings("star", parsed.layout.?);
     try testing.expectEqualStrings("V_3V3D", parsed.net.?);
     try testing.expect(parsed.text);
-    try testing.expectEqualStrings("barracuda-base", parsed.name);
+    try testing.expectEqualStrings("board-a-base", parsed.name);
 
     // JSON is the default, and the default project dir is the served library.
-    const bare = try parseArgs(&.{"barracuda"});
+    const bare = try parseArgs(&.{"board-a"});
     try testing.expect(!bare.text);
     try testing.expect(bare.net == null);
     try testing.expectEqualStrings("projects/designs", bare.project_dir);

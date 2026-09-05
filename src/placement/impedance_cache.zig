@@ -11,7 +11,7 @@
 //! page render, the PNG, `/api/pcb-describe`, the thermal page and every
 //! autosave's DRC re-resolve each re-synthesised widths nobody had changed.
 //! Measured with `netlisp bench-page --reps 3` (2026-08-29, Debug): of
-//! barracuda-base's 8245 ms solve, `net_rules.resolvedNetRules` was 8.1–12.4 s
+//! board-a-base's 8245 ms solve, `net_rules.resolvedNetRules` was 8.1–12.4 s
 //! and every other `prepare` step was under 10 ms.
 //!
 //! ## Why a memo is safe here
@@ -252,7 +252,7 @@ pub fn stats() Tally {
 
 const testing = std.testing;
 
-/// Barracuda's four-layer JLC buildup with the coated-microstrip process
+/// Board A's four-layer JLC buildup with the coated-microstrip process
 /// profile — the stack whose synthesis costs seconds, and therefore the one
 /// worth proving is answered once.
 const coated_fixture = struct {

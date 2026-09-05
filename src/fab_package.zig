@@ -9,7 +9,7 @@
 //! a single Gerber. What it did NOT do was reach that answer cheaply: it ran
 //! the whole release gate first and only then read the verdict off it.
 //!
-//! Measured on a mid-edit `barracuda` (ReleaseSafe, gate-locked, the shared
+//! Measured on a mid-edit `board-a` (ReleaseSafe, gate-locked, the shared
 //! designs snapshot), one 14.5 s refusal broke down as:
 //!
 //!     project_state    11 ms   two Git reads
@@ -436,7 +436,7 @@ test "the refusal body names the blocking finding and the report it did not comp
 
     const refusal = sourceRevisionRefusal(.{ .commit = "unavailable", .status = .unavailable }) orelse return error.TestExpectedRefusal;
     var aw: std.Io.Writer.Allocating = .init(alloc);
-    try writeRefusalJson(&aw.writer, "barracuda", refusal);
+    try writeRefusalJson(&aw.writer, "board-a", refusal);
     const body = aw.written();
 
     // Parses, and every key a blocked readiness response is branched on keeps
@@ -457,7 +457,7 @@ test "the refusal body names the blocking finding and the report it did not comp
     // …and it is explicit that the rest of the report was skipped, naming the
     // surface that still computes it.
     try std.testing.expect(!parsed.object.get("report_complete").?.bool);
-    try std.testing.expectEqualStrings("/api/fab-readiness/barracuda", parsed.object.get("report_url").?.string);
+    try std.testing.expectEqualStrings("/api/fab-readiness/board-a", parsed.object.get("report_url").?.string);
 }
 
 // spec: fabrication-release - the fast fabrication refusal declines every request the saved-layout selection still owes a 404

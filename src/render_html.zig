@@ -2697,7 +2697,7 @@ test "functional pin order terminates with two pins related to the same earlier 
     // pin 2 — a target sitting more than one slot earlier, which is the
     // backward-move branch. Under the old rewind both took turns moving into
     // the slot after pin 2, displacing each other forever; this test hung
-    // rather than failed. Reproduces /schematics/cyclops-analog, which spun a
+    // rather than failed. Reproduces /schematics/board-b-analog, which spun a
     // request thread past 39 GB RSS instead of ever rendering.
     for ([_][]const u8{ "R_A", "R_B" }, [_][]const u8{ "4", "5" }) |spoke, hub_pin| {
         try ctx.spoke_set.put(allocator, spoke, {});
@@ -2988,7 +2988,7 @@ test "schematic header switches between sequential and functional views" {
 
 // spec: render_svg - A bridged sub-block port net keeps its wire and net label on the module's own pin
 test "a bridged sub-block port net renders its net label" {
-    // The cyclops-kband ADAR2001 case. The `tx` module declares an output port
+    // The board-b-kband ADAR2001 case. The `tx` module declares an output port
     // TXOUT+; the parent bridges it (`(bridge "" TXOUT+)` ⇒ net-tie
     // TXOUT+ ↔ tx/TXOUT+), and the only pin on the flattened net is the module's
     // own U1.1 — the far end is net-less printed patch copper. The pad must still

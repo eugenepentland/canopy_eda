@@ -594,7 +594,7 @@ test "the interaction log appends to a dated file and stays silent when disabled
         .{ .key = "port", .value = .{ .int = 7050 } },
     }));
     try testing.expect(emit(&store, alloc, .server, "req", &.{
-        .{ .key = "path", .value = .{ .text = "/api/pcb-drc/barracuda" } },
+        .{ .key = "path", .value = .{ .text = "/api/pcb-drc/board-a" } },
     }));
     const body = logBody(&store, alloc);
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, body, "\n"));
@@ -661,7 +661,7 @@ fn postClientLog(
     var srv = Server{ .allocator = alloc, .project_dir = project, .auth_dir = project, .state = state };
     var ht = httpz.testing.init(.{});
     defer ht.deinit();
-    ht.param("name", "barracuda");
+    ht.param("name", "board-a");
     ht.body(body);
     try clientLogApi(&srv, ht.req, ht.res);
     return .{ .status = ht.res.status, .body = try alloc.dupe(u8, ht.res.body) };
@@ -689,13 +689,13 @@ test "the client-log endpoint stores each event and refuses oversized batches" {
     const body = logBody(&state.request_log, alloc);
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, body, "\n"));
     try testing.expect(std.mem.indexOf(u8, body, "\"src\":\"client\",\"evt\":\"save.start\"," ++
-        "\"design\":\"barracuda\",\"page_build\":\"834d4421a\",\"t_client\":1756400645123," ++
+        "\"design\":\"board-a\",\"page_build\":\"834d4421a\",\"t_client\":1756400645123," ++
         "\"verb\":\"autosave\",\"automatic\":true,\"bytes\":184213}") != null);
     try testing.expect(std.mem.indexOf(u8, body, "\"result\":\"saved\",\"server_ms\":8123.4") != null);
     // A nested field is dropped, and a client may not overwrite a server field.
     try testing.expect(std.mem.indexOf(u8, body, "\"nested\"") == null);
     try testing.expect(std.mem.indexOf(u8, body, "\"spoofed\"") == null);
-    try testing.expect(std.mem.indexOf(u8, body, "\"evt\":\"log.drop\",\"design\":\"barracuda\"," ++
+    try testing.expect(std.mem.indexOf(u8, body, "\"evt\":\"log.drop\",\"design\":\"board-a\"," ++
         "\"page_build\":\"834d4421a\",\"n\":7}") != null);
 
     // Refusals write nothing more: the file still holds exactly three lines.

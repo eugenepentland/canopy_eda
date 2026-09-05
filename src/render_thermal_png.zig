@@ -399,7 +399,7 @@ const Ctx = struct {
     /// the part's own drawn box — the same "does the label fit the thing it
     /// names" rule `render_pcb_png.drawPinLabels` applies to pad labels — and
     /// only when it lands clear of every label already placed. Without that,
-    /// measured on barracuda at 1000 px, five neighbouring 0402 refs printed on
+    /// measured on board-a at 1000 px, five neighbouring 0402 refs printed on
     /// top of each other as `C140.39.38.3756` and a passive's ref merged into
     /// its neighbour's temperature as `U14 175C ESC182`.
     ///
@@ -820,7 +820,7 @@ test "labels give way to the temperatures they would otherwise garble" {
     try testing.expect(!overlapsAny(&.{}, first));
 
     // An UNREPORTED part whose label would land on one already drawn gives up
-    // rather than printing through it — the fix for barracuda's
+    // rather than printing through it — the fix for board-a's
     // "C140.39.38.3756", five neighbouring 0402 refs stacked on one another.
     try testing.expect(labelSlot(.{ 100, 100, 140, 120 }, 30, &.{first}, false) == null);
 
@@ -843,7 +843,7 @@ test "labels give way to the temperatures they would otherwise garble" {
 
 /// The two reported hubs of `testScreen`, plus twelve 0402-sized passives
 /// packed a millimetre apart down one edge — the shape that garbled on
-/// barracuda, where five neighbouring refs printed as one string.
+/// board-a, where five neighbouring refs printed as one string.
 fn crowdedParts() [14]optimizer.Part {
     var parts: [14]optimizer.Part = undefined;
     const hubs = testParts();

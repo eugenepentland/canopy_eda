@@ -1088,7 +1088,7 @@ fn span(stack: Stack, a: u8, b: u8) struct { h: f64, er: f64 } {
     // `h` is the full physical separation (foils included — they really do push
     // the planes apart), but the permittivity average is weighted by DIELECTRIC
     // thickness only. Counting a copper foil as a zero-εr slab would drag the
-    // mix down (barracuda's bottom face read 4.35 instead of its uniform 4.40).
+    // mix down (board-a's bottom face read 4.35 instead of its uniform 4.40).
     return .{ .h = h, .er = if (dielectric > 0) weighted / dielectric else default_er };
 }
 
@@ -1547,7 +1547,7 @@ test "reference geometry follows the stackup's planes" {
 
 // spec: placement/impedance - outer poured faces remain signal layers when resolving impedance references
 test "outer pours remain impedance-capable signal faces" {
-    // Barracuda-style six-layer stack: outer GND pours coexist with routed RF,
+    // Board-A-style six-layer stack: outer GND pours coexist with routed RF,
     // while layers 2 and 4 are dedicated GND planes. Treating every declared
     // pour as plane-only used to skip F.Cu and derive the RF class against the
     // first inner stripline instead.
@@ -1683,7 +1683,7 @@ test "mismatchPct measures an authored width against its target" {
 }
 
 // spec: placement/impedance - grounded coplanar analysis uses the authored ground gap and round-trips its synthesized width
-test "grounded coplanar impedance matches the barracuda stackup" {
+test "grounded coplanar impedance matches the board-a stackup" {
     const ref: Ref = .{ .microstrip = .{ .h_mm = 0.2104, .er = 4.4 } };
     const z = try groundedCoplanarZ0(0.31, 0.2104, 0.035, 4.4, 0.127);
     try testing.expectApproxEqAbs(@as(f64, 48.76), z, 0.02);
@@ -1752,8 +1752,8 @@ test "grounded coplanar domain rejects impossible slots" {
     try testing.expectError(Error.OutOfDomain, groundedCoplanarZ0(0.01, 0.2104, 0.2, 4.4, 0.01));
 }
 
-// spec: placement/impedance - an offset L3 coupled stripline solves the Barracuda 100 ohm LVDS geometry and round-trips
-test "coupled stripline synthesis matches the barracuda L3 reference pair" {
+// spec: placement/impedance - an offset L3 coupled stripline solves the Board A 100 ohm LVDS geometry and round-trips
+test "coupled stripline synthesis matches the board-a L3 reference pair" {
     const ref: Ref = .{ .stripline = .{ .h1_mm = 0.4, .h2_mm = 0.618, .er = 4.55915 } };
     const gap = 0.1524;
     const width = try refWidthForDiffZ0(ref, 100, 0.0152, gap);
@@ -1811,7 +1811,7 @@ test "coated trapezoidal microstrip lowers impedance and round-trips synthesis" 
 }
 
 // spec: placement/impedance - coated coupled microstrip synthesis remains self-consistent for both USB and Ethernet targets
-test "coated differential microstrip round-trips barracuda base targets" {
+test "coated differential microstrip round-trips board-a base targets" {
     const stack = Stack{
         .layers = 4,
         .planes = &.{ 2, 3 },
@@ -1856,7 +1856,7 @@ test "coated differential microstrip round-trips barracuda base targets" {
     }
 }
 
-test "current JLC Barracuda base process parameters synthesize controlled widths" {
+test "current JLC Board A base process parameters synthesize controlled widths" {
     const stack = Stack{
         .layers = 4,
         .planes = &.{ 2, 3 },

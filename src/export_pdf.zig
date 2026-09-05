@@ -814,7 +814,7 @@ fn moduleDrawsRef(e: Entry, ref: []const u8) bool {
 ///
 /// A module note repeating a SECTION note's visible text is dropped. Boards
 /// routinely copy a module's rationale into the section that wraps it (every
-/// cyclops-kband RF section does), and before unified sheets the two lived pages
+/// board-b-kband RF section does), and before unified sheets the two lived pages
 /// apart so the duplication was invisible; on one sheet it would read twice.
 /// Two scoping rules, both review findings: the comparison is against the
 /// section's own notes ONLY (module rows never join the seen-set — a sibling

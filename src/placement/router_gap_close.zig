@@ -155,7 +155,7 @@ pub fn closeGaps(
     ctx.deadline_ns = opts.raster.stop.deadline_ns;
     // A refined rung also looks FURTHER out of each terminal pad: the fan's
     // default ~1.5 mm is too short for a sealed pad whose only exit lies beyond
-    // the parts hugging its package (barracuda's `lmx2595/U17.16` escapes
+    // the parts hugging its package (board-a's `lmx2595/U17.16` escapes
     // 2.45 mm down its free tip, and every ring inside that lands in the
     // decoupling caps against the QFN edge).
     if (opts.raster.divisor > gap_grid_divisor)
@@ -399,7 +399,7 @@ fn closeOneGap(state: *GapState, gap: Gap) std.mem.Allocator.Error!?GapPath {
     markTerminalViaBan(state, gap, net);
     const live = try liveCopper(state, &.{});
     // Leave each terminal from the clearest point on its own pad — see
-    // `padExitPoint` for the two barracuda nets this alone was costing.
+    // `padExitPoint` for the two board-a nets this alone was costing.
     const from = padExitPoint(state.ctx, gap.from, net);
     const to = if (gap.to) |t|
         padExitPoint(state.ctx, t, net)
@@ -412,7 +412,7 @@ fn closeOneGap(state: *GapState, gap: Gap) std.mem.Allocator.Error!?GapPath {
     // asked for a cross-board join is a treadmill: it expands a corridor lattice
     // over tens of millimetres of congested copper, spends whatever budget it is
     // given, and returns the same `join_no_path` the mesh answers in geometry —
-    // measured on barracuda, where `LOCK_DET`'s 55 mm join consumed a whole
+    // measured on board-a, where `LOCK_DET`'s 55 mm join consumed a whole
     // guided slice in the maze and the shape tier behind it was never asked at
     // all. Order only: both tiers still run, so nothing the maze could draw is
     // lost, and a hop within reach keeps today's order exactly.
@@ -446,7 +446,7 @@ fn closeOneGap(state: *GapState, gap: Gap) std.mem.Allocator.Error!?GapPath {
 /// The signal layers a gap hop may lay TRACKS on: the outer faces, every inner
 /// layer the board leaves un-poured, and any layer carrying this net's OWN
 /// pour. An inner layer a FOREIGN pour occupies is excluded — that is a
-/// reserved plane (barracuda's In2.Cu carries only rail pours), and slicing a
+/// reserved plane (board-a's In2.Cu carries only rail pours), and slicing a
 /// signal trace through it is exactly the damage a finishing pass must not do.
 /// Vias are unaffected: a barrel crosses every layer through the pour's antipad.
 pub fn gapLayers(ctx: *const Ctx, net: i32) u64 {
@@ -544,7 +544,7 @@ const StubJoin = struct { pt: NetPt, key: usize };
 /// other `gateStub` caller passes the whole board's lists and is unaffected;
 /// this is the one seam where the two roles were the same slice.
 ///
-/// Measured on barracuda (2026-08-18, layout `barracuda-kicad-clean-v1`): the
+/// Measured on board-a (2026-08-18, layout `board-a-kicad-clean-v1`): the
 /// first gate's `TXDATA_ADF` hop drew its source stub as a 45° leg straight
 /// through `loop_amp/LF_FB_RC`'s via barrel — 0.196 mm centre-to-centre where
 /// the rule needs 0.391 — and the gate then dropped the whole hop as its DRC
@@ -820,12 +820,12 @@ fn findGapStitch(state: *GapState, live: GapBoard, pt: NetPt, net: i32, poured: 
     // (`plane_via.InPad.overDrill`).
     //
     // This is the fine-pitch finger, and for it the two searches above are not
-    // merely empty — they cannot be anything else. Barracuda's `J1` is a
+    // merely empty — they cannot be anything else. Board A's `J1` is a
     // 1.27 mm-pitch board-to-board connector: its B.Cu fingers are 1.0 x
     // 0.35 mm and the board's via is 0.4 mm, so the pad is NARROWER than the
     // barrel and no point of it can contain one; outside the pad the fan is
     // walled by the row neighbours 0.635 mm away, a mounting hole below and a
-    // test point beside. Measured on the last open GND gap barracuda had left:
+    // test point beside. Measured on the last open GND gap board-a had left:
     // 192 fan sites tried and every one refused, then a 5 mm maze that found
     // 596 legal sites further out and no lane on B.Cu to reach one of them —
     // a lone-pad copper island 1.27 mm from the rest of its own net.
@@ -853,7 +853,7 @@ fn findGapStitch(state: *GapState, live: GapBoard, pt: NetPt, net: i32, poured: 
     // default.
     //
     // Strictly additive by position: both tiers above have already declined, so
-    // a pad that had a site keeps the site it had. On barracuda today it is
+    // a pad that had a site keeps the site it had. On board-a today it is
     // additive and nothing more, which is measured rather than hoped: the tier
     // turns `J1` pad 40's zero candidates into nine and `lmx2595/U17` pad 34's
     // into seven, and every one of them is then refused by `viaClearsTracks` —
@@ -955,7 +955,7 @@ fn ripNearTerminals(state: *GapState, from: NetPt, to: NetPt, net: i32, breadth:
             if (kill.len == 0) continue;
             // A wider reach that catches no further segment of this victim is
             // the SAME board as the tier below, so the maze would re-derive the
-            // same answer over a full re-stamp and a full sweep. Barracuda's
+            // same answer over a full re-stamp and a full sweep. Board A's
             // reach ladder collapses this way for most victims, and those
             // duplicate sweeps were a large share of a failing hop's cost.
             if (try state.ripAlreadyTried(kill)) continue;
@@ -988,7 +988,7 @@ fn ripNearTerminals(state: *GapState, from: NetPt, to: NetPt, net: i32, breadth:
 /// One at a time is not enough. A corridor walled by TWO trunks stays walled
 /// when either one alone goes, so every single-net rip reports `blocked` and the
 /// hop is written off as impossible — while the same hop routes freely once both
-/// move. (Barracuda's `SPI_SCK` is exactly this: its corridor carries
+/// move. (Board A's `SPI_SCK` is exactly this: its corridor carries
 /// `SPI_MOSI` AND `V_12V`, and the hand-finished board that closes it re-routed
 /// both.) So the singles are tried first — cheapest, least to repair — and when
 /// none opens the channel the whole candidate set is cleared TOGETHER. The
@@ -1185,9 +1185,9 @@ const gap_max_nodes: usize = 400_000;
 /// A finishing hop is re-searched a dozen times against different rip
 /// candidates, and the ones that fail are the ones that sweep widest: a hop
 /// whose terminals are in genuinely disconnected regions drains the entire
-/// reachable board, which on barracuda is ~100k nodes a sweep and turns a
+/// reachable board, which on board-a is ~100k nodes a sweep and turns a
 /// single hop into half a minute. Sweeps that SUCCEED are nothing like that —
-/// measured over full barracuda runs the widest search that ever landed copper
+/// measured over full board-a runs the widest search that ever landed copper
 /// expanded 29,869 nodes, and the median is under 400 — so a ceiling four times
 /// above the widest observed success bounds the failures without reaching any
 /// hop that would have worked. Above the whole-board `max_batch_expansions`, so
@@ -1679,7 +1679,7 @@ test "a stitch target is judged on the fill that survives near the pad" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    // The barracuda shape, in miniature: a low pour (net 0) overlapped end to
+    // The board-a shape, in miniature: a low pour (net 0) overlapped end to
     // end by a higher-priority foreign one (net 1) except for a surviving band
     // along its west edge. `largestNetZone` sees one pour and answers "poured"
     // everywhere; only the fill says where the copper actually is.
@@ -1787,7 +1787,7 @@ test "a cross-board gap hop asks the shape tier before the maze" {
     try testing.expect(!shapeFirst(.{}, near, .{ .x = 3, .y = 0, .layer = 0 }));
     try testing.expect(!shapeFirst(.{}, near, .{ .x = 37, .y = 0, .layer = 0 }));
     try testing.expect(!shapeFirst(.{}, near, .{ .x = shape_first_hop_mm, .y = 0, .layer = 0 }));
-    // The residual cross-board joins the maze never closes — barracuda's 42.5,
+    // The residual cross-board joins the maze never closes — board-a's 42.5,
     // 49.6 and 55.3 mm control targets — go to the mesh first.
     for ([_]f64{ 42.5, 49.6, 55.3 }) |mm| {
         try testing.expect(shapeFirst(.{}, near, .{ .x = mm, .y = 0, .layer = 0 }));

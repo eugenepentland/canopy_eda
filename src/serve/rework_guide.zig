@@ -3,8 +3,8 @@
 //! A design may carry several guides: the legacy `<design>.rework.md` sibling
 //! plus any `<design>-<slug>.rework.md` companion beside it, so one board can
 //! keep a separate bench document per deviation. A companion whose slug is
-//! itself a design in that directory (`barracuda-base.sexp` beside
-//! `barracuda.sexp`) stays with its own design. Rendering stays in the
+//! itself a design in that directory (`board-a-base.sexp` beside
+//! `board-a.sexp`) stays with its own design. Rendering stays in the
 //! assembly client, where `[[uuid:...]]`, `[[pin:UUID.PAD]]`, and `[[net:...]]`
 //! targets become board-focus controls.
 
@@ -42,7 +42,7 @@ pub fn loadAll(
 
 /// True when `filename` is a guide belonging to design `name` — either the
 /// legacy `<name>.rework.md` or a `<name>-<slug>.rework.md` companion. The
-/// separator is required so `barracuda2-foo.rework.md` never joins `barracuda`.
+/// separator is required so `board-a2-foo.rework.md` never joins `board-a`.
 fn belongsTo(filename: []const u8, name: []const u8) bool {
     if (!std.mem.endsWith(u8, filename, extension)) return false;
     const base = filename[0 .. filename.len - extension.len];
@@ -51,9 +51,9 @@ fn belongsTo(filename: []const u8, name: []const u8) bool {
     return base[name.len] == '-';
 }
 
-/// True when `slug` names a design of its own in this directory. `barracuda-base.sexp`
-/// sits beside `barracuda.sexp` here, so `barracuda-base.rework.md` is that design's
-/// own legacy guide, not a `barracuda` companion — and its UUID targets address the
+/// True when `slug` names a design of its own in this directory. `board-a-base.sexp`
+/// sits beside `board-a.sexp` here, so `board-a-base.rework.md` is that design's
+/// own legacy guide, not a `board-a` companion — and its UUID targets address the
 /// other board's parts, which would drive focus controls to the wrong board.
 fn ownedByAnotherDesign(
     allocator: std.mem.Allocator,
@@ -186,7 +186,7 @@ test "a sibling design's legacy guide is never adopted by its name-prefixed neig
     defer arena.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    // The live shape in projects/designs/src/boards/barracuda/.
+    // The live shape in projects/designs/src/boards/board-a/.
     const project = try seedProject(arena.allocator(), &tmp, &.{
         .{ "demo.sexp", "(design-block \"Demo\")" },
         .{ "demo-base.sexp", "(design-block \"Demo Base\")" },

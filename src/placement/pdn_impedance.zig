@@ -722,7 +722,7 @@ fn groundViaLegs(alloc: std.mem.Allocator, p: optimizer.Placement, routed: route
 /// scan. `computedPaths` nevertheless asks the same question once per (inner
 /// ground plane x decoupling loop x hub ground land), and every answer walks
 /// each routed via and, for the vias the land does not overlap, builds a
-/// per-layer track list and searches it. On barracuda that repetition WAS the
+/// per-layer track list and searches it. On board-a that repetition WAS the
 /// editor's deferred payload: 7.9 s of a 16 s response. Memoising per call
 /// leaves one scan per distinct land.
 const LegMemo = struct {
@@ -885,7 +885,7 @@ fn computedPaths(
 
     // `computeFill` is arena-oriented and keeps several board-sized work
     // rasters beside its returned labels. The server allocator outlives its
-    // cached pages, so retaining every relevant surface there made a Barracuda
+    // cached pages, so retaining every relevant surface there made a Board A
     // page hold nearly a gigabyte. Extract compact per-loop facts
     // while one surface is live, then recycle all of that surface's scratch
     // before rasterizing the next one.

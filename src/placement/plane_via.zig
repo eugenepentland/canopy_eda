@@ -9,12 +9,12 @@
 //! Both used to look for it in the same place — OUTSIDE the pad. The site they
 //! try first is the pad's anchor snapped to the ROUTING grid, and every
 //! candidate after that is a whole grid pitch further out (~0.44 mm on
-//! barracuda), joined back with a stub. That is the right answer for a chip
+//! board-a), joined back with a stub. That is the right answer for a chip
 //! pad, which is smaller than the grid anyway, and the wrong one for a big pad:
 //! a buck's exposed thermal pad is millimetres across, so a site a couple of
 //! tenths off its centre is still deep inside its own copper — clear of the
 //! neighbour that refused the centre, needing no stub, and invisible to a
-//! search that only ever steps by the grid. Measured on barracuda's
+//! search that only ever steps by the grid. Measured on board-a's
 //! `buck_6v/U22.3` (1.32 × 1.72 mm): the anchor sits 0.063 mm from the `FB` pad
 //! and needs 0.327, while a site 0.275 mm below it clears everything — inside
 //! the same pad.
@@ -67,7 +67,7 @@ pub const ThermalAxis = struct {
 
 /// Choose one centred array axis. Use the preferred pitch when it naturally
 /// gives at least three sites; otherwise tighten only when the DRC minimum can
-/// support a 3-site row. This makes Barracuda's 1.95-mm HMC451 paddle a 3-site
+/// support a 3-site row. This makes Board A's 1.95-mm HMC451 paddle a 3-site
 /// axis while its 2.5-mm and 4.6-mm paddles remain at about 0.9-mm pitch.
 pub fn thermalAxis(span: f64, via_dia: f64, min_pitch: f64) ThermalAxis {
     if (span < via_dia or min_pitch <= 0) return .{ .count = 0, .pitch = 0 };
@@ -176,7 +176,7 @@ pub fn inLandBarrelFits(land: ?pad_shape.Shape, point: [2]f64, via_dia: f64) boo
 
 /// In-pad scan step as a fraction of the via's copper DIAMETER. A quarter of a
 /// 0.4 mm via is 0.1 mm — fine enough to find the legal band beside a crowding
-/// neighbour (the barracuda thermal pad's is 0.275 mm off centre) without
+/// neighbour (the board-a thermal pad's is 0.275 mm off centre) without
 /// turning a 1.7 mm pad into thousands of probes.
 const step_frac: f64 = 0.25;
 /// Floor on that step (mm), so a hairline via diameter cannot make the scan
@@ -240,14 +240,14 @@ pub const InPad = struct {
     /// inside the pad's copper and only the annular RING may hang over its edge.
     ///
     /// For the pad this exists for, the strict scan above is not merely empty —
-    /// it cannot be anything else. Barracuda's `J1` is a 1.27 mm-pitch
+    /// it cannot be anything else. Board A's `J1` is a 1.27 mm-pitch
     /// board-to-board connector whose B.Cu fingers are 1.0 x **0.35 mm**, and
     /// the board's via is 0.4 mm: no point of that pad can hold the barrel,
     /// because the pad is narrower than the barrel is wide. Its GND finger
     /// (pad 40) therefore reads as having no in-pad site, while every ring of
     /// the fan outside it is walled by the neighbours 0.635 mm away — so the
     /// pad ships as its own one-pad copper island, which is exactly what
-    /// barracuda's last open GND gap was. The board the design is checked
+    /// board-a's last open GND gap was. The board the design is checked
     /// against solves it the way a hand layout does: one via at the finger's own
     /// centre, ring overhanging, hole in the pad.
     ///
@@ -547,7 +547,7 @@ test "in-pad scan yields nothing on a pad narrower than the via" {
 
 // spec: placement/plane-via - a via-in-pad site may hang its annular ring over the pad edge while its drilled hole stays on the pad's own copper, so a finger narrower than the barrel still offers one
 test "the drill-contained scan lands a via on a finger narrower than its barrel" {
-    // barracuda's `J1` GND finger and the board's 0.4/0.2 via: 1.00 x 0.35 mm,
+    // board-a's `J1` GND finger and the board's 0.4/0.2 via: 1.00 x 0.35 mm,
     // so the pad is narrower than the barrel and the strict scan has nothing.
     const finger = pad_shape.Shape{ .x0 = 184.475, .y0 = 110.295, .x1 = 185.475, .y1 = 110.645 };
     const anchor = [2]f64{ 184.975, 110.47 };

@@ -297,7 +297,7 @@ fn viaClearsSameNetVias(ctx: *const Ctx, placed: []const Via, x: f64, y: f64, ne
 /// The copper tests cannot stand in for it: `viaClearsPads` skips the routing
 /// net's OWN pads outright, so a barrel dropped beside a same-net through pad
 /// passed every generator check while the DRC — which is net-blind about drills —
-/// refused it. Measured on barracuda's `V_6VA`: a plane via 0.202 mm from
+/// refused it. Measured on board-a's `V_6VA`: a plane via 0.202 mm from
 /// `buck_6v/U22` pad 5's 0.20 mm bore, a −0.048 mm wall against the design's
 /// 0.200 mm rule, and the gate then dropped the whole net's generated copper
 /// (3 islands → 16).
@@ -1401,7 +1401,7 @@ pub fn netPourCovers(ctx: *const Ctx, net: i32, x: f64, y: f64, except_layer: ?u
 /// polygon a pour merely declares?
 ///
 /// `largestNetZone(…) != null` answers the DECLARED question, and the two are
-/// different answers on a board whose pours overlap. Barracuda's `V_6VA` In3
+/// different answers on a board whose pours overlap. Board A's `V_6VA` In3
 /// pour (priority 5) is overlapped almost end to end by `V_3V3_LMX`'s (priority
 /// 6), so all but a ~1.2 mm band of its fill is knocked back; `V_3V3A`'s zone
 /// stops at y = 105.75 while a third of its pads sit north of it. Both nets

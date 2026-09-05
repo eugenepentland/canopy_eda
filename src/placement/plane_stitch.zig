@@ -559,7 +559,7 @@ pub const Web = struct {
     /// whose barrel the rest of that cluster shares? A bond the probe refused is no
     /// cluster and gets no say: its pads keep the sites the ordinary ladder picks,
     /// which is what keeps this rule from moving stitch vias all over a board whose
-    /// bonds are all refused (barracuda's ground, straps-synth's ground).
+    /// bonds are all refused (board-a's ground, straps-synth's ground).
     ///
     /// The caller sites THAT barrel on the land's own centre when the land admits it
     /// (clearance to foreign copper and to every barrel already down; the annular

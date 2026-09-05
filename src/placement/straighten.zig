@@ -88,7 +88,7 @@ const escape_align_min_dot: f64 = 0.70710678;
 const pin_snap: f64 = 0.01;
 /// Smallest 45° corner cut worth emitting (mm). A shorter chamfer is invisible
 /// at fab resolution and only spends two extra vertices — and on a real board
-/// it costs more than nothing: barracuda's `V_22V` carried six sub-0.1 mm
+/// it costs more than nothing: board-a's `V_22V` carried six sub-0.1 mm
 /// chamfer legs, each one a micro-segment in the fab output and in every
 /// "is this trace still a staircase" count, for a corner cut narrower than the
 /// trace itself. One trace width (0.127 mm at the default class; 0.1 mm is a
@@ -134,7 +134,7 @@ const terminal_keep_mm: f64 = 0.15;
 /// drops or chamfers a vertex sitting on a via would leave the via — and every
 /// bit of the net hanging off its other layer — stranded off the trace. Chain
 /// endpoints never move, so this only matters for a via a same-layer run passes
-/// THROUGH (a mid-run stitch); barracuda has seven.
+/// THROUGH (a mid-run stitch); board-a has seven.
 const PinSet = struct {
     pts: []const [2]f64 = &.{},
 
@@ -592,7 +592,7 @@ fn Reelbower(comptime Probe: type) type {
 ///
 /// The arms themselves are NOT required to be octilinear. A routed corner can
 /// sit a degree or two off square when one arm is the join stub onto an
-/// off-grid pad centre — barracuda's `I2C_SCL` turns at 92.3° between a
+/// off-grid pad centre — board-a's `I2C_SCL` turns at 92.3° between a
 /// −0.90° run and a −88.61° one — and refusing those left square corners on
 /// the board for a property that was already lost upstream. What actually has
 /// to hold is that the CUT is octilinear, and `Chamferer.cutFor` tests exactly
@@ -898,7 +898,7 @@ pub const HopGloss = struct {
 /// finishing hop never reaches that pass — `router.closeGaps` runs long after
 /// it — so without this seam the copper a nearly-finished board GAINS is the
 /// only copper on it that keeps its staircases and square corners. (Measured on
-/// barracuda: every staircase in the banked board came from this path; a fresh
+/// board-a: every staircase in the banked board came from this path; a fresh
 /// whole-board route has none.)
 ///
 /// The probe is the same `TautProbe` the whole-board pass uses, pointed at the
@@ -1429,7 +1429,7 @@ test "an already-straight net returns null" {
 
 /// The shape a finishing hop actually comes back from the maze as: `steps`
 /// alternating one-cell moves (an axis step then a diagonal step) climbing a
-/// shallow slope, exactly like barracuda's `V_22V` bridge on B.Cu — 22 segments
+/// shallow slope, exactly like board-a's `V_22V` bridge on B.Cu — 22 segments
 /// of 0.127 mm and 0.180 mm covering a ~3.3 mm span at ~24°.
 fn latticeStaircase(arena: std.mem.Allocator, cell: f64, steps: usize) std.mem.Allocator.Error![]router.Track {
     var out: std.ArrayList(router.Track) = .empty;
@@ -1504,7 +1504,7 @@ test "chamfer cuts a near-square corner but refuses one whose chord is off 45" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
     const placement = fixture(&.{}, &.{.{ .width = 0.2 }});
-    // I2C_SCL's real shape on barracuda: a −0.90° run meeting a −88.61° one, so
+    // I2C_SCL's real shape on board-a: a −0.90° run meeting a −88.61° one, so
     // the corner is 92.3° and NEITHER arm is octilinear — the join stub onto an
     // off-grid pad centre tilted them. The chord of an equal cut is still 45°
     // within a third of a degree, so the corner is cut.

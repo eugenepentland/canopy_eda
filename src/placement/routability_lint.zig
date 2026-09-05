@@ -8,7 +8,7 @@
 //! That is the point. The autorouter reports "net X failed" *after* a full
 //! solve, and the remedy an agent then reaches for — reorder, re-prioritise,
 //! widen the window — cannot help when the obstruction is the footprint's own
-//! geometry. Two situations on barracuda cost real routing iterations before
+//! geometry. Two situations on board-a cost real routing iterations before
 //! anyone measured them:
 //!
 //!   * `adf4159/C116`, a 0201 whose two pads face each other across 0.180 mm.
@@ -846,7 +846,7 @@ const Blocked = struct { pad: PadInfo, have: f64, need: f64 };
 /// rather than still being pad. Deliberately a point rather than a swept
 /// corridor: a track only has to get clear of the pad's immediate neighbourhood
 /// before it may turn, and a fixed-length straight probe called pads sealed that
-/// have a perfectly good short lane to turn in (measured on barracuda's
+/// have a perfectly good short lane to turn in (measured on board-a's
 /// `lmx2595/U17` pad 3, which has 0.35 mm of free lane west against a 0.19 mm
 /// halo, yet failed a 0.5 mm straight probe).
 fn escapeBlocker(b: *const Board, pd: *const PadInfo, d: [2]f64) ?Blocked {
@@ -930,7 +930,7 @@ fn sealedFinding(alloc: Allocator, pd: PadInfo, hit: Blocked) Allocator.Error!Fi
 ///
 /// The finding steers nothing. It names the fan, the cross-section, the
 /// shortfall, and the one-line wave that would schedule it, and leaves the
-/// decision to whoever reads it: on the measured barracuda case any automatic
+/// decision to whoever reads it: on the measured board-a case any automatic
 /// steering of that fan costs a routed net, so the tidier board is not free.
 fn checkEscapes(
     alloc: Allocator,
@@ -1185,7 +1185,7 @@ fn findRule(findings: []const Finding, rule: []const u8) ?Finding {
 
 // spec: placement/routability_lint - flags two pads of one part facing across less than half a track plus clearance
 test "preflight flags the sibling-pad corridor of a 0201 on a wide rail" {
-    // The measured barracuda case: adf4159/C116, pads 0.400 x 0.460 with
+    // The measured board-a case: adf4159/C116, pads 0.400 x 0.460 with
     // centres 0.640 mm apart => a 0.180 mm lane, against the "power" class
     // (width 0.2532, clearance 0.127) demanding 0.2536 mm.
     var pads = [_]geometry.Pad{

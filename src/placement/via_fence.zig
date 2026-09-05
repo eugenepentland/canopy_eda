@@ -2464,7 +2464,7 @@ test "the board outline clips the fence instead of hanging vias off the edge" {
 
 // spec: placement/via-fence - a fence pitch derives a tenth of the guided wavelength from the class max-freq
 test "fence pitch resolves from max-freq, and an authored pitch overrides it" {
-    // barracuda's "rf" class: 12 GHz microstrip on FR4 ⇒ λg ≈ 11.91 mm ⇒ 1.191 mm
+    // board-a's "rf" class: 12 GHz microstrip on FR4 ⇒ λg ≈ 11.91 mm ⇒ 1.191 mm
     // spacing, which matches the hand-fenced reference's ~1.18 mm median.
     const rf = NetRule{ .rf = .{ .max_freq_hz = 12e9, .fence = .{ .declared = true } } };
     try std.testing.expectApproxEqAbs(@as(f64, 1.191), resolvedPitchMm(rf), 0.001);
@@ -2486,7 +2486,7 @@ test "fence pitch is zero when the class declares neither pitch nor max-freq" {
 // spec: placement/via-fence - a fence offset is the gap from the net's copper edge to the fence via's copper edge, derived from the class clearance and a fabrication margin
 test "fence offset resolves an edge-to-edge gap, and an authored offset overrides it" {
     const design = DesignRules{}; // via 0.4/0.2, clearance 0.127, track 0.127
-    // barracuda's "rf" class: its own 0.127 mm clearance + the 0.1 mm margin.
+    // board-a's "rf" class: its own 0.127 mm clearance + the 0.1 mm margin.
     const rf = NetRule{
         .width = 0.3124,
         .clearance = 0.127,
@@ -2751,7 +2751,7 @@ test "a pad's outline and its slot's capsule decide, not their bounding boxes" {
     }
 
     // ── a GROUND mounting slot: exempt copper, net-blind bore ─────────────────
-    // An M2 SMT spacer bonded to ground (barracuda has one): its copper is the
+    // An M2 SMT spacer bonded to ground (board-a has one): its copper is the
     // stitch net's, so only its 1.4 mm-long slotted BORE can veto — and the DRC
     // measures that bore as the capsule swept along the slot, not as a disc
     // swallowing its whole length, so beside the slot's flank the rule is the same

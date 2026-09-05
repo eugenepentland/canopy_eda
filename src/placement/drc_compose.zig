@@ -368,7 +368,7 @@ pub fn checkPrimingReport(alloc: std.mem.Allocator, in: CopperCheck) ScopedRepor
 /// rastering every declared plane and pour of the board. `drc.check` passes no
 /// prepared copper, so a caller whose placement carries the design's `(i-typ …)`
 /// rail demands paid that raster in full on every call — 7.5 s of
-/// barracuda-base's 8.2 s geometry pass — and the boards a SERVER checks are
+/// board-a-base's 8.2 s geometry pass — and the boards a SERVER checks are
 /// saved boards it re-checks over and over.
 ///
 /// This is that same check with the process fill memo wired in. The findings are
@@ -415,7 +415,7 @@ pub const FillHold = fill_cache.Held;
 /// publishes them (`boardFills`). What it did NOT do is let anyone else see
 /// them, so `/api/pcb-describe` ran its connectivity tally, its open-net report
 /// and its completion ladder over three private re-pours of the identical
-/// board — 55-60 s apiece on barracuda-base. This is the same acquire the
+/// board — 55-60 s apiece on board-a-base. This is the same acquire the
 /// reporting pass makes, with the borrow handed out instead of dropped.
 ///
 /// The borrow's rule is unchanged and load-bearing: nothing derived from these
@@ -797,7 +797,7 @@ fn filledTopology(alloc: std.mem.Allocator, in: CopperCheck, memo: ?pour.FillMem
     // user zone has one spec, so the topology pass's fill of it and
     // `net_open.zoneFills`' fill of it share a content key and were already one
     // memo entry. Building it once here retires the second key pass outright —
-    // twenty-odd zones' worth of digesting obstacle walk on a barracuda-class
+    // twenty-odd zones' worth of digesting obstacle walk on a board-a-class
     // board that only ever confirmed what this loop had just poured.
     const zone_fills = try alloc.alloc(pour.Fill, in.zones.len);
     for (in.zones, 0..) |zone, zone_i| {

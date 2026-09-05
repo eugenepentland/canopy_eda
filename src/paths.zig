@@ -2,7 +2,7 @@
 //!
 //! `projects/designs/src/` may be flat (`src/<name>.sexp`) or grouped
 //! into project subdirectories (`src/<group>/<name>.sexp`). Callers
-//! pass bare basenames (`stm32n6`, `cyclops-analog`) and this module
+//! pass bare basenames (`stm32n6`, `board-b-analog`) and this module
 //! walks `src/` to locate the file. Per-design artifacts (`.bom`,
 //! `.layout`, `.ids`, `.kicad.json`) and the autoloaded sidecars
 //! (`.checks.sexp`, `.layout.sexp`, `.diagram.sexp` — see

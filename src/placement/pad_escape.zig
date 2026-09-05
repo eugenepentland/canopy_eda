@@ -209,7 +209,7 @@ const square_tol_cos: f64 = 0.0871557;
 /// six-board corpus (2026-08-12), re-scoring compliant ends on this key SAVED
 /// copper rather than spending it — 1252.20 mm of trace fell to 1247.64 mm, with
 /// five of the six boards shrinking, the sixth (lmk05318b-clock) growing 0.05 mm
-/// and the worst single net (barracuda's V_22V) growing 0.67 mm. The board
+/// and the worst single net (board-a's V_22V) growing 0.67 mm. The board
 /// owner's own example, straps-synth-lmx2595's `LMX_VREFVCO2`, lost its right
 /// angle AND 0.35 mm of the 2.46 mm it had. A budget widened for a case the
 /// geometry does not produce would only buy detours.
@@ -490,7 +490,7 @@ fn nearPolyline(p: [2]f64, pts: []const [2]f64, reach: f64) bool {
 /// which a centre-anchored ray then leaves behind. Both open the net when the
 /// finish's single-layer-via sweep drops the abandoned barrel and the loose-end
 /// cascade follows it. (Measured: `lmk05318b-clock`'s LMK_CAP_PLL1 and
-/// barracuda's V_12V, one net each.) Such an end keeps what it has, counted as
+/// board-a's V_12V, one net each.) Such an end keeps what it has, counted as
 /// a fallback — connectivity outranks the rule.
 fn stripsVia(vias: []const Barrel, was: []const [2]f64, now: []const [2]f64, half: f64) bool {
     for (vias) |v| {
@@ -914,7 +914,7 @@ fn escapeChain(
     // re-anchoring the first would leave the second walking back out to it and
     // the copper doubles over itself. (Duplicated copper — the same segment
     // emitted twice, which the finish does leave behind — reads as exactly such
-    // a two-node cycle; rewriting one cost barracuda's V_12V its westward
+    // a two-node cycle; rewriting one cost board-a's V_12V its westward
     // branch and with it a routed net.)
     if (dist(job.pts[0], job.pts[job.pts.len - 1]) <= eps) return null;
     var work = job.pts;
@@ -2078,7 +2078,7 @@ test "every via the old copper carried is still carried by the new" {
     // barrel — never the third thing, which is what opened that net.
     try testing.expect(built == null or !stripsVia(&on_end, &pts, built.?, half));
     // The guard itself. A barrel the copper merely BRUSHES counts too — that is
-    // barracuda's V_12V, where the abandoned via took the whole net with it.
+    // board-a's V_12V, where the abandoned via took the whole net with it.
     const moved = [_][2]f64{ .{ 0, 0 }, .{ 0, -1.4 } };
     const brushed = [_]Barrel{.{ .at = .{ 0.5, -0.5 }, .r = 0.1 }};
     try testing.expect(stripsVia(&brushed, &pts, &moved, half));

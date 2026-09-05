@@ -199,7 +199,7 @@ test "routability_preflight JSON carries the measurements and the per-rule count
     }};
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try writeJson(&aw.writer, "barracuda", &findings);
+    try writeJson(&aw.writer, "board-a", &findings);
     const out = aw.written();
     // The measurements must survive as FIELDS, not only inside the prose.
     try testing.expect(std.mem.indexOf(u8, out, "\"have_mm\":0.1800") != null);
@@ -230,7 +230,7 @@ test "routability_preflight JSON carries the escape-contention block and its sug
     }};
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try writeJson(&aw.writer, "barracuda", &findings);
+    try writeJson(&aw.writer, "board-a", &findings);
     const out = aw.written();
     // The counts must survive as FIELDS: a lane shortfall is what the reader acts on.
     try testing.expect(std.mem.indexOf(u8, out, "\"escape\":{\"side\":\"west\"") != null);

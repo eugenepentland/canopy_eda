@@ -717,8 +717,8 @@ test "requiresWriteFor exempts each read-only post prefix and gates its siblings
 
     // The one-character-wide hazard the list's own comment names, pinned on both
     // sides: `/api/pcb-drc/:name` computes, `/api/pcb-drc-rules/:name` persists.
-    try std.testing.expect(!requiresWriteFor(.POST, "/api/pcb-drc/barracuda"));
-    try std.testing.expect(requiresWriteFor(.POST, "/api/pcb-drc-rules/barracuda"));
+    try std.testing.expect(!requiresWriteFor(.POST, "/api/pcb-drc/board-a"));
+    try std.testing.expect(requiresWriteFor(.POST, "/api/pcb-drc-rules/board-a"));
     // Same shape for the score pair: the batch route is listed in its own right,
     // and a third name sharing the stem is NOT exempt.
     try std.testing.expect(!requiresWriteFor(.POST, "/api/pcb-score/x"));

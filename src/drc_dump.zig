@@ -36,8 +36,8 @@
 //! second dump, and `--prime` runs a discarded DRC pass over the UNMUTATED
 //! board first. That pair is what tests a fill memo end to end on a real board:
 //!
-//!   netlisp drc-dump --mutate 2 --prime barracuda > warm.txt   # borrows fills
-//!   netlisp drc-dump --mutate 2         barracuda > cold.txt   # pours them
+//!   netlisp drc-dump --mutate 2 --prime board-a > warm.txt   # borrows fills
+//!   netlisp drc-dump --mutate 2         board-a > cold.txt   # pours them
 //!   diff -I '^#' warm.txt cold.txt                             # must be empty
 //!
 //! A borrowed fill that is not bit-identical to a poured one shows up here as a
@@ -51,7 +51,7 @@
 //! reconcile uses, and after every step also runs a cold full check of the
 //! identical state in the same process:
 //!
-//!   netlisp drc-dump --scoped barracuda > seq.txt
+//!   netlisp drc-dump --scoped board-a > seq.txt
 //!   diff <(grep ' scoped ' seq.txt | cut -d' ' -f3-) \
 //!        <(grep ' full '   seq.txt | cut -d' ' -f3-)   # must be empty
 //!
@@ -68,7 +68,7 @@
 //! a `SWEEP` line, each disagreement a `SWEEP!` line naming the finding and the
 //! direction it moved, and the run ends with the one line a soak reads:
 //!
-//!   netlisp drc-dump --scoped barracuda barracuda-base barracuda-via-fence Cyclops-Flex \
+//!   netlisp drc-dump --scoped board-a board-a-base board-a-fence Board-B-Flex \
 //!     | grep '^# SWEEP RESULT'          # must say discrepancies=0
 //!
 //! The sweep's deferred-kind refresh is applied between steps too, so the
@@ -81,7 +81,7 @@
 //! three editing gestures — a track drag, the identical repost the client sends
 //! when nothing moved, and a via drag — printing each one's median:
 //!
-//!   netlisp drc-dump --bench 5 barracuda barracuda-base | grep BENCH
+//!   netlisp drc-dump --bench 5 board-a board-a-base | grep BENCH
 //!
 //! No cold full pass runs beside the measured one, which is the difference from
 //! `--scoped`: the numbers are the reconcile's own wall time, and a profiler
@@ -618,7 +618,7 @@ fn runParsed(allocator: std.mem.Allocator, w: *std.Io.Writer, parsed: Args) Dump
     var resolved: usize = 0;
     var unresolved: usize = 0;
     for (parsed.names) |name| {
-        // A per-board arena: a barracuda-class board's DRC holds hundreds of
+        // A per-board arena: a board-a-class board's DRC holds hundreds of
         // megabytes, and a corpus dump must peak at one board's worth.
         var board_state = std.heap.ArenaAllocator.init(allocator);
         defer board_state.deinit();
@@ -655,7 +655,7 @@ test "drc-dump CLI parses flags and positionals" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const parsed = try parseArgs(arena, &.{ "--project-dir", "p", "--mutate", "3", "--prime", "--bench", "4", "barracuda", "cyclops" });
+    const parsed = try parseArgs(arena, &.{ "--project-dir", "p", "--mutate", "3", "--prime", "--bench", "4", "board-a", "board-b" });
     try testing.expectEqualStrings("p", parsed.project_dir);
     try testing.expectEqual(Mutation.add_track, parsed.mutate);
     try testing.expect(parsed.prime);

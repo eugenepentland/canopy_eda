@@ -3,7 +3,7 @@
 //!
 //! This is the endpoint agent loops and review tooling hit hardest, and it was
 //! the only expensive one left with no retention at all: measured on this
-//! project's boards, two identical back-to-back requests for `barracuda` cost
+//! project's boards, two identical back-to-back requests for `board-a` cost
 //! **6.570 s and 6.574 s** against an already-warm server — the second paid the
 //! first's work over again, byte for byte. Each call runs
 //! `pcb_layout_page.solveForRequest` (design evaluation + a multi-megabyte

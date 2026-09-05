@@ -999,7 +999,7 @@ fn firstRippable(blockers: []const Blocker) ?Blocker {
 /// member's whole policy and takes its routing order from the wave's POSITION,
 /// so a class priority reaches only the rip-up/rescue tier and the net routes
 /// exactly when it did before. Emitting that form for a wave-bound net sends
-/// its reader after an inert lever — measured on barracuda, where the class the
+/// its reader after an inert lever — measured on board-a, where the class the
 /// remedy asked for produced a byte-identical board. The wave itself is the
 /// lever there, so that is what is offered.
 fn raisePriority(s: Allocator, rc: RemedyCtx, tier: u8, rationale: []const u8, confidence: []const u8) Allocator.Error!Remedy {
@@ -1248,7 +1248,7 @@ const leaf = net_name.leaf;
 /// A signal index is not a stack position: a `(plane …)` claims an inner layer
 /// and the routable ones close up behind it. Reading the index AS a stack
 /// position (`board_layers.StackIndex.of(layer)`, what this did) is exact only
-/// where no plane claims an inner layer, and barracuda declares two — so its
+/// where no plane claims an inner layer, and board-a declares two — so its
 /// In2.Cu blockers printed "In1.Cu" and its In3.Cu blockers "In2.Cu", one layer
 /// off each, naming In1.Cu, which that board's router cannot lay a track on at
 /// all. During the routing campaign that made plan-compliant copper read as a
@@ -1408,7 +1408,7 @@ test "a blocker layer name follows the board's declared planes" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    // barracuda's stackup: `(stackup 6 (plane 2 "GND") (plane 5 "GND"))`, so the
+    // board-a's stackup: `(stackup 6 (plane 2 "GND") (plane 5 "GND"))`, so the
     // routable inners are stack 3 and 4 — In2.Cu and In3.Cu. Reading a SIGNAL
     // index as a stack position named them In1.Cu and In2.Cu, and In1.Cu is the
     // plane, a layer this board's router cannot lay a track on at all.

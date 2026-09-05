@@ -11,7 +11,7 @@
 //! what it stores. That objective is the auto-placer's own, it is not what a
 //! saved board is judged by (DRC findings and routed-trace counts are, from
 //! their own endpoints), and re-running it here cost 27.2 s of a 27.7 s
-//! barracuda autosave. Saved entries are therefore written score-less; the
+//! board-a autosave. Saved entries are therefore written score-less; the
 //! panel renders "—", and `/api/pcb-rescore` still fills scores in on demand.
 //!
 //! It lives at the top level rather than under `src/serve/` because the whole
@@ -42,7 +42,7 @@ const Server = serve_root.Server;
 /// evaluated is still a board the user may save.
 ///
 /// `stages`, when supplied, closes the `resolve` phase here — the whole-design
-/// re-evaluation, which FEEDBACK.md measured at ~3.5 s on barracuda and which
+/// re-evaluation, which FEEDBACK.md measured at ~3.5 s on board-a and which
 /// every autosave pays. It is named separately from the endpoint's own work
 /// because a slow evaluator and a slow endpoint are opposite fixes.
 pub fn savedLayoutLayers(

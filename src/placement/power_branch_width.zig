@@ -3,7 +3,7 @@
 //! `power_route_width.adaptiveTargetWidth` answers ONE width for a whole rail:
 //! the IPC-2221 width of the entire declared rail current on the worst foil.
 //! Growing every segment of the net to that width builds a test-point stub at
-//! trunk width — on barracuda's `V_5VA` all 93 segments (123 mm of copper) were
+//! trunk width — on board-a's `V_5VA` all 93 segments (123 mm of copper) were
 //! sized for 0.42 A while the worst branch actually carried 0.275 A.
 //!
 //! `power_integrity` already solves the local current of every routed segment

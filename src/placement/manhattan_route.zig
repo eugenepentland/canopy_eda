@@ -202,7 +202,7 @@ fn eligible(g: Gate) bool {
 /// acceptance, four neighbours instead of eight and a price per corner.
 ///
 /// A net carrying plain `(waypoints …)` DOES come through here, with the
-/// waypoints cleared for the span of the attempt. On barracuda those waypoints
+/// waypoints cleared for the span of the attempt. On board-a those waypoints
 /// were authored by earlier routing campaigns as a way to buy a clean shape —
 /// `lo-drive-rounded`'s stated reason is "one remote elbow with long horizontal
 /// and vertical arms, leaving enough tangent length for the full RF bend radius",
@@ -264,7 +264,7 @@ pub fn attempt(
 /// shape this rung exists to produce and refuses everything that is a DETOUR
 /// rather than a corner.
 ///
-/// Measured on barracuda: `RF1_HPF`, a 0.61 mm hop, closed axis-only at 1.78 mm
+/// Measured on board-a: `RF1_HPF`, a 0.61 mm hop, closed axis-only at 1.78 mm
 /// (2.9×) by going the long way around an obstacle, against a requirement that a
 /// smoothed RF route not run farther than it needs to. Grid quantization counts
 /// against this budget too, which is deliberate: on a hop that short, a route
@@ -482,7 +482,7 @@ fn escapeHonoured(pt: router.NetPt, next: [2]f64, reserve: f64, width: f64) bool
 ///
 /// This is the one place an RF net's copper may leave the compass, and the
 /// exemption is the whole point: a lone segment has no direction transition at
-/// all, which is what the angle discipline exists to buy. Barracuda's RF1 filter
+/// all, which is what the angle discipline exists to buy. Board A's RF1 filter
 /// chain hops sit tenths of a millimetre off-axis over a few millimetres, and
 /// squaring that up produces a pair of micro-facets INSIDE the trace's own width
 /// — measurably worse copper than a hair-off-axis straight, and nothing a bend
@@ -570,7 +570,7 @@ const geometry = @import("geometry.zig");
 const flat_netlist = @import("../flat_netlist.zig");
 
 /// The RF class every fixture declares. Only its presence matters here; the
-/// value is barracuda's K-band ceiling.
+/// value is board-a's K-band ceiling.
 const rf_hz: f64 = 12e9;
 const rf_net: i32 = 0;
 
@@ -652,7 +652,7 @@ fn board(max_freq: f64) Board {
     };
 }
 
-/// Barracuda's `RF1_HPF` in miniature: a SHORT diagonal hop — the two terminals
+/// Board A's `RF1_HPF` in miniature: a SHORT diagonal hop — the two terminals
 /// move to (2, 3) and (3.4, 4.4), `hop_span_mm` apart — with a wall across the
 /// gap between them. Neither router can cross it (the fixtures also forbid vias),
 /// so both must round its right-hand end, which costs about 5.6 mm: 2.8× the
@@ -668,7 +668,7 @@ fn hopBoard(max_freq: f64) Board {
     return b;
 }
 
-/// Barracuda's `U13`→`U16` LO run in miniature, and the exact shape the user is
+/// Board A's `U13`→`U16` LO run in miniature, and the exact shape the user is
 /// judging: an 8 mm drop with a 1.5 mm sideways offset. The archetype is a long
 /// vertical leg leaving J1 and a short horizontal leg into J2, meeting at one
 /// corner the bend smoother then opens.
@@ -901,7 +901,7 @@ test "the direct tier draws a sub-width offset straight and a real offset as an 
     var out: std.ArrayList([2][2]f64) = .empty;
     const open = PairSeam{ .arena = arena, .out = &out };
 
-    // Barracuda's RF1 filter hop: 3 mm apart, 0.06 mm off — inside one 0.127 mm
+    // Board A's RF1 filter hop: 3 mm apart, 0.06 mm off — inside one 0.127 mm
     // trace width. ONE segment, pad centre to pad centre, no corner at all.
     try testing.expect(try directPair(open, term(2, 3), term(5, 3.06), 0, 0.127));
     try testing.expectEqual(@as(usize, 1), out.items.len);
@@ -957,7 +957,7 @@ test "an RF elbow gives the bend smoother two clean legs and one corner" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    // Barracuda's U13→U16 shape: 8 mm of drop, 1.5 mm of offset.
+    // Board A's U13→U16 shape: 8 mm of drop, 1.5 mm of offset.
     var rf = elbowBoard();
     const routed = try router.route(arena, rf.placement(), .{});
     try testing.expectEqual(@as(usize, 1), routed.routed);
@@ -1068,7 +1068,7 @@ test "the escape reserve rejects a leg that turns too soon or leaves the wrong w
     // A 1.5 mm reserve wants 1.5 mm of +x before anything else happens.
     try testing.expect(escapeHonoured(east, .{ 3, 0 }, 1.5, w));
     // Half a millimetre of +x and then a corner does not honour it — this is
-    // barracuda's rf-escape fixture, and why the tier declines it outright.
+    // board-a's rf-escape fixture, and why the tier declines it outright.
     try testing.expect(!escapeHonoured(east, .{ 0.5, 0 }, 1.5, w));
     // Leaving along the wrong axis, or the wrong way down the right one, fails
     // however long the leg is.
@@ -1089,7 +1089,7 @@ test "a waypointed RF net is routed rectilinear rather than through its waypoint
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    // Barracuda's `(waypoints …)` on RF nets were authored by earlier ROUTING
+    // Board A's `(waypoints …)` on RF nets were authored by earlier ROUTING
     // campaigns to buy a clean elbow — which is what this rung produces
     // natively — so a plain waypoint is a means, not a shape the author owns.
     // The waypoint here sits well off any sensible path; the copper must ignore
@@ -1229,7 +1229,7 @@ test "the detour cap measures a route against its terminals' minimum spanning tr
     try testing.expectApproxEqAbs(@as(f64, 6), routedMm(&elbow), 1e-9);
     try testing.expect(try withinDetourCap(arena, &elbow, &pair));
 
-    // Barracuda's `RF1_HPF` ratio — 12.6 mm of copper across a 4.24 mm span,
+    // Board A's `RF1_HPF` ratio — 12.6 mm of copper across a 4.24 mm span,
     // 2.97× — is a wall detour, not a corner, and is refused.
     const detour = [_]router.Track{ leg(0, 0, 6.3, 0), leg(6.3, 0, 6.3, 3), leg(6.3, 3, 3, 3) };
     try testing.expect(routedMm(&detour) > 2.9 * mstOf(pair));

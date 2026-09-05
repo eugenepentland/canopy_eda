@@ -4,7 +4,7 @@
 //! count.
 //!
 //! The campaign this exists for had run its routing economics to the end. Ten
-//! measurements on barracuda held at the same routed tally with the same five
+//! measurements on board-a held at the same routed tally with the same five
 //! survivors, each with a PROVEN wall: a coupled pair with no alternative
 //! channel, a pocket whose every freed blocker revealed another, corridors
 //! geometry-sealed after rips. Every remaining lever on the routing side had

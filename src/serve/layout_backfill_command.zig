@@ -168,12 +168,12 @@ fn printResult(arena: std.mem.Allocator, args: Args, scanned: usize, rows: []con
 
 // spec: serve/layout-backfill - the argument parser reads the project dir, named blocks, dry-run flag, and limit
 test "parseArgs reads the project dir, named blocks, dry-run flag and limit" {
-    const args = parseArgs(&.{ "--project-dir", "projects/designs", "barracuda", "straps", "--dry-run", "--limit", "5" });
+    const args = parseArgs(&.{ "--project-dir", "projects/designs", "board-a", "straps", "--dry-run", "--limit", "5" });
     try std.testing.expectEqualStrings("projects/designs", args.project_dir);
     try std.testing.expect(args.dry_run);
     try std.testing.expectEqual(@as(usize, 5), args.limit);
     try std.testing.expectEqual(@as(usize, 2), args.blocks.len);
-    try std.testing.expectEqualStrings("barracuda", args.blocks[0]);
+    try std.testing.expectEqualStrings("board-a", args.blocks[0]);
     try std.testing.expectEqualStrings("straps", args.blocks[1]);
 
     // Bare invocation: whole project, live run, default limit.

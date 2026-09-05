@@ -152,7 +152,7 @@ pub fn describeDesign(
     // One board, one pour. The reporting DRC below rasters every plane and
     // hand-drawn zone of this board; the connectivity tally and the open-net
     // report that follow ask the SAME questions of the SAME copper, and each
-    // used to raster all of it privately — 55-60 s apiece on barracuda-base,
+    // used to raster all of it privately — 55-60 s apiece on board-a-base,
     // three times in one request. They now read what the DRC pass built
     // (`drc_rules.sharedFills`), and the board-edge margin field every one of
     // them starts from is seeded ONCE here instead of once per fill per net.
@@ -204,7 +204,7 @@ pub fn describeDesign(
         // alike (see `netConnectivity`). The router's own counters answer a
         // different question — "did every leg's search succeed" — and on a
         // `?route=1` run they shipped in the SAME payload as `open_nets`, which
-        // is the oracle: barracuda reported `routed:85, unrouted:[5 names]`
+        // is the oracle: board-a reported `routed:85, unrouted:[5 names]`
         // beside thirteen open nets. Two tallies in one object, and the
         // optimistic one is the one a reader sees first.
         const conn: fab_readiness.Tally = try connectivityTally(alloc, solved.placement, r, solved.shown_zones.user, prep);
@@ -410,7 +410,7 @@ const RoutedSummary = struct {
 /// ZERO, so a restored board with open nets once reported `"routed":0,"total":0`
 /// with an empty `unrouted[]` — indistinguishable from "nothing left to route".
 /// A fresh `?route=1` run has the opposite failure: the router counts a leg
-/// whose search succeeded, so barracuda shipped `routed:85` next to thirteen
+/// whose search succeeded, so board-a shipped `routed:85` next to thirteen
 /// `open_nets` in one payload. The oracle answers both honestly.
 fn connectivityTally(
     alloc: std.mem.Allocator,

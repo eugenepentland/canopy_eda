@@ -629,7 +629,7 @@ test "CAD export endpoint returns only explicitly authored extrusion solids" {
     defer step_request.deinit();
     step_request.body(extrusion_document);
     step_request.query("format", "step");
-    try exportFile(step_request.res.arena, "barracuda", step_request.req, step_request.res);
+    try exportFile(step_request.res.arena, "board-a", step_request.req, step_request.res);
     try std.testing.expect(std.mem.startsWith(u8, step_request.res.body, "ISO-10303-21;"));
     try std.testing.expect(std.mem.indexOf(u8, step_request.res.body, "FACETED_BREP('Authored floor'") != null);
     try std.testing.expect(std.mem.indexOf(u8, step_request.res.body, "FACETED_BREP('Base'") == null);
@@ -639,7 +639,7 @@ test "CAD export endpoint returns only explicitly authored extrusion solids" {
     defer stl_request.deinit();
     stl_request.body(extrusion_document);
     stl_request.query("format", "stl");
-    try exportFile(stl_request.res.arena, "barracuda", stl_request.req, stl_request.res);
+    try exportFile(stl_request.res.arena, "board-a", stl_request.req, stl_request.res);
     try std.testing.expect(std.mem.startsWith(u8, stl_request.res.body, "solid floor\n"));
 }
 
@@ -731,7 +731,7 @@ test "system CAD validates and serializes repeated assembly instances" {
     try std.testing.expect(std.mem.indexOf(u8, browser, "function applyPendingDimension()") != null);
     try std.testing.expect(std.mem.indexOf(u8, browser, "event.key.toLowerCase() === \"d\"") != null);
     const boards = [_]system_review.BoardMember{
-        .{ .name = "barracuda", .role = "controller", .source = "src/boards/barracuda/barracuda.sexp", .part_number = "BAR", .revision = "2" },
+        .{ .name = "board-a", .role = "controller", .source = "src/boards/board-a/board-a.sexp", .part_number = "BAR", .revision = "2" },
         .{ .name = "black-canyon", .role = "channel", .source = "src/boards/black-canyon/black-canyon.sexp", .part_number = "BC", .revision = "1" },
     };
     const spec: system_review.SystemSpec = .{
@@ -743,7 +743,7 @@ test "system CAD validates and serializes repeated assembly instances" {
         .boards = &boards,
     };
     const instances = [_]AssemblyInstance{
-        .{ .id = "barracuda", .board = "barracuda", .z = 18.5 },
+        .{ .id = "board-a", .board = "board-a", .z = 18.5 },
         .{ .id = "black-canyon-left-1", .board = "black-canyon", .x = -73.95, .y = -77, .z = 18.5 },
         .{ .id = "black-canyon-left-2", .board = "black-canyon", .x = -73.95, .y = -55, .z = 18.5 },
     };
@@ -751,7 +751,7 @@ test "system CAD validates and serializes repeated assembly instances" {
     try std.testing.expect(validAssembly(spec, assembly));
 
     const duplicate = [_]AssemblyInstance{
-        .{ .id = "same", .board = "barracuda" },
+        .{ .id = "same", .board = "board-a" },
         .{ .id = "same", .board = "black-canyon" },
     };
     try std.testing.expect(!validAssembly(spec, .{ .schema = assembly_schema, .instances = &duplicate }));

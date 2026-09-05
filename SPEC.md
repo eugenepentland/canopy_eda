@@ -608,7 +608,7 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - a fine rescue window bounds the escape direct-synthesis probe sweep it forces on, while a whole-board route keeps the unbounded sweep an author-declared escape net is allowed
 - collapses a collinear multi-pad net to one straight through-line
 - snaps a terminal via onto its pad centre and drops the sliver tail
-- a terminal-via snap reuses the earlier same-net barrel when recentering would create the barracuda TXDATA via-spacing error
+- a terminal-via snap reuses the earlier same-net barrel when recentering would create the board-a TXDATA via-spacing error
 - drops sub-micron degenerate track segments from the finished copper
 - bridges a same-net copper gap so a routed net is connected by construction
 - a trace that only grazes a pad is welded from its centreline to the exact pad centre
@@ -3816,7 +3816,7 @@ actual/ideal ratio on their closed-form baseline.
 - propagation uses the same grounded coplanar effective permittivity as impedance synthesis
 - a widening CPWG trace grows its side-ground slot only until the declared cap
 - grounded coplanar analysis refuses a non-positive or copper-closed slot
-- an offset L3 coupled stripline solves the Barracuda 100 ohm LVDS geometry and round-trips
+- an offset L3 coupled stripline solves the Board A 100 ohm LVDS geometry and round-trips
 - an outer differential pair uses coupled microstrip odd mode and round-trips through synthesis
 - vacuum capacitance and dielectric capacitance produce the quasi-TEM impedance and effective permittivity of a layered microstrip
 - odd mode drives two conductors oppositely and differential impedance is exactly twice the resulting odd-mode impedance
@@ -7950,7 +7950,7 @@ is what makes the predicate exact rather than approximately right.
 - Front-only and Back-only PCB views exclude opposite-face footprints from hover, direct and exact-pad clicks, marquee and select-all selection, and every part/group transform
 - WebGPU pan and zoom frames replay a cached render bundle until geometry, layer order, or visible-pour membership changes
 - Swept variable-width RF paths remain on WebGPU as exact triangulated stencil unions, while their hidden centreline tracks are omitted from the GPU copper stream and a hidden copper layer cannot leak its taper through a visible layer's stencil cover
-- The deterministic PCB-editor zoom gate measures fit-to-8×-to-fit paints in both directions, covers the DPR-2 Canvas fallback, asserts an RF-heavy Barracuda workload stays on WebGPU, and is required metadata on every deployable release candidate
+- The deterministic PCB-editor zoom gate measures fit-to-8×-to-fit paints in both directions, covers the DPR-2 Canvas fallback, asserts an RF-heavy Board A workload stays on WebGPU, and is required metadata on every deployable release candidate
 - The deterministic PCB-editor benchmark never schedules a saved-layout migration or autosave while measuring read-only frame performance
 - Release preparation waits for a stable quiet-host window before PCB-editor timing, retries timing-budget misses after contention clears, and never retries renderer or infrastructure failures
 - The WebGPU renderer drops a track whose layer the board does not have instead of repainting it on F.Cu
@@ -8846,7 +8846,7 @@ export never invents them.
 - each declaration publishes a typed report whose plans concatenate back into assertion order, one verdict per screen matching that assertion's pass/warn/fail, and (sideband either) publishes both sidebands high side first
 - evaluating one declaration twice produces byte-identical assertions and structurally identical reports, so the analysis is a pure function of what was declared
 - the parser requires a title, mode, output band, LO and mixer sense, bounds the enumeration order at nine, and refuses sum mixing rather than approximating it
-- the authored Barracuda declaration round-trips through the parser into the same plan the fixture screens, with SI-suffixed frequencies and signed dBm resolved
+- the authored Board A declaration round-trips through the parser into the same plan the fixture screens, with SI-suffixed frequencies and signed dBm resolved
 - a low-side plan under an LO below the commanded band is refused as unrealizable rather than screened against a negative RF window
 - completeness-waiver: empty inputs (the parser rejects a declaration without a title, a mode, an output band, an LO frequency, and a mixer sense before evaluation; a source range that does not contain its own delivered passband is refused with them)
 - completeness-waiver: large inputs (one declaration enumerates at most the ninth-order square plus two leakage rows — 83 products — over a single required RF interval, admits at most 64 spur-table rows, and plans at most two sidebands)

@@ -3,7 +3,7 @@
 //!
 //! A batch route counts a net routed when its own maze reached each terminal.
 //! That is not the same question as "does the copper on the board join this
-//! net's pads", and on a dense board the two answers diverge badly: barracuda's
+//! net's pads", and on a dense board the two answers diverge badly: board-a's
 //! whole-board route claimed 85/90 while `fab_readiness.routableTally` — the
 //! one connectivity oracle every reporting surface shares — found 77/90. The
 //! difference was never hard routing. It was short joins the router never
@@ -39,7 +39,7 @@
 //! its island needed, so such a hop is committed one island at a time through
 //! `island_accept.Ledger` — its copper built as a separate candidate, weighed by
 //! the connectivity oracle plus the geometry DRC, and adopted only on a strict
-//! gain. That is what lets a rail like barracuda's `V_3V3A`, carried by a
+//! gain. That is what lets a rail like board-a's `V_3V3A`, carried by a
 //! retained In3.Cu zone and arriving in eight islands, be closed by the gate at
 //! all; committing those same stitches unweighed measured 102 -> 98 nets.
 
@@ -113,7 +113,7 @@ pub const Pass = struct {
 /// across the passes of ONE route.
 ///
 /// The gate re-plans from the oracle's island report every pass, and that
-/// report barely moves for a net whose hops all fail: barracuda's `V_3V3A`
+/// report barely moves for a net whose hops all fail: board-a's `V_3V3A`
 /// asked for the same fifteen hops in every pass and had every one of them
 /// refused — a corridor maze each, plus two whole-board oracle passes for each
 /// stitch — which is where two of three timed gate passes went while the rails
@@ -170,7 +170,7 @@ pub const HopMemo = struct {
     /// to the board (`router.shapeWindow`), so the mesh it builds and the
     /// channel it searches are identical at either width. Re-asking it is a
     /// rebuild of the same mesh over the same copper for the same answer —
-    /// measured on barracuda, six of the wide pass's shape attempts were verbatim
+    /// measured on board-a, six of the wide pass's shape attempts were verbatim
     /// repeats of hops the ordinary passes had already refused.
     ///
     /// The refusal is durable for the same reason a maze refusal is: this gate is
@@ -210,7 +210,7 @@ pub const HopMemo = struct {
     ///
     /// A hop-level memory alone does not stop a MANY-ISLANDED net: each accepted
     /// or refused hop reshapes the oracle's island tree, so the next pass names
-    /// fresh endpoints and the same net asks for another dozen mazes. Barracuda's
+    /// fresh endpoints and the same net asks for another dozen mazes. Board A's
     /// `V_3V3A` did exactly that — 20-plus refusals across a route, never one net
     /// gained — while `GND`, sorted behind it with eight sub-1.5 mm hops that
     /// land when they are reached, got two attempts in three passes.
@@ -313,7 +313,7 @@ fn withoutRefused(
 pub const default_max_hops: usize = 48;
 
 /// Default ceiling on one reconciliation hop (mm). Sized from the measured
-/// phantom joins on barracuda — the longest was 1.34 mm (a boost converter's
+/// phantom joins on board-a — the longest was 1.34 mm (a boost converter's
 /// diode-to-inductor switch node) — with headroom for a pad pair that has to
 /// detour around one neighbouring part rather than run straight.
 pub const default_max_hop_mm: f64 = 4.0;
@@ -433,14 +433,14 @@ const corridor_margin_mm: f64 = 3.0;
 
 /// A LAST-CHANCE pass gives a hop long enough to need room to detour a corridor
 /// proportional to its own span instead. Three millimetres round a 16 mm hop is
-/// a nearly straight slot: barracuda's `EN_BUCK6V` is one 16.5 mm bridge, its
+/// a nearly straight slot: board-a's `EN_BUCK6V` is one 16.5 mm bridge, its
 /// router diagnosis is "a free-space path the maze could not thread", and every
 /// ordinary gate pass reported "no committable path" for it — with the wider
 /// corridor it closes.
 ///
 /// It is deliberately not the ORDINARY corridor. A hop given room to detour
 /// takes it, and that copper is in the way of everything planned behind it:
-/// widening every pass measured 103 -> 102 twice on barracuda, closing
+/// widening every pass measured 103 -> 102 twice on board-a, closing
 /// `EN_BUCK6V` and losing `V_1V8A` and `SPI_DSA_CSN` to the snaking bridge it
 /// drew. Spent only once the ladder has otherwise converged, the detour has
 /// nothing left to block. The proportion still stops at
@@ -464,7 +464,7 @@ fn corridorMargin(gap: router.Gap, wide: bool) f64 {
 /// One `closeGaps` call per hop rather than one call for the batch, because the
 /// window is per-call: an unbounded batch rasters the whole board and lets a
 /// hopeless hop drain a board-scale search budget, which measured at over
-/// sixteen minutes on barracuda against a two-minute route. Bounded to the few
+/// sixteen minutes on board-a against a two-minute route. Bounded to the few
 /// millimetres around its own pads, a hop that cannot land fails fast.
 fn closeEach(
     arena: std.mem.Allocator,
@@ -636,7 +636,7 @@ fn planHops(
                 o.net, net_i, o.islands, gaps.items.len - before_plan,
             });
             // A pour is no rescue for an island its fill never reaches. Of
-            // barracuda's `V_3V3A` islands only two sit over the In3 zone that
+            // board-a's `V_3V3A` islands only two sit over the In3 zone that
             // carries the rail; the rest are 1.0-10.2 mm surface hops between
             // ordinary pads, so a pass that plans stitches alone leaves every
             // one of them open. Each island-joining hop the oracle named is
@@ -647,7 +647,7 @@ fn planHops(
             // The bridge ceiling stays at the DEFAULT short-hop bound even when
             // the gate's own ceiling is the 50 mm standard tier: a long bridge
             // is a corridor maze — a full net route in cost — and one poured
-            // rail's 10 mm legs ran the broad gate to 108 s on barracuda,
+            // rail's 10 mm legs ran the broad gate to 108 s on board-a,
             // starving every later phase. The pour is the long-haul carrier;
             // an island past the short bound belongs to the residual passes.
             const before_bridges = gaps.items.len;
@@ -693,7 +693,7 @@ fn planHops(
 /// to the actual question: it maximises nets closed per hop spent.
 ///
 /// Measured on the corpus, on top of the in-pad stitch search: black-canyon
-/// 47 -> 52 routed nets and straps 80 -> 83, with barracuda's sixteen ground
+/// 47 -> 52 routed nets and straps 80 -> 83, with board-a's sixteen ground
 /// stitches still fitting because its whole board asks for fewer hops than the
 /// budget. Dealing round-robin instead — every net's first hop, then every net's
 /// second — measured identically on every board, so the win is in not letting one
@@ -709,7 +709,7 @@ fn cheapestNetFirst(arena: std.mem.Allocator, gaps: []const router.Gap) std.mem.
     // net closes only when every one of its hops lands: the count is exactly
     // how many hops the slice must buy to gain a net, which is what the budget
     // is being spent on. Keying total millimetres instead was measured and
-    // reverted — it promoted barracuda's two many-islanded rails (GND's sixteen
+    // reverted — it promoted board-a's two many-islanded rails (GND's sixteen
     // sub-2 mm hops, V_3V3A's fifteen) ahead of the three-hop rails behind them
     // and cost three closed nets (v46 102 -> v48 100), because a long run's
     // early hops buy nothing when its later ones cannot land.
@@ -1160,7 +1160,7 @@ test "reconcile keeps one hop of a poured rail and refuses the redundant rest" {
     const placement = fixturePlacement(&parts, &nets);
     // A pour naming the rail, well away from either pad: it makes `PWR`
     // pour-carried (so its hops go through the transactional gate) without
-    // joining anything, which is barracuda's `V_3V3A` in miniature — a zone
+    // joining anything, which is board-a's `V_3V3A` in miniature — a zone
     // that covers one strip of the board and none of the stranded islands.
     const poly = [_][2]f64{ .{ 4, -0.9 }, .{ 5, -0.9 }, .{ 5, -0.3 }, .{ 4, -0.3 } };
     const zones = [_]route_policy.ExistingZone{.{ .polygon = &poly, .layer = 0, .net = 0, .copper = true }};
@@ -1485,7 +1485,7 @@ test "planned hops are ordered cheapest net first" {
     // The key is the hop COUNT, not the run's millimetres: a net closes only
     // when every one of its hops lands, so the one-hop long shot outranks the
     // three-hop run of tiny joins. Keying millimetres was measured and reverted
-    // — it promoted barracuda's two many-islanded rails ahead of the short runs
+    // — it promoted board-a's two many-islanded rails ahead of the short runs
     // behind them and cost three closed nets.
     const mixed = [_]router.Gap{
         .{ .net_i = 5, .from = .{ .x = 0, .y = 0, .layer = 0 }, .to = .{ .x = 40, .y = 0, .layer = 0 } },

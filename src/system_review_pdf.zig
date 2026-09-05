@@ -192,7 +192,7 @@ pub fn compose(allocator: std.mem.Allocator, markdown: []const u8, opts: Options
 test "system review PDF renders draft status and authored text" {
     const allocator = std.testing.allocator;
     const bytes = try compose(allocator, "# Architecture\n\n- RF board\n- Base board\n", .{
-        .title = "Barracuda System Review",
+        .title = "Board A System Review",
         .identity = "OC-303-1-01 / B3",
         .generated_at = "2026-08-29T00:00:00Z",
         .build_id = "test-build",

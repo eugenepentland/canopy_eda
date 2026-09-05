@@ -831,7 +831,7 @@ fn mkPlacement(parts: []optimizer.Part, loops: []const optimizer.Loop, nets: []c
     };
 }
 
-/// A placement carrying nothing but one net's resolved rule and Barracuda's
+/// A placement carrying nothing but one net's resolved rule and Board A's
 /// six-layer buildup — everything the impedance gate reads and nothing else.
 fn mkImpedancePlacement(rules: []const optimizer.NetRule) Placement {
     const S = struct {
@@ -938,7 +938,7 @@ test "the impedance gate is quiet when the width matches or was derived" {
         .width = solved,
         .rf = .{ .impedance = .{ .ohms = 50, .width_derived = true } },
     }};
-    // (c) Barracuda's authored CPWG geometry is within the 5% fab band.
+    // (c) Board A's authored CPWG geometry is within the 5% fab band.
     const grounded = [_]optimizer.NetRule{.{
         .class = .{ .name = "rf" },
         .width = 0.31,

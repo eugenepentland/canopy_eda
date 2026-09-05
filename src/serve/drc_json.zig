@@ -315,7 +315,7 @@ pub fn writeViolation(w: *std.Io.Writer, v: drc.Violation, names: Names) std.Io.
     try w.writeAll("}");
 }
 
-// Regression for barracuda: a diff-pair split across copper layers has no
+// Regression for board-a: a diff-pair split across copper layers has no
 // finite same-layer separation, which used to emit bare `inf` into `const
 // PCB=...` and abort every board script that followed it.
 test "non-finite DRC measurements serialize as valid JSON nulls" {

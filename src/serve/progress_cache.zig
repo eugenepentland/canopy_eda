@@ -6,7 +6,7 @@
 //! design, re-parses its (potentially multi-megabyte) layout sidecar, and then
 //! rasters every retained copper pour to answer the routing rung. Measured on
 //! this project's boards, that is 0.1 s for a stub design and **100 s** for a
-//! poured one (`barracuda-base`, 15 zones), with none of it retained: the next
+//! poured one (`board-a-base`, 15 zones), with none of it retained: the next
 //! reload paid it all again. The ladder is a pure function of the design's
 //! sources and its sidecars, so it is kept in process memory and invalidated by
 //! the evaluator read-set, the layout / DRC-override sidecars, and the design's
