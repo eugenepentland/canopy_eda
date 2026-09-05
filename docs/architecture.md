@@ -191,8 +191,12 @@ A structured per-design TODO log, stored as `<design>.notes.md` next to the desi
 
 ### Electrical-rule checks (ERC)
 
-A post-build pass over the resolved design block. The complete list of finding
-kinds is `erc.ViolationKind` in `src/erc.zig`; the ones worth naming here:
+A post-build pass over the resolved design block. ERC is one input to the
+unified finding model in `src/preflight.zig` — `netlisp check`, `netlisp build`
+and the `run_checks` tool all consume that model, so none of them can disagree
+about a design's status, and the **check profile** decides which findings gate.
+The complete list of ERC finding kinds is `erc.ViolationKind` in `src/erc.zig`;
+the ones worth naming here:
 
 | Check | What it catches |
 | --- | --- |
@@ -209,6 +213,7 @@ kinds is `erc.ViolationKind` in `src/erc.zig`; the ones worth naming here:
 | `power_budget` | A net's current draw exceeds a declared rating. |
 | `pin_function_unsupported` | A pin's `(as "FN")` assertion names a function that isn't in the pinout's primary + alts list. |
 | `pin_function_required` | A pin whose pinout entry has ≥ 2 alts was wired without an `(as …)` to disambiguate. (Pins with exactly one alt auto-fill via `pin_enrichment` and don't trigger this; pins with no alts don't need one.) The pinout lookup is dual-keyed by BGA position *and* logical name, so `(pin H4 …)` and `(pin PC13 …)` both resolve. |
+| `interface_half_connected` | A `(port-group …)` whose lanes were partly wired — SCK and MOSI connected, CS left open. Lanes marked `optional` are never demanded. |
 
 Three kinds are **informational** — they never fail `netlisp check` and no
 profile escalates them, because each surfaces a decision the tool made on the
@@ -219,6 +224,7 @@ author's behalf rather than a fault:
 | `layout_class_inferred` | A net whose PCB-layout criticality class was guessed from its name. Pin it with `(module-policy (placement-class "NET" <class>))`. |
 | `section_category_inferred` | A section whose system-overview category was guessed from a keyword in its name. Pin it with `(category <key>)` in the section body. |
 | `deprecated_form` | A superseded spelling, with the `file:line:col` of the form and the spelling that replaces it. Old spellings keep working; this is the only place they are reported, deliberately NOT as an evaluator warning (the release profile turns those into errors). |
+| `interface_naming` | A module declaring two or more ports out of one interface's naming vocabulary without a `(port-group …)`, with the exact line that would replace them. Deliberately INFO, not a warning: "you could have written this more compactly" must never fail a release. |
 
 The `power_no_cap` violation kind exists in the enum but isn't currently invoked from the runner.
 
