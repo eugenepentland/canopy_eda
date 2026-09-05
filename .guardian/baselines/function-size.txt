@@ -52,8 +52,6 @@
 7 src/placement/pour.zig|emitCellEdges
 7 src/placement/pour.zig|padComponent
 10 src/placement/router.zig|greedyPass
-9 src/placement/router.zig|relaxDiag
-7 src/placement/router.zig|relaxStep
 10 src/placement/router.zig|softDiag
 8 src/placement/router.zig|softStep
 9 src/placement/router_ctx.zig|accumPad
@@ -61,6 +59,8 @@
 7 src/placement/router_ctx.zig|findEscapeVia
 7 src/placement/router_ctx.zig|stampDisc
 7 src/placement/router_ctx.zig|trimStub
+9 src/placement/router_maze.zig|relaxDiag
+7 src/placement/router_maze.zig|relaxStep
 7 src/raster.zig|discRing
 7 src/raster.zig|fillRect
 9 src/raster.zig|line
