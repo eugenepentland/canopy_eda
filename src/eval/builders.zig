@@ -951,8 +951,9 @@ pub fn emitDecoupleItems(
         c += 1;
 
         // ── Host ref ── an explicit ref, or the per-design default IC. With a
-        // default IC declared, the first post-per-pin token is taken as a pin
-        // unless it equals that ref; with no default the token is always the
+        // default IC declared the first post-per-pin token is genuinely
+        // ambiguous — see `defaultIcTokenRole`, which resolves it in a fixed
+        // order instead of assuming; with no default the token is always the
         // ref (legacy positional form, unchanged for designs that set none).
         // A leading `auto` defers to the decouple-defaults IC — it is not
         // consumed here; the pin-collection loop below expands it.
@@ -966,11 +967,12 @@ pub fn emitDecoupleItems(
         if (first_is_auto) {
             ref_str = try autoHostRef(self, items[c].span, net_name);
         } else if (self.decouple_defaults.ic.len > 0) {
-            if (first_tok != null and std.mem.eql(u8, first_tok.?, self.decouple_defaults.ic)) {
-                ref_str = first_tok.?;
-                c += 1; // explicit ref consumed
-            } else {
-                ref_str = self.decouple_defaults.ic; // token is a pin; ref defaults in
+            switch (try defaultIcTokenRole(self, items[c], first_tok, instances.items, net_name)) {
+                .host => {
+                    ref_str = first_tok.?;
+                    c += 1; // explicit ref consumed
+                },
+                .pin => ref_str = self.decouple_defaults.ic, // ref defaults in
             }
         } else {
             ref_str = first_tok orelse {
@@ -1220,6 +1222,62 @@ pub fn emitBulkDecouples(
         try ctx.pin_nets.append(self.allocator, .{ .ref_des = ref, .pin = "1", .net = net_name });
         try ctx.pin_nets.append(self.allocator, .{ .ref_des = ref, .pin = "2", .net = "GND" });
     }
+}
+
+/// What the first token after `per-pin` means when a default IC is in force.
+const DefaultIcTokenRole = enum { host, pin };
+
+/// Resolve the one genuinely ambiguous token in the positional decouple
+/// grammar. With `(decouple-defaults (ic "REF"))` set, `(decouple "VDD" (comp)
+/// 1 per-pin X …)` can mean host `X`, or pin `X` of the default IC — and BGA
+/// pad ids are spelled exactly like ref-des (`J14`, `H1`, `C3` are all pads on
+/// the corpus' own parts). Resolved in a fixed order that never depends on
+/// where the parts were declared:
+///
+///   1. the default IC's own ref                  -> host
+///   2. a pad id / pin function of that IC        -> pin
+///   3. a ref-des authored in this block          -> host
+///   4. neither, and that IC has a pinout to check against -> diagnosed
+///
+/// Rule 3 is the fix for a silent misread: a token naming a real part
+/// (`per-pin R1 1`) used to be taken as a *pad* of the default IC, so ONE form
+/// emitted two differently-keyed children and the build pinned an `(ids …)`
+/// sidecar naming both — source the next build then choked on. Rule 2 comes
+/// first because a pad that collides with some part's ref-des is the common
+/// case and must not change meaning when an unrelated part is added above.
+/// Only authored ref-des count for rule 3; an auto-assigned `C7` from an
+/// earlier shorthand is not something anyone wrote as a host.
+fn defaultIcTokenRole(
+    self: *Evaluator,
+    token_node: Node,
+    token: ?[]const u8,
+    inst_items: []const Instance,
+    net_name: []const u8,
+) EvalError!DefaultIcTokenRole {
+    const ic = self.decouple_defaults.ic;
+    // Not a bare token at all (a nested form) — leave the legacy reading, which
+    // stops pin collection immediately and reports the empty pin list.
+    const tok = token orelse return .pin;
+    if (std.mem.eql(u8, tok, ic)) return .host;
+    const pinout = findPinFuncMap(self, inst_items, ic);
+    if (pinout) |pm| {
+        if (pm.contains(tok)) return .pin; // a pad id on the default IC
+        if (instance_mod.matchPinName(pm, tok) != null) return .pin; // a pin function
+    }
+    if (self.authored_refs.contains(tok)) return .host;
+    if (pinout != null) {
+        self.setErrorFmt(
+            token_node.span,
+            "(decouple \"{s}\" … per-pin {s} …): '{s}' is neither a pad or pin function of the " ++
+                "default IC \"{s}\" nor a part declared in this block — spell the host ref before " ++
+                "the pin list, or check the pad name",
+            .{ net_name, tok, tok, ic },
+        );
+        return EvalError.InvalidForm;
+    }
+    // The default IC has no pinout to judge against (a passive, or a part whose
+    // pinout file is missing): keep the legacy reading rather than guess.
+    return .pin;
 }
 
 /// The host ref a bare `auto` per-pin marker resolves to: the
@@ -2036,6 +2094,59 @@ fn pinsOfFixture(alloc: std.mem.Allocator, eval: *Evaluator, all_pin_nets: *std.
     try putTestFamily(eval, alloc, "cap-0201");
     try all_pin_nets.append(alloc, .{ .ref_des = "U1", .pin = "J14", .net = "VDD" });
     try all_pin_nets.append(alloc, .{ .ref_des = "U1", .pin = "K14", .net = "VDD" });
+}
+
+// spec: eval/design_block - a positional decouple resolves the token after per-pin as a pad of the default IC, then as a part declared in the block, and diagnoses one that is neither
+test "decouple resolves the ambiguous post-per-pin token as pad, then host, then error" {
+    // page_allocator: evaluator-allocated keys/ids are intentionally never freed.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    eval.hierarchical_ids = true;
+    eval.decouple_defaults.ic = "U1";
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try putTestFamily(&eval, alloc, "cap-0201");
+
+    // U1 carries a BGA-style pinout, so "H1" is a pad AND looks like a ref-des.
+    var pinout: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try pinout.put(alloc, "H1", "VDDA");
+    try pinout.put(alloc, "6", "VCC");
+    try eval.symbol_pin_cache.put(alloc, "bga", pinout);
+
+    var instances: std.ArrayList(Instance) = .empty;
+    try instances.append(alloc, .{ .ref_des = "U1", .component = "", .value = "", .footprint = "", .symbol = "bga" });
+    try instances.append(alloc, .{ .ref_des = "R1", .component = "", .value = "", .footprint = "", .symbol = "" });
+    try ids.noteAuthoredRefDes(&eval, "U1", ast.Span.zero);
+    try ids.noteAuthoredRefDes(&eval, "R1", ast.Span.zero);
+    var nets: std.ArrayList(PinNetDecl) = .empty;
+    var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
+
+    // 1. A pad of the default IC stays a PIN even though it is spelled like a
+    //    ref-des — that reading must not depend on what else is declared.
+    const pad = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin H1");
+    try emitDecoupleItems(&eval, pad, "VDD", &env, &instances, &nets, "abcd1234", &sidecar);
+    try testing.expectEqual(@as(usize, 3), instances.items.len);
+    try testing.expectEqualStrings("100nF@H1#0", instances.items[2].origin_key);
+    try testing.expectEqualStrings("VDD.U1.H1", nets.items[0].net);
+
+    // 2. A token naming a part declared in this block is the HOST. This used to
+    //    be read as a pad of the default IC, so ONE form emitted two children
+    //    ("100nF@R1#0" and "100nF@1#0") and pinned an (ids …) sidecar naming
+    //    both — source the next build then refused to read back.
+    const host = try parser_mod.parse(alloc, "(cap-0201 \"10nF\") 1 per-pin R1 1");
+    try emitDecoupleItems(&eval, host, "VDD", &env, &instances, &nets, "abcd1234", &sidecar);
+    try testing.expectEqual(@as(usize, 4), instances.items.len);
+    try testing.expectEqualStrings("10nF@1#0", instances.items[3].origin_key);
+    try testing.expectEqualStrings("VDD.R1.1", nets.items[2].net);
+
+    // 3. Neither a pad/function of the default IC nor a declared part: named,
+    //    not guessed at.
+    const bad = try parser_mod.parse(alloc, "(cap-0201 \"1nF\") 1 per-pin U7 6");
+    const r = emitDecoupleItems(&eval, bad, "VDD", &env, &instances, &nets, "abcd1234", &sidecar);
+    try testing.expectError(error.InvalidForm, r);
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "'U7' is neither a pad or pin function") != null);
 }
 
 // spec: eval/design_block - decouple per-pin auto expands the decouple-defaults IC's pins on the decoupled net

@@ -5051,6 +5051,7 @@ against its own file rather than the design's.
 - insertPendingIds writes a child (ids …) sidecar and stays idempotent
 - persistMintedIds writes minted ids back like the CLI and is a no-op when nothing is pending
 - an id minted by a form spliced in from a sidecar is written back into that sidecar, leaving the design source byte-identical
+- every design-scope form the inserter can stamp with an (id …)/(ids …) anchor re-reads its own output on the next build, byte-identical
 - a CLI export pins the ids its evaluation minted, so a second export of an untouched design reproduces the same identity
 
 ## convert/footprint
@@ -5837,6 +5838,7 @@ Public functions: analyze
 - fanout places one component from COMMON to each listed net
 - decouple-defaults lets decouple omit its component and host ref
 - decouple with no defaults keeps its legacy explicit form
+- a positional decouple resolves the token after per-pin as a pad of the default IC, then as a part declared in the block, and diagnoses one that is neither
 - decouple per-pin auto expands the decouple-defaults IC's pins on the decoupled net
 - decouple per-pin auto without a decouple-defaults ic is diagnosed
 - a decoupling binding resolves its pin through the target IC's pinout whichever of the two is declared first

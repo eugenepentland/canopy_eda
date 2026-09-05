@@ -739,12 +739,30 @@ must appear first); a literal `REF PIN…` list spells the pins out instead. The
 `(decouple-defaults … (bypass …))` component (not the ic) cascades into
 sub-block modules that don't set their own.
 
+**Host vs. pin, with a default IC set.** The token right after `per-pin` is
+genuinely ambiguous once `(decouple-defaults (ic "REF"))` is in force: BGA pads
+are spelled exactly like ref-des (`J14`, `H1`, `C3` are all real pads on parts
+in this library). It is resolved in a fixed order that never depends on
+declaration order:
+
+1. the default IC's own ref — the host, spelled out redundantly;
+2. a pad id or pin function of that IC — a **pin**, so a pad keeps its meaning
+   when an unrelated `J14` connector is added to the block later;
+3. a part declared in this block — the **host**, and the tokens after it are its
+   pins;
+4. neither, and that IC has a pinout to check against — an error naming the
+   token and its line, rather than a guess.
+
+Rule 3 is why `(decouple "V_3V3" (cap-0402 "100nF") 1 per-pin R1 1)` places one
+cap on R1 pin 1. It used to read `R1` as a *pad of the default IC*, so a single
+form emitted two differently-keyed children and the build pinned an
+`(ids ("100nF@R1#0" …) ("100nF@1#0" …))` sidecar the next build refused to read.
+
 `(decouple-defaults …)` itself is deprecated (info, still working). The
 defaults it supplies are exactly what makes a `(decouple …)` line unreadable
 on its own — you cannot tell from `(decouple "VDD" 1 per-pin J14 K14)` which
 part is placed or which IC hosts it without scrolling back to the defaults
-form, and with a default IC set, a leading `REF` token is silently reinterpreted
-as a *pin*. Spell the host and the part at each site instead.
+form. Spell the host and the part at each site instead.
 
 ### Per-pin decoupling binding: `(decouples "IC" PIN)`
 
@@ -1793,6 +1811,13 @@ identities, which is how a hand-unrolled block is folded into a loop or a
 conditional without changing its established PCB UUIDs. Wrapping existing
 instances in a control form otherwise re-derives their ids, exactly as
 folding them into a `for` does.
+
+`(id …)` and `(ids …)` are **inert wherever they appear** — the evaluator
+short-circuits both to nil, so a form that walks its own children (`decouple`,
+`series`, `fanout`, `pullup`/`pulldown`, `divider`, `led`, `sub-block`, and
+every structural control form) reads back the anchor the previous build
+appended to it instead of trying to evaluate it. That is the invariant that
+makes id write-back safe: what the tool writes, the tool reads.
 
 **Errors.** A body form that the enclosing scope does not accept is reported
 at **its own** `file:line:col`, with the same message a hand-written sibling

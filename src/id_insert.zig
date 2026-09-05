@@ -559,3 +559,192 @@ test "a sidecar form's minted id lands in the sidecar, not the design file" {
     };
     try std.testing.expectError(error.IdCollision, insertPendingIds(alloc, design_path, &collide, &.{}));
 }
+
+/// One design-scope form that the id inserter can stamp with an `(ids …)`
+/// child sidecar, written as a whole design so the round-trip goes through the
+/// same read → eval → write-back path a `netlisp build` does.
+const RoundTripCase = struct {
+    name: []const u8,
+    /// Whether the first build is expected to write an enumerated `(ids …)`
+    /// child sidecar (as opposed to only the form's own `(id …)` anchor).
+    sidecar: bool = true,
+    body: []const u8,
+};
+
+/// The component families the round-trip cases instantiate — including the two
+/// the `(pullup …)`/`(led …)` shorthands hard-code by name. A named helper
+/// rather than a second loop in the test body: it asserts nothing.
+fn writeRoundTripComponents(tmp: *std.testing.TmpDir) !void {
+    inline for (.{
+        .{ "cap-0402", "capacitance" },
+        .{ "res-0402", "resistance" },
+        .{ "ferrite-0603", "impedance" },
+        .{ "led-0402", "string" },
+    }) |part| {
+        try tmp.dir.writeFile(std.testing.io, .{
+            .sub_path = "lib/components/" ++ part[0] ++ ".sexp",
+            .data = "(component-family " ++ part[0] ++ " (parameter \"value\" " ++ part[1] ++ ") (footprint \"fp\"))",
+        });
+    }
+}
+
+/// Build one case twice and assert the second build reads back what the first
+/// one wrote: no eval error, nothing left pending, and byte-identical source.
+fn expectSourceRoundTrips(
+    alloc: std.mem.Allocator,
+    tmp: *std.testing.TmpDir,
+    project_dir: []const u8,
+    case: RoundTripCase,
+) !void {
+    // Names the failing case: the assertions below compare file contents, which
+    // on their own do not say which form produced them.
+    errdefer log.warn("[round-trip] case '{s}' did not survive its own written source", .{case.name});
+    const sub_path = try std.fmt.allocPrint(alloc, "src/{s}.sexp", .{case.name});
+    defer alloc.free(sub_path);
+    const source = try std.fmt.allocPrint(
+        alloc,
+        "(import cap-0402 res-0402 led-0402 ferrite-0603 testic mymod)\n(design-block \"{s}\"\n{s})\n",
+        .{ case.name, case.body },
+    );
+    defer alloc.free(source);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = source });
+
+    const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ project_dir, sub_path });
+    defer alloc.free(path);
+
+    {
+        var eval = Evaluator.init(alloc, project_dir);
+        defer eval.deinit();
+        _ = try eval.evalFile(path);
+        _ = persistMintedIds(alloc, path, &eval);
+    }
+    const after1 = try infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20);
+    defer alloc.free(after1);
+    // Asserting exactly which forms mint an enumerated sidecar keeps the
+    // round-trip honest: a form that quietly stopped writing one would
+    // otherwise pass this test by never exercising the read-back at all.
+    try std.testing.expectEqual(case.sidecar, std.mem.indexOf(u8, after1, "(ids ") != null);
+
+    // The build the bug report was about: the SECOND one, reading the file the
+    // first one wrote. It must evaluate cleanly and leave nothing pending.
+    {
+        var eval = Evaluator.init(alloc, project_dir);
+        defer eval.deinit();
+        _ = try eval.evalFile(path);
+        try std.testing.expect(!persistMintedIds(alloc, path, &eval));
+    }
+    const after2 = try infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20);
+    defer alloc.free(after2);
+    try std.testing.expectEqualStrings(after1, after2);
+}
+
+// spec: id_insert - every design-scope form the inserter can stamp with an (id …)/(ids …) anchor re-reads its own output on the next build, byte-identical
+test "every id-stamped design-scope form round-trips through its own written source" {
+    // page_allocator: the evaluator allocates from it and never frees (AST
+    // slices reference source buffers).
+    const alloc = std.heap.page_allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project_dir);
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/modules");
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try writeRoundTripComponents(&tmp);
+    // A hub with a real pinout: the decouple cases need one both to infer a
+    // compact host and to exercise the pad-vs-ref-des resolution below.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/testic.sexp",
+        .data = "(component testic (pinout \"testic\") (footprint \"fp\"))",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/pinouts/testic.sexp",
+        .data = "(pinout \"testic\" (pin 1 \"VIN\") (pin 2 \"GND\") (pin 6 \"VCC\"))",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/modules/mymod.sexp",
+        .data =
+        \\(defmodule mymod ()
+        \\  (design-block "M"
+        \\    (import cap-0402)
+        \\    (port "VDD" in power)
+        \\    (instance "C1" (cap-0402 "100nF") (pin 1 "VDD") (pin 2 "GND"))))
+        ,
+    });
+
+    // Every form `ids.zig` threads a ChildIdSidecar through, plus the two the
+    // inserter only gives a bare `(id …)` anchor to. The positional decouple
+    // under `(decouple-defaults (ic …))` is the reported regression: its host
+    // ref-des used to be re-read as a pad, so the form emitted two
+    // differently-keyed children and pinned a sidecar naming both.
+    const cases = [_]RoundTripCase{
+        .{ .name = "decouple_default_ic_host", .body =
+        \\  (instance "U1" testic (pin 1 "V_3V3") (pin 2 "GND"))
+        \\  (instance "R1" (res-0402 "10k") (pin 1 "V_3V3") (pin 2 "GND"))
+        \\  (decouple-defaults (ic "U1"))
+        \\  (decouple "V_3V3" (cap-0402 "100nF") 1 per-pin R1 1)
+        },
+        .{ .name = "decouple_positional", .body =
+        \\  (instance "U1" testic (pin 1 "V_IN") (pin 2 "GND"))
+        \\  (decouple "V_IN" (cap-0402 "100nF") 1 per-pin U1 1)
+        },
+        .{ .name = "decouple_sub_forms", .body =
+        \\  (instance "U1" testic (pin 1 "V_IN") (pin 2 "GND"))
+        \\  (decouple "V_IN" (per-pin (cap-0402 "100nF") VIN) (bulk (cap-0402 "10uF") 2))
+        },
+        .{ .name = "series_form", .body =
+        \\  (instance "U1" (res-0402 "0R") (pin 1 "V_IN") (pin 2 "GND"))
+        \\  (series (ferrite-0603 "600R") "V_IN" "V_OUT")
+        },
+        .{ .name = "fanout_form", .body =
+        \\  (instance "U1" (res-0402 "0R") (pin 1 "V_OUT") (pin 2 "GND"))
+        \\  (fanout "V_OUT" (cap-0402 "10nF") "A1" "A2")
+        },
+        .{ .name = "pull_forms", .body =
+        \\  (instance "U1" (res-0402 "0R") (pin 1 "SDA") (pin 2 "V_OUT"))
+        \\  (pullup "SDA" "4.7k" "V_OUT")
+        \\  (pulldown "BOOT0" "10k")
+        },
+        .{ .name = "divider_form", .body =
+        \\  (instance "U1" (res-0402 "0R") (pin 1 "V_OUT") (pin 2 "GND"))
+        \\  (divider "V_OUT" "VSENSE" "GND" 100000 22000)
+        },
+        .{ .name = "led_form", .body =
+        \\  (instance "U1" (res-0402 "0R") (pin 1 "V_OUT") (pin 2 "GND"))
+        \\  (led "PWR" "V_OUT" "green" (r "1k"))
+        },
+        // Structural control flow and sub-blocks take an `(id …)` anchor and
+        // derive their children from it, so no `(ids …)` is minted — but an
+        // authored one is honoured, which is why they belong in this sweep.
+        .{ .name = "sub_block_form", .sidecar = true, .body =
+        \\  (sub-block "a" (mymod) (bridge (net "VDD" "V_3V3")))
+        },
+        .{ .name = "repeat_form", .sidecar = false, .body =
+        \\  (repeat i 1 2
+        \\    (instance (fmt "RX~a" i) (res-0402 "1k") (pin 1 "V_OUT") (pin 2 "GND")))
+        },
+        .{ .name = "for_form", .sidecar = false, .body =
+        \\  (for ch ("a" "b")
+        \\    (instance (fmt "RY~S" ch) (res-0402 "2k") (pin 1 "V_OUT") (pin 2 "GND")))
+        },
+        .{ .name = "when_unless_if_forms", .sidecar = false, .body =
+        \\  (when (== 1 1)
+        \\    (instance "RW1" (res-0402 "3k") (pin 1 "V_OUT") (pin 2 "GND")))
+        \\  (unless (== 1 0)
+        \\    (instance "RU1" (res-0402 "4k") (pin 1 "V_OUT") (pin 2 "GND")))
+        \\  (if (== 1 1)
+        \\    (instance "RI1" (res-0402 "5k") (pin 1 "V_OUT") (pin 2 "GND"))
+        \\    (instance "RI2" (res-0402 "6k") (pin 1 "V_OUT") (pin 2 "GND")))
+        },
+        .{ .name = "connect_chain_test_point", .sidecar = false, .body =
+        \\  (instance "U1" (res-0402 "0R") (pin 1 "V_IN") (pin 2 "GND"))
+        \\  (instance "R9" (res-0402 "1k"))
+        \\  (connect "U1.1" "V_IN")
+        \\  (chain "V_OUT" "R9" "GND")
+        \\  (test-point "TP1" "V_OUT")
+        },
+    };
+    for (cases) |case| try expectSourceRoundTrips(alloc, &tmp, project_dir, case);
+}

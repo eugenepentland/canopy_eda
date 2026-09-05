@@ -32,6 +32,7 @@ pub const SpecialForm = enum {
     assert_range,
     fmt_,
     id_,
+    ids_,
     implements,
     interface,
 
@@ -65,6 +66,7 @@ const atom_to_form = std.StaticStringMap(SpecialForm).initComptime(.{
     .{ "assert-range", .assert_range },
     .{ "fmt", .fmt_ },
     .{ "id", .id_ },
+    .{ "ids", .ids_ },
     .{ "implements", .implements },
     .{ "interface", .interface },
 });
@@ -286,7 +288,8 @@ pub const special_form_schema = blk: {
 };
 
 /// Look up the schema for a special form. Returns `null` when no
-/// arity contract is declared (only `.id_` is unconstrained).
+/// arity contract is declared (only the identity anchors `.id_` / `.ids_`
+/// are unconstrained).
 pub fn schemaFor(sf: SpecialForm) ?FormSchema {
     return special_form_schema[@backingInt(sf)];
 }
@@ -414,6 +417,13 @@ pub const special_form_docs = blk: {
     t[@backingInt(SpecialForm.id_)] = .{
         .syntax = "(id <hex8>)",
         .summary = "Stable 8-char identifier auto-inserted by the build. Evaluator short-circuits to `.nil`.",
+    };
+    t[@backingInt(SpecialForm.ids_)] = .{
+        .syntax = "(ids (\"origin-key\" hex8)…)",
+        .summary = "Enumerated child-identity sidecar auto-inserted by the build onto a form that emits " ++
+            "parts of its own. Like `(id …)` it is pure source residue: the evaluator short-circuits it " ++
+            "to `.nil`, so a form that re-reads its own children can never trip over the sidecar the " ++
+            "previous build wrote onto it.",
     };
     t[@backingInt(SpecialForm.implements)] = .{
         .syntax = "(implements component [(policy canonical|recommended|example)] [(role name)])",
@@ -553,7 +563,10 @@ pub const scope_form_docs = blk: {
             "item list. The positional shorthand — COUNT per-pin REF PIN… — is the retired second " ++
             "grammar on the same head: still accepted, and reported as a `deprecated_form` info. " ++
             "Component and REF may come from (decouple-defaults …); a trailing `auto` expands to the " ++
-            "pins already declared on the net.",
+            "pins already declared on the net. With a default IC set, the token right after `per-pin` " ++
+            "is resolved in a fixed order — the default IC's own ref, then a pad id or pin function of " ++
+            "that IC (so a BGA pad spelled like a ref-des stays a pin), then a part declared in this " ++
+            "block (the host), and otherwise it is an error naming the token rather than a guess.",
     } };
     t[@backingInt(ScopeForm.series)] = .{ .scope = all, .doc = .{
         .syntax = "(series …)",
@@ -2143,10 +2156,10 @@ test "validateArity bounds-checks against the schema" {
 }
 
 // spec: eval/forms - schemaFor returns the schema for every special form whose arity is fixed
-test "schemaFor covers all special forms except id" {
+test "schemaFor covers all special forms except the identity anchors" {
     inline for (@typeInfo(SpecialForm).@"enum".field_values) |fval| {
         const variant: SpecialForm = @fromBackingInt(@intCast(fval));
-        if (variant == .id_) {
+        if (variant == .id_ or variant == .ids_) {
             try std.testing.expect(schemaFor(variant) == null);
         } else {
             try std.testing.expect(schemaFor(variant) != null);
