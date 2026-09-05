@@ -29,6 +29,7 @@ const datasheet_ref = @import("datasheet_ref.zig");
 const rebuild_design = @import("rebuild_design.zig");
 const modules_mod = @import("modules.zig");
 const SexprNode = @import("../sexpr/ast.zig").Node;
+const settings_target = @import("design_settings_target.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 const http_not_found: u16 = 404;
@@ -868,7 +869,19 @@ fn patchPowerPlaneSource(allocator: std.mem.Allocator, source: []const u8, enabl
 
 const BoardRouteMeta = struct { role: env_mod.BoardRole = .subcircuit, power_plane: bool = true };
 
-fn boardRouteMeta(allocator: std.mem.Allocator, source: []const u8) EditError!BoardRouteMeta {
+/// The role and supply-plane policy in force for `name`.
+///
+/// `board-role` is a design-file form by definition (it says what the design
+/// IS), but `power-plane` is a LAYOUT form: `split-design` moves it into
+/// `<name>.layout.sexp`, and because the splice appends the sidecar last, the
+/// sidecar's copy is the one that wins. Reading the design file alone would
+/// report the wrong policy on a split board — and then write against it.
+fn boardRouteMeta(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    project_dir: []const u8,
+    name: []const u8,
+) EditError!BoardRouteMeta {
     const nodes = sexpr_parser.parse(allocator, source) catch return error.InvalidSource;
     defer sexpr_parser.freeNodes(allocator, nodes);
     var meta = BoardRouteMeta{};
@@ -884,6 +897,10 @@ fn boardRouteMeta(allocator: std.mem.Allocator, source: []const u8) EditError!Bo
             if (std.mem.eql(u8, word, "on")) meta.power_plane = true else if (std.mem.eql(u8, word, "off")) meta.power_plane = false;
         }
     }
+    if (settings_target.sidecarAtomArg(allocator, project_dir, name, "power-plane")) |word| {
+        defer allocator.free(word);
+        if (std.mem.eql(u8, word, "on")) meta.power_plane = true else if (std.mem.eql(u8, word, "off")) meta.power_plane = false;
+    }
     return meta;
 }
 
@@ -894,7 +911,7 @@ pub fn getBoardRoleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch
         return sendJsonError(ctx, res, http_not_found, "cannot read design source");
     defer ctx.allocator.free(source);
-    const meta = boardRouteMeta(ctx.allocator, source) catch
+    const meta = boardRouteMeta(ctx.allocator, source, ctx.project_dir, name) catch
         return sendJsonError(ctx, res, http_bad_request, "source does not contain an editable design root");
     res.header(header_cors_allow_origin, "*");
     res.content_type = .JSON;
@@ -967,11 +984,31 @@ pub fn setPowerPlaneApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch
         return sendJsonError(ctx, res, http_not_found, "cannot read design source");
     defer ctx.allocator.free(source);
-    const meta = boardRouteMeta(ctx.allocator, source) catch
+    const meta = boardRouteMeta(ctx.allocator, source, ctx.project_dir, name) catch
         return sendJsonError(ctx, res, http_bad_request, "source does not contain an editable design root");
     if (meta.role != .subcircuit)
         return sendJsonError(ctx, res, http_bad_request, "power-plane mode applies only to subcircuits");
-    const updated = patchPowerPlaneSource(ctx.allocator, source, enabled_v.bool) catch |err| {
+
+    // `power-plane` is a layout form: patch it where it lives, or a split board
+    // keeps obeying the sidecar's copy while the design file grows a second one.
+    const resolution = settings_target.resolve(ctx.allocator, ctx.project_dir, name, &.{"power-plane"}) catch
+        return sendJsonError(ctx, res, http_not_found, "cannot read design source");
+    defer resolution.deinit(ctx.allocator);
+    if (resolution == .conflict)
+        return sendJsonError(ctx, res, 409, "(power-plane …) is declared in two of this design's files — delete one copy");
+    const where = resolution.target;
+    const target_source = if (where.isSidecar())
+        infra_fs.cwd().readFileAlloc(ctx.allocator, where.path, max_source_bytes) catch
+            return sendJsonError(ctx, res, http_not_found, "cannot read design source")
+    else
+        try ctx.allocator.dupe(u8, source);
+    defer ctx.allocator.free(target_source);
+
+    const replacement = if (enabled_v.bool) "(power-plane on)" else "(power-plane off)";
+    const updated = (if (where.container == .top_level)
+        settings_target.patchTopLevel(ctx.allocator, target_source, "power-plane", replacement)
+    else
+        patchPowerPlaneSource(ctx.allocator, target_source, enabled_v.bool)) catch |err| {
         const message = switch (err) {
             error.InvalidSource => "design source has invalid s-expression syntax",
             error.MalformedSource => "source does not contain an editable design root",
@@ -981,7 +1018,7 @@ pub fn setPowerPlaneApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     };
     defer ctx.allocator.free(updated);
 
-    const result = writeAndRebuild(ctx.allocator, ctx.project_dir, name, updated, "set subcircuit power-plane mode") catch
+    const result = writeFileAndRebuild(ctx.allocator, ctx.project_dir, name, where.path, updated, "set subcircuit power-plane mode") catch
         return sendJsonError(ctx, res, http_internal_error, "could not save and rebuild power-plane setting");
     res.header(header_cors_allow_origin, "*");
     res.content_type = .JSON;
@@ -2422,6 +2459,27 @@ pub fn writeAndRebuild(
     new_source: []const u8,
     description: ?[]const u8,
 ) EditError!MutationResult {
+    const path = try designFilePath(allocator, project_dir, name);
+    defer allocator.free(path);
+    return writeFileAndRebuild(allocator, project_dir, name, path, new_source, description);
+}
+
+/// `writeAndRebuild` for bytes that belong in one of `name`'s files other than
+/// the design source — an autoloaded `<name>.layout.sexp` / `.diagram.sexp`
+/// sidecar (`eval/sidecars.zig`), which is part of the design in every sense
+/// downstream. `write_path` receives the bytes; the DESIGN is still what gets
+/// evaluated, id-pinned, BOM-resolved and version-bumped, and the sidecar's own
+/// mtime is what retires the page caches keyed on it (`serve/page_cache.zig`).
+/// Resolve `write_path` with `serve/design_settings_target.zig` — a span read
+/// from one of these files and applied to another is data corruption.
+pub fn writeFileAndRebuild(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    write_path: []const u8,
+    new_source: []const u8,
+    description: ?[]const u8,
+) EditError!MutationResult {
     const mutation = try source_transaction.begin(project_dir);
     defer mutation.unlock();
     const path = try designFilePath(allocator, project_dir, name);
@@ -2430,6 +2488,9 @@ pub fn writeAndRebuild(
     // Snapshot prior state before overwriting. Null means the design didn't
     // exist yet (brand-new create). Snapshot errors are logged but don't
     // block the write — undo is a nice-to-have, not a hard requirement.
+    // `history.snapshot` captures the design source alone, so a sidecar write
+    // is versioned by the design's own history entry but not restorable from
+    // it; see serve/history.zig.
     const snap_id: ?[]const u8 = history.snapshot(allocator, project_dir, name, description) catch |e| blk: {
         log.warn("[snapshot] failed for {s}: {s}", .{ name, @errorName(e) });
         break :blk null;
@@ -2438,7 +2499,7 @@ pub fn writeAndRebuild(
     // tmp → fsync → rename: the snapshot above is best-effort, so a truncating
     // write is the one step that could leave the design with neither its old
     // nor its new contents.
-    source_transaction.writeFile(allocator, path, new_source) catch return error.CannotWriteDesign;
+    source_transaction.writeFile(allocator, write_path, new_source) catch return error.CannotWriteDesign;
 
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
@@ -3282,12 +3343,14 @@ test "autorouter power-plane toggle patches nested module design settings" {
     defer allocator.free(updated);
     try std.testing.expect(std.mem.indexOf(u8, updated, "(power-plane off)") != null);
     try std.testing.expect(std.mem.indexOf(u8, updated, "(plane 3 \"VOUT\")") != null);
-    const meta = try boardRouteMeta(allocator, updated);
+    // No project on disk here: the sidecar lookup finds nothing and the
+    // design source alone decides, which is the unsplit case.
+    const meta = try boardRouteMeta(allocator, updated, ".", "nosuchdesign");
     try std.testing.expectEqual(env_mod.BoardRole.subcircuit, meta.role);
     try std.testing.expect(!meta.power_plane);
     const restored = try patchPowerPlaneSource(allocator, updated, true);
     defer allocator.free(restored);
-    try std.testing.expect((try boardRouteMeta(allocator, restored)).power_plane);
+    try std.testing.expect((try boardRouteMeta(allocator, restored, ".", "nosuchdesign")).power_plane);
     try std.testing.expect(std.mem.indexOf(u8, restored, "(plane 3 \"VOUT\")") != null);
 
     const js = @embedFile("assets/pcb_board.js");
@@ -3660,4 +3723,145 @@ test "edit value range skips escaped quotes in labels and values" {
     const range = findInstanceValueRange(source, 0, source.len).?;
     try std.testing.expectEqualStrings("a\\\"b\\\\c", source[range[0]..range[1]]);
     try std.testing.expectEqual(@as(u8, '"'), source[range[1]]);
+}
+
+// spec: serve/edit - a settings write that lands in a sidecar still pins every minted (id …) into the file whose byte offsets it indexes, so the sidecar's own forms are never stamped into the design source
+test "writeFileAndRebuild pins minted ids per file when the bytes land in a sidecar" {
+    // page_allocator for the same reason as the test above: the evaluator's
+    // AST slices reference source buffers it never frees.
+    const alloc = std.heap.page_allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project_dir);
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/res.sexp",
+        .data =
+        \\(component-family res
+        \\  (param-type resistance)
+        \\  (footprint "0402"))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/0402.sexp",
+        .data = "(component 0402 (footprint \"0402.kicad_mod\"))",
+    });
+
+    // The circuit is split across the design file and the (unrestricted)
+    // checks sidecar, and neither instance carries an `(id …)` yet.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/idsplit.sexp",
+        .data =
+        \\(import res)
+        \\(design-block "Id Split"
+        \\  (instance "R1" (res "10k") (pin 1 "V") (pin 2 "GND")))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/idsplit.checks.sexp",
+        .data = "(instance \"R2\" (res \"22k\") (pin 1 \"V\") (pin 2 \"GND\"))\n",
+    });
+
+    // A Design Settings save whose bytes belong in the LAYOUT sidecar.
+    const layout_path = try std.fmt.allocPrint(alloc, "{s}/src/idsplit.layout.sexp", .{project_dir});
+    defer alloc.free(layout_path);
+    _ = try writeFileAndRebuild(
+        alloc,
+        project_dir,
+        "idsplit",
+        layout_path,
+        "(design-rules (clearance 0.22))\n",
+        "edit design rules from PCB settings",
+    );
+
+    const design_after = try tmp.dir.readFileAlloc(std.testing.io, "src/idsplit.sexp", alloc, .limited(4096));
+    defer alloc.free(design_after);
+    const checks_after = try tmp.dir.readFileAlloc(std.testing.io, "src/idsplit.checks.sexp", alloc, .limited(4096));
+    defer alloc.free(checks_after);
+    const layout_after = try tmp.dir.readFileAlloc(std.testing.io, "src/idsplit.layout.sexp", alloc, .limited(4096));
+    defer alloc.free(layout_after);
+
+    // Each file received exactly its OWN mint — an id written at a foreign
+    // byte offset would land inside an unrelated form instead.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, design_after, "(id "));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, checks_after, "(id "));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, layout_after, "(id "));
+    try std.testing.expect(std.mem.indexOf(u8, design_after, "\"R1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, checks_after, "\"R2\"") != null);
+    try std.testing.expectEqualStrings("(design-rules (clearance 0.22))\n", layout_after);
+
+    // Pinned means pinned: a second settings save mints nothing new.
+    _ = try writeFileAndRebuild(
+        alloc,
+        project_dir,
+        "idsplit",
+        layout_path,
+        "(design-rules (clearance 0.25))\n",
+        "edit design rules from PCB settings",
+    );
+    const design_twice = try tmp.dir.readFileAlloc(std.testing.io, "src/idsplit.sexp", alloc, .limited(4096));
+    defer alloc.free(design_twice);
+    const checks_twice = try tmp.dir.readFileAlloc(std.testing.io, "src/idsplit.checks.sexp", alloc, .limited(4096));
+    defer alloc.free(checks_twice);
+    try std.testing.expectEqualStrings(design_after, design_twice);
+    try std.testing.expectEqualStrings(checks_after, checks_twice);
+}
+
+// spec: serve/edit - the subcircuit supply-plane toggle reads and writes (power-plane …) in whichever of the design's files declares it, and refuses a board or an unreadable design rather than writing one
+test "setPowerPlaneApi toggles the layout sidecar's copy on a split subcircuit" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    const design = "(design-block \"Sub\"\n  (board-role subcircuit)\n  (section \"S\"))\n";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/sub.sexp", .data = design });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/sub.layout.sexp",
+        .data = "; Layout sidecar.\n(power-plane on)\n",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/whole.sexp",
+        .data = "(design-block \"Whole\"\n  (board-role board)\n  (section \"S\"))\n",
+    });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    var state = serve_root.ServerState{};
+    var srv = Server{ .allocator = a, .project_dir = root, .auth_dir = root, .state = &state };
+
+    // The sidecar's copy is the one the splice leaves in force, so it is the
+    // one both the read and the write must see.
+    var read = httpz.testing.init(.{});
+    defer read.deinit();
+    read.param("name", "sub");
+    try getBoardRoleApi(&srv, read.req, read.res);
+    try std.testing.expect(std.mem.indexOf(u8, read.res.body, "\"power_plane\":true") != null);
+
+    var request = httpz.testing.init(.{});
+    defer request.deinit();
+    request.param("name", "sub");
+    request.body("{\"enabled\":false}");
+    try setPowerPlaneApi(&srv, request.req, request.res);
+    try std.testing.expectEqual(@as(u16, 200), request.res.status);
+    try std.testing.expectEqualStrings(design, try tmp.dir.readFileAlloc(std.testing.io, "src/sub.sexp", a, .limited(4096)));
+    const sidecar = try tmp.dir.readFileAlloc(std.testing.io, "src/sub.layout.sexp", a, .limited(4096));
+    try std.testing.expectEqualStrings("; Layout sidecar.\n(power-plane off)\n", sidecar);
+
+    // The two refusals the handler owns still refuse instead of writing.
+    var board = httpz.testing.init(.{});
+    defer board.deinit();
+    board.param("name", "whole");
+    board.body("{\"enabled\":false}");
+    try setPowerPlaneApi(&srv, board.req, board.res);
+    try std.testing.expectEqual(http_bad_request, board.res.status);
+
+    var missing = httpz.testing.init(.{});
+    defer missing.deinit();
+    missing.param("name", "nosuchdesign");
+    missing.body("{\"enabled\":false}");
+    try setPowerPlaneApi(&srv, missing.req, missing.res);
+    try std.testing.expectEqual(http_not_found, missing.res.status);
 }

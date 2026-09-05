@@ -403,6 +403,28 @@ Auth in full: [auth.md](auth.md).
   or no `events` array → 400. Same auth as every other `/api` route
   (`src/serve/request_log.zig`).
 - **Value editing**: `POST /api/edit-value/:name` — edit component value in .sexp file
+- **PCB Design Settings**: `POST /api/design-rules/:name` `{"rules":{…}}` patches
+  the board-level numeric rules inside `(design-rules …)`;
+  `POST /api/stackup-planes/:name`
+  `{"layers":N,"planes":[{"index":I,"net":"…"}]}` replaces the whole-layer
+  copper assignments inside `(stackup …)` (the list is authoritative — an
+  omitted layer deletes its plane). Both are surgical: comments, ordering,
+  physical construction and every form the GUI does not know survive byte for
+  byte, and a board that relied on defaults gets the form authored for it.
+  Both are **sidecar-aware**. `design-rules` and `stackup` may live in the
+  design's `<name>.layout.sexp` (`docs/sexpr-language.md` → "Sidecar files"),
+  so each save is applied to whichever file declares the form, at THAT file's
+  byte spans, leaving the other file untouched; a form that exists nowhere yet
+  is authored into the layout sidecar when the design has one, else into the
+  design file. Either way the DESIGN is what is re-evaluated, id-pinned (each
+  minted `(id …)` back into the file its offset indexes), BOM-resolved and
+  version-bumped, and the sidecar's mtime is in the page-cache read-set, so the
+  served page refreshes on the next poll. The only refusal left is **409** when
+  the same singleton is declared in BOTH files — the message names both, and
+  the evaluator refuses that board anyway. `POST /api/power-plane/:name`
+  (subcircuit supply-plane policy, `GET /api/board-role/:name` reports it) and
+  `POST /api/diagram-layout/:name` (the Layout tab's drag-to-arrange writeback)
+  follow the same rule for `(power-plane …)` and `(diagram-layout …)`.
 - **ERC**: `GET /api/erc/:name` — electrical-rule violations. Repeat requests
   are answered from a dependency-validated in-memory cache
   (`src/serve/read_cache.zig`): the evaluator read-set (design, checks, every

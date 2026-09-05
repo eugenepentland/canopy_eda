@@ -1273,6 +1273,18 @@ design archive and the system-review package; and an `(id …)` minted by a form
 that lives in a sidecar is written back **into that sidecar**, never into the
 design file at a foreign byte offset.
 
+The GUI edits them in place too. The PCB **Design Settings** drawer
+(`/api/design-rules/:name`, `/api/stackup-planes/:name`), the Layout tab's
+drag-to-arrange writeback (`/api/diagram-layout/:name`) and the subcircuit
+supply-plane toggle (`/api/power-plane/:name`) each patch **the file that
+actually declares the form**, at that file's own byte spans — so on a split
+design the `(design-rules …)` edit lands in `<name>.layout.sexp` and the design
+file is not touched at all. A form nobody has authored yet is created in the
+sidecar that owns its kind when the design has one, and in the design file when
+it does not; the same singleton declared in two of the files is refused, naming
+both, which is the state the loader would refuse anyway. Nothing about a split
+design is read-only from the GUI.
+
 #### Splitting an existing design
 
 `split-design` does the move for you, and proves it:
