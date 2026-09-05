@@ -398,6 +398,7 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - field-directed finish accepts exact-clearance continuous shortcuts instead of retaining octilinear quantization detours
 - a sub-base-grid opening remains visible at the fixed 0.05 mm field pitch
 - routing the same placement twice is byte-identical
+- a lattice whose node count overflows a usize is refused by the node-budget bail instead of trapping on the multiply
 - vectorized maze-source discovery preserves ascending node order
 - route-space immutable rasters and cached path payloads share one memory budget while the single live raster is independently cell-bounded
 - the copper index's nearSegment query is a superset of the full scan: every box within reach of the segment appears in the candidates

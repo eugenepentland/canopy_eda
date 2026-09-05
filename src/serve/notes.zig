@@ -54,6 +54,24 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
     infra_fs.File.WriteError || infra_fs.File.OpenError || infra_fs.File.ReadError ||
     error{ StreamTooLong, EndOfStream };
 
+/// Resolving `<design>.notes.md` beside the design source: allocation plus the
+/// name-validation failures `paths.designSourcePath` reports for a name that
+/// escapes the project (`InvalidName`) or resolves to nothing.
+pub const PathError = std.mem.Allocator.Error || paths.PathError;
+
+/// Rendering canonical notes markdown into an allocating writer.
+pub const RenderError = std.mem.Allocator.Error || std.Io.Writer.Error;
+
+/// Reading and parsing the sidecar. `FileNotFound` is absorbed into an empty
+/// `Notes`, so what a caller can still see is path resolution plus every other
+/// read failure (permissions, a directory in the way, an over-limit file).
+pub const LoadError = PathError || std.Io.Dir.ReadFileAllocError;
+
+/// One task mutation end to end: load, re-render, atomic rewrite, plus the
+/// secure-RNG failure the note-id generator can report.
+pub const MutateError = LoadError || RenderError || atomic_write.Error ||
+    std.Io.RandomSecureError;
+
 pub const NoteStatus = enum { open, done };
 
 pub const Note = struct {
@@ -68,7 +86,7 @@ pub const Notes = struct {
     scratchpad: []const u8,
 };
 
-fn notesPath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ![]u8 {
+fn notesPath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) PathError![]u8 {
     const src = try paths.designSourcePath(allocator, project_dir, name);
     defer allocator.free(src);
     const dir = std.fs.path.dirname(src) orelse "";
@@ -163,7 +181,7 @@ fn isIsoDate(s: []const u8) bool {
 
 /// Render `Notes` as canonical markdown: tasks first (in given order),
 /// blank line, then scratchpad. Returns allocated bytes the caller owns.
-pub fn renderNotes(allocator: std.mem.Allocator, notes: Notes) ![]u8 {
+pub fn renderNotes(allocator: std.mem.Allocator, notes: Notes) RenderError![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     const w = &out.writer;
     for (notes.tasks) |t| try writeTaskLine(w, t);
@@ -185,14 +203,14 @@ fn writeTaskLine(w: anytype, t: Note) !void {
 
 /// Generate a random 8-char lowercase hex id. Collisions across a
 /// per-design TODO list are astronomically unlikely for a 32-bit space.
-fn generateNoteId(allocator: std.mem.Allocator) ![]u8 {
+fn generateNoteId(allocator: std.mem.Allocator) (std.mem.Allocator.Error || std.Io.RandomSecureError)![]u8 {
     var bytes: [4]u8 = undefined;
     try infra_random.bytes(&bytes);
     return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{ bytes[0], bytes[1], bytes[2], bytes[3] });
 }
 
 /// Return today's UTC date as `YYYY-MM-DD`. Allocates 10 bytes.
-fn todayIsoDate(allocator: std.mem.Allocator) ![]u8 {
+fn todayIsoDate(allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
     const now_s: i64 = clock.timestamp();
     const es = std.time.epoch.EpochSeconds{ .secs = @intCast(now_s) };
     const ed = es.getEpochDay();
@@ -213,7 +231,7 @@ pub fn loadNotes(
     project_dir: []const u8,
     name: []const u8,
     out_raw: *?[]u8,
-) !Notes {
+) LoadError!Notes {
     const path = try notesPath(allocator, project_dir, name);
     defer allocator.free(path);
     const data = infra_fs.cwd().readFileAlloc(allocator, path, max_notes_bytes) catch |e| switch (e) {
@@ -239,7 +257,7 @@ fn writeNotesFile(
     project_dir: []const u8,
     name: []const u8,
     notes: Notes,
-) !void {
+) (PathError || RenderError || atomic_write.Error)!void {
     const path = try notesPath(allocator, project_dir, name);
     defer allocator.free(path);
     const body = try renderNotes(allocator, notes);
@@ -440,7 +458,7 @@ pub fn addTaskCore(
     project_dir: []const u8,
     name: []const u8,
     text: []const u8,
-) !Note {
+) MutateError!Note {
     var raw: ?[]u8 = null;
     const notes = try loadNotes(allocator, project_dir, name, &raw);
     defer if (raw) |d| allocator.free(d);
@@ -467,7 +485,7 @@ pub fn mutateTaskCore(
     name: []const u8,
     id: []const u8,
     mode: TaskMutation,
-) !?bool {
+) MutateError!?bool {
     var raw: ?[]u8 = null;
     const notes = try loadNotes(allocator, project_dir, name, &raw);
     defer if (raw) |d| allocator.free(d);
@@ -490,7 +508,7 @@ pub fn mutateTaskCore(
 
 /// Apply the mutation to a single task. `remove` returns the task
 /// unchanged; the caller drops it via the `mode == .remove` check.
-fn applyMutation(allocator: std.mem.Allocator, t: Note, mode: TaskMutation) !Note {
+fn applyMutation(allocator: std.mem.Allocator, t: Note, mode: TaskMutation) std.mem.Allocator.Error!Note {
     return switch (mode) {
         .complete => if (t.completed != null) t else .{
             .id = t.id,

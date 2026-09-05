@@ -121,6 +121,7 @@ const RouteProgress = route_timeline.RouteProgress;
 // Guardian's code-line ceiling). These aliases keep every call site here — and
 // the meaning of each name — exactly as it was before the extraction.
 const max_nodes = route_grid.max_nodes;
+const nodeCount = route_grid.nodeCount;
 const fine_selection_max_nets = route_grid.fine_selection_max_nets;
 const selectedCount = route_grid.selectedCount;
 const maxRouteParams = route_grid.maxRouteParams;
@@ -1363,8 +1364,9 @@ fn buildRouteCtx(
     const dims = routeGridDims(placement, params, selected_nets, resolution_scale);
     const nx = dims.nx;
     const ny = dims.ny;
-    if (nx * ny == 0) return .empty;
-    if (nx * ny > max_nodes) return .overflow;
+    const grid_nodes = nodeCount(nx, ny);
+    if (grid_nodes == 0) return .empty;
+    if (grid_nodes > max_nodes) return .overflow;
     const n_signal: usize = placement.rules.signalLayerCount();
     const obs = try buildObstacles(arena, placement.parts, placement.nets);
     var keep_state = KeepState{ .nets = try keepout.halos(arena, placement) };
@@ -1518,7 +1520,7 @@ pub fn visionMask(
     // the grid depends on the selected-net subset and the resolution scale the
     // attempt resolved to, which the design alone does not pin down.
     const grid = in.pass.grid.?;
-    const nodes = grid.nx * grid.ny;
+    const nodes = nodeCount(grid.nx, grid.ny);
     if (nodes == 0 or nodes > max_nodes) return null;
     const edge_inset = via_rules.edgeInset(base.track_width, base.via_dia, in.placement.rules.design.edgeClearance());
     ctx.grid = grid;
@@ -4111,6 +4113,13 @@ pub const LoopRouter = struct {
     /// fall back to the analytic surrogate.
     ready: bool,
 
+    /// Every allocation below lands in `arena` and NOTHING here is freed
+    /// individually: both callers (`optimizer.routedLoops` /
+    /// `routedSubsetWeighted`) hand over a scratch arena they reset per
+    /// candidate, and the tests use one they `deinit`. That is why a failure
+    /// after `allocLayerGrids` leaks nothing and carries no `errdefer` — an
+    /// `arena.free` here would be a no-op standing in for a release the arena
+    /// already performs wholesale.
     pub fn init(
         arena: std.mem.Allocator,
         parts: []const Part,
@@ -4140,14 +4149,18 @@ pub const LoopRouter = struct {
         const oy = miny - margin;
         const nx: usize = numeric.toCount(@ceil((maxx - minx + 2 * margin) / g) + 1);
         const ny: usize = numeric.toCount(@ceil((maxy - miny + 2 * margin) / g) + 1);
-        if (nx * ny == 0 or nx * ny > max_nodes) return .{ .ctx = undefined, .ready = false };
+        // Saturating: a design can place parts far enough apart that `nx * ny`
+        // leaves `usize` outright, and the bail must refuse that rather than
+        // trap on (or wrap past) the multiply. See `route_grid.nodeCount`.
+        const nodes = nodeCount(nx, ny);
+        if (nodes == 0 or nodes > max_nodes) return .{ .ctx = undefined, .ready = false };
         const grid = Grid{ .ox = ox, .oy = oy, .g = g, .nx = nx, .ny = ny };
 
         // The loop surrogate always measures on the two OUTER faces — it
         // scores a decoupling leg, not a full route, so inner layers would
         // only slow the placement loop without changing the ordering.
-        const occ = try allocLayerGrids(arena, 2, nx * ny);
-        const resv = try allocLayerGrids(arena, 2, nx * ny);
+        const occ = try allocLayerGrids(arena, 2, nodes);
+        const resv = try allocLayerGrids(arena, 2, nodes);
 
         // Every pad is an obstacle tagged with its net — same indexing as `route`
         // (absolute position in `nets`), so a leg routed on net N treats N's pads
@@ -14115,6 +14128,44 @@ test "LoopRouter.legLen lengthens a leg that must route around an obstacle" {
     var lr_blk = try LoopRouter.init(arena, &blk_parts, &blk_nets, &blk_idx, .{});
     const len_blk = (try lr_blk.legLen(.{ 0, 0 }, .{ 4, 0 }, 0)).?;
     try testing.expect(len_blk > len_clear + 0.5);
+}
+
+// spec: placement/router - a lattice whose node count overflows a usize is refused by the node-budget bail instead of trapping on the multiply
+test "LoopRouter.init refuses a span whose node count overflows usize" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // The axis counts are `ceil(span / pitch) + 1` over a span the DESIGN
+    // supplies, so two parts this far apart give each axis ~1e11/pitch nodes
+    // and `nx * ny` leaves `usize`. Before `route_grid.nodeCount` saturated it,
+    // the bare multiply panicked with `integer overflow` in a safe build (and
+    // wrapped to a small count in an optimized one, sailing past the
+    // `> max_nodes` bail and then sizing the grid allocation from the wrapped
+    // value while `Grid.nx`/`Grid.ny` stayed astronomical). The router must
+    // refuse this the way it refuses any other unaffordable board: not ready.
+    const G = @import("geometry.zig");
+    const pad = [_]G.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    const sig = [_]flat_netlist.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
+    var parts = [_]Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pad, .fallback = false, .x = 1e11, .y = 1e11 },
+    };
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &sig }};
+    var idx = std.StringHashMapUnmanaged(usize).empty;
+    try idx.put(arena, "R1", 0);
+    try idx.put(arena, "R2", 1);
+
+    const lr = try LoopRouter.init(arena, &parts, &nets, &idx, .{});
+    try testing.expect(!lr.ready);
+
+    // The saturating count is what makes that bail reachable: the product of
+    // two axis counts this size must land at the ceiling, never wrap.
+    try testing.expectEqual(
+        @as(usize, std.math.maxInt(usize)),
+        route_grid.nodeCount(std.math.maxInt(usize) / 2, 4),
+    );
+    try testing.expectEqual(@as(usize, 12), route_grid.nodeCount(3, 4));
 }
 
 // spec: placement/router - routes corners as 45° diagonals rather than 90° bends

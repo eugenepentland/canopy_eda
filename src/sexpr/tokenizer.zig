@@ -55,6 +55,17 @@ pub const si_scales = [_]SiScale{
 /// scale, only readability (`100nF` == `100n`, `3.3V` == `3.3`).
 pub const si_unit_letters: []const u8 = "VAFHR";
 
+/// Every way the lexer can reject its input. Exhaustive: `readString` raises
+/// `UnterminatedString`, `next` raises `UnexpectedCharacter`, and every other
+/// scan path (`readNumber`/`readAtom`/`readOperator`) is total. `parser.zig`
+/// re-declares both variants in `ParseError` and maps them to located
+/// diagnostics, so widening this set is a compile error there rather than a
+/// silent `anyerror` leaking into the parse path.
+pub const LexError = error{
+    UnexpectedCharacter,
+    UnterminatedString,
+};
+
 /// S-expression tokenizer. Holds a non-owning reference to `source` plus
 /// the cursor (`pos`, `line`, `col`) used for span reporting; instantiate
 /// with `init(source)` then call `next()` to walk tokens until `eof`.
@@ -122,7 +133,7 @@ pub const Tokenizer = struct {
         }
     }
 
-    pub fn next(self: *Tokenizer) !Token {
+    pub fn next(self: *Tokenizer) LexError!Token {
         self.skipWhitespaceAndComments();
 
         const s = self.span();
@@ -167,7 +178,7 @@ pub const Tokenizer = struct {
         return self.source[idx];
     }
 
-    fn readString(self: *Tokenizer, s: Span) !Token {
+    fn readString(self: *Tokenizer, s: Span) LexError!Token {
         self.advance(); // skip opening "
         const start = self.pos;
         while (self.peek()) |ch| {

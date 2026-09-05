@@ -308,7 +308,7 @@ pub const RenderCtx = struct {
 
     /// Build a net rename map from a block's net_ties, prefixed appropriately.
     /// A tie (a="VDD", b="buck/VOUT") at prefix="" means: rename net "buck/VOUT" to "VDD".
-    fn buildNetRenameMap(self: *RenderCtx, block: *const DesignBlock, prefix: []const u8) !std.StringHashMapUnmanaged([]const u8) {
+    fn buildNetRenameMap(self: *RenderCtx, block: *const DesignBlock, prefix: []const u8) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]const u8) {
         var net_rename = std.StringHashMapUnmanaged([]const u8).empty;
         for (block.net_ties) |nt| {
             const full_b = if (prefix.len > 0)
@@ -405,7 +405,7 @@ pub const RenderCtx = struct {
         try self.buildPinCanonicalNets();
     }
 
-    pub fn collectFlat(self: *RenderCtx, block: *const DesignBlock, prefix: []const u8) !void {
+    pub fn collectFlat(self: *RenderCtx, block: *const DesignBlock, prefix: []const u8) std.mem.Allocator.Error!void {
         try self.collectFlatWithRenames(block, prefix, &.{});
     }
 
@@ -478,7 +478,7 @@ pub const RenderCtx = struct {
         }
     }
 
-    pub fn buildPinNetMap(self: *RenderCtx) !void {
+    pub fn buildPinNetMap(self: *RenderCtx) std.mem.Allocator.Error!void {
         for (self.nets.items) |net| {
             for (net.pins) |pin| {
                 const key = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ pin.ref_des, pin.pin });
@@ -487,7 +487,7 @@ pub const RenderCtx = struct {
         }
     }
 
-    pub fn classify(self: *RenderCtx) !void {
+    pub fn classify(self: *RenderCtx) std.mem.Allocator.Error!void {
         for (self.instances.items) |inst| {
             if (isHub(inst)) {
                 try self.hub_order.append(self.allocator, inst.ref_des);
@@ -497,7 +497,7 @@ pub const RenderCtx = struct {
         }
     }
 
-    pub fn buildAdjacency(self: *RenderCtx) !void {
+    pub fn buildAdjacency(self: *RenderCtx) std.mem.Allocator.Error!void {
         for (self.nets.items) |net| {
             const bn = baseNetName(net.name);
             for (net.pins) |pin| {
@@ -859,7 +859,7 @@ pub const RenderCtx = struct {
         return null;
     }
 
-    pub fn synthesizeSpokeConnections(self: *RenderCtx) !void {
+    pub fn synthesizeSpokeConnections(self: *RenderCtx) std.mem.Allocator.Error!void {
         try self.computeSpokeAnchors();
         for (self.nets.items) |net| {
             const bn = baseNetName(net.name);
@@ -1004,7 +1004,7 @@ pub const RenderCtx = struct {
         return false;
     }
 
-    pub fn buildNetIndex(self: *RenderCtx) !void {
+    pub fn buildNetIndex(self: *RenderCtx) std.mem.Allocator.Error!void {
         for (self.nets.items) |net| {
             const bn = baseNetName(net.name);
             for (net.pins) |pin| {
@@ -1068,7 +1068,7 @@ pub const RenderCtx = struct {
         }
     }
 
-    pub fn buildSignificantNets(self: *RenderCtx, block: *const DesignBlock) !void {
+    pub fn buildSignificantNets(self: *RenderCtx, block: *const DesignBlock) std.mem.Allocator.Error!void {
         for (block.ports) |port| {
             try self.markLonePinNet(baseNetName(port.net), .boundary_port);
         }
@@ -1134,7 +1134,7 @@ pub const RenderCtx = struct {
         }
     }
 
-    pub fn buildPinCanonicalNets(self: *RenderCtx) !void {
+    pub fn buildPinCanonicalNets(self: *RenderCtx) std.mem.Allocator.Error!void {
         for (self.nets.items) |net| {
             const bn = baseNetName(net.name);
             for (net.pins) |pin| {
@@ -1146,7 +1146,7 @@ pub const RenderCtx = struct {
         }
     }
 
-    pub fn validateNetConsistency(self: *RenderCtx) !void {
+    pub fn validateNetConsistency(self: *RenderCtx) std.mem.Allocator.Error!void {
         var adj_it = self.adjacency.iterator();
         while (adj_it.next()) |kv| {
             const ref_des = kv.key_ptr.*;
@@ -1210,7 +1210,7 @@ pub const RenderCtx = struct {
         }
     }
 
-    pub fn adjAppend(self: *RenderCtx, ref_des: []const u8, entry: AdjEntry) !void {
+    pub fn adjAppend(self: *RenderCtx, ref_des: []const u8, entry: AdjEntry) std.mem.Allocator.Error!void {
         const gop = try self.adjacency.getOrPut(self.allocator, ref_des);
         if (!gop.found_existing) gop.value_ptr.* = .empty;
         try gop.value_ptr.append(self.allocator, entry);
