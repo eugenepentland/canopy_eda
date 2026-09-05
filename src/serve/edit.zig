@@ -63,6 +63,17 @@ const err_json_missing_name = "{\"error\":\"missing name\"}";
 const ok_json_true = "{\"ok\":true}";
 /// `std.fmt` template for a `{"error":"<msg>"}` JSON body (msg substituted).
 const err_json_fmt = "{{\"error\":\"{s}\"}}";
+/// `std.fmt` template for the `{"ok":true,"version":N}` body every mutation
+/// endpoint answers with. Spelled once so a mutation cannot start reporting a
+/// differently-shaped success than its siblings.
+const ok_version_json_fmt = "{{\"ok\":true,\"version\":{d}}}";
+
+/// The request-body key naming the design section a mutation applies to. It is
+/// the QUOTED key `parseJsonString` scans for, not the bare word.
+const json_key_section = "\"section\"";
+/// Bodies for the two mutation arguments most often left out by a caller.
+const err_missing_net = "missing net";
+const err_missing_to = "missing to";
 
 /// Adapts an allocating writer's generic `WriteFailed` back to the historical
 /// allocator-only contract. Growing this writer is its only failure mode.
@@ -520,7 +531,7 @@ pub fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
         return;
     };
     const value = parseJsonString(body, "\"value\"") orelse "";
-    const section = parseJsonString(body, "\"section\"") orelse "";
+    const section = parseJsonString(body, json_key_section) orelse "";
     // Optional caller-chosen ref-des. When omitted we emit the component name
     // as a descriptive (non-standard) label, which the evaluator's post-build
     // auto-assignment renumbers to the right prefix (C1, R3, …). An instance
@@ -967,7 +978,7 @@ fn finishMutation(ctx: *Server, name: []const u8, new_source: []const u8, desc: 
         return;
     };
     res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+    res.body = try std.fmt.allocPrint(ctx.allocator, ok_version_json_fmt, .{result.version});
 }
 
 /// POST /api/add-section/:name  Body: {"section":"Power","subtitle":"3V3 buck"}
@@ -982,7 +993,7 @@ pub fn addSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         res.body = "no body";
         return;
     };
-    const section = parseJsonString(body, "\"section\"") orelse {
+    const section = parseJsonString(body, json_key_section) orelse {
         res.status = 400;
         res.body = "missing section";
         return;
@@ -1046,7 +1057,7 @@ pub fn renameSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
     };
     const to = parseJsonString(body, "\"to\"") orelse {
         res.status = 400;
-        res.body = "missing to";
+        res.body = err_missing_to;
         return;
     };
     if (to.len == 0) {
@@ -1096,7 +1107,7 @@ pub fn removeSectionApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
         res.body = "no body";
         return;
     };
-    const section = parseJsonString(body, "\"section\"") orelse {
+    const section = parseJsonString(body, json_key_section) orelse {
         res.status = 400;
         res.body = "missing section";
         return;
@@ -1159,7 +1170,7 @@ pub fn addPortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     };
     const net = parseJsonString(body, "\"net\"") orelse {
         res.status = 400;
-        res.body = "missing net";
+        res.body = err_missing_net;
         return;
     };
     const dir = parseJsonString(body, "\"dir\"") orelse "bidi";
@@ -1214,7 +1225,7 @@ pub fn removePortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
     };
     const net = parseJsonString(body, "\"net\"") orelse {
         res.status = 400;
-        res.body = "missing net";
+        res.body = err_missing_net;
         return;
     };
     const source = readDesignSource(ctx.allocator, ctx.project_dir, name) catch {
@@ -1267,7 +1278,7 @@ pub fn renameRefdesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
     };
     const to = parseJsonString(body, "\"to\"") orelse {
         res.status = 400;
-        res.body = "missing to";
+        res.body = err_missing_to;
         return;
     };
     if (to.len == 0) {
@@ -1670,7 +1681,7 @@ pub fn rewirePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
         return;
     };
     const new_net = parseJsonString(body, "\"net\"") orelse {
-        sendJsonError(ctx, res, 400, "missing net");
+        sendJsonError(ctx, res, 400, err_missing_net);
         return;
     };
     const src_off = parseSrcOff(body);
@@ -1974,7 +1985,7 @@ pub fn renameNetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Han
         return;
     };
     const to = parseJsonString(body, "\"to\"") orelse {
-        sendJsonError(ctx, res, 400, "missing to");
+        sendJsonError(ctx, res, 400, err_missing_to);
         return;
     };
     if (from.len == 0 or to.len == 0) {
@@ -2093,7 +2104,7 @@ pub fn movePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
         }
     };
 
-    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+    res.body = try std.fmt.allocPrint(ctx.allocator, ok_version_json_fmt, .{result.version});
 }
 
 /// Swap the net assignments of two pins on the same instance.
@@ -2161,7 +2172,7 @@ pub fn swapPinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
         }
     };
 
-    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{result.version});
+    res.body = try std.fmt.allocPrint(ctx.allocator, ok_version_json_fmt, .{result.version});
 }
 
 /// Rebuild design, render SVG, and push live update. Every caller has just
@@ -2474,7 +2485,7 @@ pub fn editMpnApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
 
     res.header(header_cors_allow_origin, "*");
     res.content_type = .JSON;
-    res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":true,\"version\":{d}}}", .{version});
+    res.body = try std.fmt.allocPrint(ctx.allocator, ok_version_json_fmt, .{version});
 }
 
 /// Look for `key` (e.g. `"\"mpn\":\""`) in a tiny JSON body and return the
@@ -2810,7 +2821,7 @@ fn findPinInForm(source: []const u8, start: usize, limit: usize, pin: []const u8
     while (i < limit) {
         const c = source[i];
         if (c == ')' or c == '"') return null;
-        if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
+        if (isPinWs(c)) {
             i += 1;
             continue;
         }
@@ -2825,7 +2836,7 @@ fn findPinInForm(source: []const u8, start: usize, limit: usize, pin: []const u8
         const tok_start = i;
         while (i < limit) : (i += 1) {
             const cc = source[i];
-            if (cc == ' ' or cc == '\t' or cc == '\n' or cc == '\r' or cc == '"' or cc == '(' or cc == ')') break;
+            if (isPinTokenEnd(cc)) break;
         }
         if (std.mem.eql(u8, source[tok_start..i], pin)) return .{ .start = tok_start, .end = i };
     }
@@ -2916,7 +2927,13 @@ pub fn movePinCore(
     new_pin: []const u8,
 ) EditError!MutationResult {
     if (old_pin.len == 0 or new_pin.len == 0) return error.InvalidSource;
-    for (new_pin) |c| if (c == ' ' or c == '\t' or c == '\n' or c == '"' or c == '(' or c == ')') return error.InvalidSource;
+    // A new pin ID may not contain any character that ENDS a pin-id token, or
+    // the scanner that has to find it again would stop short of its end and the
+    // rewritten design would no longer name the pin it just moved. The reject
+    // set is `isPinTokenEnd` itself rather than a hand-copy of it: the copy here
+    // omitted '\r', so a CR inside a pin ID passed validation and then split the
+    // token on the next read.
+    for (new_pin) |c| if (isPinTokenEnd(c)) return error.InvalidSource;
     if (std.mem.eql(u8, old_pin, new_pin)) return error.InvalidSource;
 
     const source = try readDesignSource(allocator, project_dir, name);
@@ -2956,8 +2973,9 @@ pub fn swapPinsCore(
     pin_b: []const u8,
 ) EditError!MutationResult {
     if (pin_a.len == 0 or pin_b.len == 0) return error.InvalidSource;
-    for (pin_a) |c| if (c == ' ' or c == '\t' or c == '\n' or c == '"' or c == '(' or c == ')') return error.InvalidSource;
-    for (pin_b) |c| if (c == ' ' or c == '\t' or c == '\n' or c == '"' or c == '(' or c == ')') return error.InvalidSource;
+    // Same reject set as `movePinCore`, for the same reason.
+    for (pin_a) |c| if (isPinTokenEnd(c)) return error.InvalidSource;
+    for (pin_b) |c| if (isPinTokenEnd(c)) return error.InvalidSource;
     if (std.mem.eql(u8, pin_a, pin_b)) return error.InvalidSource;
 
     const source = try readDesignSource(allocator, project_dir, name);
@@ -3317,6 +3335,26 @@ test "findPinInForm locates a bareword pin token before any net string" {
     const src = "(pin W12 \"CNV\")";
     const loc = findPinInForm(src, "(pin ".len, src.len, "W12") orelse return error.TestPinNotFound;
     try std.testing.expectEqualStrings("W12", src[loc.start..loc.end]);
+}
+
+test "the pin-token delimiter set the scanner and the pin-ID validators share" {
+    // `findPinInForm`, `movePinCore` and `swapPinsCore` all read the SAME
+    // predicate. They must: the scanner stops a pin-id token at every character
+    // below, so a new pin ID containing one would be written into the design and
+    // then found only up to that character on the next read. The validators
+    // hand-copied this set and left '\r' out of their copy.
+    try std.testing.expect(isPinTokenEnd(' '));
+    try std.testing.expect(isPinTokenEnd('\t'));
+    try std.testing.expect(isPinTokenEnd('\n'));
+    try std.testing.expect(isPinTokenEnd('\r'));
+    try std.testing.expect(isPinTokenEnd('"'));
+    try std.testing.expect(isPinTokenEnd('('));
+    try std.testing.expect(isPinTokenEnd(')'));
+    // Everything a pin ID is actually made of stays legal.
+    try std.testing.expect(!isPinTokenEnd('W'));
+    try std.testing.expect(!isPinTokenEnd('1'));
+    try std.testing.expect(!isPinTokenEnd('_'));
+    try std.testing.expect(!isPinTokenEnd('-'));
 }
 
 /// Read one `.bom` entry by ref-des for the identity tests below. Returns the

@@ -48,6 +48,11 @@ const pad_net = @import("kicad_pcb/pad_net.zig");
 const infra_fs = @import("infra/fs.zig");
 const import_fold = @import("import_fold.zig");
 const numeric = @import("numeric.zig");
+
+/// `<project>/lib/components/<name>.sexp` — the one shape every component-library
+/// path this importer reads or writes takes. Spelled once so a probe and the
+/// write that follows it can never look in two different places.
+const component_lib_path_fmt = "{s}/lib/components/{s}.sexp";
 const Node = ast.Node;
 
 /// KiCad's single-pad stub prefix — pads on these nets are unconnected.
@@ -335,7 +340,7 @@ fn familyFor(arena: std.mem.Allocator, project_dir: []const u8, part: Part) Impo
     if (!hasExactPads12(part.pads)) return null;
 
     const fam = try std.fmt.allocPrint(arena, "{s}-{s}", .{ kind, size.? });
-    const fam_path = try std.fmt.allocPrint(arena, "{s}/lib/components/{s}.sexp", .{ project_dir, fam });
+    const fam_path = try std.fmt.allocPrint(arena, component_lib_path_fmt, .{ project_dir, fam });
     infra_fs.cwd().access(fam_path, .{}) catch return null;
     return fam;
 }
@@ -426,7 +431,7 @@ fn isAllDigits(s: []const u8) bool {
 /// True when `lib/components/<name>.sexp` exists and declares a
 /// component-family rather than a fixed component.
 fn clashesWithFamily(arena: std.mem.Allocator, project_dir: []const u8, name: []const u8) ImportError!bool {
-    const path = try std.fmt.allocPrint(arena, "{s}/lib/components/{s}.sexp", .{ project_dir, name });
+    const path = try std.fmt.allocPrint(arena, component_lib_path_fmt, .{ project_dir, name });
     const head = infra_fs.cwd().readFileAlloc(arena, path, 4096) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return false,
@@ -450,7 +455,7 @@ fn ensureLibFiles(
     for (comps) |comp| {
         const part = parts[comp.part_idx];
 
-        const comp_path = try std.fmt.allocPrint(arena, "{s}/lib/components/{s}.sexp", .{ opts.project_dir, comp.name });
+        const comp_path = try std.fmt.allocPrint(arena, component_lib_path_fmt, .{ opts.project_dir, comp.name });
         if (fileExists(comp_path)) {
             summary.lib_existing += 1;
         } else {

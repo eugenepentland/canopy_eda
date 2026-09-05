@@ -3348,6 +3348,20 @@ fn buildClusters(
 /// by its own IC pad; a cluster orphan (no IC signal pad) docks at its subsystem's
 /// attach centroid so connected parts stay together; anything with no IC connection
 /// drops to `leftover`. Pad offset → side + along-edge coordinate.
+/// True when `net` can serve a part's cohesion anchor: a CONCENTRATED (≤2-pad)
+/// net that is ground by neither the role data nor the net name. A power rail
+/// lands on many pads, so the pad count alone excludes it, and both ground tests
+/// are needed because each catches what the other misses — the role data misses
+/// a hub GND pad, and the role classification catches a ground pin whose net
+/// name does not read like one. Named because it is the whole difference between
+/// a bypass cap casting no vote in `cohereGroups` and dragging its group toward
+/// the ground pad it happens to sit on.
+fn isCohesionAnchorNet(net: HubTopology.Net, roles: pin_roles.PartRoles) bool {
+    if (net.pin_count > 2) return false;
+    if (net.ground) return false;
+    return roles.classOf(net.pin) != .ground;
+}
+
 fn assignSides(
     arena: std.mem.Allocator,
     parts: []Part,
@@ -3389,10 +3403,9 @@ fn assignSides(
             // so it's excluded too. Checked before the role `continue` below so it
             // still runs on nets that pass the (unreliable) role ground-test.
             const cnt = hub_net.pin_count;
-            if (cnt <= 2 and !hub_net.ground and
-                roles.classOf(hub_net.pin) != .ground and
-                (anchor == null or cnt < anchor_cnt))
-            {
+            // Fewer pads than the anchor held so far (or no anchor yet).
+            const tighter_than_current_anchor = anchor == null or cnt < anchor_cnt;
+            if (isCohesionAnchorNet(hub_net, roles) and tighter_than_current_anchor) {
                 if (hub_net.pads.len > 0) {
                     anchor = hub_net.pads[0];
                     anchor_cnt = cnt;
@@ -11611,6 +11624,31 @@ test "cohereGroups coheres an anchored group and leaves a pure-bypass group dist
     // BYP members stayed on their seeded sides (C3 left, C4 right).
     try testing.expectEqual(@as(usize, 1), sides[0].items.len);
     try testing.expectEqual(@as(usize, 1), sides[1].items.len);
+}
+
+test "isCohesionAnchorNet accepts only a concentrated non-ground net" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+
+    // Pin "7" is classified ground by the role data; every other pin is .other.
+    var roles = pin_roles.PartRoles{};
+    try roles.map.put(arena, "7", .ground);
+
+    const signal = HubTopology.Net{ .pads = &.{}, .pin_parts = &.{}, .pin = "3", .pin_count = 2, .ground = false };
+    try testing.expect(isCohesionAnchorNet(signal, roles));
+
+    // A rail: same non-ground pin, but it lands on more than two pads.
+    const rail = HubTopology.Net{ .pads = &.{}, .pin_parts = &.{}, .pin = "3", .pin_count = 3, .ground = false };
+    try testing.expect(!isCohesionAnchorNet(rail, roles));
+
+    // Ground by NAME (the topology's own flag) — concentrated, still no anchor.
+    const named_ground = HubTopology.Net{ .pads = &.{}, .pin_parts = &.{}, .pin = "3", .pin_count = 2, .ground = true };
+    try testing.expect(!isCohesionAnchorNet(named_ground, roles));
+
+    // Ground by ROLE only: the name test would have let this one anchor.
+    const role_ground = HubTopology.Net{ .pads = &.{}, .pin_parts = &.{}, .pin = "7", .pin_count = 1, .ground = false };
+    try testing.expect(!isCohesionAnchorNet(role_ground, roles));
 }
 
 // spec: placement/optimizer - servedPadLocal resolves a decoupling cap's bound hub pad on-net and rejects a cross-hub binding
