@@ -29,6 +29,7 @@ const test_point_mod = @import("test_point.zig");
 const micro_forms = @import("micro_forms.zig");
 const pin_enrichment = @import("pin_enrichment.zig");
 const forms_mod = @import("forms.zig");
+const sidecars = @import("sidecars.zig");
 const board_role_mod = @import("board_role.zig");
 const board_keepout_mod = @import("board_keepout.zig");
 const net_analysis = @import("net_analysis.zig");
@@ -362,7 +363,20 @@ fn evalBlockBodyForms(
     env: *Env,
     build: *BlockBuildState,
 ) EvalError!void {
-    for (body_forms) |form| try evalBlockBodyForm(self, form, env, build);
+    // A form spliced in from a sidecar reports against its OWN file: the
+    // origin index recovers which, and `current_file` carries it for the whole
+    // sub-tree that form evaluates (see eval/sidecars.zig).
+    const origins = sidecars.originIndex(self, body_forms);
+    if (origins.isEmpty()) {
+        for (body_forms) |form| try evalBlockBodyForm(self, form, env, build);
+        return;
+    }
+    for (body_forms, 0..) |form, i| {
+        const saved_file = self.current_file;
+        defer self.current_file = saved_file;
+        if (origins.fileAt(i)) |file| self.current_file = file;
+        try evalBlockBodyForm(self, form, env, build);
+    }
 }
 
 /// Expand a design-scope `(repeat name start end body…)`. Each body form runs

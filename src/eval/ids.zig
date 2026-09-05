@@ -18,6 +18,7 @@ const Evaluator = evaluator_mod.Evaluator;
 const EvalError = evaluator_mod.EvalError;
 const AltFunc = evaluator_mod.AltFunc;
 const infra_random = @import("../infra/random.zig");
+const sidecars = @import("sidecars.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 /// Number of letters (a-f) we map the leading hex byte into so the first
@@ -583,6 +584,7 @@ pub fn reassignSubBlockIds(
                 .parent_form_offset = sidecar.parent_offset,
                 .key = key,
                 .id = seed,
+                .file = sidecars.pendingIdFile(self),
             });
             try sidecar.map.put(self.allocator, key, seed);
             inst.id = seed;
@@ -638,6 +640,7 @@ pub fn getOrCreateFormId(self: *Evaluator, form_children: []const Node) EvalErro
     try self.pending_ids.append(self.allocator, .{
         .form_offset = form_children[0].span.offset -| 1,
         .id = new_id,
+        .file = sidecars.pendingIdFile(self),
     });
     return new_id;
 }
@@ -683,6 +686,7 @@ pub fn getOrCreateChildId(self: *Evaluator, sidecar: *ChildIdSidecar, key: []con
         .parent_form_offset = sidecar.parent_offset,
         .key = key,
         .id = tok,
+        .file = sidecars.pendingIdFile(self),
     });
     try sidecar.map.put(self.allocator, key, tok);
     return tok;

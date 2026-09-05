@@ -257,6 +257,11 @@ pub const Evaluator = struct {
         form_offset: u32,
         /// The generated 8-char hex ID to insert
         id: []const u8,
+        /// The sidecar file `form_offset` indexes, or "" for the design source
+        /// itself. A form spliced in from `<name>.layout.sexp` carries a span
+        /// into THAT buffer, so writing it into the design file would land on
+        /// an unrelated `(` — see `id_insert.persistMintedIds`.
+        file: []const u8 = "",
     };
 
     pub const PendingChildId = struct {
@@ -268,6 +273,9 @@ pub const Evaluator = struct {
         key: []const u8,
         /// The generated 8-char hex token for this child.
         id: []const u8,
+        /// The sidecar file `parent_form_offset` indexes, or "" for the design
+        /// source. See `PendingId.file`.
+        file: []const u8 = "",
     };
 
     pub const NetTie = struct {

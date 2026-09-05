@@ -515,12 +515,12 @@ src/eval/builders.zig::findPinFuncMap | fn findPinFuncMap(self: *Evaluator, inst
 src/eval/builders.zig::isKnownPinsChild | fn isKnownPinsChild(node: Node) bool
 src/eval/builders.zig::loadDesignFile | fn loadDesignFile(self: *Evaluator, path: []const u8) ?[]const Node
 src/eval/builders.zig::loadFile | fn loadFile(self: *Evaluator, path: []const u8) ?[]const Node
+src/eval/builders.zig::loadSidecars | fn loadSidecars( self: *Evaluator, design_path: []const u8, buf: *[sidecars.kinds.len]sidecars.Loaded, ) []const sidecars.Loaded
 src/eval/builders.zig::parseSectionCalc | fn parseSectionCalc(self: *Evaluator, sf_children: []const Node, env: *env_mod.Env) EvalError!?env_mod.CalcBlock
 src/eval/builders.zig::parseSectionPort | fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod.Env) EvalError!?env_mod.SectionPort
 src/eval/builders.zig::processPinForm | fn processPinForm( self: *Evaluator, pin_form: Node, pins_ref: []const u8, pin_func_map: ?*const std.StringHashMapUnmanaged([]const u8), env: *env_mod.Env, all_pin_nets: *std.ArrayList(PinNetDecl), pg_pins: *std.ArrayList(env_mod.PartPin), net_ties: *std.ArrayList(NetTie), ) EvalError!void
 src/eval/builders.zig::resolveDecoupleTargets | fn resolveDecoupleTargets(self: *Evaluator, instances: []Instance) void
 src/eval/builders.zig::resolveNearTargets | fn resolveNearTargets(self: *Evaluator, instances: []Instance) void
-src/eval/builders.zig::spliceChecksIntoDesignBlock | fn spliceChecksIntoDesignBlock( self: *Evaluator, nodes: []const Node, checks_nodes: []const Node, ) ?[]const Node
 src/eval/builders.zig::warnUnknownPinsChild | fn warnUnknownPinsChild(self: *Evaluator, node: Node) void
 src/eval/builtins.zig::BuiltinError value
 src/eval/builtins.zig::evalBuiltinOp | fn evalBuiltinOp(op: Builtin, args: []const Value) BuiltinError!Value
@@ -839,6 +839,22 @@ src/eval/rails.zig::schematic_supply_prefixes value
 src/eval/rails.zig::supply_pad_prefixes value
 src/eval/rails.zig::system_rail value
 src/eval/section_maturity.zig::creditSections | fn creditSections( sections: []env_mod.Section, sub_blocks: []const env_mod.SubBlock, groups: []const env_mod.Group, layout_groups: []const env_mod.LayoutGroup, body_forms: []const Node, ) void
+src/eval/sidecars.zig::Kind enum_
+src/eval/sidecars.zig::Loaded struct_
+src/eval/sidecars.zig::OriginIndex struct_
+src/eval/sidecars.zig::accepts | fn accepts(kind: Kind, head: []const u8) bool
+src/eval/sidecars.zig::ext | fn ext(self: Kind) []const u8
+src/eval/sidecars.zig::exts value
+src/eval/sidecars.zig::fileAt | fn fileAt(self: OriginIndex, i: usize) ?[]const u8
+src/eval/sidecars.zig::homeOf | fn homeOf(head: []const u8) ?Kind
+src/eval/sidecars.zig::isEmpty | fn isEmpty(self: OriginIndex) bool
+src/eval/sidecars.zig::isSingleton | fn isSingleton(head: []const u8) bool
+src/eval/sidecars.zig::kindOfPath | fn kindOfPath(path: []const u8) ?Kind
+src/eval/sidecars.zig::kinds value
+src/eval/sidecars.zig::originIndex | fn originIndex(self: *Evaluator, body_forms: []const Node) OriginIndex
+src/eval/sidecars.zig::pendingIdFile | fn pendingIdFile(self: *const Evaluator) []const u8
+src/eval/sidecars.zig::siblingPath | fn siblingPath(allocator: std.mem.Allocator, design_path: []const u8, kind: Kind) ?[]u8
+src/eval/sidecars.zig::splice | fn splice( self: *Evaluator, design_path: []const u8, nodes: []const Node, loaded: []const Loaded, ) EvalError!?[]const Node
 src/eval/special_forms.zig::ForSpec struct_
 src/eval/special_forms.zig::RepeatIterator struct_
 src/eval/special_forms.zig::RepeatSpec struct_
@@ -1107,6 +1123,7 @@ src/fab_release.zig::reviewedInputDigest | fn reviewedInputDigest( allocator: st
 src/fab_release.zig::safeRevision | fn safeRevision(allocator: std.mem.Allocator, revision: []const u8) std.mem.Allocator.Error![]const u8
 src/fab_release.zig::savedBomDigest | fn savedBomDigest( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) std.mem.Allocator.Error![64]u8
 src/fab_release.zig::savedLayoutDigest | fn savedLayoutDigest( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) std.mem.Allocator.Error![64]u8
+src/fab_release.zig::sourceClosure | fn sourceClosure(self: InputPaths, allocator: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8
 src/fab_release.zig::tracedInputs | fn tracedInputs( allocator: std.mem.Allocator, trace: *const infra_fs.ReadTrace, project_dir: []const u8, name: []const u8, ) std.mem.Allocator.Error!TracedInputs
 src/fab_release.zig::writeChecksums | fn writeChecksums(writer: *std.Io.Writer, entries: []const zipfile.Entry) std.Io.Writer.Error!void
 src/fab_release.zig::writeDrcHumanReport | fn writeDrcHumanReport( writer: *std.Io.Writer, evidence: Evidence, ) std.Io.Writer.Error!void
@@ -5272,6 +5289,11 @@ src/silk_font.zig::heightMm | fn heightMm(size: f64) f64
 src/silk_font.zig::stroke_width_mm value
 src/silk_font.zig::widthMm | fn widthMm(text: []const u8, size: f64) f64
 src/silk_font.zig::widthUnits | fn widthUnits(text: []const u8) f64
+src/split_design.zig::Plan struct_
+src/split_design.zig::PlanError value
+src/split_design.zig::ToolError value
+src/split_design.zig::planSplit | fn planSplit( arena: std.mem.Allocator, source: []const u8, nodes: []const Node, existing: [sidecars.kinds.len][]const u8, ) PlanError!Plan
+src/split_design.zig::tool | fn tool( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) ToolError!bool
 src/spurious.zig::Band struct_
 src/spurious.zig::Branches struct_
 src/spurious.zig::Sideband enum_

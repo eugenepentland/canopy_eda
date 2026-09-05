@@ -4,9 +4,10 @@
 //! into project subdirectories (`src/<group>/<name>.sexp`). Callers
 //! pass bare basenames (`stm32n6`, `cyclops-analog`) and this module
 //! walks `src/` to locate the file. Per-design artifacts (`.bom`,
-//! `.layout`, `.ids`, `.kicad.json`) and the autoloaded `.checks.sexp`
-//! sibling are resolved by reusing the same lookup with a different
-//! extension — the artifact lives next to the source file.
+//! `.layout`, `.ids`, `.kicad.json`) and the autoloaded sidecars
+//! (`.checks.sexp`, `.layout.sexp`, `.diagram.sexp` — see
+//! `eval/sidecars.zig`) are resolved by reusing the same lookup with a
+//! different extension — the artifact lives next to the source file.
 //!
 //! Behaviour:
 //!  - If a unique file with the requested basename exists, its path is
@@ -121,7 +122,7 @@ pub fn designSourcePathUnique(
 
 /// Path to `<name><ext>` next to the design source file. `ext` includes
 /// the leading dot (`".bom"`, `".layout"`, `".ids"`, `".kicad.json"`,
-/// `".checks.sexp"`). Falls back to the flat-layout path when the file
+/// `".checks.sexp"`, `".layout.sexp"`, `".diagram.sexp"`). Falls back to the flat-layout path when the file
 /// is not yet present (e.g. first-time write). Rejects a `name` that
 /// violates the bare-basename contract (see module docs) with
 /// `error.InvalidName`.

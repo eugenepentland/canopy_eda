@@ -816,8 +816,70 @@ lib/modules/probe-ldo.sexp:5:17: error: (port …) expects a direction or net af
   in module 'probe-ldo' (called at 4:21)
 ```
 
-(Forms spliced in from a sibling `<design>.checks.sexp` are the one exception:
-they still report against the design path.)
+Forms spliced in from a sibling sidecar (`<design>.checks.sexp`,
+`<design>.layout.sexp`, `<design>.diagram.sexp`) report against the **sidecar's**
+own path and line, not the design's — see "Sidecar files" below.
+
+### Sidecar files
+
+A design may be split across up to four files that all live next to each other
+under `src/`. Every sidecar is **optional** and is autoloaded by basename: when
+`src/…/<name>.sexp` is evaluated, each sibling that exists is parsed and its
+top-level forms are spliced onto the end of that design's `(design-block …)`
+body. There is nothing to import and nothing to declare — the forms behave
+exactly as if they had been written inline.
+
+| File | Holds |
+|---|---|
+| `<name>.sexp` | the circuit: `section`, `instance`, `net`, `sub-block`, `port`, the shorthands — plus `board-role`, `hierarchical-ids`, `revision` |
+| `<name>.checks.sexp` | verification forms (`verifies`, `assert`, …). Historical and deliberately unrestricted |
+| `<name>.layout.sexp` | `board`, `stackup`, `net-class`, `pcb-plan`, `design-rules`, `pdn`, `module-policy`, `net-envelope`, `power-plane`, `rough`, `fabrication-layer`, `kicad-pcb` |
+| `<name>.diagram.sexp` | `diagram-layout`, the design-scope `(group "name" ("R1" …))`, `function` |
+
+`board-role` and `hierarchical-ids` stay in the design file on purpose: they
+change what the design *is* — its identity and its place in a system — rather
+than how it is laid out.
+
+Two rules keep the split honest:
+
+- **A form of the wrong kind is an error**, and the message names the file that
+  should hold it. A `(section …)` cannot hide in the layout sidecar, and a
+  `(diagram-layout …)` there is told to move next door.
+- **A singleton form declared in two of the files is an error** naming both
+  locations. `stackup`, `board`, `pcb-plan`, `design-rules` and `diagram-layout`
+  may each be declared once per design; because the splice appends, a second
+  copy would otherwise be resolved by file order rather than by you.
+
+```text
+src/boards/x.layout.sexp:9:1: error: (diagram-layout …) belongs in the .diagram.sexp sidecar, not x.layout.sexp
+src/boards/x.layout.sexp:2:1: error: (stackup …) is declared twice: here and at x.sexp:5 — a design may declare it once
+```
+
+Sidecars are part of the design in every sense that matters downstream: they are
+in the evaluator read-set, so the served page refreshes when one is edited; they
+are in the fabrication gate's provable closure, the release source closure, the
+design archive and the system-review package; and an `(id …)` minted by a form
+that lives in a sidecar is written back **into that sidecar**, never into the
+design file at a foreign byte offset.
+
+#### Splitting an existing design
+
+`split-design` does the move for you, and proves it:
+
+```bash
+netlisp tool split-design --project-dir projects/designs \
+  --args '{"design":"barracuda"}'                 # dry run: the three diffs
+netlisp tool split-design --project-dir projects/designs \
+  --args '{"design":"barracuda","write":true}'    # apply
+```
+
+Every eligible top-level form is lifted at its parser span **byte for byte**,
+together with the comment block written directly above it, and appended to the
+matching sidecar (an existing sidecar is appended to, never overwritten). The
+circuit, the file banner, `board-role`, `hierarchical-ids` and every `(id …)`
+stay where they are. The write is refused unless the original and split trees
+evaluate to the same design — the flattened netlist *and* the evaluated
+design-scope form set, compared field for field.
 
 ### Duplicate ref-des
 

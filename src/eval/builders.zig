@@ -21,6 +21,7 @@ const ids = @import("ids.zig");
 const instance_mod = @import("instance.zig");
 const electrical = @import("electrical.zig");
 const forms_mod = @import("forms.zig");
+const sidecars = @import("sidecars.zig");
 
 const Node = ast.Node;
 const Value = env_mod.Value;
@@ -1594,54 +1595,49 @@ pub fn loadFile(self: *Evaluator, path: []const u8) ?[]const Node {
     return nodes;
 }
 
-/// Load a top-level design file: `loadFile` plus an autoloader that splices a
-/// sibling `<name>.checks.sexp`'s forms into the trailing `(design-block …)`.
-/// Library imports call `loadFile` directly, so module files aren't spliced.
+/// Load a top-level design file: `loadFile` plus the autoloader that splices
+/// every sibling sidecar (`<name>.checks.sexp`, `<name>.layout.sexp`,
+/// `<name>.diagram.sexp`) into the trailing `(design-block …)`. Library
+/// imports call `loadFile` directly, so module files aren't spliced.
+///
+/// A sidecar holding a form of the wrong kind (or a second copy of a singleton
+/// form) makes this return null with the diagnostic already located in the
+/// sidecar — `evalFile` turns that into `ImportError`.
 pub fn loadDesignFile(self: *Evaluator, path: []const u8) ?[]const Node {
     const nodes = loadFile(self, path) orelse return null;
     if (!std.mem.endsWith(u8, path, ".sexp")) return nodes;
 
-    const stem = path[0 .. path.len - ".sexp".len];
-    const checks_path = std.fmt.allocPrint(self.allocator, "{s}.checks.sexp", .{stem}) catch return nodes;
-    infra_fs.cwd().access(checks_path, .{}) catch {
-        self.allocator.free(checks_path);
-        return nodes;
-    };
-
-    const checks_nodes = loadFile(self, checks_path) orelse return nodes;
-
-    return spliceChecksIntoDesignBlock(self, nodes, checks_nodes) orelse nodes;
+    var buf: [sidecars.kinds.len]sidecars.Loaded = undefined;
+    const loaded = loadSidecars(self, path, &buf);
+    const merged = sidecars.splice(self, path, nodes, loaded) catch return null;
+    return merged orelse nodes;
 }
 
-/// Build a new top-level node slice where the design-block form's children
-/// have the checks-file forms appended. Returns null when the file has no
-/// design-block to splice into (e.g. a `(board …)` source) — the caller
-/// should fall back to the original node list in that case. Public because the
-/// same splice has to happen when a candidate design is evaluated from BYTES
-/// rather than from disk (`pins_by_name.evalDesignSource`) — a rewrite proof
-/// that skipped the checks file would compare a different design than the one
-/// `evalFile` builds.
-pub fn spliceChecksIntoDesignBlock(
+/// Read and parse every sidecar of `design_path` that exists, into `buf`.
+/// Public because the same closure has to be assembled when a candidate design
+/// is evaluated from BYTES rather than from disk (`pins_by_name`): a rewrite
+/// proof that skipped the sidecars would compare a different design than the
+/// one `evalFile` builds.
+pub fn loadSidecars(
     self: *Evaluator,
-    nodes: []const Node,
-    checks_nodes: []const Node,
-) ?[]const Node {
-    var design_idx: ?usize = null;
-    for (nodes, 0..) |n, i| if (n.isForm("design-block")) {
-        design_idx = i;
-        break;
-    };
-    const di = design_idx orelse return null;
-
-    const original_children = nodes[di].asList() orelse return null;
-    const merged_children = self.allocator.alloc(Node, original_children.len + checks_nodes.len) catch return null;
-    @memcpy(merged_children[0..original_children.len], original_children);
-    @memcpy(merged_children[original_children.len..], checks_nodes);
-
-    const merged_top = self.allocator.alloc(Node, nodes.len) catch return null;
-    @memcpy(merged_top, nodes);
-    merged_top[di] = Node.list(nodes[di].span, merged_children);
-    return merged_top;
+    design_path: []const u8,
+    buf: *[sidecars.kinds.len]sidecars.Loaded,
+) []const sidecars.Loaded {
+    var count: usize = 0;
+    for (sidecars.kinds) |kind| {
+        const path = sidecars.siblingPath(self.allocator, design_path, kind) orelse continue;
+        infra_fs.cwd().access(path, .{}) catch {
+            self.allocator.free(path);
+            continue;
+        };
+        const nodes = loadFile(self, path) orelse {
+            self.allocator.free(path);
+            continue;
+        };
+        buf[count] = .{ .kind = kind, .path = path, .nodes = nodes };
+        count += 1;
+    }
+    return buf[0..count];
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

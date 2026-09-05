@@ -943,6 +943,32 @@ identical netlist and the identical resolved bindings.
 - completeness-waiver: integer overflow (byte offsets come from the parser's own spans and are bounds-checked against the source before any splice; no input-derived arithmetic)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
+## split-design
+
+Public functions: tool, planSplit
+
+Moving a design's physical and diagram declarations into the sidecars by hand
+is a large, error-prone edit on the one file a board cannot afford to have
+subtly changed. This does it mechanically: each eligible top-level form is
+lifted at its parser span byte for byte, together with the comment block
+written directly above it, and the write is gated on the original and split
+trees evaluating to the same design — flattened netlist plus the evaluated
+design-scope form set, field for field.
+
+- each moved form leaves the design file with the comment block written directly above it and reaches its sidecar byte for byte, while the circuit and the file banner stay behind
+- the default run writes nothing and returns one unified diff per file, and write true writes all three files after proving the split evaluates to the identical design
+- an existing sidecar is appended to rather than overwritten, and an unreadable design or a missing name is refused with ok false
+- the split-design tool is registered as a mutation and its declared schema round-trips through netlisp tool list
+
+- completeness-waiver: empty inputs (a missing `design`, a name that resolves to no source, and a design with nothing eligible to move each answer with a named result instead of a write)
+- completeness-waiver: large inputs (both the design and each sidecar are read under the same 10 MiB cap the evaluator uses for a library file)
+- completeness-waiver: unauthorized access (a local CLI over the caller's own project directory; the design name must be a bare basename, so traversal and absolute paths are refused before any path is built, and the write is registered as a mutation like every other design edit)
+- completeness-waiver: i/o failure (an unreadable design is refused before anything is planned, an unreadable sidecar is treated as absent, and every write is a tmp-then-rename atomic replace so a crash cannot truncate a file)
+- completeness-waiver: concurrent access (single-threaded; the plan is computed and proven against bytes already read, and each of the two evaluations owns its own evaluator and arena)
+- completeness-waiver: malformed encoding (a design that does not parse, or whose original or split tree does not evaluate, is refused; forms move as raw spans so no re-encoding happens)
+- completeness-waiver: integer overflow (byte offsets come from the parser's own spans, are bounds-checked against the source, and every subtraction that could go negative uses saturating arithmetic)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
 ## bench-page
 
 Public functions: benchOne, corpus, writeTable, writeResultsJson, cmdBenchPage
@@ -4694,6 +4720,35 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - completeness-waiver: i/o failure (the validator reads only the already-materialized block, never the filesystem)
 - completeness-waiver: concurrent access (validation runs inline on the single evaluation thread that built the block)
 
+## eval/sidecars
+
+Public functions: accepts, homeOf, isSingleton, kindOfPath, pendingIdFile, siblingPath, splice, originIndex
+
+A board's `.sexp` accumulates content that is not the circuit. On the flagship
+board, `pcb-plan` alone was 20% of 1867 lines and the physical/diagram
+declarations together 39%, against 7.6% for the `(section …)` bodies.
+`<name>.checks.sexp` already proved the autoloaded-sibling shape; this
+generalises it to `<name>.layout.sexp` and `<name>.diagram.sexp`, each
+restricted by form kind so the split cannot silently become a second place to
+hide the circuit, and each reporting diagnostics and `(id …)` write-back
+against its own file rather than the design's.
+
+- the layout sidecar accepts physical forms, the diagram sidecar accepts arrangement forms, and each names the other's forms as belonging elsewhere
+- a path is recognised as a sidecar by its extension so a minted id is written back to the file its byte offset indexes
+- a design's .layout.sexp and .diagram.sexp siblings are autoloaded and spliced into the design body, so their forms take effect exactly as if written inline
+- a form of the wrong kind in a sidecar is refused with a diagnostic located in that sidecar and naming the file that should hold it
+- a singleton design-scope form declared in two of a design's files is refused with both locations named, instead of letting splice order pick a winner
+- a diagnostic raised while a spliced sidecar form evaluates reports the sidecar's own path and line, not the design file's
+
+- completeness-waiver: empty inputs (every sidecar is optional; an absent or empty one leaves the design exactly as it evaluates on its own)
+- completeness-waiver: large inputs (a sidecar is read through the evaluator's own file loader under its 10 MiB cap, and is parsed and cached once however many times it is referenced)
+- completeness-waiver: unauthorized access (a sidecar is resolved from the design's own path by extension, so it can only ever be a sibling of a design the caller already reached; no name from a request reaches this module)
+- completeness-waiver: i/o failure (a sidecar that cannot be read or parsed is treated as absent, degrading to the design's own forms rather than failing the build — the file-load contract the rest of the evaluator uses)
+- completeness-waiver: concurrent access (the splice runs inside one evaluator on one thread; the server's per-request evaluators share nothing, and the page cache stamps each sidecar so a concurrent edit invalidates rather than races)
+- completeness-waiver: malformed encoding (a sidecar that does not parse is reported by the parser's own located syntax error, and a top-level form the sidecar does not accept is a located error naming the file that should hold it)
+- completeness-waiver: integer overflow (no input-derived arithmetic; the splice concatenates node slices and the origin index compares pointers)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
 ## eval/evaluator
 - prescanIds skips the requirement id a (req (id …)) sign-off reference names, so a derived requirement id never collides with its own reference
 
@@ -4756,6 +4811,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - insertPendingIds aborts when a pending id already exists in the source
 - insertPendingIds writes a child (ids …) sidecar and stays idempotent
 - persistMintedIds writes minted ids back like the CLI and is a no-op when nothing is pending
+- an id minted by a form spliced in from a sidecar is written back into that sidecar, leaving the design source byte-identical
 - a CLI export pins the ids its evaluation minted, so a second export of an untouched design reproduces the same identity
 
 ## convert/footprint
