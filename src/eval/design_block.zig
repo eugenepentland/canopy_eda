@@ -4276,6 +4276,60 @@ test "design-block captures (kicad-pcb path)" {
     try testing.expectEqualStrings("/mnt/nas/test.kicad_pcb", block.kicad_pcb_path.?);
 }
 
+// spec: eval/design_block - a project kicad-projects.sexp entry overrides the design's own kicad-pcb path and supplies one when the source declares none
+test "project board map overrides and supplies the kicad-pcb path" {
+    const a = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "kicad-projects.sexp",
+        .data =
+        \\(kicad-pcb "declared" "/mapped/declared.kicad_pcb")
+        \\(kicad-pcb "silent" "/mapped/silent.kicad_pcb")
+        ,
+    });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+
+    // A design that DOES declare a path: the project entry wins, because the
+    // machine path is a property of this checkout, not of the schematic.
+    const declared = try evalWithProject(a, root, "src/declared.sexp",
+        \\(design-block "d" (kicad-pcb "/in-source/declared.kicad_pcb"))
+    );
+    try testing.expectEqualStrings("/mapped/declared.kicad_pcb", declared.kicad_pcb_path.?);
+
+    // A design that declares NONE still gets a target — which is what lets the
+    // source form be dropped entirely.
+    const silent = try evalWithProject(a, root, "src/silent.sexp",
+        \\(design-block "d")
+    );
+    try testing.expectEqualStrings("/mapped/silent.kicad_pcb", silent.kicad_pcb_path.?);
+
+    // A design the map does not name keeps exactly what its source says.
+    const unmapped = try evalWithProject(a, root, "src/unmapped.sexp",
+        \\(design-block "d" (kicad-pcb "/in-source/unmapped.kicad_pcb"))
+    );
+    try testing.expectEqualStrings("/in-source/unmapped.kicad_pcb", unmapped.kicad_pcb_path.?);
+}
+
+/// Evaluate one design-block source as if it were `design_file` inside
+/// `project_dir`, so the project-level board map is consulted the way a real
+/// build consults it.
+fn evalWithProject(
+    a: std.mem.Allocator,
+    project_dir: []const u8,
+    design_file: []const u8,
+    src: []const u8,
+) !*const DesignBlock {
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, project_dir);
+    defer eval.deinit();
+    eval.current_file = design_file;
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    return (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+}
+
 // spec: eval/design_block - a frequency-plan declaration is collected during the block body and evaluated after it, publishing its typed report on the evaluator beside the loop-filter ones
 test "design-block collects and evaluates (frequency-plan …)" {
     const a = std.heap.page_allocator;
@@ -4473,6 +4527,43 @@ test "design-block captures (module-policy (net-class …)) pins" {
     try testing.expectEqualStrings("clock", block.net_class_pins[1].class);
     // The unknown class and the malformed child each warned rather than landing.
     try testing.expect(eval.warnings.items.len >= 2);
+}
+
+// spec: eval/design_block - placement-class is the documented module-policy child and net-class is a deprecated alias for it
+test "module-policy accepts placement-class and deprecates net-class" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (instance "R1" fakeres (pin 1 "SW") (pin 2 "REF"))
+        \\  (module-policy (placement-class "SW" switch_node) (net-class "REF" clock)))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    try eval.component_cache.put(a, "fakeres", .{
+        .name = "fakeres",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    var scope = env_mod.Env.init(a, null);
+    defer scope.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &scope)).design_block;
+
+    // Both spellings pin, in authored order — the alias is not second-class.
+    try testing.expectEqual(@as(usize, 2), block.net_class_pins.len);
+    try testing.expectEqualStrings("SW", block.net_class_pins[0].net);
+    try testing.expectEqualStrings("switch_node", block.net_class_pins[0].class);
+    try testing.expectEqualStrings("REF", block.net_class_pins[1].net);
+    try testing.expectEqualStrings("clock", block.net_class_pins[1].class);
+
+    // Exactly the alias is deprecated, and it is NOT an evaluator warning:
+    // the release profile turns those into errors and this spelling still works.
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+    try testing.expectEqual(@as(usize, 1), block.deprecations.len);
+    try testing.expect(std.mem.indexOf(u8, block.deprecations[0].message, "placement-class") != null);
 }
 
 // spec: eval/design_block - net-envelope form publishes an authored voltage envelope on the design block

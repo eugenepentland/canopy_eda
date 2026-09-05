@@ -298,6 +298,22 @@ test "default form materializes a physical testpoint" {
     try std.testing.expectEqual(@as(usize, 1), block.test_points.len);
     try std.testing.expectEqualStrings("TP1", block.test_points[0].ref_des);
     try std.testing.expect(!block.test_points[0].virtual);
+    // Placing the same pad as `(instance "TP" testpoint (pin 1 …))` makes this
+    // a second spelling for one part, so it reports itself as deprecated —
+    // still working, and an info rather than a warning.
+    try std.testing.expectEqual(@as(usize, 1), block.deprecations.len);
+    try std.testing.expect(std.mem.indexOf(u8, block.deprecations[0].message, "testpoint (pin 1") != null);
+}
+
+// spec: eval/test_point - The (virtual) marker keeps its own meaning and is not reported as a deprecated spelling
+test "virtual test points are not deprecated" {
+    const block = try evalFixture(std.heap.page_allocator,
+        \\(design-block "probe"
+        \\  (test-point "TP_SIG" "SIG" (virtual)))
+    );
+    // Nothing else in the language expresses "a marker with no pad", so there
+    // is no spelling to recommend and nothing to deprecate.
+    try std.testing.expectEqual(@as(usize, 0), block.deprecations.len);
 }
 
 // spec: eval/test_point - Keeps (virtual) test points marker-only with no physical instance or pad net

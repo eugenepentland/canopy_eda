@@ -4957,6 +4957,94 @@ test "missing requirements recurses sub-blocks and dedups by component" {
     try std.testing.expectEqual(@as(usize, 1), violations.items.len);
 }
 
+// spec: erc - reports a section whose diagram category came from a name keyword, and stays silent once (category ...) pins it
+test "section category inferred fires only on a name-keyword guess" {
+    const sections = [_]env_mod.Section{
+        // Name keyword "Buck" decides this one — reportable.
+        .{ .name = "3V3 Buck" },
+        // Pinned: the explicit key wins, whatever the name says.
+        .{ .name = "5V Regulator", .category = "connector" },
+        // No keyword matches; the fallback has no magic word to lose.
+        .{ .name = "Widget Farm" },
+    };
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .sections = &sections,
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkSectionCategories(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), violations.items.len);
+    try std.testing.expectEqual(ViolationKind.section_category_inferred, violations.items[0].kind);
+    try std.testing.expectEqual(Severity.info, violations.items[0].severity);
+    try std.testing.expect(std.mem.indexOf(u8, violations.items[0].message, "(category power)") != null);
+}
+
+// spec: erc - one section name reports its inferred category once however many sub-blocks carry it
+test "section category inferred dedupes a module used twice" {
+    const sections = [_]env_mod.Section{.{ .name = "3V3 Buck" }};
+    var sub_a: DesignBlock = .{ .name = "p1", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{}, .sections = &sections };
+    var sub_b: DesignBlock = .{ .name = "p2", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{}, .sections = &sections };
+    const sbs = [_]env_mod.SubBlock{ .{ .name = "p1", .block = &sub_a }, .{ .name = "p2", .block = &sub_b } };
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &sbs,
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkSectionCategories(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), violations.items.len);
+}
+
+// spec: erc - a deprecated spelling is an info finding carrying file:line:col and its replacement, never an error or a warning
+test "deprecated form findings are info rows with a source position" {
+    const deps = [_]env_mod.DeprecatedForm{
+        .{ .file = "lib/modules/x.sexp", .line = 12, .col = 3, .message = "old spelling — write (new)" },
+    };
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .deprecations = &deps,
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkDeprecatedForms(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), violations.items.len);
+    try std.testing.expectEqual(ViolationKind.deprecated_form, violations.items[0].kind);
+    // Info, not warning: the release profile promotes warnings to errors and
+    // every deprecated spelling in this wave still works.
+    try std.testing.expectEqual(Severity.info, violations.items[0].severity);
+    try std.testing.expectEqualStrings(
+        "lib/modules/x.sexp:12:3: old spelling — write (new)",
+        violations.items[0].message,
+    );
+}
+
 // spec: erc - surfaces layout-critical net classes as info rows, staying silent on ground/power/plain-signal nets
 test "layout class surfacing flags only the interesting nets" {
     const p1 = [_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "1" }};

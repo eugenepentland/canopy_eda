@@ -1495,6 +1495,37 @@ test "part form wires pins and records the part" {
     try testing.expectEqual(@as(usize, 1), res.instance.parts[1].pins.len);
 }
 
+// spec: eval/instance - the inert (row N) / (col N) grid hints on an instance and inside (part …) report themselves as doing nothing
+test "inert grid hints are reported as deprecated, not warned about" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    try eval.component_cache.put(alloc, "ic8", .{
+        .name = "ic8",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    const src = "(instance \"U1\" ic8 (row 2) (col 1) (part \"A\" (row 0) (pin 1 \"NET1\")))";
+    const nodes = try parser_mod.parse(alloc, src);
+    const res = try buildInstance(&eval, nodes[0].asList().?, &env);
+
+    // The hints are still accepted and still change nothing: the pin wires and
+    // the part records, exactly as without them.
+    try testing.expectEqual(@as(usize, 1), res.pin_nets.len);
+    try testing.expectEqual(@as(usize, 1), res.instance.parts.len);
+    // Three inert hints, three infos — and no warning, because they have always
+    // been legal and the release profile turns warnings into errors.
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+    try testing.expectEqual(@as(usize, 3), eval.deprecations.items.items.len);
+    for (eval.deprecations.items.items) |dep| {
+        try testing.expect(std.mem.indexOf(u8, dep.message, "does nothing") != null);
+    }
+}
+
 // spec: eval/evaluator - a pinout-less instance wiring three or more pads warns that the pad numbers are unchecked
 test "pinout-less multi-pad wiring warns; two-pad passive stays silent" {
     const alloc = std.heap.page_allocator;

@@ -1751,6 +1751,61 @@ test "parseSectionPort reads the class keyword value" {
     try testing.expectEqualStrings("diff", port.class);
 }
 
+// spec: eval/design_block - a section port reads role protocol class and nominal as sub-forms with the bare spellings kept as deprecated aliases
+test "parseSectionPort reads the metadata sub-forms and deprecates the bare pairs" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    // The documented spelling: parenthesised, self-delimiting, and silent.
+    const sub = try parser_mod.parse(
+        alloc,
+        "(port \"NET\" in (role \"sense\") (protocol \"SPI\") (class \"diff\") (nominal 1.8))",
+    );
+    const port = (try parseSectionPort(&eval, sub[0].asList().?, &env)).?;
+    try testing.expectEqualStrings("sense", port.role);
+    try testing.expectEqualStrings("SPI", port.protocol);
+    try testing.expectEqualStrings("diff", port.class);
+    try testing.expectEqual(@as(f64, 1.8), port.voltage.?);
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+    try testing.expectEqual(@as(usize, 0), eval.deprecations.items.items.len);
+
+    // The retired spelling parses to exactly the same port and records infos,
+    // never warnings — the release profile promotes warnings to errors.
+    const bare = try parser_mod.parse(alloc, "(port \"NET\" in role \"sense\" 1.8)");
+    const bare_port = (try parseSectionPort(&eval, bare[0].asList().?, &env)).?;
+    try testing.expectEqualStrings("sense", bare_port.role);
+    try testing.expectEqual(@as(f64, 1.8), bare_port.voltage.?);
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+    try testing.expectEqual(@as(usize, 2), eval.deprecations.items.items.len);
+    try testing.expect(std.mem.indexOf(u8, eval.deprecations.items.items[0].message, "(role VALUE)") != null);
+    try testing.expect(std.mem.indexOf(u8, eval.deprecations.items.items[1].message, "(nominal 1.8)") != null);
+}
+
+// spec: eval/design_block - a design-block port accepts the metadata sub-forms without warning and deprecates the bare keyword pair
+test "buildPort accepts the metadata sub-forms" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    const sub = try parser_mod.parse(alloc, "(port \"V_3V3\" out power (role \"rail\") (protocol \"none\") (class \"quiet\"))");
+    const port = try buildPort(&eval, sub[0].asList().?[1..], &env);
+    try testing.expectEqualStrings("V_3V3", port.name);
+    // Accepted and dropped, exactly as the keyword pair always was — and not
+    // mistaken for an unknown sub-form.
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+    try testing.expectEqual(@as(usize, 0), eval.deprecations.items.items.len);
+
+    const bare = try parser_mod.parse(alloc, "(port \"V_3V3\" out power role \"rail\")");
+    _ = try buildPort(&eval, bare[0].asList().?[1..], &env);
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+    try testing.expectEqual(@as(usize, 1), eval.deprecations.items.items.len);
+}
+
 /// Register a minimal component family so `(name "val")` evaluates to a
 /// `component_instance` without needing lib/components/ fixtures on disk.
 fn putTestFamily(eval: *Evaluator, alloc: std.mem.Allocator, name: []const u8) !void {

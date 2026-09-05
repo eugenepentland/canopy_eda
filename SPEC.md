@@ -4572,6 +4572,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - strap-ok, nc-ok and a (near …) own pad are held to the same pad set as (pin …)
 - a part with neither a pinout nor a footprint has an unknown pad set and every pad token passes
 - a footprint's pad ids check the pads of a part that has no pinout file
+- the inert (row N) / (col N) grid hints on an instance and inside (part …) report themselves as doing nothing
 - completeness-waiver: empty inputs (an instance with no net arguments retains the established component-only behavior)
 - completeness-waiver: large inputs (positional pad numbering is a bounded linear walk over the parsed instance children)
 - completeness-waiver: unauthorized access (pure in-process AST lowering with no request, identity, or authorization surface)
@@ -5372,6 +5373,9 @@ Public functions: renderSchematic
 
 - a floating net within two edits of a well-connected net suggests that net
 - a net pinned by (module-policy (net-class …)) is not reported as an inferred layout class
+- reports a section whose diagram category came from a name keyword, and stays silent once (category ...) pins it
+- one section name reports its inferred category once however many sub-blocks carry it
+- a deprecated spelling is an info finding carrying file:line:col and its replacement, never an error or a warning
 - a declared differential pair with exactly one wired lane is reported as half-connected, naming the wired lane and the open one
 - a declared differential pair wired on both lanes, or on neither, is not reported
 - a sub-block's differential pair tied on only one lane by the parent is reported as half-connected
@@ -5495,6 +5499,7 @@ Public functions: analyze
 - shorthand-generated ref-des never collide with each other or with authored ones
 - each sub-block is its own ref-des namespace so two modules may both name R1
 - module-policy form pins the placement class of named nets on the design block
+- placement-class is the documented module-policy child and net-class is a deprecated alias for it
 - design-rules captures an optional ground-via maximum distance for SMD ground-pad plane stitching
 - design-rules captures an optional finished via-wall plating thickness for power-capacity analysis
 
@@ -5532,6 +5537,8 @@ Public functions: analyze
 - a section-scope diff-port expands two section ports typed differential
 - a diff-port missing its direction is an arity error naming the form
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
+- a section port reads role protocol class and nominal as sub-forms with the bare spellings kept as deprecated aliases
+- a design-block port accepts the metadata sub-forms without warning and deprecates the bare keyword pair
 - kicad-pcb form captures the literal path on the design block
 - stackup form captures layer count and plane assignments on the design block
 - net-envelope form publishes an authored voltage envelope on the design block
@@ -5600,6 +5607,7 @@ Public functions: analyze
 - a zero-based bus-port range still expands and the lane cap admits a span of exactly 4095
 - a frequency-plan declaration is collected during the block body and evaluated after it, publishing its typed report on the evaluator beside the loop-filter ones
 - Project board map keys on the design source file stem
+- a project kicad-projects.sexp entry overrides the design's own kicad-pcb path and supplies one when the source declares none
 
 ## eval/deprecations
 
@@ -5641,6 +5649,7 @@ Public functions: parse
 - Parses (virtual) as an explicit marker-only test point
 - Materializes a physical testpoint instance and pin-1 net by default
 - Keeps (virtual) test points marker-only with no physical instance or pad net
+- The (virtual) marker keeps its own meaning and is not reported as a deprecated spelling
 - Materializes test points inside sections and preserves section membership
 - Materializes test points inside nested sections and preserves nested membership
 
