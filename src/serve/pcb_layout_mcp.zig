@@ -2032,7 +2032,7 @@ const TracePhase = struct {
 /// advisory and the gate is the authority, and on real hand-edited boards
 /// they disagree: the topology graph credits a connection net_open's
 /// fabricated-copper raster does not, so deleting that net's
-/// "deletion-invariant" sections opens it (barracuda, 2026-08: three such
+/// "deletion-invariant" sections opens it (board-a, 2026-08: three such
 /// nets vetoed a 152-section cleanup outright), and a section can carry a
 /// decoupling cap's same-face bypass leg the net graph never modelled. One
 /// unsound net must not hold every other net's junk hostage: each refused
@@ -3714,7 +3714,7 @@ test "add_tracks judges hand copper on geometry, not on the net still being open
     // pad is a stub to a fanout via: geometrically perfect, and it raises the
     // OPEN-net count by one because the stub is its own island until the run
     // finishes. Counting that as a regression rolled the stub back and the
-    // loop could never take a first step — measured on barracuda's LMX2595
+    // loop could never take a first step — measured on board-a's LMX2595
     // escape, which added zero clearance findings and was undone anyway.
     const stub_in_progress = [_]drc.Violation{
         .{ .kind = .net_open, .x = 1, .y = 1, .gap = 0.3, .clearance = 0, .severity = .err },

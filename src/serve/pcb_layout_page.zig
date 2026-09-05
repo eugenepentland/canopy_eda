@@ -986,7 +986,7 @@ pub fn renderLayoutPage(
         // The thermal overlay paints its own field over the semantic board
         // and explicitly suppresses copper/DRC. Generating every Gerber and
         // Excellon layer, parsing it back, and shipping the resulting CAM
-        // program only to hide it cost several seconds on Barracuda.
+        // program only to hide it cost several seconds on Board A.
         .cam_lazy = needsCamPreview(physical_review, thermal_overlay),
         .sub = sub,
         .subseeds_json = subseeds.poses,
@@ -1710,7 +1710,7 @@ pub fn solveForRequest(
     // default, its poses, the auto cache, the drawn outline, the silk texts,
     // the persisted copper, the user pours — used to re-read and re-parse the
     // same `.layouts.json` from scratch. On a routed board that file is large
-    // (7 MB for barracuda), and the seven repeats put ~85% of a cold schematic
+    // (7 MB for board-a), and the seven repeats put ~85% of a cold schematic
     // page render inside `std.json`. The page render already worked this way
     // (see `defaultLayoutNameIn`); this is the same discipline for the PNG /
     // describe / thermal path.
@@ -2991,7 +2991,7 @@ pub fn pcbRouteApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
 /// `?pours_only=1` returns fills before the editor's independent DRC refresh.
 pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     // Six phases. FEEDBACK.md (2026-08-28) measured this endpoint at 7.0-11.4 s
-    // on barracuda, of which ~3.5 s was resolving the design and 4.3-5.3 s was
+    // on board-a, of which ~3.5 s was resolving the design and 4.3-5.3 s was
     // `placeFromPoses` — neither of them DRC. `resolve` is both of those (the
     // reconcile session's build), so a line where `resolve` is near zero is one
     // that answered from a retained placement.
@@ -3040,7 +3040,7 @@ pub fn pcbDrcApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
 
     // Lease this design's reconcile session and take its placement, or build one
     // into it. Evaluating and placing the design is seven to nine seconds of a
-    // barracuda-class request and depends on nothing the editor's copper edits
+    // board-a-class request and depends on nothing the editor's copper edits
     // touch, so a session already holding one for these poses answers with it.
     var resolved = drc_reconcile.resolvePlacement(ctx, req, res, root, poses.items, name) orelse return;
     defer resolved.lease.release();
@@ -4523,7 +4523,7 @@ fn resolveShownView(ctx: *Server, req: ?*httpz.Request, in: ShownInputs) ShownVi
     // seeds from is a pure function of the placement, and the outline above is
     // the placement's FINAL one — so seed it once here, after that mutation,
     // and thread it through the DRC pours in this call and the blob/fab pours
-    // in `pcb_layout_blob.writePcbData` (carried out on the return). On barracuda that outline
+    // in `pcb_layout_blob.writePcbData` (carried out on the return). On board-a that outline
     // walk was ~36% of the render, repeated per caller and per net.
     const base_edge = if (in.omit_copper or in.defer_derived)
         null
@@ -4890,7 +4890,7 @@ const lockSidecar = sidecar_store.lockSidecar;
 /// closer's kept hops, `add_tracks`, a module Stamp — and an appender that
 /// re-lays a segment it already has produces a byte-identical twin. That is not
 /// harmless: a duplicated track is drawn twice, exported twice, and counted
-/// twice by every per-net length report, and the barracuda `engine-90` snapshot
+/// twice by every per-net length report, and the board-a `engine-90` snapshot
 /// shipped 23 duplicate tracks and 3 duplicate vias this way. Two segments with
 /// identical endpoints, layer, width and net carry no information the first one
 /// does not, so the sidecar keeps one. Nothing else is touched: near-identical
@@ -6884,7 +6884,7 @@ test "multi-layer custom pour expands across outer and inner layers" {
     const arena = arena_i.allocator();
 
     // A 4-layer board whose In1 is the GND plane (stack index 2), so In2.Cu
-    // (stack 3) is a free inner SIGNAL layer at index 2 — the barracuda case.
+    // (stack 3) is a free inner SIGNAL layer at index 2 — the board-a case.
     // A same-net V_3V3A through-hole pad seeds the inner pour.
     const pad = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.9, .h = 0.9, .thru = true, .drill = 0.4 }};
     var parts = [_]optimizer.Part{
@@ -7415,7 +7415,7 @@ test "loadSubBlockPoses re-keys a module-only defmodule layout onto parent refs"
 
 // spec: Web Server - The shown layout's copper carries its pour zones, so a rail poured rather than traced counts as connected
 test "shownLayoutCopper carries pour zones as connecting copper" {
-    // barracuda pours V_12V / V_5VA / V_6VA / V_3V3A / V_3V3_LMX instead of
+    // board-a pours V_12V / V_5VA / V_6VA / V_3V3A / V_3V3_LMX instead of
     // tracing them. Dropping zones here (the old behaviour) made every pad on
     // such a rail read as its own island — 8-10 phantom "isolated islands" per
     // rail and five nets reported unrouted on a board where they are poured.
@@ -7499,7 +7499,7 @@ pub fn shownLayoutCopper(
             out.rf_paths = r.rf_port_outcomes;
         }
         // Pour zones are CONNECTING COPPER, not decoration: a rail poured
-        // instead of traced (barracuda's V_12V/V_5VA/V_6VA/V_3V3A/V_3V3_LMX)
+        // instead of traced (board-a's V_12V/V_5VA/V_6VA/V_3V3A/V_3V3_LMX)
         // is joined by its zone and by nothing else. Omitting them here made
         // every pad on such a rail read as its own isolated island — the
         // connectivity pass must see the same copper the Gerber emits.
@@ -7649,7 +7649,7 @@ test "re-keying drops the stale pose of a deleted part whose ref a renumbered pa
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const alloc = arena_state.allocator();
-    // black-canyon, 2026-09-02: the layout was saved with C16 = C_SNS12 parked
+    // board-e, 2026-09-02: the layout was saved with C16 = C_SNS12 parked
     // off-board and C20 = C_HPF1_IN placed on the board. Removing C_SNS12 (and
     // eleven others) renumbered C_HPF1_IN to C16.
     var block = try tCapBlock(alloc, &.{ "C16", "R7" }, &.{ "C_HPF1_IN", "R_KEPT" });

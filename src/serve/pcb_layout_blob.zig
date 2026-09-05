@@ -1807,14 +1807,14 @@ test "authored PCB settings JSON includes the complete configuration" {
         .reason = "Protect the launch",
     }};
     const block = env_mod.DesignBlock{
-        .name = "Barracuda",
+        .name = "Board A",
         .instances = &.{},
         .nets = &.{},
         .ports = &.{},
         .notes = &.{},
         .groups = &.{},
         .sub_blocks = &.{},
-        .kicad_pcb_path = "/boards/barracuda.kicad_pcb",
+        .kicad_pcb_path = "/boards/board-a.kicad_pcb",
         .stackup = .{
             .present = true,
             .layers = 4,
@@ -1829,7 +1829,7 @@ test "authored PCB settings JSON includes the complete configuration" {
     };
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
-    try writeAuthoredSettings(&aw.writer, &block, "src/boards/barracuda.sexp", null);
+    try writeAuthoredSettings(&aw.writer, &block, "src/boards/board-a.sexp", null);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, aw.written(), .{});
     defer parsed.deinit();
     const root = parsed.value.object;
@@ -1852,7 +1852,7 @@ test "authored PCB settings JSON includes the complete configuration" {
         "F.Cu",
         route.get("allowed_layers").?.array.items[0].string,
     );
-    try std.testing.expectEqualStrings("src/boards/barracuda.sexp", root.get("source").?.object.get("path").?.string);
+    try std.testing.expectEqualStrings("src/boards/board-a.sexp", root.get("source").?.object.get("path").?.string);
     try std.testing.expectApproxEqAbs(@as(f64, 0.23), root.get("design_rules").?.object.get("via_to_via").?.float, 1e-9);
 }
 

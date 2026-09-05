@@ -524,7 +524,7 @@ fn seedLayerAllowed(placement: optimizer.Placement, options: route_policy.Option
 }
 
 /// Signal-layer indices are stackup-independent for the two outer layers:
-/// 0=F.Cu and 1=B.Cu even on Barracuda's six-layer stack. A bottom-side rigid
+/// 0=F.Cu and 1=B.Cu even on Board A's six-layer stack. A bottom-side rigid
 /// stamp swaps those two; inner saved indices remain in the destination's
 /// signal-layer namespace and are accepted only when that layer exists.
 fn seedLayerFromModule(placement: optimizer.Placement, xf: SeedPose, saved: u8) ?u8 {
