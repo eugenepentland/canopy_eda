@@ -2,7 +2,9 @@
 //!
 //! Production is a `systemd --user` unit rendered from
 //! `.githooks/netlisp.service.in` by `.githooks/install.sh`, with a checked-in
-//! copy at `systemd/netlisp.service`. Its `ExecStart` must name
+//! EXAMPLE render at `systemd/netlisp.service` — the same template resolved
+//! against a placeholder root, never a real machine's paths. Its `ExecStart`
+//! must name
 //! `.deploy/bin/netlisp` — the artifact `deploy-prod.sh` installs atomically
 //! after a compiler-SHA check, a test run and a checksum — and must NEVER name
 //! `zig-out/bin/netlisp`, which any local `zig build` overwrites, including
@@ -29,6 +31,15 @@ const template = @embedFile("netlisp.service.in");
 const deploy_exec_suffix = "/.deploy/bin/netlisp";
 /// The build-output path that must never appear in a unit file.
 const forbidden_exec_dir = "zig-out";
+/// The placeholder root the checked-in EXAMPLE render is resolved against.
+/// It is deliberately not any machine's checkout — the unit production runs is
+/// rendered per machine by `.githooks/install.sh --deploy` — so pinning it
+/// keeps the tracked copy an example: a real path here (a user's home, an
+/// operator's install prefix) means someone pasted their own render back into
+/// the tree, which is a private path in a public repo and the same drift
+/// channel that produced DRIFT-INFRA-002. Change it only together with the
+/// header comment in `systemd/netlisp.service` that names it.
+const example_root = "/srv/netlisp";
 
 /// Return the value of the first `key=` directive in a unit file, ignoring
 /// comment lines so a directive quoted in a rationale comment is not mistaken
@@ -96,6 +107,17 @@ test "the systemd unit runs the deployed binary, never zig-out" {
     const first = shipped_exec[0 .. std.mem.indexOfScalar(u8, shipped_exec, ' ') orelse shipped_exec.len];
     try std.testing.expect(std.mem.endsWith(u8, first, deploy_exec_suffix));
     try std.testing.expect(first[0] == '/');
+
+    // The checked-in copy is an EXAMPLE render and has to stay one: both of
+    // its paths sit under the placeholder root, never a real machine's. The
+    // template, by contrast, still holds `@TOP@` — an unrendered placeholder
+    // is the correct state there and is checked below.
+    try std.testing.expectEqualStrings(
+        example_root,
+        directive(shipped, "WorkingDirectory") orelse return error.TestUnexpectedResult,
+    );
+    try std.testing.expect(std.mem.startsWith(u8, first, example_root ++ "/"));
+    try std.testing.expect(std.mem.indexOf(u8, directive(template, "WorkingDirectory") orelse "", "@TOP@") != null);
 }
 
 // spec: Development pipeline - The checked-in systemd unit is the rendered form of the deploy-hook template, so the two cannot drift apart in the directives that matter

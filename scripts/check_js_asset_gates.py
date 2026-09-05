@@ -49,10 +49,10 @@ ASSET_SUFFIXES = (".js", ".mjs")
 VENDORED: dict[str, str] = {
     "src/serve/assets/three.min.js": "Three.js r128, MIT — minified upstream build",
     "src/serve/assets/OrbitControls.js": "Three.js r128 example controls, MIT",
-    "src/serve/assets/occt-import-js.js": "occt-import-js Emscripten build, LGPL",
-    "src/serve/assets/codemirror.bundle.js": "CodeMirror 5 bundle, MIT — minified",
-    "src/serve/assets/pcb_earcut.js": "Mapbox earcut, ISC — extracted from the Three.js build",
-    "src/serve/assets/vendor": "pdf.js drop — gated individually by the pdfjs externals",
+    "src/serve/assets/occt-import-js.js": "occt-import-js 0.0.23 Emscripten build, LGPL-2.1 (embeds OCCT 7.6) — keep byte-identical to upstream",
+    "src/serve/assets/codemirror.bundle.js": "CodeMirror 5.65.16 bundle, MIT — minified",
+    "src/serve/assets/pcb_earcut.js": "Mapbox earcut 2.2.2, ISC — extracted from the Three.js build",
+    "src/serve/assets/vendor": "third-party drops (pdf.js bundles + the occt-import-js licence files); the pdf.js externals gate its scripts individually",
 }
 
 

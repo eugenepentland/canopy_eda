@@ -1,5 +1,7 @@
 # Netlisp
 
+[![CI](https://github.com/eugenepentland/netlisp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/eugenepentland/netlisp/actions/workflows/ci.yml)
+
 *Schematics as S-expressions, written by an agent, compiled to KiCad.*
 
 Netlisp is a command-line electronic design automation tool. A design is a
@@ -81,15 +83,25 @@ bundled set for a directory of your own. The passive families need no
 `(import …)`; test points, mounting holes and pin headers do. See
 [docs/standard-library.md](docs/standard-library.md).
 
-[`test/fixtures/stdlib-smoke`](test/fixtures/stdlib-smoke) is a complete
-minimal project. Build it, check it, and hand it to KiCad:
+[`examples/blinky-breakout`](examples/blinky-breakout) is a complete board:
+a 5 V input, a 3.3 V regulator, a Schmitt-trigger oscillator blinking an LED,
+four spare gates on an expansion header, test points, mounting holes, and a
+placed and routed two-layer PCB. Build it, check it, and hand it to KiCad:
 
 ```bash
-zig build run -- build --project-dir test/fixtures/stdlib-smoke stdlib-smoke
-zig build run -- check --project-dir test/fixtures/stdlib-smoke --profile preflight stdlib-smoke
-zig build run -- export-kicad --project-dir test/fixtures/stdlib-smoke \
-    --output-dir out/kicad --with-schematic stdlib-smoke
+zig build run -- build --project-dir examples/blinky-breakout blinky-breakout
+zig build run -- check --project-dir examples/blinky-breakout blinky-breakout
+zig build run -- export-kicad --project-dir examples/blinky-breakout \
+    --output-dir ~/blinky-kicad --with-schematic blinky-breakout
 ```
+
+[`examples/README.md`](examples/README.md) is the walkthrough: it goes from
+that clone to a KiCad project, explaining every form as it appears, how the
+bundled library and the project's own `lib/` resolve, how to drive the same
+steps with `netlisp tool …`, and how the board was placed and routed.
+[`test/fixtures/stdlib-smoke`](test/fixtures/stdlib-smoke) is the smaller
+fixture next to it — a project with no `lib/` at all, proving the bundled
+library end to end.
 
 `netlisp help` lists every command; `netlisp reference [section]` prints the
 language grammar from the binary itself.
@@ -169,8 +181,25 @@ zig build run -- import-kicad-layout --project-dir my-board my-board
 - [ZIG_TOOLCHAIN.md](ZIG_TOOLCHAIN.md): the pinned compiler, mirrors and checksums
 - [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md): how agents and contributors are expected to work in this repository (worktrees, Guardian, the spec ledger)
 
+## Contributing
+
+Pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first — two
+things about this repository will otherwise surprise you: every `zig build`
+runs a code-quality gate that has no bypass, and work happens on a branch in
+its own worktree rather than in the `main` checkout. It also covers the
+`SPEC.md` test-tag contract, the audit ledger, and what makes a bug report
+about a misbehaving design actionable.
+
+Participation is governed by our [Code of Conduct](CODE_OF_CONDUCT.md).
+Security issues go through GitHub's private reporting, never a public issue —
+see [SECURITY.md](SECURITY.md). Release notes live in
+[CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 [MIT](LICENSE) © 2026 Eugene Pentland. Vendored Zig packages under
 `vendor/` and the browser libraries under `src/serve/assets/` keep their
-own licenses.
+own licenses. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists every
+one of them — component, version, license and where its text lives — and
+flags the one copyleft component (the OpenCASCADE-based STEP importer,
+LGPL-2.1 with the OCCT exception).

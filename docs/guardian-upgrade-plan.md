@@ -22,7 +22,7 @@ nothing here is visible to our builds.
 | 0 Migration | `c2c6068` | v2 ratchets live; mutate steps auto-wired; sinks on |
 | 2 Spec debt | `68c29a1`, `ed5ed86` | debt 124→109; `deny_growth=["spec"]` proven to refuse growth; remaining 101 entries are tests-without-bullets (writing work) |
 | 3 Caps | `2ac896a`…`1c27f4e` | all 7 overrides deleted; 479 offenders under personal only-shrinks ceilings; toml is defaults-only |
-| 4 Workflow | `6ad050a`, `8b12c2d` | nightly units in `systemd/` (**not enabled** — run `systemctl --user enable --now netlisp-guardian-nightly.timer`); CLAUDE.md accurate |
+| 4 Workflow | `6ad050a`, `8b12c2d` | nightly units in `systemd/` (**not enabled** — maintainer-only: `.githooks/install.sh --guardian-nightly` renders and enables them); CLAUDE.md accurate |
 | 5 Opt-ins | `2ec125d` | completeness live on `placement/drc` (8 honest waivers); 80-section exemption ledger is the TODO list |
 | 1 Mutation | `5d0d1bd`, `5f79b91` | **first whole-tree score: 28%** (28/100 killed, 72 survivors); gate floored at the measured 28, ratchet in `.guardian/mutation.txt` |
 | 1b Survivor campaign (07-09) | `5cfefa6`, `254b685`, `0d5b34e`, `ed39d46` | 50/72 survivors killed (splice-verified), 5 waived equivalent, 16 need harnesses (top: the auth email guard, `serve/auth.zig:1317`); 6 files' dead tests re-wired into the aggregator (+29 revived tests, suite now 897); re-measure on the shifted sample: **32%**, ratchet raised, gate floored at 32. Nightly timer installed + enabled. |

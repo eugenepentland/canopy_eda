@@ -81,9 +81,17 @@ const codemirror_js = @embedFile("assets/codemirror.bundle.js");
 const codemirror_css = @embedFile("assets/codemirror.css");
 
 // 3D model alignment viewer (/library/3d/:footprint). Self-hosted Three.js
-// r128 (MIT) + its OrbitControls, OpenCASCADE's occt-import-js (Apache-2.0:
-// .js loader + .wasm kernel) for parsing STEP in-browser, and our viewer glue.
-// All offline/embedded like CodeMirror so the viewer works behind the OAuth wall.
+// r128 (MIT) + its OrbitControls, kovacsv's occt-import-js 0.0.23 (.js loader
+// + .wasm kernel) for parsing STEP in-browser, and our viewer glue. All
+// offline/embedded like CodeMirror so the viewer works behind the OAuth wall.
+//
+// occt-import-js is LGPL-2.1 — NOT Apache-2.0, as this comment claimed until
+// 2026-09-05 — and its wasm statically embeds Open CASCADE Technology 7.6
+// (LGPL-2.1 with the Open CASCADE exception). Both files are byte-for-byte
+// upstream: keep them that way, because modifying them adds LGPL obligations
+// this repository does not currently carry. Licences and the
+// source-availability statement live in
+// assets/vendor/occt-import-js-0.0.23/; see THIRD_PARTY_NOTICES.md.
 const three_js = @embedFile("assets/three.min.js");
 const orbit_controls_js = @embedFile("assets/OrbitControls.js");
 const occt_import_js = @embedFile("assets/occt-import-js.js");

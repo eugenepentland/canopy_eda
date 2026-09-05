@@ -525,6 +525,7 @@ test {
     _ = @import("serve/subprocess.zig");
     _ = @import("serve/sync.zig");
     _ = @import("serve/sync_kicad_sch.zig");
+    _ = @import("serve/templates/html.zig");
     _ = @import("serve/twin_parity.zig");
     _ = @import("serve/upload.zig");
     _ = @import("serve/upload_datasheet.zig");
@@ -858,18 +859,8 @@ test "gated full test invocations pin the Zig build seed" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         release,
-        "\"$ZIG\" build --seed=1 -Dtemplates-prepared=true test",
+        "\"$ZIG\" build --seed=1 test",
     ) != null);
-}
-
-// spec: Development pipeline - Orders generated templates before every compiler and Guardian consumer
-
-test "template predecessor is shared by compilers probes and Guardian" {
-    const source = try readRepoFile(std.testing.allocator, "build.zig");
-    defer std.testing.allocator.free(source);
-    try std.testing.expect(std.mem.count(u8, source, "dependOn(template_predecessor)") >= 6);
-    try std.testing.expect(std.mem.indexOf(u8, source, "orderProbeAfter(compile_probe, template_predecessor)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, ".prerequisites = &.{template_predecessor}") != null);
 }
 
 // spec: Development pipeline - Runs full tests and forces the concurrent ReleaseSafe build through the self-hosted backend for one exact commit

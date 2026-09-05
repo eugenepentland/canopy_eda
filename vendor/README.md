@@ -4,9 +4,16 @@ These packages are committed because the application pins a Zig master
 snapshot and must build without the network. Do not replace them with moving
 branch URLs. Each nested `build.zig.zon` also pins the exact compiler minimum.
 
-| Path | Upstream revision | Notes |
-|---|---|---|
-| `httpz` | `e6c23eb959e20bc8871184622fa9082ddaf5b106` (`dev`) | Includes deferred-signal, fd deregistration, shutdown-UAF, and timeout-sweep fixes. |
-| `httpz/deps/metrics` | `21fe85eaa1761a870753a4d0b9e3f289986ac1a3` | Exact revision selected by httpz. |
-| `httpz/deps/websocket` | `3318a78a2c3d3b972c394717c43a354d0feb8b91` (`dev`) | Exact revision selected by httpz. |
-| `zt` | `a8b94373999c2483efa5f646438263785f70743d` (`main`) | Template compiler/runtime ported to the pinned snapshot. |
+| Path | Upstream revision | Licence | Notes |
+|---|---|---|---|
+| `httpz` | `e6c23eb959e20bc8871184622fa9082ddaf5b106` (`dev`) | MIT — [`httpz/LICENSE`](httpz/LICENSE) | Includes deferred-signal, fd deregistration, shutdown-UAF, and timeout-sweep fixes. |
+| `httpz/deps/metrics` | `21fe85eaa1761a870753a4d0b9e3f289986ac1a3` | MIT — [`httpz/deps/metrics/LICENSE`](httpz/deps/metrics/LICENSE) | Exact revision selected by httpz. |
+| `httpz/deps/websocket` | `3318a78a2c3d3b972c394717c43a354d0feb8b91` (`dev`) | MIT — [`httpz/deps/websocket/LICENSE`](httpz/deps/websocket/LICENSE) | Exact revision selected by httpz. The licence was missing from the trimmed vendoring and was restored from upstream at this revision. |
+| `ward` | `6d6c7c5d73cbc3b2322efed69862b45bbaca35a9` (client subset) | MIT — first-party, this repository's [`LICENSE`](../LICENSE) | The maintainer's own Ward auth client, bundled for the optional `NETLISP_AUTH=ward` mode; see [`ward/README.netlisp.md`](ward/README.netlisp.md). |
+
+Every package here is modified: each was ported to the pinned Zig 0.17
+snapshot, and the two `deps/` trees were trimmed of CI and packaging files.
+Diff a vendored tree against
+`https://codeload.github.com/<upstream>/tar.gz/<revision>` to see exactly
+what changed. Vendoring a new package means committing its licence file in
+the same commit and adding it to [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).

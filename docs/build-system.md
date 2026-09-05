@@ -58,7 +58,7 @@ The table is historical pre-port decision data, not current command guidance.
 A same-source rerun on 2026-08-12 selected
 the current snapshot: Debug took 43.53 s versus 134.47 s on 0.15.1 (**3.09x
 faster**) and ReleaseSafe was effectively unchanged at 6.28 s versus 6.23 s;
-all pose checksums matched. The application, Guardian, httpz, zt,
+all pose checksums matched. The application, Guardian, httpz,
 websocket, metrics, passcay, and zbor are now ported and pinned together.
 Use self-hosted Debug for development and internal performance work, and a
 self-hosted ReleaseSafe build (its own `--prefix`) when the measurement needs
@@ -130,7 +130,7 @@ Two overrides, for a machine that has a local guardian checkout:
   build guardian-selfcheck` runs the guard alone; `GUARDIAN_PREBUILT=off`
   forces the from-source compile back on.
 - `zig build --system <dir>`, where `<dir>` holds a link named for the pin
-  (`ln -s ~/ai/canopy/guardian-zig <dir>/guardian-0.2.0-<hash>`), builds against
+  (`ln -s /path/to/guardian-zig <dir>/guardian-0.2.0-<hash>`), builds against
   a **local, possibly dirty** guardian tree: `--system` matches packages by
   directory name and verifies no hash. Because the dependency root is then a
   real checkout, its `zig-out/bin/guardian-check` is picked up automatically and

@@ -135,7 +135,7 @@ def read_text(root: Path, rel: Path) -> str:
 def resolve_dependency(source: Path, value: str) -> Path | None:
     # Package imports (`std`, `httpz`, `build_options`) do not name repository
     # paths. Relative Zig imports and every embedFile value do.
-    if "/" not in value and not value.endswith((".zig", ".js", ".css", ".wasm", ".zt")):
+    if "/" not in value and not value.endswith((".zig", ".js", ".css", ".wasm")):
         return None
     candidate = Path(os.path.normpath(source.parent / value))
     if candidate.is_absolute() or ".." in candidate.parts:
@@ -154,12 +154,6 @@ def dependency_graph(root: Path, sources: list[Path]) -> tuple[dict[Path, set[Pa
             if dependency is not None:
                 reverse[dependency].add(source)
     return reverse, texts
-
-
-def generated_counterparts(path: Path) -> set[Path]:
-    if path.suffix == ".zt" and path.parent == Path("src/serve/templates"):
-        return {path.with_suffix(".zig")}
-    return set()
 
 
 def quoted_path_dependents(changed: set[Path], texts: dict[Path, str]) -> dict[Path, set[Path]]:
@@ -227,8 +221,6 @@ def make_plan(root: Path, base: str, changed_names: set[str], force_full: bool =
         reverse[dependency].update(dependents)
 
     seeds = set(changed)
-    for path in changed:
-        seeds.update(generated_counterparts(path))
     affected = bounded_reverse_closure(seeds, reverse, texts)
     affected_sources = sorted(path for path in affected if path.suffix == ".zig" and path in texts)
 
@@ -236,7 +228,7 @@ def make_plan(root: Path, base: str, changed_names: set[str], force_full: bool =
     for source in affected_sources:
         selected.update(test_names(texts[source]))
 
-    code_changed = any(path.suffix in {".zig", ".js", ".css", ".zt", ".wasm"} for path in changed)
+    code_changed = any(path.suffix in {".zig", ".js", ".css", ".wasm"} for path in changed)
     affected_named = selected.difference(ALWAYS_FILTERS)
     if full_reason is None and code_changed and not affected_named:
         full_reason = "changed code has no discoverable named behavioral tests"

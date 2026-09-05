@@ -42,6 +42,11 @@ git config user.name test
 mkdir -p .githooks
 cp "$SRC/deploy-prod.sh" "$SRC/deploy-debounce.sh" .githooks/
 chmod +x .githooks/*.sh
+# deploy-prod.sh validates the compiler pin before it will arm or deploy
+# anything, so the fixture needs the real .zigversion — without it EVERY case
+# below failed at the pin check instead of exercising the queue (which is what
+# it did, silently, from the commit that added the check until 2026-09-05).
+cp "$HERE/../.zigversion" .zigversion
 echo x >f
 git add -A
 git commit -qm root

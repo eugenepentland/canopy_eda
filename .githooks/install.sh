@@ -7,6 +7,7 @@
 #   .githooks/install.sh --deploy     # hooks + prod auto-deploy + systemd unit
 #   .githooks/install.sh --check      # report what is/isn't installed, change nothing
 #   .githooks/install.sh --uninstall-deploy   # stop auto-deploying on this machine
+#   .githooks/install.sh --guardian-nightly   # maintainer-only nightly Guardian timer
 #
 # WHY --deploy IS OPT-IN: merging into main triggers a rebuild + restart of the
 # netlisp systemd service. That is correct on the production box and wrong on a
@@ -36,6 +37,8 @@ PROD_BIN="$TOP/.deploy/bin/netlisp"
 CHECKPOINT_SERVICE="${DESIGNS_CHECKPOINT_SERVICE:-netlisp-designs-checkpoint.service}"
 CHECKPOINT_TIMER="${CHECKPOINT_SERVICE%.service}.timer"
 CHECKPOINT_QUIET_SECONDS="${DESIGNS_CHECKPOINT_QUIET_SECONDS:-300}"
+NIGHTLY_SERVICE="${GUARDIAN_NIGHTLY_SERVICE:-netlisp-guardian-nightly.service}"
+NIGHTLY_TIMER="${NIGHTLY_SERVICE%.service}.timer"
 DEBOUNCE_SERVICE="${DEPLOY_DEBOUNCE_SERVICE:-netlisp-deploy-debounce.service}"
 DEBOUNCE_TIMER="${DEBOUNCE_SERVICE%.service}.timer"
 DEBOUNCE_QUIET_SECONDS="${DEPLOY_DEBOUNCE_QUIET_SECONDS:-900}"
@@ -43,6 +46,8 @@ UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT="$UNIT_DIR/$SERVICE"
 CHECKPOINT_UNIT="$UNIT_DIR/$CHECKPOINT_SERVICE"
 CHECKPOINT_TIMER_UNIT="$UNIT_DIR/$CHECKPOINT_TIMER"
+NIGHTLY_UNIT="$UNIT_DIR/$NIGHTLY_SERVICE"
+NIGHTLY_TIMER_UNIT="$UNIT_DIR/$NIGHTLY_TIMER"
 DEBOUNCE_UNIT="$UNIT_DIR/$DEBOUNCE_SERVICE"
 DEBOUNCE_TIMER_UNIT="$UNIT_DIR/$DEBOUNCE_TIMER"
 MODE="install"
@@ -51,8 +56,9 @@ case "${1:-}" in
   --check)             MODE="check" ;;
   --deploy)            MODE="deploy" ;;
   --uninstall-deploy)  MODE="uninstall" ;;
+  --guardian-nightly)  MODE="nightly" ;;
   "")                  MODE="install" ;;
-  *) echo "usage: $0 [--deploy|--check|--uninstall-deploy]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--deploy|--check|--uninstall-deploy|--guardian-nightly]" >&2; exit 2 ;;
 esac
 
 if [ ! -d "$TOP/.git" ]; then
@@ -167,6 +173,21 @@ render_unit() {
     mv -f "$DEBOUNCE_TIMER_UNIT.tmp" "$DEBOUNCE_TIMER_UNIT"
 }
 
+# The maintainer-only nightly Guardian gate. Separate from --deploy because it
+# is a different job: --deploy keeps prod serving the verified binary, this
+# burns a machine for hours a night running whole-tree mutation testing. Its
+# tracked form is a TEMPLATE (systemd/netlisp-guardian-nightly.service.in) —
+# earlier boxes symlinked a checked-in unit that had one machine's checkout and
+# private Zig toolchain path baked into it, which is exactly the drift this
+# renderer removes.
+render_nightly_units() {
+  mkdir -p "$UNIT_DIR"
+  sed -e "s|@TOP@|$TOP|g" "$TOP/systemd/netlisp-guardian-nightly.service.in" >"$NIGHTLY_UNIT.tmp" &&
+    mv -f "$NIGHTLY_UNIT.tmp" "$NIGHTLY_UNIT" &&
+    cp "$TOP/systemd/netlisp-guardian-nightly.timer" "$NIGHTLY_TIMER_UNIT.tmp" &&
+    mv -f "$NIGHTLY_TIMER_UNIT.tmp" "$NIGHTLY_TIMER_UNIT"
+}
+
 echo "netlisp hook install — repo: $TOP"
 
 if [ "$MODE" = "check" ]; then
@@ -196,6 +217,18 @@ if [ "$MODE" = "check" ]; then
     echo "  timer: $(systemctl --user is-active "$DEBOUNCE_TIMER" 2>/dev/null; true)"
   else
     warn "deploy worker units not installed — a marker queued mid-build has no crash/reboot backstop"
+  fi
+  # Maintainer-only, and reported so a box that predates the template still
+  # gets told: a unit SYMLINKED into systemd/ is the legacy install, and the
+  # tracked file it pointed at is a template now.
+  if [ -L "$NIGHTLY_UNIT" ]; then
+    bad "$NIGHTLY_SERVICE is a symlink into the repo (legacy install of a now-templated unit)"
+    echo "      re-render it: .githooks/install.sh --guardian-nightly"
+  elif [ -f "$NIGHTLY_UNIT" ]; then
+    ok "Guardian nightly unit installed (maintainer-only)"
+    echo "  timer: $(systemctl --user is-active "$NIGHTLY_TIMER" 2>/dev/null; true)"
+  else
+    warn "Guardian nightly timer not installed here (maintainer-only; --guardian-nightly enables it)"
   fi
   # The live deploy state machine: RUNNING (the deploy lock is held right now),
   # QUEUED/SETTLING (a marker is armed — main is ahead of prod on purpose, and
@@ -264,6 +297,25 @@ if [ "$MODE" = "uninstall" ]; then
   rm -f "$TOP/.git/deploy-failed-head"
   echo "  (git hooks, the unit files and the netlisp service are left alone)"
   exit 0
+fi
+
+if [ "$MODE" = "nightly" ]; then
+  if render_nightly_units; then
+    ok "Guardian nightly units rendered: $NIGHTLY_UNIT + $NIGHTLY_TIMER_UNIT"
+    if systemctl --user daemon-reload 2>/dev/null; then
+      ok "systemctl --user daemon-reload"
+      systemctl --user enable --now "$NIGHTLY_TIMER" >/dev/null 2>&1 \
+        && ok "nightly timer enabled and started (fires around 03:00)" \
+        || warn "could not enable $NIGHTLY_TIMER"
+    else
+      warn "daemon-reload failed (no user systemd here?) — units written but not loaded"
+    fi
+    echo "  run once by hand: systemctl --user start $NIGHTLY_SERVICE"
+    echo "  results:          journalctl --user -u $NIGHTLY_SERVICE"
+    exit 0
+  fi
+  bad "could not render $NIGHTLY_UNIT from systemd/netlisp-guardian-nightly.service.in"
+  exit 1
 fi
 
 # --- hooks (always) -------------------------------------------------------

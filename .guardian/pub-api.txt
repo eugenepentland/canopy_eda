@@ -492,6 +492,7 @@ src/erc.zig::runErc | fn runErc(allocator: std.mem.Allocator, block: *const Desi
 src/erc.zig::writeViolationsJson | fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
 src/escape.zig::decodeXmlAlloc | fn decodeXmlAlloc(gpa: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8
 src/escape.zig::writeXml | fn writeXml(w: anytype, s: []const u8) !void
+src/escape.zig::writeXmlHexApos | fn writeXmlHexApos(w: anytype, s: []const u8) !void
 src/eval/board_keepout.zig::edge_tolerance_mm value
 src/eval/board_keepout.zig::parseAll | fn parseAll( self: *Evaluator, form_children: []const Node, w: f64, h: f64, ) EvalError![]const env.BoardKeepoutSpec
 src/eval/board_keepout.zig::sideFromAtom | fn sideFromAtom(word: []const u8) ?env.BoardKeepoutSide
@@ -5064,18 +5065,25 @@ src/serve/system_review_api.zig::systemCadMeshApi | fn systemCadMeshApi(ctx: *Se
 src/serve/system_review_api.zig::systemCadPage | fn systemCadPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::systemPage | fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/system_review_api.zig::uploadAssetApi | fn uploadAssetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/templates/html.zig::Component struct_
+src/serve/templates/html.zig::Error value
+src/serve/templates/html.zig::render | fn render(self: Component, writer: *std.Io.Writer) Error!void
+src/serve/templates/html.zig::renderComponent | fn renderComponent(comptime Template: type, args: Template.Args, writer: *std.Io.Writer) Error!void
+src/serve/templates/html.zig::writeAttr | fn writeAttr(writer: *std.Io.Writer, name: []const u8, value: anytype) Error!void
+src/serve/templates/html.zig::writeEscaped | fn writeEscaped(writer: *std.Io.Writer, value: anytype) Error!void
+src/serve/templates/html.zig::writeRaw | fn writeRaw(writer: *std.Io.Writer, markup: []const u8) Error!void
 src/serve/templates/library.zig::Args value
 src/serve/templates/library.zig::Args value
 src/serve/templates/library.zig::Args value
 src/serve/templates/library.zig::Card struct_
 src/serve/templates/library.zig::ComponentDetails struct_
 src/serve/templates/library.zig::Library struct_
-src/serve/templates/library.zig::bind | fn bind(args: *const Args) zt.Component
-src/serve/templates/library.zig::bind | fn bind(args: *const Args) zt.Component
-src/serve/templates/library.zig::bind | fn bind(args: *const Args) zt.Component
-src/serve/templates/library.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
-src/serve/templates/library.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
-src/serve/templates/library.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
+src/serve/templates/library.zig::bind | fn bind(args: *const Args) html.Component
+src/serve/templates/library.zig::bind | fn bind(args: *const Args) html.Component
+src/serve/templates/library.zig::bind | fn bind(args: *const Args) html.Component
+src/serve/templates/library.zig::render | fn render(args: Args, writer: *std.Io.Writer) html.Error!void
+src/serve/templates/library.zig::render | fn render(args: Args, writer: *std.Io.Writer) html.Error!void
+src/serve/templates/library.zig::render | fn render(args: Args, writer: *std.Io.Writer) html.Error!void
 src/serve/templates/pages.zig::Args value
 src/serve/templates/pages.zig::Args value
 src/serve/templates/pages.zig::Args value
@@ -5091,21 +5099,21 @@ src/serve/templates/pages.zig::Navbar struct_
 src/serve/templates/pages.zig::SystemCard struct_
 src/serve/templates/pages.zig::SystemCardVM struct_
 src/serve/templates/pages.zig::SystemHomeEntry struct_
-src/serve/templates/pages.zig::bind | fn bind(args: *const Args) zt.Component
-src/serve/templates/pages.zig::bind | fn bind(args: *const Args) zt.Component
-src/serve/templates/pages.zig::bind | fn bind(args: *const Args) zt.Component
-src/serve/templates/pages.zig::bind | fn bind(args: *const Args) zt.Component
-src/serve/templates/pages.zig::bind | fn bind(args: *const Args) zt.Component
+src/serve/templates/pages.zig::bind | fn bind(args: *const Args) html.Component
+src/serve/templates/pages.zig::bind | fn bind(args: *const Args) html.Component
+src/serve/templates/pages.zig::bind | fn bind(args: *const Args) html.Component
+src/serve/templates/pages.zig::bind | fn bind(args: *const Args) html.Component
+src/serve/templates/pages.zig::bind | fn bind(args: *const Args) html.Component
 src/serve/templates/pages.zig::formatHtml | fn formatHtml(self: RelTime, w: *std.Io.Writer) std.Io.Writer.Error!void
-src/serve/templates/pages.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
-src/serve/templates/pages.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
-src/serve/templates/pages.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
-src/serve/templates/pages.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
-src/serve/templates/pages.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
+src/serve/templates/pages.zig::render | fn render(args: Args, writer: *std.Io.Writer) html.Error!void
+src/serve/templates/pages.zig::render | fn render(args: Args, writer: *std.Io.Writer) html.Error!void
+src/serve/templates/pages.zig::render | fn render(args: Args, writer: *std.Io.Writer) html.Error!void
+src/serve/templates/pages.zig::render | fn render(args: Args, writer: *std.Io.Writer) html.Error!void
+src/serve/templates/pages.zig::render | fn render(args: Args, writer: *std.Io.Writer) html.Error!void
 src/serve/templates/pdf_viewer.zig::Args value
 src/serve/templates/pdf_viewer.zig::Page struct_
-src/serve/templates/pdf_viewer.zig::bind | fn bind(args: *const Args) zt.Component
-src/serve/templates/pdf_viewer.zig::render | fn render(args: Args, writer: *std.Io.Writer) std.Io.Writer.Error!void
+src/serve/templates/pdf_viewer.zig::bind | fn bind(args: *const Args) html.Component
+src/serve/templates/pdf_viewer.zig::render | fn render(args: Args, writer: *std.Io.Writer) html.Error!void
 src/serve/thermal_api.zig::Board struct_
 src/serve/thermal_api.zig::HandlerError value
 src/serve/thermal_api.zig::Solved struct_

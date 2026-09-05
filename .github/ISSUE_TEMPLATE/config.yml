@@ -1,0 +1,18 @@
+# Issue template chooser.
+#
+# NOTE FOR MAINTAINERS: the first contact link below points at GitHub
+# Discussions. Discussions must be ENABLED on this repository (Settings →
+# General → Features → Discussions) or that link 404s. If Discussions is not
+# going to be enabled, delete that entry — the "Design language question" issue
+# template covers the same ground.
+blank_issues_enabled: true
+contact_links:
+  - name: Question or idea (Discussions)
+    url: https://github.com/eugenepentland/netlisp/discussions
+    about: Open-ended questions, design language help and ideas are better as a discussion than an issue.
+  - name: Report a security vulnerability
+    url: https://github.com/eugenepentland/netlisp/security/advisories/new
+    about: Report privately through GitHub's security advisories — never in a public issue. See SECURITY.md.
+  - name: Documentation
+    url: https://github.com/eugenepentland/netlisp#documentation
+    about: The language reference, architecture, HTTP API, standard library and toolchain docs.

@@ -99,6 +99,16 @@ buys is a project decision.
   `src/stdlib.zig` fails if a prelude family, or a footprint one of them names,
   is not bundled.
 
+[`examples/blinky-breakout`](../examples/blinky-breakout) is the worked
+example of the first two bullets. Its `lib/` **adds** the two ICs the bundle
+has no opinion about (a generic SOT-23-5 LDO and a generic hex Schmitt
+inverter) with their pinouts and land patterns, and its
+`lib/footprints/testpoint-1mm.sexp` **shadows** the bundled 1 mm probe pad
+with a 1.5 mm hook-probe land — while the `testpoint` *component* and its
+pinout still resolve from the binary, because shadowing is per file name.
+Delete that one file and the bundled land is back on the next build.
+[`examples/README.md`](../examples/README.md) walks through it.
+
 `test/fixtures/stdlib-smoke/` is a tracked project with no `lib/` at all,
 proving the whole path end to end:
 
