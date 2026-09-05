@@ -788,7 +788,7 @@ async function main() {
         cwd: root,
         // See ui_browser_perf/run.js: auto-commit defaults to ENABLED when
         // unset, so a benchmark server must disable it explicitly.
-        env: { ...process.env, NETLISP_DEV: "1", NETLISP_GIT_AUTOCOMMIT: "0" },
+        env: { ...process.env, NETLISP_GIT_AUTOCOMMIT: "0" },
         stdio: ["ignore", "pipe", "pipe"],
       });
       const append = (chunk) => { serverText = (serverText + chunk.toString()).slice(-16000); };

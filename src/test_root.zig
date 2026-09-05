@@ -406,6 +406,7 @@ test {
     _ = @import("serve/assembly_page_cache.zig");
     _ = @import("serve/api.zig");
     _ = @import("serve/pcb_step_export.zig");
+    _ = @import("serve/auth.zig");
     _ = @import("serve/auth_store.zig");
     _ = @import("serve/autocommit.zig");
     _ = @import("serve/board_backup.zig");
@@ -528,7 +529,6 @@ test {
     _ = @import("serve/vfs.zig");
     _ = @import("serve/warmup.zig");
     _ = @import("serve/warm_sched.zig");
-    _ = @import("serve/ward_auth.zig");
     _ = @import("sexpr/ast.zig");
     _ = @import("sexpr/paren_span.zig");
     _ = @import("sexpr/parser.zig");

@@ -112,7 +112,7 @@ for focused surface/action runs and therefore requires `--surface` or
 `--scenario`. It cannot be combined with `--record`; raw-response checks and
 baseline recording remain complete self-started runs, where the tracked PDF is
 present. Non-loopback URLs are refused. Without `--url`, the runner starts and
-stops its own random-port `NETLISP_DEV=1` server with `--skip-warmup`.
+stops its own random-port loopback server with `--skip-warmup`.
 
 ## Coverage and baselines
 

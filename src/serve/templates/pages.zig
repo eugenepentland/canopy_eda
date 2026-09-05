@@ -351,10 +351,6 @@ pub const Navbar = struct {
         try writer.writeAll("Library");
         try writer.writeAll("</a>");
         // pages.zt:332
-        try writer.writeAll("<a href=\"https://ward.eugenepentland.dev/admin\" style=\"margin-left:auto\">");
-        try writer.writeAll("Account");
-        try writer.writeAll("</a>");
-        // pages.zt:333
         try writer.writeAll("</nav>");
     }
 
@@ -384,7 +380,7 @@ pub const DesignCard = struct {
         _ = &search;
         _ = &has_starred;
         _ = &now_sec;
-        // pages.zt:337
+        // pages.zt:336
         try writer.writeAll("<div");
         try writer.writeAll(" class=\"design-card\"");
         try zt.writeAttr(writer, "data-kind", if (s.is_board) "board" else "subcircuit");
@@ -395,99 +391,99 @@ pub const DesignCard = struct {
         try zt.writeAttr(writer, "data-assert-fails", s.assert_fails);
         try zt.writeAttr(writer, "data-open-notes", s.open_notes);
         try writer.writeAll(">");
-        // pages.zt:346
+        // pages.zt:345
         try writer.writeAll("<div class=\"type-row\">");
-        // pages.zt:347
+        // pages.zt:346
         if (s.is_board) {
-            // pages.zt:348
+            // pages.zt:347
             try writer.writeAll("<span class=\"type-tag board\">");
             try writer.writeAll("Board");
             try writer.writeAll("</span>");
         } else {
-            // pages.zt:350
+            // pages.zt:349
             try writer.writeAll("<span class=\"type-tag subcircuit\">");
             try writer.writeAll("Subcircuit");
             try writer.writeAll("</span>");
         }
-        // pages.zt:352
+        // pages.zt:351
         if (s.has_groups) {
-            // pages.zt:353
+            // pages.zt:352
             try writer.writeAll("<span class=\"tag-chip grouping\" title=\"Declares placement (group …) DSL — ready for a rough placement\">");
             try writer.writeAll("grouping");
             try writer.writeAll("</span>");
         }
-        // pages.zt:356
+        // pages.zt:355
         if (has_starred) {
-            // pages.zt:357
+            // pages.zt:356
             try writer.writeAll("<span class=\"tag-chip starred\" title=\"A layout has been starred — approved by a person\">");
             try writer.writeAll("★ starred");
             try writer.writeAll("</span>");
         }
-        // pages.zt:360
+        // pages.zt:359
         try writer.writeAll("</div>");
-        // pages.zt:361
+        // pages.zt:360
         try writer.writeAll("<div class=\"design-card-header\">");
-        // pages.zt:362
+        // pages.zt:361
         if (hasOwnTitle(s)) {
-            // pages.zt:363
+            // pages.zt:362
             try writer.writeAll("<div class=\"design-card-title\">");
             try zt.writeEscaped(writer, s.title);
             try writer.writeAll("</div>");
-            // pages.zt:364
+            // pages.zt:363
             try writer.writeAll("<div class=\"design-card-name\">");
             try zt.writeEscaped(writer, s.name);
             try writer.writeAll(".sexp");
             try writer.writeAll("</div>");
         } else {
-            // pages.zt:366
+            // pages.zt:365
             try writer.writeAll("<div class=\"design-card-title\">");
             try zt.writeEscaped(writer, s.name);
             try writer.writeAll("</div>");
         }
-        // pages.zt:368
+        // pages.zt:367
         try writer.writeAll("</div>");
-        // pages.zt:369
+        // pages.zt:368
         try writer.writeAll("<div class=\"design-card-stats\">");
-        // pages.zt:370
+        // pages.zt:369
         if (s.build_ok) {
-            // pages.zt:371
+            // pages.zt:370
             try writer.writeAll("<span>");
             try zt.writeEscaped(writer, s.instance_count);
             try writer.writeAll(" part");
             try zt.writeEscaped(writer, pluralS(s.instance_count));
             try writer.writeAll("</span>");
-            // pages.zt:372
+            // pages.zt:371
             try writer.writeAll("<span class=\"sep\">");
             try writer.writeAll("·");
             try writer.writeAll("</span>");
-            // pages.zt:373
+            // pages.zt:372
             try writer.writeAll("<span>");
             try zt.writeEscaped(writer, s.net_count);
             try writer.writeAll(" net");
             try zt.writeEscaped(writer, pluralS(s.net_count));
             try writer.writeAll("</span>");
         } else {
-            // pages.zt:375
+            // pages.zt:374
             try writer.writeAll("<span class=\"warn\">");
             try writer.writeAll("build failed");
             try writer.writeAll("</span>");
         }
-        // pages.zt:377
+        // pages.zt:376
         if (s.mtime_sec > 0) {
-            // pages.zt:378
+            // pages.zt:377
             try writer.writeAll("<span class=\"sep\">");
             try writer.writeAll("·");
             try writer.writeAll("</span>");
-            // pages.zt:379
+            // pages.zt:378
             try writer.writeAll("<span>");
             try zt.writeEscaped(writer, relTime(now_sec - s.mtime_sec));
             try writer.writeAll("</span>");
         }
-        // pages.zt:382
+        // pages.zt:381
         try writer.writeAll("</div>");
-        // pages.zt:383
+        // pages.zt:382
         try writer.writeAll("<div class=\"design-card-links\">");
-        // pages.zt:384
+        // pages.zt:383
         try writer.writeAll("<a");
         try writer.writeAll(" class=\"design-card-link\"");
         try writer.writeAll(" href=\"");
@@ -497,7 +493,7 @@ pub const DesignCard = struct {
         try writer.writeAll(">");
         try writer.writeAll("Schematic");
         try writer.writeAll("</a>");
-        // pages.zt:385
+        // pages.zt:384
         try writer.writeAll("<a");
         try writer.writeAll(" class=\"design-card-link\"");
         try writer.writeAll(" href=\"");
@@ -507,9 +503,9 @@ pub const DesignCard = struct {
         try writer.writeAll(">");
         try writer.writeAll("PCB layout");
         try writer.writeAll("</a>");
-        // pages.zt:386
+        // pages.zt:385
         try writer.writeAll("</div>");
-        // pages.zt:387
+        // pages.zt:386
         try writer.writeAll("</div>");
     }
 
@@ -539,62 +535,62 @@ pub const SystemCard = struct {
     fn _render(sys: SystemHomeEntry, search: []const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = &sys;
         _ = &search;
-        // pages.zt:393
+        // pages.zt:392
         try writer.writeAll("<div");
         try writer.writeAll(" class=\"design-card\"");
         try writer.writeAll(" data-kind=\"system\"");
         try zt.writeAttr(writer, "data-search", search);
         try writer.writeAll(">");
-        // pages.zt:394
+        // pages.zt:393
         try writer.writeAll("<div class=\"type-row\">");
-        // pages.zt:395
+        // pages.zt:394
         try writer.writeAll("<span class=\"type-tag system\">");
         try writer.writeAll("System");
         try writer.writeAll("</span>");
-        // pages.zt:396
+        // pages.zt:395
         if (sys.attested) {
-            // pages.zt:397
+            // pages.zt:396
             try writer.writeAll("<span class=\"tag-chip starred\" title=\"Review inputs have been approved and the attestation is current\">");
             try writer.writeAll("attested");
             try writer.writeAll("</span>");
         }
-        // pages.zt:400
+        // pages.zt:399
         try writer.writeAll("</div>");
-        // pages.zt:401
+        // pages.zt:400
         try writer.writeAll("<div class=\"design-card-header\">");
-        // pages.zt:402
+        // pages.zt:401
         try writer.writeAll("<div class=\"design-card-title\">");
         try zt.writeEscaped(writer, sys.title);
         try writer.writeAll("</div>");
-        // pages.zt:403
+        // pages.zt:402
         try writer.writeAll("<div class=\"design-card-name\">");
         try zt.writeEscaped(writer, sys.part_number);
         try writer.writeAll(" rev ");
         try zt.writeEscaped(writer, sys.revision);
         try writer.writeAll("</div>");
-        // pages.zt:404
+        // pages.zt:403
         try writer.writeAll("</div>");
-        // pages.zt:405
+        // pages.zt:404
         try writer.writeAll("<div class=\"design-card-stats\">");
-        // pages.zt:406
+        // pages.zt:405
         try writer.writeAll("<span>");
         try zt.writeEscaped(writer, sys.boards);
         try writer.writeAll(" boards");
         try writer.writeAll("</span>");
-        // pages.zt:407
+        // pages.zt:406
         try writer.writeAll("<span class=\"sep\">");
         try writer.writeAll("·");
         try writer.writeAll("</span>");
-        // pages.zt:408
+        // pages.zt:407
         try writer.writeAll("<span>");
         try zt.writeEscaped(writer, sys.documents);
         try writer.writeAll(" documents");
         try writer.writeAll("</span>");
-        // pages.zt:409
+        // pages.zt:408
         try writer.writeAll("</div>");
-        // pages.zt:410
+        // pages.zt:409
         try writer.writeAll("<div class=\"design-card-links\">");
-        // pages.zt:411
+        // pages.zt:410
         try writer.writeAll("<a");
         try writer.writeAll(" class=\"design-card-link\"");
         try writer.writeAll(" href=\"");
@@ -604,9 +600,9 @@ pub const SystemCard = struct {
         try writer.writeAll(">");
         try writer.writeAll("Review workspace");
         try writer.writeAll("</a>");
-        // pages.zt:412
+        // pages.zt:411
         try writer.writeAll("</div>");
-        // pages.zt:413
+        // pages.zt:412
         try writer.writeAll("</div>");
     }
 
@@ -634,65 +630,65 @@ pub const ModuleCard = struct {
     fn _render(m: ModuleHomeEntry, search: []const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = &m;
         _ = &search;
-        // pages.zt:417
+        // pages.zt:416
         try writer.writeAll("<div");
         try writer.writeAll(" class=\"design-card\"");
         try writer.writeAll(" data-kind=\"subcircuit\"");
         try zt.writeAttr(writer, "data-search", search);
         try writer.writeAll(">");
-        // pages.zt:418
+        // pages.zt:417
         try writer.writeAll("<div class=\"type-row\">");
-        // pages.zt:419
+        // pages.zt:418
         try writer.writeAll("<span class=\"type-tag subcircuit\">");
         try writer.writeAll("Subcircuit");
         try writer.writeAll("</span>");
-        // pages.zt:420
+        // pages.zt:419
         if (m.has_groups) {
-            // pages.zt:421
+            // pages.zt:420
             try writer.writeAll("<span class=\"tag-chip grouping\" title=\"Declares placement (group …) DSL — ready for a rough placement\">");
             try writer.writeAll("grouping");
             try writer.writeAll("</span>");
         }
-        // pages.zt:424
+        // pages.zt:423
         if (m.has_starred) {
-            // pages.zt:425
+            // pages.zt:424
             try writer.writeAll("<span class=\"tag-chip starred\" title=\"A layout has been starred — approved by a person\">");
             try writer.writeAll("★ starred");
             try writer.writeAll("</span>");
         }
-        // pages.zt:428
+        // pages.zt:427
         try writer.writeAll("</div>");
-        // pages.zt:429
+        // pages.zt:428
         try writer.writeAll("<div class=\"design-card-header\">");
-        // pages.zt:430
+        // pages.zt:429
         try writer.writeAll("<div class=\"design-card-title\">");
         try zt.writeEscaped(writer, m.name);
         try writer.writeAll("<span class=\"mod-params\">");
         try zt.writeEscaped(writer, m.params);
         try writer.writeAll("</span>");
         try writer.writeAll("</div>");
-        // pages.zt:431
+        // pages.zt:430
         try writer.writeAll("</div>");
-        // pages.zt:432
+        // pages.zt:431
         if (m.doc.len > 0) {
-            // pages.zt:433
+            // pages.zt:432
             try writer.writeAll("<div class=\"design-card-stats\">");
             try writer.writeAll("<span>");
             try zt.writeEscaped(writer, m.doc);
             try writer.writeAll("</span>");
             try writer.writeAll("</div>");
         }
-        // pages.zt:436
+        // pages.zt:435
         try writer.writeAll("<div class=\"design-card-sections\">");
-        // pages.zt:437
+        // pages.zt:436
         if (m.used_by.len > 0) {
-            // pages.zt:438
+            // pages.zt:437
             try writer.writeAll("<span class=\"section-chip-more\">");
             try writer.writeAll("used by");
             try writer.writeAll("</span>");
-            // pages.zt:439
+            // pages.zt:438
             for (m.used_by) |d| {
-                // pages.zt:440
+                // pages.zt:439
                 try writer.writeAll("<a");
                 try writer.writeAll(" class=\"section-chip\"");
                 try writer.writeAll(" href=\"");
@@ -704,16 +700,16 @@ pub const ModuleCard = struct {
                 try writer.writeAll("</a>");
             }
         } else {
-            // pages.zt:443
+            // pages.zt:442
             try writer.writeAll("<span class=\"section-chip-more\">");
             try writer.writeAll("not used by any design yet");
             try writer.writeAll("</span>");
         }
-        // pages.zt:445
+        // pages.zt:444
         try writer.writeAll("</div>");
-        // pages.zt:446
+        // pages.zt:445
         try writer.writeAll("<div class=\"design-card-links\">");
-        // pages.zt:447
+        // pages.zt:446
         try writer.writeAll("<a");
         try writer.writeAll(" class=\"design-card-link\"");
         try writer.writeAll(" href=\"");
@@ -723,7 +719,7 @@ pub const ModuleCard = struct {
         try writer.writeAll(">");
         try writer.writeAll("Schematic");
         try writer.writeAll("</a>");
-        // pages.zt:448
+        // pages.zt:447
         try writer.writeAll("<a");
         try writer.writeAll(" class=\"design-card-link\"");
         try writer.writeAll(" href=\"");
@@ -733,9 +729,9 @@ pub const ModuleCard = struct {
         try writer.writeAll(">");
         try writer.writeAll("PCB layout");
         try writer.writeAll("</a>");
-        // pages.zt:449
+        // pages.zt:448
         try writer.writeAll("</div>");
-        // pages.zt:450
+        // pages.zt:449
         try writer.writeAll("</div>");
     }
 
@@ -766,31 +762,31 @@ pub const Home = struct {
         _ = &module_cards;
         _ = &now_sec;
         try writer.writeAll("<!DOCTYPE html>");
-        // pages.zt:455
+        // pages.zt:454
         try writer.writeAll("<html>");
-        // pages.zt:456
+        // pages.zt:455
         try writer.writeAll("<head>");
-        // pages.zt:457
+        // pages.zt:456
         try writer.writeAll("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">");
-        // pages.zt:458
+        // pages.zt:457
         try writer.writeAll("<title>");
         try writer.writeAll("Netlisp — Systems, Designs &amp; Modules");
         try writer.writeAll("</title>");
-        // pages.zt:459
+        // pages.zt:458
         try zt.writeRaw(writer, home_style_block);
-        // pages.zt:460
+        // pages.zt:459
         try writer.writeAll("</head>");
-        // pages.zt:461
+        // pages.zt:460
         try writer.writeAll("<body>");
-        // pages.zt:462
+        // pages.zt:461
         try zt.renderComponent(Navbar, .{"designs"}, writer);
-        // pages.zt:463
+        // pages.zt:462
         try writer.writeAll("<div class=\"home-shell\" style=\"max-width:960px;margin:0 auto\">");
-        // pages.zt:464
+        // pages.zt:463
         try writer.writeAll("<h1 class=\"home-title\" style=\"padding:16px 16px 0;color:#f0f6fc\">");
         try writer.writeAll("Systems, Designs &amp; Modules");
         try writer.writeAll("</h1>");
-        // pages.zt:465
+        // pages.zt:464
         try writer.writeAll("<p class=\"mod-sub-note\">");
         try writer.writeAll("Every system-review workspace, ");
         try writer.writeAll("<code>");
@@ -802,21 +798,21 @@ pub const Home = struct {
         try writer.writeAll("</code>");
         try writer.writeAll(" block — tagged and searchable.");
         try writer.writeAll("</p>");
-        // pages.zt:466
+        // pages.zt:465
         try writer.writeAll("<div class=\"home-newrow\">");
-        // pages.zt:467
+        // pages.zt:466
         try writer.writeAll("<input type=\"text\" id=\"home-search\" class=\"home-search\" placeholder=\"Search systems, designs and modules…\">");
-        // pages.zt:470
+        // pages.zt:469
         try writer.writeAll("<button type=\"button\" id=\"home-new\" class=\"home-new\">");
         try writer.writeAll("+ New design");
         try writer.writeAll("</button>");
-        // pages.zt:471
+        // pages.zt:470
         try writer.writeAll("</div>");
-        // pages.zt:472
+        // pages.zt:471
         try writer.writeAll("<div class=\"home-filters\" id=\"home-filters\">");
-        // pages.zt:473
+        // pages.zt:472
         for (home_filters) |f| {
-            // pages.zt:474
+            // pages.zt:473
             try writer.writeAll("<button");
             try writer.writeAll(" type=\"button\"");
             try zt.writeAttr(writer, "class", filterClass(f.id));
@@ -827,52 +823,52 @@ pub const Home = struct {
             try zt.writeEscaped(writer, f.label);
             try writer.writeAll("</button>");
         }
-        // pages.zt:476
+        // pages.zt:475
         try writer.writeAll("</div>");
-        // pages.zt:477
+        // pages.zt:476
         try writer.writeAll("<div class=\"home-count\" id=\"home-count\">");
         try writer.writeAll("</div>");
-        // pages.zt:478
+        // pages.zt:477
         try writer.writeAll("<div class=\"designs-grid\" id=\"home-grid\">");
-        // pages.zt:479
+        // pages.zt:478
         for (system_cards) |c| {
-            // pages.zt:480
+            // pages.zt:479
             try zt.renderComponent(SystemCard, .{ c.sys, c.search }, writer);
         }
-        // pages.zt:482
+        // pages.zt:481
         for (design_cards) |c| {
-            // pages.zt:483
+            // pages.zt:482
             try zt.renderComponent(DesignCard, .{ c.s, c.search, c.has_starred, now_sec }, writer);
         }
-        // pages.zt:485
+        // pages.zt:484
         for (module_cards) |c| {
-            // pages.zt:486
+            // pages.zt:485
             try zt.renderComponent(ModuleCard, .{ c.m, c.search }, writer);
         }
-        // pages.zt:488
+        // pages.zt:487
         if (system_cards.len == 0 and design_cards.len == 0 and module_cards.len == 0) {
-            // pages.zt:489
+            // pages.zt:488
             try writer.writeAll("<div class=\"empty-hint\">");
             try writer.writeAll("Nothing found.");
             try writer.writeAll("</div>");
         }
-        // pages.zt:492
+        // pages.zt:491
         try writer.writeAll("</div>");
-        // pages.zt:493
+        // pages.zt:492
         try writer.writeAll("<div class=\"empty-hint\" id=\"home-empty\" style=\"display:none\">");
         try writer.writeAll("Nothing matches your search.");
         try writer.writeAll("</div>");
-        // pages.zt:494
+        // pages.zt:493
         try writer.writeAll("</div>");
-        // pages.zt:495
+        // pages.zt:494
         try zt.writeRaw(writer, home_search_script);
-        // pages.zt:496
+        // pages.zt:495
         try zt.writeRaw(writer, home_progress_script);
-        // pages.zt:497
+        // pages.zt:496
         try zt.writeRaw(writer, home_new_script);
-        // pages.zt:498
+        // pages.zt:497
         try writer.writeAll("</body>");
-        // pages.zt:499
+        // pages.zt:498
         try writer.writeAll("</html>");
     }
 

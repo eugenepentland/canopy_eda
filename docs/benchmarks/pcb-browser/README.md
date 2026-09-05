@@ -45,7 +45,7 @@ chromium`. The benchmark also recognizes a rootless library bundle at
 ## Running it
 
 Build the production-class ReleaseSafe benchmark binary once, then run the gate. It starts and stops its own
-random-port `NETLISP_DEV=1` loopback server, so no deployed server, login, or
+random-port loopback server, so no deployed server, login, or
 MCP service is involved. It also passes `--skip-warmup`; otherwise the server's
 unrelated whole-corpus cache warm-up competes with the measured page.
 

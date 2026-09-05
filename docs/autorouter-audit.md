@@ -1,7 +1,7 @@
 # Autorouter audit — routing priority, overlaps, 45° discipline
 
 *2026-07-05. Measured on `rp2350b-core` (starred layout) via `POST /api/pcb-route`
-on a dev server (`NETLISP_DEV=1`, main-checkout binary + project dir).*
+on a local server (main-checkout binary + project dir; a loopback request is admin).*
 
 **Status: IMPLEMENTED same day** (branch `claude/practical-mestorf-9e51a0`), plus
 one fix the audit missed — the fine-pitch **pad-gateway** (a 0.4 mm-pitch pad's

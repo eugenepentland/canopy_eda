@@ -106,6 +106,6 @@ Read the relevant file before working in that area — they are the canonical, c
 - `docs/build-system.md` — build graph internals
 - `docs/sexpr-language.md` — design language spec — read before editing .sexp designs
 - `docs/webserver-api.md` — web server API reference — read before touching server endpoints
-- `docs/ward-auth.md` — ward auth setup
+- `docs/auth.md` — the local-first auth model (loopback admin, plugin tokens, `--bind`, `--allow-remote`)
 - `docs/testing-guide.md` — full testing guide: filters, test-compile, test-affected, mutation tiers
 - `docs/worktrees.md` — worktree workflow details

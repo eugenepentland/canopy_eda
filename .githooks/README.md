@@ -141,9 +141,9 @@ or candidate validation never restarts prod**, so the service keeps running its
 previous binary.
 
 After installing the verified candidate it restarts the unit and probes the live server
-(`HEALTH_URLS`, default: `/.well-known/oauth-protected-resource` must return
-200 and `/` must return 302, the ward login redirect) for up to
-`HEALTH_TIMEOUT` seconds:
+(`HEALTH_URLS`, default: `/healthz` must return 200 — the unauthenticated
+liveness probe, which reads no design and so answers a cold process as fast as
+a warm one) for up to `HEALTH_TIMEOUT` seconds:
 
 - **Healthy** → the binary is copied to `.git/deploy-lastgood-netlisp`, its ID
   to `.git/deploy-lastgood-id`, and the deployed commit to

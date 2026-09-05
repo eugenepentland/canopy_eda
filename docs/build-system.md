@@ -58,7 +58,7 @@ The table is historical pre-port decision data, not current command guidance.
 A same-source rerun on 2026-08-12 selected
 the current snapshot: Debug took 43.53 s versus 134.47 s on 0.15.1 (**3.09x
 faster**) and ReleaseSafe was effectively unchanged at 6.28 s versus 6.23 s;
-all pose checksums matched. The application, Guardian, Ward, httpz, zt,
+all pose checksums matched. The application, Guardian, httpz, zt,
 websocket, metrics, passcay, and zbor are now ported and pinned together.
 Use self-hosted Debug for development and internal performance work, and a
 self-hosted ReleaseSafe build (its own `--prefix`) when the measurement needs

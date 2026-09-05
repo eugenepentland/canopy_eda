@@ -235,7 +235,7 @@ async function main() {
         // it is the one place where an auto-commit would land in the user's
         // repository directly rather than through a symlinked .git. config.zig
         // defaults auto-commit to ENABLED when unset; disable it explicitly.
-        cwd: root, env: { ...process.env, NETLISP_DEV: "1", NETLISP_GIT_AUTOCOMMIT: "0" }, stdio: ["ignore", "pipe", "pipe"],
+        cwd: root, env: { ...process.env, NETLISP_GIT_AUTOCOMMIT: "0" }, stdio: ["ignore", "pipe", "pipe"],
       });
       const append = (c) => { serverText = (serverText + c.toString()).slice(-16000); };
       server.stdout.on("data", append); server.stderr.on("data", append);

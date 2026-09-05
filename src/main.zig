@@ -382,9 +382,11 @@ fn dispatchServe(io: std.Io, allocator: std.mem.Allocator, scratch_allocator: st
     const auth_dir_override = optionalArg(args, "--auth-dir") orelse readAuthDirEnv(arena, environ);
     try serve_mod.serve(io, allocator, scratch_allocator, .{
         .port = port,
+        .bind = optionalArg(args, "--bind") orelse serve_mod.default_bind_address,
         .project_dir = project_dir,
         .auth_dir = auth_dir_override,
         .skip_warmup = hasFlag(args, "--skip-warmup"),
+        .allow_remote = hasFlag(args, "--allow-remote"),
     });
 }
 
@@ -539,7 +541,7 @@ fn printUsage() !void {
         \\  netlisp reference [section]             Print the DSL grammar reference (docs/language-forms.md)
         \\  netlisp tool list                       List every structured CLI tool and its JSON schema
         \\  netlisp tool <name> [--project-dir <d>] [--args <json> | --args-file <path>] [--output <path|->]  Invoke any structured tool
-        \\  netlisp serve [--project-dir <d>] [--port <n>] [--skip-warmup]  Start web server (default port 7050)
+        \\  netlisp serve [--project-dir <d>] [--port <n>] [--bind <addr>] [--allow-remote] [--skip-warmup]  Start web server (default 127.0.0.1:7050; a loopback request is admin, --allow-remote makes EVERY request admin for a deployment behind an authenticating reverse proxy)
         \\  netlisp mint-plugin-token [--project-dir <d>] [--label <l>]  Mint a bearer token for the KiCad plugin
         \\  netlisp import-kicad <board.kicad_pcb> [--project-dir <d>] [--name <n>] [--title <t>] [--dry-run]  Migrate a KiCad board into a netlisp design
         \\  netlisp import-kicad-layout [--project-dir <d>] <design> [--board <path>] [--dry-run] [--chord-tol-mm <mm>]  Import a routed board's placement/outline/copper as the design's starred layout (board read-only)
@@ -681,7 +683,6 @@ test {
     _ = @import("serve/kicad_sch_export.zig");
     _ = @import("serve/sync_kicad_sch.zig");
     _ = @import("serve/auth_store.zig");
-    _ = @import("serve/ward_auth.zig");
     _ = @import("serve/sync.zig");
     _ = @import("serve/board_backup.zig");
     _ = @import("serve/component_search.zig");

@@ -30,10 +30,21 @@ pub const ServeError = std.mem.Allocator.Error ||
 /// Startup settings shared by the CLI and the long-running HTTP server.
 pub const ServeOptions = struct {
     port: u16,
+    /// Interface the listening socket binds to. Defaults to loopback: netlisp
+    /// is a local tool and only an operator who has put an authenticating
+    /// reverse proxy in front of it should widen this (`--bind 0.0.0.0`).
+    bind: []const u8 = default_bind_address,
     project_dir: []const u8,
     auth_dir: ?[]const u8,
     skip_warmup: bool = false,
+    /// Treat every request as an authenticated admin (`--allow-remote` /
+    /// `NETLISP_ALLOW_REMOTE=1`). Only correct behind a reverse proxy that is
+    /// itself doing the authentication — it disables netlisp's own gate.
+    allow_remote: bool = false,
 };
+
+/// Loopback-only bind, the default for `netlisp serve`.
+pub const default_bind_address = "127.0.0.1";
 
 // Sub-modules
 const paths = @import("paths.zig");
@@ -89,7 +100,6 @@ const layout_match = @import("serve/layout_match.zig");
 const rough_best = @import("serve/rough_best.zig");
 const modules_page = @import("serve/modules.zig");
 const auth = @import("serve/auth.zig");
-const ward_auth = @import("serve/ward_auth.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
 const static_assets = @import("serve/static_assets.zig");
 const sync = @import("serve/sync.zig");
@@ -424,18 +434,14 @@ pub const Caches = struct {
     }
 };
 
-/// Mutable per-server state. Post ward-migration this is the plugin-token store
-/// (bearer tokens for the KiCad sync helper) plus the ward auth adapter state;
-/// sessions, passkeys, users, and OAuth grants all live in wardd now. One
+/// Mutable per-server state. Auth-wise this is only the plugin-token store
+/// (bearer tokens for the KiCad sync helper): netlisp keeps no users, sessions
+/// or grants — a loopback request is admin (see `serve/auth.zig`). One
 /// instance per running server; two instances are fully independent, which is
 /// what makes per-test servers possible. Every field defaults to empty so
 /// `.{}` yields a fresh, unloaded server.
 pub const ServerState = struct {
     plugin_tokens: plugin_tokens.PluginTokenStore = .{},
-    /// Ward auth adapter state: verdict caches + HTTP client + resolved config,
-    /// built once in `serve()` via `WardState.init`. netlisp now verifies
-    /// sessions and bearer tokens against wardd through this.
-    ward: ward_auth.WardState = .{},
     /// Interactive routing sessions, keyed by design name — mutex-guarded,
     /// idle-evicted, and capped (see `route_session_api.Store`). Held here so
     /// the table lives for the server's lifetime without a module-level global.
@@ -482,31 +488,30 @@ pub const Server = struct {
     /// returned to the OS rather than retained by the response arena.
     scratch_allocator: ?std.mem.Allocator = null,
     project_dir: []const u8,
-    /// Directory holding the auth state files. Post ward-migration this is only
-    /// `plugin_tokens.json` (the KiCad-sync bearer store) — passkeys, sessions,
-    /// users, and OAuth grants moved to wardd. Defaults to `<project_dir>/auth`
-    /// when no explicit override is supplied — the historic location. Override
-    /// via `netlisp serve --auth-dir <path>` or the `NETLISP_AUTH_DIR` env var so
-    /// multiple worktrees / project checkouts share one plugin-token store.
+    /// Directory holding the auth state files — only `plugin_tokens.json` (the
+    /// KiCad-sync bearer store). Defaults to `<project_dir>/auth` when no
+    /// explicit override is supplied. Override via `netlisp serve --auth-dir
+    /// <path>` or the `NETLISP_AUTH_DIR` env var so multiple worktrees /
+    /// project checkouts share one plugin-token store.
     auth_dir: []const u8,
 
-    /// When true, requests arriving directly from the loopback interface (and
-    /// NOT forwarded by a reverse proxy) bypass passkey/session auth and act as
-    /// a `dev@localhost` admin — the local-development convenience. Default
-    /// FALSE: it is opt-in via the `NETLISP_DEV` env var. This must never be
-    /// derived from a request header — the prod server sits behind a same-host
-    /// reverse proxy, so every internet request also arrives from loopback, and
-    /// a `Host: localhost` header used to grant unauthenticated admin remotely.
-    dev_mode: bool = false,
+    /// When true, EVERY request is treated as an authenticated admin —
+    /// `netlisp serve --allow-remote` (or `NETLISP_ALLOW_REMOTE=1`), the
+    /// deployment switch that hands authentication to a reverse proxy in front
+    /// of netlisp. Default FALSE: only a loopback, unproxied request is
+    /// admitted. Locality itself is derived from the TCP peer, never from a
+    /// request header — a `Host: localhost` header once bought unauthenticated
+    /// admin here.
+    allow_remote: bool = false,
 
     /// Authenticated identity for the current request. The long-lived server
     /// leaves these at their defaults; `dispatch` creates a request-local copy
-    /// and `ward_auth.authMiddleware` fills them only after verification.
+    /// and `auth.authMiddleware` fills them only after the locality/token check.
     /// Handlers that create audit records must use these fields rather than
     /// trusting a username supplied by the request body.
     request_auth: struct {
         username: ?[]const u8 = null,
-        role: ward_auth.Role = .reader,
+        role: auth.Role = .reader,
     } = .{},
 
     /// Per-server mutable state (session/challenge stores today; OAuth/user/
@@ -546,7 +551,7 @@ pub const Server = struct {
             .scratch_allocator = self.scratch_allocator,
             .project_dir = self.project_dir,
             .auth_dir = self.auth_dir,
-            .dev_mode = self.dev_mode,
+            .allow_remote = self.allow_remote,
             .request_auth = .{},
             // The per-request copy borrows the same long-lived state instance,
             // so every route handler reaches the same stores/caches/limiters.
@@ -638,6 +643,23 @@ fn routeLabRedirect(_: *Server, req: *httpz.Request, res: *httpz.Response) !void
     };
     res.status = 302;
     res.header("Location", try routeLabLocation(res.arena, name));
+}
+
+// spec: Web Server - the serve bind address parses loopback and any-interface and refuses a non-address
+test "parseBindAddress accepts an ip literal and refuses anything else" {
+    const loopback = try parseBindAddress(default_bind_address, 7050);
+    try std.testing.expectEqual(@as(u16, 7050), loopback.ip4.port);
+    try std.testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &loopback.ip4.bytes);
+    // Widening to every interface is spelled as an address, not as a flag.
+    const all = try parseBindAddress("0.0.0.0", 1);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, &all.ip4.bytes);
+    // ipv6 literals parse too.
+    _ = try parseBindAddress("::1", 1);
+    // A hostname, a typo and an empty string are all the same refusal: startup
+    // fails rather than binding something the operator did not name.
+    try std.testing.expectError(error.InvalidIPAddressFormat, parseBindAddress("localhost", 7050));
+    try std.testing.expectError(error.InvalidIPAddressFormat, parseBindAddress("127.0.0.256", 7050));
+    try std.testing.expectError(error.InvalidIPAddressFormat, parseBindAddress("", 7050));
 }
 
 // spec: Web Server - the retired /pcb-route-lab page 302-redirects to the /pcb-layout page for the same design
@@ -891,6 +913,15 @@ fn registerLibraryRoutes(router: anytype) void {
     router.post("/api/library-delete/:kind/:name", library.deleteLibraryEntryApi, .{});
 }
 
+/// Resolve `--bind` into the listening address, narrowing every spelling of
+/// "that is not an address" (a hostname, a typo, an unresolvable scope) to the
+/// one error `ServeError` already carries. A bind netlisp cannot parse must
+/// fail the startup rather than silently fall back to a wider interface than
+/// the operator asked for.
+fn parseBindAddress(bind: []const u8, port: u16) error{InvalidIPAddressFormat}!std.Io.net.IpAddress {
+    return std.Io.net.IpAddress.parse(bind, port) catch error.InvalidIPAddressFormat;
+}
+
 /// Start the HTTP server: configure auth/rate limits, register every route
 /// (pages, APIs, auth, OAuth support), and block serving requests until shutdown.
 pub fn serve(
@@ -906,11 +937,12 @@ pub fn serve(
     // thread can touch the limiters.
     rate_limiter.configureFromEnv(allocator);
     const effective_auth: []const u8 = if (auth_dir) |d| d else try std.fmt.allocPrint(allocator, "{s}/auth", .{project_dir});
-    // Opt-in local-dev auth bypass. Off in production (no env var) → every
-    // request must authenticate. See Server.dev_mode. Read via config.zig so
-    // the ban-env policy holds (only config.zig touches the environment).
-    const dev_mode = @import("config.zig").devMode(allocator);
-    if (dev_mode) log.warn("netlisp: NETLISP_DEV set — loopback requests bypass auth as dev@localhost", .{});
+    // `--allow-remote` (flag or `NETLISP_ALLOW_REMOTE=1`, read via config.zig so
+    // the ban-env policy holds) turns netlisp's own gate OFF: every request is
+    // an admin, and the operator's reverse proxy is the only thing left
+    // authenticating anyone. Loud on stderr because it is not a local default.
+    const allow_remote = options.allow_remote or @import("config.zig").allowRemote(allocator);
+    if (allow_remote) log.warn("netlisp: --allow-remote — EVERY request is an admin; an authenticating reverse proxy must sit in front of this server", .{});
     var state: ServerState = .{
         .caches = .init(allocator),
         // The reconcile store retains an evaluated design, its placement and a
@@ -936,10 +968,16 @@ pub fn serve(
     // (defers unwind last-in-first-out): no surface can reach a torn-down store.
     thermal_cache.publish(&state.caches.thermal_solves);
     defer thermal_cache.publish(null);
-    state.ward.init(allocator); // ward verdict caches + HTTP client from WARD_* env
-    var handler = Server{ .allocator = allocator, .scratch_allocator = scratch_allocator, .project_dir = project_dir, .auth_dir = effective_auth, .dev_mode = dev_mode, .state = &state };
+    var handler = Server{ .allocator = allocator, .scratch_allocator = scratch_allocator, .project_dir = project_dir, .auth_dir = effective_auth, .allow_remote = allow_remote, .state = &state };
+    // Loopback by default (`--bind` widens it). A remote-reachable socket and
+    // an auth model that admits loopback only would refuse every real caller,
+    // so the two knobs are meant to move together.
+    const listen_ip = parseBindAddress(options.bind, port) catch |err| {
+        log.warn("netlisp: --bind {s} is not an IP address (try 127.0.0.1 or 0.0.0.0)", .{options.bind});
+        return err;
+    };
     var server = try httpz.Server(*Server).init(io, allocator, .{
-        .address = .all(port),
+        .address = .{ .ip = listen_ip },
         .request = .{
             // 64 MiB so datasheet PDFs and large KiCad zips fit. Individual
             // endpoints re-validate their own per-request limits.
@@ -1103,10 +1141,11 @@ pub fn serve(
 
     registerLibraryRoutes(router);
 
-    // RFC 9728 protected-resource metadata only (wardd is the auth server now).
-    router.get("/.well-known/oauth-protected-resource", ward_auth.metadataProtectedResource, .{});
+    // Unauthenticated liveness probe for deployment health checks — the
+    // cheapest route in the tree (see `serve/api.zig`).
+    router.get("/healthz", api.healthzApi, .{});
 
-    log.progress("Listening on http://localhost:{d}", .{port});
+    log.progress("Listening on http://{s}:{d}", .{ options.bind, port });
     log.progress("Project: {s}", .{project_dir});
     // Open the day's interaction log with a line naming this process, and say
     // on stderr where it is — a log nobody can find diagnoses nothing.

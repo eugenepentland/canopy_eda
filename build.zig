@@ -68,14 +68,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Ward auth library — session-cookie + OAuth-bearer verification against
-    // wardd (ward.eugenepentland.dev). Pure-Zig module; sqlite/OpenSSL link
-    // only into the wardd binary, never into consumers.
-    const ward_dep = b.dependency("ward", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
     // Guardian — runs on every build. Baseline mode is configured in
     // guardian.toml: every check records existing violations once and
     // only fails when new ones appear, so the full check suite can be
@@ -181,7 +173,6 @@ pub fn build(b: *std.Build) void {
     exe_mod.strip = optimize == .safe;
     exe_mod.addImport("httpz", httpz.module("httpz"));
     exe_mod.addImport("zt", zt_dep.module("zt"));
-    exe_mod.addImport("ward", ward_dep.module("ward"));
     // Embed the compiled drc.wasm so static_assets.zig can @embedFile it.
     exe_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
 
@@ -240,7 +231,6 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.addImport("httpz", httpz.module("httpz"));
     test_mod.addImport("zt", zt_dep.module("zt"));
-    test_mod.addImport("ward", ward_dep.module("ward"));
     test_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
     addDeployUnitImports(b, test_mod);
 
@@ -308,7 +298,6 @@ pub fn build(b: *std.Build) void {
     });
     fast_test_mod.addImport("httpz", httpz.module("httpz"));
     fast_test_mod.addImport("zt", zt_dep.module("zt"));
-    fast_test_mod.addImport("ward", ward_dep.module("ward"));
     fast_test_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
     addDeployUnitImports(b, fast_test_mod);
 
