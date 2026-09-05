@@ -1317,7 +1317,7 @@ test "the thermal tab follows assembly and Review stays board scoped" {
     // The other three headers gained the same tab, each after their Assembly link.
     const heads = [_][]const u8{
         @embedFile("../render_html.zig"),
-        @embedFile("pcb_layout_page.zig"),
+        @embedFile("pcb_layout_chrome.zig"),
         @embedFile("assembly_debug.zig"),
     };
     for (heads) |src| {

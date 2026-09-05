@@ -93,10 +93,13 @@
 10 src/serve/digikey.zig|Product
 12 src/serve/library.zig|LibraryRow
 14 src/serve/mcp_tools.zig|DesignSummary
+34 src/serve/pcb_layout_blob.zig|PcbDataOpts
+10 src/serve/pcb_layout_blob.zig|RoutedMetrics
 9 src/serve/pcb_layout_chrome.zig|SidebarOpts
 27 src/serve/pcb_layout_page.zig|PngRequest
 8 src/serve/pcb_layout_page.zig|SavedZone
 9 src/serve/pcb_layout_page.zig|SolvedRequest
+13 src/serve/pcb_layout_page.zig|ShownView
 8 src/serve/saved_zone.zig|SavedZone
 9 src/shape_sketch.zig|Constraint
 8 src/subcircuit_silkscreen.zig|Annotation

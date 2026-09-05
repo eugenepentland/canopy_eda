@@ -98,10 +98,10 @@
 8 src/serve/library_3d.zig|writeViewerDataJson
 8 src/serve/pcb_describe.zig|writeDescribeJson
 8 src/serve/pcb_describe.zig|writeLint
+7 src/serve/pcb_layout_blob.zig|writeBlobHead
+12 src/serve/pcb_layout_blob.zig|writePcbData
 9 src/serve/pcb_layout_chrome.zig|writeEditControls
 7 src/serve/pcb_layout_chrome.zig|writeRoutePanel
-7 src/serve/pcb_layout_page.zig|writeBlobHead
-12 src/serve/pcb_layout_page.zig|writePcbData
 8 src/serve/rough_best.zig|computeBest
 9 src/serve/sync.zig|buildNetSignatureRelinkIndex
 9 src/serve/sync.zig|emitAddOp
