@@ -40,9 +40,11 @@
 
   ;; Pins how the PCB engine should treat the input rail. Without this the
   ;; engine infers a class from the net name and says so; declaring it makes
-  ;; the intent explicit and the inference silent.
+  ;; the intent explicit and the inference silent. The child is
+  ;; (placement-class …) — placement and routing-order criticality. The
+  ;; top-level (net-class …) form is a different thing: routing geometry.
   (module-policy
-    (net-class "VIN_5V" input_rail))
+    (placement-class "VIN_5V" input_rail))
 
   ;; ── Design maths ────────────────────────────────────────────────────────
   ;; `let` binds a value; numeric literals carry SI suffixes, so `470k` is
@@ -63,17 +65,22 @@
   (let f-blink (/ 1.0 t-blink))
 
   ;; Assertions never stop evaluation: every one below is checked and recorded,
-  ;; so one run reports all of them. `build` and `export-kicad` then refuse to
-  ;; emit anything if one failed; `check` and the review report it and carry on.
+  ;; so one run reports all of them. What happens next is per command. `build`
+  ;; and `export-kicad` hand off the board, so a failed assertion is fatal
+  ;; there: they print every assertion, locate the failing ones at
+  ;; file:line:col, write NOTHING — no netlist, no .bom, no export — and exit
+  ;; 1. `check` reports it as one error finding beside ERC and still prints its
+  ;; whole report. `export-pdf` and the review pages put it in the validation
+  ;; table and produce the document anyway.
   (assert (> (- v-in v-rail) 0.5)
     "LDO input-to-output headroom must exceed the regulator's dropout voltage")
   (assert-range (* i-led 1000.0) 2.0 10.0 "LED current (mA)")
   (assert-range f-blink 0.5 5.0 "Blink rate (Hz)")
 
   ;; ── Board boundary ──────────────────────────────────────────────────────
-  (port "VIN" "VIN_5V" in   power 5.0 (rated 4.5 5.5) (current 0.02 0.15))
+  (port "VIN" "VIN_5V" in   power (nominal v-in)   (rated 4.5 5.5) (current 0.02 0.15))
   (port "GND"           bidi power)
-  (port "3V3" "+3V3"    out  power 3.3 (rated 3.2 3.4))
+  (port "3V3" "+3V3"    out  power (nominal v-rail) (rated 3.2 3.4))
 
   ;; ── Block diagram ───────────────────────────────────────────────────────
   ;; Names the clusters the schematic page's block view draws. Purely a
@@ -86,7 +93,7 @@
   ;; ── Sections ────────────────────────────────────────────────────────────
 
   (section "Power Input Header" "2-pin 0.1 in header, 4.5-5.5 V bench supply"
-    (row 0) (col 0)
+    (row 0) (col 0) (category power)
     (description "Where the board is powered from.")
     (instance "J1" pin-header-1x2
       (pin 1 "VIN_5V")
@@ -95,7 +102,7 @@
   )
 
   (section "3V3 LDO Regulator" "Generic SOT-23-5 LDO, 5 V in, 3.3 V out"
-    (row 0) (col 1)
+    (row 0) (col 1) (category power)
     (description "Makes the 3.3 V rail the logic runs from, and enables it when power arrives.")
     (instance "U1" ldo-3v3-sot23-5
       (pin VIN  "VIN_5V" (i-typ 0.012) (i-max 0.15))
@@ -121,7 +128,7 @@
   )
 
   (section "Schmitt Oscillator" "Hex Schmitt inverter, 470k x 1uF RC relaxation oscillator"
-    (row 1) (col 0)
+    (row 1) (col 0) (category clock)
     (description "Generates the blink. Gate 1 oscillates; gate 2 buffers it.")
     ;; The gate pins are quoted because a bare `1A` is a NUMBER — `1` with the
     ;; SI unit letter `A` — and would silently connect pad 1. Quote any pin name
@@ -150,7 +157,7 @@
   )
 
   (section "Status LED" "Buffered red indicator, about 5 mA through 270 ohms"
-    (row 1) (col 1)
+    (row 1) (col 1) (category peripheral)
     (description "Shows the blink. Driven by gate 2, never by the timing node.")
     (instance "R3" (res-0603 (fmt "~R" r-led))
       (pin 1 "LED_DRIVE")
@@ -163,7 +170,7 @@
   )
 
   (section "Expansion Header" "2x5 0.1 in header: power, ground, four spare inverters"
-    (row 2) (col 0)
+    (row 2) (col 0) (category connector)
     (description "Brings the rail and the four unused gates off the board.")
     ;; (pins …) wires an already-placed part from another section, so one IC can
     ;; appear wherever its pins belong instead of all in one box.
@@ -191,17 +198,26 @@
   )
 
   (section "Test Points" "Four hook-probe pads for bring-up"
-    (row 2) (col 1)
+    (row 2) (col 1) (category peripheral)
     (diagram hidden)
     (description "Four pads to clip a scope onto during bring-up.")
-    (test-point "TP1" "+3V3"  (purpose "Regulated 3.3 V rail — check this first.") (id ee57727c))
-    (test-point "TP2" "BLINK" (purpose "Oscillator output; scope it to measure the real blink rate.") (id db1e766b))
-    (test-point "TP3" "GND"   (purpose "Ground return for the scope clip.") (id c662916c))
-    (test-point "TP4" "VIN_5V" (purpose "Input rail, upstream of the regulator.") (id fe834c0b))
+    ;; A probe pad is an ordinary part: `testpoint` from the standard library,
+    ;; one pad, wired by naming a net. The note is what the review's bring-up
+    ;; table prints. (The older `(test-point "TP1" "NET" (purpose …))` spelling
+    ;; places exactly this and still works; keep it for `(virtual)` markers,
+    ;; which have no pad and no other spelling.)
+    (instance "TP1" testpoint (pin 1 "+3V3")
+      (note "Regulated 3.3 V rail — check this first.") (id ee57727c))
+    (instance "TP2" testpoint (pin 1 "BLINK")
+      (note "Oscillator output; scope it to measure the real blink rate.") (id db1e766b))
+    (instance "TP3" testpoint (pin 1 "GND")
+      (note "Ground return for the scope clip.") (id c662916c))
+    (instance "TP4" testpoint (pin 1 "VIN_5V")
+      (note "Input rail, upstream of the regulator.") (id fe834c0b))
   )
 
   (section "Mounting Holes" "Four M2 holes, bonded to ground"
-    (row 3) (col 0)
+    (row 3) (col 0) (category connector)
     (diagram hidden)
     (description "Mechanical attachment; the plated holes tie the ground pour to the standoffs.")
     (instance "H1" mounting-hole-m2 (pin 1 "GND") (id b88b1c51))
