@@ -275,6 +275,7 @@ src/commands.zig::cmdSyncKicadSch | fn cmdSyncKicadSch(allocator: std.mem.Alloca
 src/commands.zig::cmdSystemCheck | fn cmdSystemCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::syncKicadSchReport | fn syncKicadSchReport(allocator: std.mem.Allocator, args: []const []const u8) CommandError!SyncSchReport
 src/component_classification.zig::isActiveSemiconductor | fn isActiveSemiconductor(inst: env.Instance) bool
+src/component_classification.zig::isFixtureClass | fn isFixtureClass(ref_des: []const u8) bool
 src/component_classification.zig::isPassThroughConnector | fn isPassThroughConnector(inst: env.Instance) bool
 src/config.zig::allowRemote | fn allowRemote(allocator: std.mem.Allocator) bool
 src/config.zig::cseEmail | fn cseEmail(allocator: std.mem.Allocator) ?[]u8

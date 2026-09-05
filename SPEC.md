@@ -7578,6 +7578,8 @@ is what makes the predicate exact rather than approximately right.
 - The board PNG query turns ?thermal=1 into a heat-zone request carrying its scenario and ambient, and an unknown scenario word falls back to still air rather than refusing the image
 - export-schematic-png parses native image focus, view, theme, width, and output options
 - Native schematic export paints the SVG display list into a valid PNG without a browser
+- Test points, mounting holes and fiducials do not spend the unfocused schematic PNG's hub budget
+- An unfocused schematic PNG renders a board whose hub count is only over the cap because of its test points and mounting holes
 - Schematic image view parsing accepts the UI's Sequential and Functional names and defaults to Functional
 - The schematic display-list translator applies the renderer's rotate group transform to vertical passives
 - The src basename index resolves a design sibling without re-walking the tree, and rebuilds when a directory it walked changes mtime
