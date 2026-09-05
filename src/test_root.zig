@@ -355,6 +355,7 @@ test {
     _ = @import("placement/route_timing.zig");
     _ = @import("placement/routed_copper.zig");
     _ = @import("placement/router.zig");
+    _ = @import("placement/router_ctx.zig");
     _ = @import("placement/router_via_rules.zig");
     _ = @import("placement/router_vision_regression.zig");
     _ = @import("placement/router_waypoint_regression.zig");

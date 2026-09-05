@@ -3550,8 +3550,8 @@ src/placement/router.zig::addGroundPadStitches | fn addGroundPadStitches( arena:
 src/placement/router.zig::arena | fn arena(self: CleanupBoard) std.mem.Allocator
 src/placement/router.zig::beginNet | fn beginNet(self: CleanupBoard, net_i: usize) void
 src/placement/router.zig::bend_cost_mult value
-src/placement/router.zig::blocked | fn blocked(ctx: *Ctx, layer: usize, n: usize, net: i32) bool
-src/placement/router.zig::buildObstacles | fn buildObstacles(arena: std.mem.Allocator, parts: []const Part, nets: []const FlatNet) std.mem.Allocator.Error![]PadObs
+src/placement/router.zig::blocked value
+src/placement/router.zig::buildObstacles value
 src/placement/router.zig::buildPairViaBan | fn buildPairViaBan( run: CoupledRun, at: []const [2]f64, radius: f64, ) std.mem.Allocator.Error![]const bool
 src/placement/router.zig::canonicalizeTraceJunctions | fn canonicalizeTraceJunctions( arena: std.mem.Allocator, tracks: *std.ArrayList(Track), mutable: *std.ArrayList(bool), vias: []const Via, ) std.mem.Allocator.Error!void
 src/placement/router.zig::cleanupBoard | fn cleanupBoard( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, options: route_policy.Options, copper: struct { tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via) }, ) std.mem.Allocator.Error!?CleanupBoard
@@ -3565,7 +3565,7 @@ src/placement/router.zig::clearWidth | fn clearWidth(self: TautProbe, layer: u8,
 src/placement/router.zig::clearance_eps value
 src/placement/router.zig::closeGaps | fn closeGaps( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, board: GapBoard, gaps: []const Gap, opts: GapOptions, ) std.mem.Allocator.Error![]const ?GapPath
 src/placement/router.zig::collectRippable | fn collectRippable( scratch: std.mem.Allocator, placement: optimizer.Placement, routable: []const RipNet, blockers: []const i32, fail_pri: u64, ) std.mem.Allocator.Error![]usize
-src/placement/router.zig::copperCompacted | fn copperCompacted(ctx: *Ctx) void
+src/placement/router.zig::copperCompacted value
 src/placement/router.zig::detectBlockers | fn detectBlockers( ctx: *Ctx, placement: optimizer.Placement, idx_of: *std.StringHashMapUnmanaged(usize), net_i: usize, scratch: std.mem.Allocator, ) std.mem.Allocator.Error![]i32
 src/placement/router.zig::direct | fn direct(self: CoupledRun, net: usize) DirectRun
 src/placement/router.zig::directViaClear | fn directViaClear(run: DirectRun, pos: [2]f64) bool
@@ -3580,23 +3580,23 @@ src/placement/router.zig::gap_grid_divisor value
 src/placement/router.zig::glossFinishedTracks | fn glossFinishedTracks( arena: std.mem.Allocator, placement: optimizer.Placement, tracks: *std.ArrayList(Track), mutable: *std.ArrayList(bool), vias: []const Via, ) std.mem.Allocator.Error!void
 src/placement/router.zig::groundVias | fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams) std.mem.Allocator.Error![]Via
 src/placement/router.zig::init | fn init( arena: std.mem.Allocator, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize), params: RouteParams, ) std.mem.Allocator.Error!LoopRouter
-src/placement/router.zig::keepoutExtra | fn keepoutExtra(ctx: *const Ctx, obstacle_net: i32) f64
+src/placement/router.zig::keepoutExtra value
 src/placement/router.zig::layer | fn layer(self: VisionMask, index: usize) []const u8
-src/placement/router.zig::layerInMask | fn layerInMask(mask: u64, layer: u8) bool
+src/placement/router.zig::layerInMask value
 src/placement/router.zig::legLen | fn legLen(self: *LoopRouter, cap_c: [2]f64, hub_c: [2]f64, net_id: i32) std.mem.Allocator.Error!?f64
 src/placement/router.zig::liveCurves | fn liveCurves(arena: std.mem.Allocator, ctx: *const Ctx, net_count: usize) std.mem.Allocator.Error!Curves
 src/placement/router.zig::localSupplyBonds value
-src/placement/router.zig::netEnabled | fn netEnabled(ctx: *const Ctx, net_i: usize) bool
+src/placement/router.zig::netEnabled value
 src/placement/router.zig::netHasPlane value
-src/placement/router.zig::netLayerAuthored | fn netLayerAuthored(ctx: *const Ctx, net_i: usize) bool
+src/placement/router.zig::netLayerAuthored value
 src/placement/router.zig::netPoints value
-src/placement/router.zig::netPourCovers | fn netPourCovers(ctx: *const Ctx, net: i32, x: f64, y: f64, except_layer: ?u8) bool
+src/placement/router.zig::netPourCovers value
 src/placement/router.zig::netPourLayers value
 src/placement/router.zig::pairCouplable | fn pairCouplable(ctx: *const Ctx, pair: diff_pairs.DiffPair) bool
 src/placement/router.zig::pairOf | fn pairOf(ctx: *const Ctx, pairs: []const diff_pairs.DiffPair, p_net: usize) ?diff_pairs.DiffPair
 src/placement/router.zig::path | fn path(self: DirectRun, layer: u8) DirectPath
 src/placement/router.zig::perNetRouted | fn perNetRouted(arena: std.mem.Allocator, placement: optimizer.Placement, r: RouteResult) std.mem.Allocator.Error![]NetRouted
-src/placement/router.zig::rebuildCopperIndex | fn rebuildCopperIndex(ctx: *Ctx, tracks: []const Track, vias: []const Via) void
+src/placement/router.zig::rebuildCopperIndex value
 src/placement/router.zig::recordRfOutcome | fn recordRfOutcome(self: CleanupBoard, net: i32, outcome: rf_port_report.Outcome) std.mem.Allocator.Error!void
 src/placement/router.zig::recordSessionEvent | fn recordSessionEvent( self: RouteCore, kind: RouteEventKind, net_i: ?usize, detail: []const u8, ) std.mem.Allocator.Error!void
 src/placement/router.zig::rerouteNet | fn rerouteNet( ctx: *Ctx, placement: optimizer.Placement, idx_of: *std.StringHashMapUnmanaged(usize), rn: *RipNet, tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via), ) std.mem.Allocator.Error!void
@@ -3625,8 +3625,8 @@ src/placement/router.zig::routeWithTimeline | fn routeWithTimeline( arena: std.m
 src/placement/router.zig::saveSnapshot | fn saveSnapshot( scratch: std.mem.Allocator, ctx: *Ctx, tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via), routable: []const RipNet, ) std.mem.Allocator.Error!RipSnapshot
 src/placement/router.zig::searchWasLimited | fn searchWasLimited(ctx: *const Ctx, net_i: usize) bool
 src/placement/router.zig::seg | fn seg(self: OctiJoin, a: [2]f64, b: [2]f64) std.mem.Allocator.Error!void
-src/placement/router.zig::setNetParams | fn setNetParams(ctx: *Ctx, placement: optimizer.Placement, net_i: usize) void
-src/placement/router.zig::setNetRoutePolicy | fn setNetRoutePolicy(ctx: *Ctx, net_i: usize, pts: []const NetPt) void
+src/placement/router.zig::setNetParams value
+src/placement/router.zig::setNetRoutePolicy value
 src/placement/router.zig::shapeInput | fn shapeInput(run: DirectRun, ask: ShapeAsk) std.mem.Allocator.Error!?cdt_layers.Input
 src/placement/router.zig::shortName value
 src/placement/router.zig::shrinkCopper | fn shrinkCopper(t: *std.ArrayList(Track), v: *std.ArrayList(Via), tm: usize, vm: usize) void
@@ -3635,6 +3635,98 @@ src/placement/router.zig::trackWidth | fn trackWidth(self: CleanupBoard) f64
 src/placement/router.zig::tryMazeTerminalTree | fn tryMazeTerminalTree( ctx: *Ctx, net: i32, pts: []const NetPt, tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via), partial_after: usize, ) std.mem.Allocator.Error!bool
 src/placement/router.zig::visionMask | fn visionMask( arena: std.mem.Allocator, in: VisionInput, ) std.mem.Allocator.Error!?VisionMask
 src/placement/router.zig::waveOrdered | fn waveOrdered(core: *const RouteCore, net_i: usize) bool
+src/placement/router_ctx.zig::Ctx struct_
+src/placement/router_ctx.zig::Grid value
+src/placement/router_ctx.zig::KeepStamp struct_
+src/placement/router_ctx.zig::KeepState struct_
+src/placement/router_ctx.zig::NetPt value
+src/placement/router_ctx.zig::NetSmooth struct_
+src/placement/router_ctx.zig::PadDrills struct_
+src/placement/router_ctx.zig::PadGrid value
+src/placement/router_ctx.zig::Rect struct_
+src/placement/router_ctx.zig::ShapeVerdict enum_
+src/placement/router_ctx.zig::allocLayerGrids | fn allocLayerGrids(arena: std.mem.Allocator, n_layers: usize, nodes: usize) std.mem.Allocator.Error![][]i32
+src/placement/router_ctx.zig::armStaticBlock | fn armStaticBlock(ctx: *Ctx, arena: std.mem.Allocator) std.mem.Allocator.Error!void
+src/placement/router_ctx.zig::blocked | fn blocked(ctx: *Ctx, layer: usize, n: usize, net: i32) bool
+src/placement/router_ctx.zig::build | fn build( arena: std.mem.Allocator, placement: optimizer.Placement, grid: Grid, max_drill: f64, ) std.mem.Allocator.Error!PadDrills
+src/placement/router_ctx.zig::buildObstacles | fn buildObstacles(arena: std.mem.Allocator, parts: []const Part, nets: []const FlatNet) std.mem.Allocator.Error![]PadObs
+src/placement/router_ctx.zig::clearance_eps value
+src/placement/router_ctx.zig::copperCompacted | fn copperCompacted(ctx: *Ctx) void
+src/placement/router_ctx.zig::copperHalo | fn copperHalo(ctx: *Ctx) f64
+src/placement/router_ctx.zig::copperIdx | fn copperIdx(ctx: *const Ctx) ?*const PadGrid
+src/placement/router_ctx.zig::copperReach | fn copperReach(ctx: *const Ctx) f64
+src/placement/router_ctx.zig::distPointRect | fn distPointRect(px: f64, py: f64, r: Rect) f64
+src/placement/router_ctx.zig::empty_cell value
+src/placement/router_ctx.zig::escTerm value
+src/placement/router_ctx.zig::findEscapeVia | fn findEscapeVia(ctx: *Ctx, placed: []const Via, tracks: []const Track, a: [2]f64, dir: [2]f64, net: i32, layer: u8) ?[2]f64
+src/placement/router_ctx.zig::findGroundVia | fn findGroundVia( ctx: *Ctx, placed: []const Via, tracks: []const Track, c: [2]f64, net: i32, layer: u8, ) ?[2]f64
+src/placement/router_ctx.zig::findStitchVia | fn findStitchVia(ctx: *Ctx, placed: []const Via, tracks: []const Track, c: [2]f64, net: i32, max_r: f64) ?[2]f64
+src/placement/router_ctx.zig::firstGroundNet | fn firstGroundNet(placement: optimizer.Placement) ?i32
+src/placement/router_ctx.zig::foreignPadAt | fn foreignPadAt(ctx: *Ctx, layer: usize, n: usize, net: i32) bool
+src/placement/router_ctx.zig::gate_rings value
+src/placement/router_ctx.zig::gridBounds | fn gridBounds(g: Grid) pad_grid.Bounds
+src/placement/router_ctx.zig::groundViaPointClear | fn groundViaPointClear( ctx: *Ctx, placed: []const Via, tracks: []const Track, point: [2]f64, net: i32, ) bool
+src/placement/router_ctx.zig::keepStamp | fn keepStamp(ctx: *const Ctx, net: i32, layer: u8, half: f64) KeepStamp
+src/placement/router_ctx.zig::keepoutBlocked | fn keepoutBlocked(ctx: *const Ctx, layer: ?usize, n: usize, net: i32) bool
+src/placement/router_ctx.zig::keepoutExtra | fn keepoutExtra(ctx: *const Ctx, obstacle_net: i32) f64
+src/placement/router_ctx.zig::layerInMask | fn layerInMask(mask: u64, layer: u8) bool
+src/placement/router_ctx.zig::localSupplyBonds value
+src/placement/router_ctx.zig::moveClearsCopper | fn moveClearsCopper(ctx: *Ctx, net: i32, from_key: usize, to_layer: usize, to_node: usize) bool
+src/placement/router_ctx.zig::netClassRank | fn netClassRank(name: []const u8) u32
+src/placement/router_ctx.zig::netEnabled | fn netEnabled(ctx: *const Ctx, net_i: usize) bool
+src/placement/router_ctx.zig::netHasPlane value
+src/placement/router_ctx.zig::netLayerAuthored | fn netLayerAuthored(ctx: *const Ctx, net_i: usize) bool
+src/placement/router_ctx.zig::netPoints value
+src/placement/router_ctx.zig::netPourCovers | fn netPourCovers(ctx: *const Ctx, net: i32, x: f64, y: f64, except_layer: ?u8) bool
+src/placement/router_ctx.zig::netPourLayers value
+src/placement/router_ctx.zig::netPriority | fn netPriority(placement: optimizer.Placement, idx_of: *std.StringHashMapUnmanaged(usize), net: FlatNet, net_i: usize) u32
+src/placement/router_ctx.zig::outlineBlocked | fn outlineBlocked(ctx: *Ctx, n: usize, net: i32) bool
+src/placement/router_ctx.zig::padCopperAt | fn padCopperAt(ctx: *const Ctx, c: [2]f64, net: i32, layer: u8) ?pad_shape.Shape
+src/placement/router_ctx.zig::padInPour value
+src/placement/router_ctx.zig::padIndexReach | fn padIndexReach(ctx: *const Ctx) f64
+src/placement/router_ctx.zig::padSegmentClears | fn padSegmentClears(ctx: *const Ctx, p: PadObs, a: [2]f64, b: [2]f64, ordinary: f64) bool
+src/placement/router_ctx.zig::perimeterAllowed | fn perimeterAllowed(ctx: *const Ctx, net: i32) bool
+src/placement/router_ctx.zig::pointMissesBox | fn pointMissesBox(point: [2]f64, x0: f64, y0: f64, x1: f64, y1: f64, reach: f64) bool
+src/placement/router_ctx.zig::pourLiveNear | fn pourLiveNear(ctx: *const Ctx, net: i32, x: f64, y: f64, reach: f64) bool
+src/placement/router_ctx.zig::probeBudgetExhausted | fn probeBudgetExhausted(ctx: *Ctx) bool
+src/placement/router_ctx.zig::rebuildCopperIndex | fn rebuildCopperIndex(ctx: *Ctx, tracks: []const Track, vias: []const Via) void
+src/placement/router_ctx.zig::segClearsPadsOnLayer | fn segClearsPadsOnLayer(ctx: *Ctx, a: [2]f64, b: [2]f64, net: i32, layer: ?u8) bool
+src/placement/router_ctx.zig::segClearsTracks | fn segClearsTracks(ctx: *Ctx, tracks: []const Track, a: [2]f64, b: [2]f64, net: i32, layer: u8) bool
+src/placement/router_ctx.zig::segClearsVias | fn segClearsVias(ctx: *Ctx, placed: []const Via, a: [2]f64, b: [2]f64, net: i32) bool
+src/placement/router_ctx.zig::setNetParams | fn setNetParams(ctx: *Ctx, placement: optimizer.Placement, net_i: usize) void
+src/placement/router_ctx.zig::setNetReferenceGuide | fn setNetReferenceGuide(ctx: *Ctx, net_i: usize) std.mem.Allocator.Error!void
+src/placement/router_ctx.zig::setNetRoutePolicy | fn setNetRoutePolicy(ctx: *Ctx, net_i: usize, pts: []const NetPt) void
+src/placement/router_ctx.zig::sqrt2 value
+src/placement/router_ctx.zig::staging_offboard_mm value
+src/placement/router_ctx.zig::stampBoardCopper | fn stampBoardCopper(ctx: *Ctx, tracks: []const Track, vias: []const Via, skip_net: i32) void
+src/placement/router_ctx.zig::stampCurrentRf | fn stampCurrentRf(ctx: *Ctx, a: [2]f64, b: [2]f64, net: i32, layer: u8) void
+src/placement/router_ctx.zig::stampCurrentRfVia | fn stampCurrentRfVia(ctx: *Ctx, x: f64, y: f64, net: i32) void
+src/placement/router_ctx.zig::stampDisc | fn stampDisc(ctx: *Ctx, x: f64, y: f64, net: i32, dist: f64, layer: u8, both: bool) void
+src/placement/router_ctx.zig::stampExistingCopper | fn stampExistingCopper( ctx: *Ctx, options: route_policy.Options, tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via), ) std.mem.Allocator.Error!void
+src/placement/router_ctx.zig::stampKeepoutPad | fn stampKeepoutPad(ctx: *Ctx, p: PadObs) void
+src/placement/router_ctx.zig::stampKeepoutPadsForNet | fn stampKeepoutPadsForNet(ctx: *Ctx, net: i32) void
+src/placement/router_ctx.zig::stampKeepoutSeg | fn stampKeepoutSeg(ctx: *Ctx, a: [2]f64, b: [2]f64, st: KeepStamp) void
+src/placement/router_ctx.zig::stampRetainedRf | fn stampRetainedRf( ctx: *Ctx, placement: optimizer.Placement, copper: struct { tracks: []const Track, vias: []const Via }, ) void
+src/placement/router_ctx.zig::stampStubOcc | fn stampStubOcc(ctx: *Ctx, a: [2]f64, b: [2]f64, net: i32, layer: u8) void
+src/placement/router_ctx.zig::stampTrackResv | fn stampTrackResv(ctx: *Ctx, a: [2]f64, b: [2]f64, net: i32, layer: u8) void
+src/placement/router_ctx.zig::stampViaOcc | fn stampViaOcc(ctx: *Ctx, x: f64, y: f64, net: i32) void
+src/placement/router_ctx.zig::staticBlocked | fn staticBlocked(ctx: *Ctx, layer: usize, n: usize, net: i32) bool
+src/placement/router_ctx.zig::trimStub | fn trimStub(ctx: *Ctx, placed: []const Via, tracks: []const Track, a: [2]f64, b: [2]f64, net: i32, layer: u8) [2]f64
+src/placement/router_ctx.zig::viaAllowed | fn viaAllowed(ctx: *Ctx, n: usize, net: i32, placed: []const Via) bool
+src/placement/router_ctx.zig::viaClearsHoles | fn viaClearsHoles(ctx: *Ctx, placed: []const Via, x: f64, y: f64) bool
+src/placement/router_ctx.zig::viaClearsOutline | fn viaClearsOutline(ctx: *const Ctx, x: f64, y: f64, net: i32) bool
+src/placement/router_ctx.zig::viaClearsPadDrills | fn viaClearsPadDrills(ctx: *const Ctx, x: f64, y: f64) bool
+src/placement/router_ctx.zig::viaClearsPads | fn viaClearsPads(ctx: *Ctx, x: f64, y: f64, net: i32) bool
+src/placement/router_ctx.zig::viaClearsTracks | fn viaClearsTracks(ctx: *Ctx, tracks: []const Track, x: f64, y: f64, net: i32) bool
+src/placement/router_ctx.zig::viaClearsVias | fn viaClearsVias(ctx: *Ctx, placed: []const Via, x: f64, y: f64, net: i32) bool
+src/placement/router_ctx.zig::viaCopperRule | fn viaCopperRule(ctx: *const Ctx) via_rules.CopperRule
+src/placement/router_ctx.zig::viaPairCenterNeed | fn viaPairCenterNeed(ctx: *const Ctx, a_dia: f64, b_dia: f64, same_net: bool) f64
+src/placement/router_ctx.zig::viaR | fn viaR(params: RouteParams) f64
+src/placement/router_ctx.zig::zoneArea | fn zoneArea(poly: []const [2]f64) f64
+src/placement/router_ctx.zig::zoneBlocksPoint | fn zoneBlocksPoint( ctx: *const Ctx, layer: usize, point: [2]f64, net: i32, reach: f64, via: bool, ) bool
+src/placement/router_ctx.zig::zoneBounds | fn zoneBounds(poly: []const [2]f64) optimizer.BoardRect
+src/placement/router_ctx.zig::zoneClipped | fn zoneClipped(ctx: *const Ctx, zone: route_policy.ExistingZone, x: f64, y: f64) bool
+src/placement/router_ctx.zig::zonePoured | fn zonePoured(ctx: *const Ctx, zone: route_policy.ExistingZone, x: f64, y: f64) bool
 src/placement/router_support.zig::RouteParams struct_
 src/placement/router_support.zig::anyBottomPads | fn anyBottomPads(obstacles: anytype) bool
 src/placement/router_support.zig::padGatewayWidth | fn padGatewayWidth(params: RouteParams, distance: f64) f64
