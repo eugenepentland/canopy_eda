@@ -27,6 +27,7 @@ const PadEdit = struct {
     roundrect_ratio: ?f64 = null,
     mask_margin: ?f64 = null,
     no_paste: bool = false,
+    paste: ?[]const @import("../footprint_paste.zig").Aperture = null,
     poly: ?[][]f64 = null,
 };
 
@@ -102,6 +103,12 @@ pub fn editorPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
         \\">
     );
     try navbar.write(w, .library);
+    const recipe_path = try std.fmt.allocPrint(req.arena, "{s}/lib/packages/{s}.json", .{ ctx.project_dir, name });
+    if (infra_fs.cwd().access(recipe_path, .{})) |_| {
+        try w.writeAll("<div style=\"padding:8px 18px\"><a href=\"/library/package?name=");
+        try (std.Uri.Component{ .raw = name }).formatEscaped(w);
+        try w.writeAll("\">Edit package dimensions ↗</a> · Pad and artwork edits are saved as package overrides.</div>");
+    } else |_| {}
     try w.writeAll(
         \\<header class="topbar">
         \\  <a class="back" href="/library" title="Back to component library">‹ Library</a>
@@ -239,6 +246,8 @@ fn writeRightPanel(w: *std.Io.Writer) std.Io.Writer.Error!void {
 /// rectangular courtyard. Unchanged top-level source forms stay byte-for-byte
 /// intact, including descriptions, silk, fab, and project-specific metadata.
 pub fn saveApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
+    const mutation = @import("../infra/source_transaction.zig").begin(ctx.project_dir) catch return sendError(res, 500, "Cannot lock project");
+    defer mutation.unlock();
     const name = req.param("name") orelse return sendError(res, 404, footprint_not_found);
     if (!safeName(name)) return sendError(res, 400, "Invalid footprint name");
     const body = req.body() orelse return sendError(res, 400, "Missing request body");
@@ -276,6 +285,7 @@ pub fn saveApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerE
         return sendError(res, 400, "Edited footprint is not valid S-expression syntax");
     defer parser.freeNodes(ctx.allocator, nodes);
     if (nodes.len == 0 or !nodes[0].isForm("footprint")) return sendError(res, 400, "Edited source is not a footprint");
+    if (try saveGenerated(ctx, req, res, name, payload)) return;
     atomicWrite(path, updated) catch return sendError(res, 500, "Could not save footprint");
 
     res.content_type = .JSON;
@@ -323,6 +333,7 @@ fn validatePad(p: PadEdit) bool {
             if (!finiteBounded(point[0]) or !finiteBounded(point[1])) return false;
         }
     } else if (std.mem.eql(u8, p.shape, "custom")) return false;
+    if (p.paste) |windows| if (!@import("../footprint_paste.zig").valid(windows, p.w, p.h)) return false;
     return true;
 }
 
@@ -544,6 +555,7 @@ fn writePad(w: *std.Io.Writer, pad: PadEdit) !void {
     if (pad.roundrect_ratio) |ratio| try w.print(" (roundrect_rratio {d:.4})", .{ratio});
     if (pad.mask_margin) |margin| try w.print(" (mask-margin {d:.4})", .{margin});
     if (pad.no_paste) try w.writeAll(" no-paste");
+    if (pad.paste) |windows| try @import("../footprint_paste.zig").write(w, windows);
     if (pad.poly) |poly| {
         try w.writeAll(" (poly");
         for (poly) |point| try w.print(" ({d:.4} {d:.4})", .{ point[0], point[1] });
@@ -692,4 +704,125 @@ test "footprint editor rejects duplicate or out-of-range source pad changes" {
     try std.testing.expect(!validateRequest(std.testing.allocator, duplicate, 1));
     const out_of_range = SaveRequest{ .revision = "x", .changes = &.{.{ .index = 1, .pad = pad }} };
     try std.testing.expect(!validateRequest(std.testing.allocator, out_of_range, 1));
+}
+
+fn packagePad(a: std.mem.Allocator, key: []const u8, p: PadEdit) !@import("package_generator.zig").Pad {
+    var value = try std.json.parseFromSliceLeaky(std.json.Value, a, try std.json.Stringify.valueAlloc(a, p, .{}), .{});
+    try value.object.put(a, "key", .{ .string = key });
+    return std.json.parseFromSliceLeaky(@import("package_generator.zig").Pad, a, try std.json.Stringify.valueAlloc(a, value, .{}), .{});
+}
+fn packageDiff(a: std.mem.Allocator, base: @import("package_generator.zig").Pad, pad: @import("package_generator.zig").Pad) !@import("package_generator.zig").Override {
+    var patch_value: @import("package_generator.zig").Override = .{ .key = base.key };
+    var clear: std.ArrayList([]const u8) = .empty;
+    inline for (.{ "id", "x", "y", "w", "h", "type", "shape", "drill_x", "drill_y", "roundrect_ratio", "mask_margin", "no_paste", "poly", "paste" }) |field| {
+        const original = @field(base, field);
+        const edited = @field(pad, field);
+        const old_json = try std.json.Stringify.valueAlloc(a, original, .{});
+        const new_json = try std.json.Stringify.valueAlloc(a, edited, .{});
+        if (!std.mem.eql(u8, old_json, new_json)) {
+            @field(patch_value, field) = edited;
+            if (@typeInfo(@TypeOf(edited)) == .optional) {
+                if (edited == null) try clear.append(a, field);
+            }
+        }
+    }
+    patch_value.clear_fields = try clear.toOwnedSlice(a);
+    return patch_value;
+}
+fn saveGenerated(ctx: *Server, req: *httpz.Request, res: *httpz.Response, name: []const u8, payload: SaveRequest) HandlerError!bool {
+    const store = @import("package_store.zig");
+    const recipe = store.load(req.arena, ctx.project_dir, name) catch |err| {
+        if (err == error.FileNotFound) return false;
+        sendError(res, 409, @import("package_tools.zig").message(err));
+        return true;
+    };
+    const saved = saveGeneratedCore(req.arena, ctx.project_dir, recipe, payload) catch |err| {
+        sendError(res, 409, @import("package_tools.zig").message(err));
+        return true;
+    };
+    res.content_type = .JSON;
+    res.body = try std.fmt.allocPrint(req.arena, "{{\"ok\":true,\"revision\":\"{x}\"}}", .{std.hash.Wyhash.hash(0, saved)});
+    return true;
+}
+fn saveGeneratedCore(a: std.mem.Allocator, project: []const u8, input: @import("package_generator.zig").Recipe, payload: SaveRequest) ![]const u8 {
+    const gen = @import("package_generator.zig");
+    const store = @import("package_store.zig");
+    var recipe = input;
+    const current = try gen.generate(a, recipe);
+    if (gen.hasErrors(current.diagnostics)) return error.InvalidPackage;
+    var pads: std.ArrayList(gen.Pad) = .empty;
+    for (current.pads, 0..) |pad, i| {
+        var edited = pad;
+        var removed = false;
+        for (payload.changes) |change| if (change.index == i) {
+            removed = change.remove;
+            if (change.pad) |p| edited = try packagePad(a, pad.key, p);
+        };
+        if (!removed) try pads.append(a, edited);
+    }
+    for (payload.additions, 0..) |pad, i| try pads.append(a, try packagePad(a, try std.fmt.allocPrint(a, "manual-{x}-{d}", .{ std.hash.Wyhash.hash(0, current.footprint), i }), pad));
+    const base = try gen.basePads(a, recipe);
+    var overrides: std.ArrayList(gen.Override) = .empty;
+    var additions: std.ArrayList(gen.Pad) = .empty;
+    for (base) |p| {
+        var found = false;
+        for (pads.items) |edited| if (std.mem.eql(u8, p.key, edited.key)) {
+            try overrides.append(a, try packageDiff(a, p, edited));
+            found = true;
+            break;
+        };
+        if (!found) try overrides.append(a, .{ .key = p.key, .remove = true });
+    }
+    for (pads.items) |p| {
+        var found = false;
+        for (base) |original| if (std.mem.eql(u8, p.key, original.key)) {
+            found = true;
+            break;
+        };
+        if (!found) try additions.append(a, p);
+    }
+    recipe.overrides = try overrides.toOwnedSlice(a);
+    recipe.additions = try additions.toOwnedSlice(a);
+    if (payload.courtyard) |court| {
+        var w: std.Io.Writer.Allocating = .init(a);
+        try writeCourtyard(&w.writer, court);
+        recipe.artwork.courtyard = try w.toOwnedSlice();
+    }
+    if (payload.silk) |art| {
+        var w: std.Io.Writer.Allocating = .init(a);
+        try writeArtwork(&w.writer, "silkscreen", art);
+        recipe.artwork.silk = try w.toOwnedSlice();
+    }
+    if (payload.fab) |art| {
+        var w: std.Io.Writer.Allocating = .init(a);
+        try writeArtwork(&w.writer, "fab", art);
+        recipe.artwork.fab = try w.toOwnedSlice();
+    }
+    var session = @import("autocommit.zig").begin(a, project);
+    defer if (session) |*s| s.deinit();
+    const saved = try store.save(a, project, recipe);
+    @import("autocommit.zig").commit(session, null, "package_footprint_edit");
+    return (try gen.generate(a, saved)).footprint;
+}
+
+// spec: IC package builder - Precise-editor save retains changed fields and catches invalid recipes
+test "IC package saveGenerated retains changed fields and catches invalid recipes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const gen = @import("package_generator.zig");
+    const store = @import("package_store.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    var recipe = gen.template(.dfn);
+    recipe.dimensions_verified = true;
+    recipe = try store.save(a, root, recipe);
+    const payload = SaveRequest{ .revision = "unused", .changes = &.{.{ .index = 0, .pad = .{ .id = "1", .type = "smd", .shape = "rect", .x = -1.95, .y = -0.5, .w = 0.8, .h = 0.3 } }} };
+    _ = try saveGeneratedCore(a, root, recipe, payload);
+    const edited = try store.load(a, root, recipe.name);
+    try std.testing.expectEqual(@as(?f64, 0.8), edited.overrides[0].w);
+    try std.testing.expectEqual(@as(?f64, null), edited.overrides[0].x);
+    recipe.body.width = -1;
+    try std.testing.expectError(error.InvalidPackage, saveGeneratedCore(a, root, recipe, payload));
 }

@@ -823,3 +823,6 @@ real time and none is specific to that board.
   binary (~10 min each) driven off `netlist-dump`. A `netlisp envelopes
   <design>` (or a `--json` block on `netlist-dump`) would turn a 20-minute
   sweep into two commands.
+
+## 2026-09-05 · codex · IC package builder CLI exploration
+- **friction:** `netlisp serve --help` started the server instead of printing help, created a worktree interaction log, then hit the existing port and emitted startup allocator-leak traces. Reject unknown serve flags or handle `--help` before opening logs and sockets so CLI discovery is read-only.

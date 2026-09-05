@@ -74,6 +74,18 @@ const Board = struct {
     color: ?[3]f64 = .{ 0.047, 0.404, 0.204 },
 };
 
+/// Analytic package solid: a planar profile extruded along its local -Z axis.
+/// The placement maps that local frame into the component's seating frame.
+pub const Extrusion = struct {
+    name: []const u8,
+    outline: []const [2]f64,
+    thickness: f64,
+    origin: [3]f64 = .{ 0, 0, 0 },
+    x_axis: [3]f64 = .{ 1, 0, 0 },
+    z_axis: [3]f64 = .{ 0, 0, 1 },
+    color: ?[3]f64 = null,
+};
+
 const Instance = struct {
     name: []const u8,
     footprint: []const u8,
@@ -86,6 +98,7 @@ const Request = struct {
     board: ?Board = null,
     bodies: []const Body = &.{},
     instances: []const Instance = &.{},
+    extrusions: []const Extrusion = &.{},
 };
 
 const BoardProduct = struct {
@@ -93,6 +106,8 @@ const BoardProduct = struct {
     product_definition: u64,
     representation: u64,
     assembly_offset: [3]f64,
+    x_axis: [3]f64 = .{ 1, 0, 0 },
+    z_axis: [3]f64 = .{ 0, 0, 1 },
 };
 
 const Entity = struct {
@@ -1318,14 +1333,36 @@ fn writeFacetedBodies(w: *std.Io.Writer, bodies: []const Body, next_id: *u64, ro
     }
 }
 
+fn writeExtrusionProducts(allocator: std.mem.Allocator, w: *std.Io.Writer, next_id: *u64, extrusions: []const Extrusion, styles: *StyleState) ![]const BoardProduct {
+    var products: std.ArrayList(BoardProduct) = .empty;
+    for (extrusions) |solid| {
+        if (!finitePoint(solid.origin)) return error.InvalidGeometry;
+        const x_axis = normalized(solid.x_axis) orelse return error.InvalidGeometry;
+        const z_axis = normalized(solid.z_axis) orelse return error.InvalidGeometry;
+        if (@abs(x_axis[0] * z_axis[0] + x_axis[1] * z_axis[1] + x_axis[2] * z_axis[2]) > 1e-8) return error.InvalidGeometry;
+        var product = try writeAnalyticBoard(allocator, w, next_id, .{
+            .name = solid.name,
+            .outline = solid.outline,
+            .thickness = solid.thickness,
+            .color = solid.color,
+        }, styles);
+        product.assembly_offset = solid.origin;
+        product.x_axis = x_axis;
+        product.z_axis = z_axis;
+        try products.append(allocator, product);
+    }
+
+    return products.toOwnedSlice(allocator);
+}
+
 fn build(allocator: std.mem.Allocator, project_dir: []const u8, design_name: []const u8, request: Request) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
-    if (request.bodies.len > max_bodies or request.instances.len > max_instances) return error.BadRequest;
+    if (request.bodies.len + request.extrusions.len > max_bodies or request.instances.len > max_instances) return error.BadRequest;
     var has_faceted_body = false;
     for (request.bodies) |body| if (!body.surface) {
         has_faceted_body = true;
         break;
     };
-    if (request.board == null and !has_faceted_body) return error.BadRequest;
+    if (request.board == null and request.extrusions.len == 0 and !has_faceted_body) return error.BadRequest;
 
     var next_id: u64 = 18;
     var models: std.ArrayList(ImportedModel) = .empty;
@@ -1387,6 +1424,10 @@ fn build(allocator: std.mem.Allocator, project_dir: []const u8, design_name: []c
         .assembly_offset = assembly_offset,
     });
 
+    var solid_products: std.ArrayList(BoardProduct) = .empty;
+    if (board_product) |board| try solid_products.append(allocator, board);
+    try solid_products.appendSlice(allocator, try writeExtrusionProducts(allocator, w, &next_id, request.extrusions, &styles));
+
     const root_representation = next_id;
     next_id += 1;
     try w.print("#{d}=SHAPE_REPRESENTATION(", .{root_representation});
@@ -1409,7 +1450,7 @@ fn build(allocator: std.mem.Allocator, project_dir: []const u8, design_name: []c
         next_id += 1;
     }
 
-    if (board_product) |board| {
+    for (solid_products.items) |board| {
         const point = next_id;
         const z_direction = point + 1;
         const x_direction = point + 2;
@@ -1418,8 +1459,8 @@ fn build(allocator: std.mem.Allocator, project_dir: []const u8, design_name: []c
         try w.print("#{d}=CARTESIAN_POINT('',(", .{point});
         try writePoint(w, board.assembly_offset);
         try w.writeAll("));\n");
-        try writeDirection(w, z_direction, .{ 0, 0, 1 });
-        try writeDirection(w, x_direction, .{ 1, 0, 0 });
+        try writeDirection(w, z_direction, board.z_axis);
+        try writeDirection(w, x_direction, board.x_axis);
         try w.print("#{d}=AXIS2_PLACEMENT_3D('',#{d},#{d},#{d});\n", .{ placement, point, z_direction, x_direction });
         const nauo = next_id;
         const occurrence_shape = nauo + 1;
@@ -1508,6 +1549,12 @@ pub fn buildBodies(
 ) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
     if (!safeDesignName(design_name)) return error.BadRequest;
     return build(allocator, ".", design_name, .{ .bodies = bodies });
+}
+
+/// Generate a self-contained AP242 assembly from named analytic extrusions.
+pub fn buildExtrusions(allocator: std.mem.Allocator, name: []const u8, solids: []const Extrusion) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8 {
+    if (!@import("library.zig").isSafeLibName(name)) return error.BadRequest;
+    return build(allocator, ".", name, .{ .extrusions = solids });
 }
 
 fn sendError(res: *httpz.Response, status: u16, message: []const u8) void {
@@ -1777,4 +1824,10 @@ test "analytic PCB validation rejects self intersections and invalid mechanical 
         .arcs = &.{.{ .p1 = .{ 5, 0 }, .pm = .{ 6, 1 }, .p2 = .{ 7, 0 } }},
         .thickness = 1.6,
     }));
+}
+
+// spec: IC package builder - Step rejects empty assembly and invalid names
+test "IC package STEP rejects empty assembly and invalid names" {
+    try std.testing.expectError(error.BadRequest, buildExtrusions(std.testing.allocator, "empty", &.{}));
+    try std.testing.expectError(error.BadRequest, buildExtrusions(std.testing.allocator, "../invalid", &.{}));
 }

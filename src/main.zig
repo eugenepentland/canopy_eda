@@ -143,7 +143,9 @@ pub fn main(init: std.process.Init) !void {
     const command = args[1];
     if (try dispatchEarlyCommand(allocator, arena, command, args[2..])) return;
 
-    if (std.mem.eql(u8, command, "parse")) {
+    if (std.mem.eql(u8, command, "package")) {
+        try @import("package_cli.zig").run(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "parse")) {
         if (args.len < 3) {
             exit.fatal("Usage: netlisp parse <file>\n", .{});
         }
@@ -596,6 +598,7 @@ fn printUsage() !void {
         \\  netlisp power-flow [--project-dir <d>] [--layout <name>] [--net <name>] [--text] <name>  Explain every power rail's current solve — the two axis statuses, source terminals with contact counts, each load's resolution (contacts / complete / placed) and unplaced amperes, then per-track and per-via required vs actual with the reason (read-only; JSON unless --text)
         \\  netlisp netlist-dump [--project-dir <d>] <name>…  Dump the flattened netlist — one sorted line per net carrying its sorted refdes.pad members (read-only; `#` lines carry the timings)
         \\  netlisp export-schematic-png [--project-dir <d>] <name> [--sub <slug>|--ref <hub>] [--view sequential|functional] [--theme light|dark] [--width <px>] [--output <file>]  Export a schematic block PNG without a browser
+        \\  netlisp package <command>             Create, preview, check, save and export IC packages
         \\  netlisp convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
         \\  netlisp convert-symbol <file> [--filter <name>]  Convert KiCad .kicad_sym to .sexp
         \\  netlisp convert-pinout <file> [--filter <name>]  Generate pinout from KiCad .kicad_sym
@@ -733,6 +736,9 @@ test {
     _ = @import("serve/autocommit.zig");
     _ = @import("serve/datasheet.zig");
     _ = @import("serve/library.zig");
+    _ = @import("serve/package_generator.zig");
+    _ = @import("serve/package_store.zig");
+    _ = @import("serve/package_tools.zig");
     _ = @import("serve/library_3d.zig");
     _ = @import("serve/footprint_preview.zig");
     _ = @import("config.zig");

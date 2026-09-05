@@ -62,11 +62,13 @@ pub fn convertFootprint(allocator: std.mem.Allocator, source: []const u8) Conver
         try w.writeAll("\")\n");
     }
 
+    try validatePasteOwners(children[2..]);
+
     // Extract pads
     try w.writeByte('\n');
     for (children[2..]) |child| {
         if (child.isForm("pad")) {
-            try emitPad(w, child);
+            if (!pasteOnly(child)) try emitPad(w, child, children[2..]);
         }
     }
 
@@ -107,7 +109,7 @@ fn writePadNum(w: anytype, num: []const u8) !void {
     try w.print("\"{s}\"", .{num});
 }
 
-fn emitPad(w: anytype, node: Node) !void {
+fn emitPad(w: anytype, node: Node, siblings: []const Node) !void {
     const children = node.asList() orelse return;
     if (children.len < 4) return;
 
@@ -227,6 +229,7 @@ fn emitPad(w: anytype, node: Node) !void {
     if (has_rratio and std.mem.eql(u8, out_shape, shape_roundrect)) {
         try w.print(" (roundrect_rratio {d:.3})", .{rratio});
     }
+    try emitPasteWindows(w, siblings, .{ .x = x, .y = y, .rotation = rot_out.angle, .w = out_sx, .h = out_sy }, node);
     try w.writeAll(")\n");
 }
 
@@ -798,4 +801,112 @@ test "convert quotes pad numbers so SI-shaped names survive a re-parse" {
         seen += 1;
     }
     try std.testing.expectEqual(@as(usize, want.len), seen);
+}
+
+const PasteOwner = struct { x: f64, y: f64, rotation: f64, w: f64, h: f64 };
+fn hasLayer(node: Node, layer: []const u8) bool {
+    const children = node.asList() orelse return false;
+    for (children) |child| if (child.isForm("layers")) {
+        for (child.asList().?[1..]) |v| {
+            const text = v.asString() orelse v.asAtom() orelse continue;
+            if (std.mem.eql(u8, text, layer)) return true;
+        }
+    };
+    return false;
+}
+fn pasteOnly(node: Node) bool {
+    return node.isForm("pad") and hasLayer(node, board_layers.f_paste) and !hasLayer(node, board_layers.f_cu) and !hasLayer(node, "*.Cu");
+}
+fn pasteRect(node: Node, owner: PasteOwner) ?@import("../footprint_paste.zig").Aperture {
+    const items = node.asList() orelse return null;
+    if (items.len < 4 or !std.mem.eql(u8, items[3].asAtom() orelse "", "rect")) return null;
+    var x: f64 = 0;
+    var y: f64 = 0;
+    var rot: f64 = 0;
+    var w: f64 = 0;
+    var h: f64 = 0;
+    for (items) |item| {
+        const v = item.asList() orelse continue;
+        if (item.isForm("at") and v.len >= 3) {
+            x = v[1].asNumber() orelse return null;
+            y = v[2].asNumber() orelse return null;
+            if (v.len >= 4) rot = v[3].asNumber() orelse return null;
+        }
+        if (item.isForm("size") and v.len >= 3) {
+            w = v[1].asNumber() orelse return null;
+            h = v[2].asNumber() orelse return null;
+        }
+    }
+    const angle = owner.rotation * std.math.pi / 180;
+    const dx = x - owner.x;
+    const dy = y - owner.y;
+    const px = dx * @cos(angle) + dy * @sin(angle);
+    const py = -dx * @sin(angle) + dy * @cos(angle);
+    const rel = padRotOut(rot + owner.rotation);
+    if (rel.angle != 0) return null;
+    const pw = if (rel.swap) h else w;
+    const ph = if (rel.swap) w else h;
+    if (pw <= 0 or ph <= 0 or @abs(px) + pw / 2 > owner.w / 2 + 1e-5 or @abs(py) + ph / 2 > owner.h / 2 + 1e-5) return null;
+    return .{ .x = px, .y = py, .w = pw, .h = ph };
+}
+fn emitPasteWindows(w: anytype, siblings: []const Node, owner: PasteOwner, node: Node) !void {
+    var started = false;
+    for (siblings) |candidate| {
+        if (!pasteOnly(candidate)) continue;
+        if (pasteRect(candidate, owner)) |v| {
+            if (!started) {
+                try w.writeAll(" (paste");
+                started = true;
+            }
+            try w.print(" (rect {d:.6} {d:.6} {d:.6} {d:.6})", .{ v.x, v.y, v.w, v.h });
+        }
+    }
+    if (started) try w.writeByte(')') else if (!hasLayer(node, board_layers.f_paste) and hasLayer(node, board_layers.f_cu)) try w.writeAll(" no-paste");
+}
+
+fn pasteOwner(node: Node) ?PasteOwner {
+    if (!node.isForm("pad") or !hasLayer(node, board_layers.f_cu)) return null;
+    const fields = node.asList().?;
+    if (fields.len < 4 or std.mem.eql(u8, fields[3].asAtom() orelse "", "custom")) return null;
+    var p: PasteOwner = .{ .x = 0, .y = 0, .rotation = 0, .w = 0, .h = 0 };
+    for (node.asList().?) |child| {
+        const v = child.asList() orelse continue;
+        if (child.isForm("at") and v.len >= 3) {
+            p.x = v[1].asNumber() orelse return null;
+            p.y = v[2].asNumber() orelse return null;
+            if (v.len >= 4) p.rotation = v[3].asNumber() orelse return null;
+        }
+        if (child.isForm("size") and v.len >= 3) {
+            p.w = v[1].asNumber() orelse return null;
+            p.h = v[2].asNumber() orelse return null;
+        }
+    }
+    const rot = padRotOut(p.rotation);
+    p.rotation = rot.angle;
+    if (rot.swap) std.mem.swap(f64, &p.w, &p.h);
+    return p;
+}
+fn validatePasteOwners(siblings: []const Node) error{InvalidFormat}!void {
+    for (siblings) |candidate| {
+        if (!pasteOnly(candidate)) continue;
+        var owners: usize = 0;
+        for (siblings) |node| {
+            const owner = pasteOwner(node) orelse continue;
+            if (pasteRect(candidate, owner) != null) owners += 1;
+        }
+        // Reject unsupported or ambiguous stencil geometry instead of dropping it.
+        if (owners != 1) return error.InvalidFormat;
+    }
+}
+
+// spec: IC package builder - KiCad import rejects stencil openings without a unique supported copper owner
+test "IC package KiCad unsupported and ambiguous stencil owners" {
+    const opening = "(pad \"\" smd rect (at 0 0) (size 0.4 0.4) (layers \"F.Paste\"))";
+    const copper = "(pad \"1\" smd rect (at 0 0) (size 2 2) (layers \"F.Cu\"))";
+    const sources = .{
+        "(footprint \"x\" " ++ opening ++ ")",
+        "(footprint \"x\" " ++ copper ++ copper ++ opening ++ ")",
+        "(footprint \"x\" (pad \"1\" smd custom (at 0 0) (size 2 2) (layers \"F.Cu\")) " ++ opening ++ ")",
+    };
+    inline for (sources) |source| try std.testing.expectError(error.InvalidFormat, convertFootprint(std.testing.allocator, source));
 }

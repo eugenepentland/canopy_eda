@@ -51,6 +51,7 @@ pub const Library = struct {
         try writer.writeAll("<h1>");
         try writer.writeAll("Component Library");
         try writer.writeAll("</h1>");
+        try writer.writeAll("<p><a href=\"/library/package\">＋ New IC package</a> — create a footprint and STEP model from datasheet dimensions</p>");
         try html.writeRaw(writer, upload_block);
         try writer.writeAll("<input type=\"text\" class=\"search-box\" id=\"lib-search\" placeholder=\"Search components, footprints, pinouts...\">");
         try writer.writeAll("<div class=\"count-info\" id=\"count-info\">");
@@ -186,6 +187,11 @@ pub const Card = struct {
                 try writer.writeAll(">");
                 try writer.writeAll("</div>");
             },
+        }
+        if (row.has_package) {
+            try writer.writeAll("<a href=\"/library/package?name=");
+            try (std.Uri.Component{ .raw = row.footprint orelse row.name }).formatEscaped(writer);
+            try writer.writeAll("\">Edit package ↗</a>");
         }
         if (row.requirements.len > 0) {
             try writer.writeAll("<span class=\"req-toggle\">");

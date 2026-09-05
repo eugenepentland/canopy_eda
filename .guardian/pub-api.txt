@@ -1299,6 +1299,10 @@ src/font5x7.zig::default_size_mm value
 src/font5x7.zig::gh value
 src/font5x7.zig::glyphRuns | fn glyphRuns(ch: u8, comptime E: type, ctx: anytype, emit: fn (@TypeOf(ctx), Run) E!void) E!void
 src/font5x7.zig::gw value
+src/footprint_paste.zig::Aperture struct_
+src/footprint_paste.zig::parse | fn parse(a: std.mem.Allocator, pad: Node) (std.mem.Allocator.Error || error{InvalidPaste})!?[]const Aperture
+src/footprint_paste.zig::valid | fn valid(windows: []const Aperture, width: f64, height: f64) bool
+src/footprint_paste.zig::write | fn write(w: *std.Io.Writer, windows: []const Aperture) std.Io.Writer.Error!void
 src/frequency_plan.zig::Band value
 src/frequency_plan.zig::Diagonal struct_
 src/frequency_plan.zig::DriveWindow struct_
@@ -1922,6 +1926,7 @@ src/netlist_dump.zig::cmdNetlistDump | fn cmdNetlistDump(allocator: std.mem.Allo
 src/netlist_dump.zig::lines | fn lines( arena: std.mem.Allocator, name: []const u8, nets: []flat_netlist.FlatNet, ) DumpError![]const []const u8
 src/numeric.zig::checkedInt | fn checkedInt(comptime T: type, f: f64) ?T
 src/numeric.zig::toCount | fn toCount(f: f64) usize
+src/package_cli.zig::run | fn run(a: std.mem.Allocator, args: []const []const u8) (service.Error || std.Io.File.Writer.Error)!void
 src/pad_neck_profile.zig::Profile struct_
 src/pad_neck_shape.zig::finishExactRfTapers | fn finishExactRfTapers( arena: std.mem.Allocator, placement: optimizer.Placement, selected: []const bool, routed: router.RouteResult, ) std.mem.Allocator.Error!router.RouteResult
 src/pad_neck_shape.zig::restoreGeneratedTracks | fn restoreGeneratedTracks( arena: std.mem.Allocator, placement: optimizer.Placement, selected: []const bool, routed: router.RouteResult, ) std.mem.Allocator.Error!router.RouteResult
@@ -4558,6 +4563,7 @@ src/serve/footprint_editor.zig::editorPage | fn editorPage(ctx: *Server, req: *h
 src/serve/footprint_editor.zig::saveApi | fn saveApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/footprint_preview.zig::HandlerError value
 src/serve/footprint_preview.zig::boardFootprintApi | fn boardFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/footprint_preview.zig::describeSource | fn describeSource(a: std.mem.Allocator, source: []const u8) (HandlerError || parser_mod.ParseError || error{InvalidFootprint})![]const u8
 src/serve/footprint_preview.zig::footprintApi | fn footprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/form_child_indent.zig::default_indent value
 src/serve/form_child_indent.zig::firstChild | fn firstChild(source: []const u8, form_start: usize) []const u8
@@ -4780,6 +4786,44 @@ src/serve/notes.zig::removeTaskApi | fn removeTaskApi(ctx: *Server, req: *httpz.
 src/serve/notes.zig::renderNotes | fn renderNotes(allocator: std.mem.Allocator, notes: Notes) RenderError![]u8
 src/serve/notes.zig::reopenTaskApi | fn reopenTaskApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/notes.zig::saveNotesApi | fn saveNotesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/package_builder.zig::HandlerError value
+src/serve/package_builder.zig::api | fn api(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/package_builder.zig::page | fn page(_: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/package_component.zig::Change struct_
+src/serve/package_component.zig::prepare | fn prepare(a: std.mem.Allocator, project: []const u8, name: []const u8, r: gen.Recipe, pads: []const gen.Pad) (std.mem.Allocator.Error || std.Io.Dir.ReadFileAllocError || parser.ParseError || error{ InvalidName, InvalidPinout, InvalidComponent, PinoutMismatch })!Change
+src/serve/package_generator.zig::Aperture value
+src/serve/package_generator.zig::Artwork struct_
+src/serve/package_generator.zig::Body struct_
+src/serve/package_generator.zig::Diagnostic struct_
+src/serve/package_generator.zig::Exposed struct_
+src/serve/package_generator.zig::Family enum_
+src/serve/package_generator.zig::Lands struct_
+src/serve/package_generator.zig::Leads struct_
+src/serve/package_generator.zig::Override struct_
+src/serve/package_generator.zig::Pad struct_
+src/serve/package_generator.zig::Recipe struct_
+src/serve/package_generator.zig::Result struct_
+src/serve/package_generator.zig::basePads | fn basePads(a: std.mem.Allocator, r: Recipe) std.mem.Allocator.Error![]Pad
+src/serve/package_generator.zig::finalPads | fn finalPads(a: std.mem.Allocator, r: Recipe, d: *std.ArrayList(Diagnostic)) std.mem.Allocator.Error![]const Pad
+src/serve/package_generator.zig::generate | fn generate(a: std.mem.Allocator, r: Recipe) (step.ExportError || std.mem.Allocator.Error || std.Io.Writer.Error || parser.ParseError || std.json.ParseError(std.json.Scanner) || error{ InvalidArtwork, InvalidFootprint })!Result
+src/serve/package_generator.zig::hasErrors | fn hasErrors(d: []const Diagnostic) bool
+src/serve/package_generator.zig::parse | fn parse(allocator: std.mem.Allocator, bytes: []const u8) (std.json.ParseError(std.json.Scanner) || error{ RecipeTooLarge, UnsupportedSchema })!Recipe
+src/serve/package_generator.zig::template | fn template(family: Family) Recipe
+src/serve/package_generator.zig::validate | fn validate(a: std.mem.Allocator, r: Recipe) std.mem.Allocator.Error![]const Diagnostic
+src/serve/package_generator.zig::writePad | fn writePad(w: *std.Io.Writer, p: Pad) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
+src/serve/package_store.zig::Error value
+src/serve/package_store.zig::Files struct_
+src/serve/package_store.zig::load | fn load(a: std.mem.Allocator, project: []const u8, name: []const u8) Error!gen.Recipe
+src/serve/package_store.zig::paths | fn paths(a: std.mem.Allocator, project: []const u8, name: []const u8) (std.mem.Allocator.Error || error{InvalidName})!Files
+src/serve/package_store.zig::save | fn save(a: std.mem.Allocator, project: []const u8, input: gen.Recipe) Error!gen.Recipe
+src/serve/package_store.zig::saveAttached | fn saveAttached(a: std.mem.Allocator, project: []const u8, input: gen.Recipe, component: ?[]const u8) Error!gen.Recipe
+src/serve/package_svg.zig::render | fn render(a: std.mem.Allocator, source: []const u8) (std.json.ParseError(std.json.Scanner) || @import("../sexpr/parser.zig").ParseError || std.mem.Allocator.Error || std.Io.Writer.Error || error{InvalidFootprint})![]const u8
+src/serve/package_tools.zig::Error value
+src/serve/package_tools.zig::Operation enum_
+src/serve/package_tools.zig::dispatch | fn dispatch(a: std.mem.Allocator, project: []const u8, name: []const u8, args: ?std.json.Value, out: *std.ArrayList(u8)) Error!bool
+src/serve/package_tools.zig::execute | fn execute(a: std.mem.Allocator, project: []const u8, operation: Operation, args: std.json.Value) Error![]const u8
+src/serve/package_tools.zig::message | fn message(err: anyerror) []const u8
+src/serve/package_tools.zig::operationFor | fn operationFor(name: []const u8) ?Operation
 src/serve/page_cache.zig::FileSet struct_
 src/serve/page_cache.zig::FileStamp struct_
 src/serve/page_cache.zig::append | fn append(self: *FileSet, stamp: FileStamp) std.mem.Allocator.Error!void
@@ -5026,8 +5070,10 @@ src/serve/pcb_rules_json.zig::writeNetClasses | fn writeNetClasses(w: *std.Io.Wr
 src/serve/pcb_rules_json.zig::writePlaneNets | fn writePlaneNets(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.Error!void
 src/serve/pcb_step_export.zig::Body struct_
 src/serve/pcb_step_export.zig::ExportError value
+src/serve/pcb_step_export.zig::Extrusion struct_
 src/serve/pcb_step_export.zig::HandlerError value
 src/serve/pcb_step_export.zig::buildBodies | fn buildBodies( allocator: std.mem.Allocator, design_name: []const u8, bodies: []const Body, ) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
+src/serve/pcb_step_export.zig::buildExtrusions | fn buildExtrusions(allocator: std.mem.Allocator, name: []const u8, solids: []const Extrusion) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
 src/serve/pcb_step_export.zig::buildFromJson | fn buildFromJson( allocator: std.mem.Allocator, project_dir: []const u8, design_name: []const u8, body: []const u8, ) (ExportError || std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
 src/serve/pcb_step_export.zig::pcbStepApi | fn pcbStepApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_subseeds.zig::pcbSubSeedsApi | fn pcbSubSeedsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb.HandlerError!void

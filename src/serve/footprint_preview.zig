@@ -28,7 +28,7 @@ const svg_bbox_pad: f64 = 0.5;
 // A `(rect x0 y0 x1 y1)` form is the head atom plus four coordinates.
 const rect_form_items: usize = 5;
 // JSON `[a,b,c,d]` of four 3-decimal coords — rects + line segments.
-const json_f4 = "[{d:.3},{d:.3},{d:.3},{d:.3}]";
+const json_f4 = "[{d:.6},{d:.6},{d:.6},{d:.6}]";
 
 // The layer palette + pad-label sizing now live in the shared client renderer
 // (`assets/footprint_svg.js`); this module only describes the geometry as JSON.
@@ -59,6 +59,7 @@ const Pad = struct {
     roundrect_ratio: ?f64 = null,
     mask_margin: ?f64 = null,
     no_paste: bool = false,
+    paste: ?[]const @import("../footprint_paste.zig").Aperture = null,
 };
 const Point = struct { x: f64, y: f64 };
 const Seg = struct { x1: f64, y1: f64, x2: f64, y2: f64, layer: Layer };
@@ -227,6 +228,7 @@ fn parsePad(allocator: std.mem.Allocator, child: Node) ?Pad {
         .roundrect_ratio = roundrect_ratio,
         .mask_margin = mask_margin,
         .no_paste = no_paste,
+        .paste = @import("../footprint_paste.zig").parse(allocator, child) catch null,
     };
 }
 
@@ -389,13 +391,13 @@ fn emitFootprintJson(w: anytype, shapes: Shapes, revision: ?u64) HandlerError!vo
     viewport.max_x += svg_bbox_pad;
     viewport.max_y += svg_bbox_pad;
 
-    try w.print("{{\"bbox\":{{\"x\":{d:.3},\"y\":{d:.3},\"w\":{d:.3},\"h\":{d:.3}}}", .{
+    try w.print("{{\"bbox\":{{\"x\":{d:.6},\"y\":{d:.6},\"w\":{d:.6},\"h\":{d:.6}}}", .{
         viewport.min_x, viewport.min_y, viewport.max_x - viewport.min_x, viewport.max_y - viewport.min_y,
     });
-    try w.print(",\"bounds\":{{\"x\":{d:.3},\"y\":{d:.3},\"w\":{d:.3},\"h\":{d:.3}}}", .{
+    try w.print(",\"bounds\":{{\"x\":{d:.6},\"y\":{d:.6},\"w\":{d:.6},\"h\":{d:.6}}}", .{
         bounds.min_x, bounds.min_y, bounds.max_x - bounds.min_x, bounds.max_y - bounds.min_y,
     });
-    try w.print(",\"editor\":{{\"grid\":{d:.3},\"margin\":{d:.3}}}", .{
+    try w.print(",\"editor\":{{\"grid\":{d:.6},\"margin\":{d:.6}}}", .{
         optimizer.grid_mm, geometry.bbox_margin_mm,
     });
     if (revision) |rev| try w.print(",\"revision\":\"{x}\"", .{rev});
@@ -408,17 +410,21 @@ fn emitFootprintJson(w: anytype, shapes: Shapes, revision: ?u64) HandlerError!vo
         try w.writeAll(",\"type\":");
         try writeJsonStr(w, p.pad_type);
         if (std.mem.eql(u8, p.pad_type, "npth")) try w.writeAll(",\"npth\":true");
-        try w.print(",\"x\":{d:.3},\"y\":{d:.3},\"w\":{d:.3},\"h\":{d:.3},\"shape\":", .{ p.x, p.y, p.w, p.h });
+        try w.print(",\"x\":{d:.6},\"y\":{d:.6},\"w\":{d:.6},\"h\":{d:.6},\"shape\":", .{ p.x, p.y, p.w, p.h });
         try writeJsonStr(w, p.shape);
         if (p.rot != 0) try w.print(",\"rot\":{d:.4}", .{p.rot});
         if (p.pts) |pts| {
             try w.writeAll(",\"poly\":");
             try writePtsJson(w, pts);
         }
-        if (p.drill_x > 0) try w.print(",\"drill\":{d:.3},\"drillX\":{d:.3},\"drillY\":{d:.3}", .{ @max(p.drill_x, p.drill_y), p.drill_x, p.drill_y });
+        if (p.drill_x > 0) try w.print(",\"drill\":{d:.6},\"drillX\":{d:.6},\"drillY\":{d:.6}", .{ @max(p.drill_x, p.drill_y), p.drill_x, p.drill_y });
         if (p.roundrect_ratio) |ratio| try w.print(",\"roundrectRatio\":{d:.4}", .{ratio});
         if (p.mask_margin) |margin| try w.print(",\"maskMargin\":{d:.4}", .{margin});
         if (p.no_paste) try w.writeAll(",\"noPaste\":true");
+        if (p.paste) |windows| {
+            try w.writeAll(",\"paste\":");
+            try std.json.Stringify.value(windows, .{}, w);
+        }
         try w.writeAll("}");
     }
     try w.writeAll("]");
@@ -436,7 +442,7 @@ fn emitFootprintJson(w: anytype, shapes: Shapes, revision: ?u64) HandlerError!vo
     try w.writeAll("],\"circles\":[");
     for (shapes.court_circs.items, 0..) |c, i| {
         if (i != 0) try w.writeAll(",");
-        try w.print("[{d:.3},{d:.3},{d:.3}]", .{ c.cx, c.cy, c.r });
+        try w.print("[{d:.6},{d:.6},{d:.6}]", .{ c.cx, c.cy, c.r });
     }
     try w.writeAll("],\"polys\":[");
     for (shapes.court_polys.items, 0..) |poly, i| {
@@ -463,7 +469,7 @@ fn emitLayerJson(w: anytype, shapes: Shapes, layer: Layer) HandlerError!void {
         if (c.layer != layer) continue;
         if (!first) try w.writeAll(",");
         first = false;
-        try w.print("[{d:.3},{d:.3},{d:.3}]", .{ c.cx, c.cy, c.r });
+        try w.print("[{d:.6},{d:.6},{d:.6}]", .{ c.cx, c.cy, c.r });
     }
     try w.writeAll("],\"rects\":[");
     first = true;
@@ -489,7 +495,7 @@ fn writePtsJson(w: anytype, pts: []const Point) HandlerError!void {
     try w.writeAll("[");
     for (pts, 0..) |pt, i| {
         if (i != 0) try w.writeAll(",");
-        try w.print("[{d:.3},{d:.3}]", .{ pt.x, pt.y });
+        try w.print("[{d:.6},{d:.6}]", .{ pt.x, pt.y });
     }
     try w.writeAll("]");
 }
@@ -813,4 +819,32 @@ test "footprint preview JSON carries a pad's own rotation" {
     // an unrotated pad still emits no `rot` key at all.
     try std.testing.expect(std.mem.indexOf(u8, json, "\"rot\":45.0000") != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, json, "\"rot\":"));
+}
+
+/// Describe unsaved generated source using the same geometry parser as library previews.
+pub fn describeSource(a: std.mem.Allocator, source: []const u8) (HandlerError || parser_mod.ParseError || error{InvalidFootprint})![]const u8 {
+    const nodes = try parser_mod.parse(a, source);
+    if (nodes.len != 1 or !nodes[0].isForm("footprint")) return error.InvalidFootprint;
+    var shapes: Shapes = .{};
+    try collectShapes(a, nodes[0].asList().?[1..], &shapes);
+    var out: std.Io.Writer.Allocating = .init(a);
+    try emitFootprintJson(&out.writer, shapes, null);
+    return out.toOwnedSlice();
+}
+
+// spec: IC package builder - Unsaved preview rejects non footprint source
+test "IC package unsaved preview rejects non footprint source" {
+    try std.testing.expectError(error.InvalidFootprint, describeSource(std.testing.allocator, ""));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.InvalidFootprint, describeSource(arena.allocator(), "(design-block \"x\")"));
+}
+
+// spec: IC package builder - Shared footprint previews retain submicron geometry for precise-editor regeneration
+test "IC package preview preserves precise pad dimensions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try describeSource(arena.allocator(), "(footprint \"fine\" (pad \"1\" smd rect (pos 0.123456 0) (size 0.254 0.650123)))");
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"x\":0.123456") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"h\":0.650123") != null);
 }

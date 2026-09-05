@@ -8933,3 +8933,28 @@ A physical connectivity adapter over tracks, arcs, vias, RF paths and pours.
 Reconciliation only updates counters, including on cancelled candidates; it
 never searches or changes copper. The shared perimeter generator is re-exported
 for routing surfaces. Route-plan cancellation and parity tests exercise it.
+
+## IC package builder
+
+- Concurrent access uses project locks and exact revisions; external edits and existing asset names prevent replacement
+- I/O failure stages all files before replacement and preserves previous library bytes on a failed save
+- Rollback after a staged rename failure
+- Invalid and oversized dimensions, overlapping copper, duplicate numbering, and malformed recipes fail before persistence
+- Shared templates generate dimensioned SMT footprints and analytic STEP solids with stable pad identities
+- Exposed pad stencil windows remain non-electrical geometry and manual fields survive regeneration without moving physical terminals
+- Rejects invalid inputs
+- Rotated and rectangular packages retain numbering, seating height, and independent land sizing across CLI and GUI generation
+- KiCad round trips preserve copper pad count and explicit exposed-pad stencil windows
+- Rejects oversized schema and artwork
+- Empty inputs and malformed encoding fail explicitly; stencil windows preserve absent versus intentionally empty paste
+- Component assignment requires exact pinout compatibility and joins the package save transaction
+- Precise-editor save retains changed fields and catches invalid recipes
+- Unsaved preview rejects non footprint source
+- Step rejects empty assembly and invalid names
+- Gerber stencil windows follow rotated and bottom-side placements without changing copper or mask geometry
+- Paste parsing empty and malformed
+- Shared footprint previews retain submicron geometry for precise-editor regeneration
+- KiCad import rejects stencil openings without a unique supported copper owner
+- completeness-waiver: unauthorized access (the package HTTP endpoints use the existing loopback/auth middleware; CLI uses the invoking user's project access; validated basenames reject traversal)
+- completeness-waiver: panic-free (dimensions and pin counts are bounded before geometry generation; allocations and I/O propagate failures; the fixed-array indexing is covered by all-family and rotation tests)
+- completeness-waiver: integer overflow (each pin-side count is bounded at 128 and each paste grid at 16 before multiplication or subtraction; the oversized-count test exercises rejection)

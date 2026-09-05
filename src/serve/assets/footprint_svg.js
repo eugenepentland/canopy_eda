@@ -146,11 +146,17 @@ window.FP = (function () {
       svg.appendChild(el("circle", { cx: n3(c[0]), cy: n3(c[1]), r: n3(c[2]), fill: "none", stroke: C.court, "stroke-width": "0.05", "stroke-dasharray": "0.2 0.12" }));
     });
 
+    (ct.polys || []).forEach(function(poly) {
+      svg.appendChild(el("polygon",{points:poly.map(function(p){return p.join(',');}).join(' '),fill:'none',stroke:C.court,'stroke-width':.05,'stroke-dasharray':'.2 .12'}));
+    });
     drawLayer(svg, data.fab, C.fab);
     drawLayer(svg, data.silk, C.silk);
 
     (data.pads || []).forEach(function (p) {
       svg.appendChild(padShape(p, { scale: 1 }));
+      if (!p.noPaste) (p.paste || []).forEach(function(v) {
+        svg.appendChild(el("rect",{x:p.x+v.x-v.w/2,y:p.y+v.y-v.h/2,width:v.w,height:v.h,fill:"#b4d8d0",opacity:.8,transform:p.rot?"rotate("+p.rot+" "+p.x+" "+p.y+")":null}));
+      });
       var hole = padHole(p, { scale: 1 });
       if (hole) svg.appendChild(hole);
       var lbl = padLabel(p, 1);

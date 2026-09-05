@@ -1091,3 +1091,12 @@ PCB route guides can bind a stable module-local origin using `scope/@origin`,
 for example `(between-pins "lmx2595/@U1" "22" "lmx2595/@R_RFOUTAM" "2" "F.Cu")`.
 At board root, use `@origin`. Exact reference designators remain supported;
 ambiguous bare aliases produce an unresolved-guide warning.
+
+### IC package builder
+
+`GET /library/package` opens the datasheet-driven SMT package builder;
+`?name=<footprint>` loads a saved recipe. `POST /api/packages/:operation` exposes
+`templates`, `init`, `show`, `preview`, `check`, `save`, and `export` through the
+same service as `netlisp package` and the `package_*` structured tools.
+See [package-builder.md](package-builder.md) for dimensions, recipes, revision
+checks, stencil apertures, component assignment, and CLI examples.

@@ -54,7 +54,7 @@
 8 src/placement/drc.zig|Parties
 8 src/placement/drc.zig|Violation
 8 src/placement/gap_policy.zig|GapOptions
-13 src/placement/geometry.zig|Pad
+14 src/placement/geometry.zig|Pad
 8 src/placement/impedance_rules.zig|Physical
 12 src/placement/net_rules.zig|NetRule
 9 src/placement/net_rules.zig|Rf
@@ -91,8 +91,13 @@
 14 src/review.zig|Summary
 9 src/serve.zig|ServerState
 10 src/serve/digikey.zig|Product
-12 src/serve/library.zig|LibraryRow
+13 src/serve/library.zig|LibraryRow
 14 src/serve/mcp_tools.zig|DesignSummary
+10 src/serve/package_generator.zig|Exposed
+8 src/serve/package_generator.zig|Lands
+17 src/serve/package_generator.zig|Override
+15 src/serve/package_generator.zig|Pad
+21 src/serve/package_generator.zig|Recipe
 27 src/serve/pcb_layout_page.zig|PngRequest
 8 src/serve/pcb_layout_page.zig|SavedZone
 9 src/serve/pcb_layout_page.zig|SolvedRequest

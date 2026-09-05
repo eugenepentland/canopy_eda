@@ -43,7 +43,7 @@
   function padComparable(p) {
     return {id:p.id, type:p.type, shape:p.shape, x:round(p.x), y:round(p.y), w:round(p.w), h:round(p.h),
       drillX:round(p.drillX || 0), drillY:round(p.drillY || 0), roundrectRatio:p.roundrectRatio == null ? null : round(p.roundrectRatio),
-      maskMargin:p.maskMargin == null ? null : round(p.maskMargin), noPaste:!!p.noPaste, poly:p.poly || null};
+      maskMargin:p.maskMargin == null ? null : round(p.maskMargin), noPaste:!!p.noPaste, paste:p.paste||null, poly:p.poly || null};
   }
   function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
   function sourceChanges() {
@@ -82,13 +82,14 @@
       shape:p.shape || 'rect', x:Number(p.x)||0, y:Number(p.y)||0, w:Number(p.w)||1, h:Number(p.h)||1,
       drillX:Number(p.drillX != null ? p.drillX : p.drill)||0, drillY:Number(p.drillY != null ? p.drillY : p.drill)||0,
       roundrectRatio:p.roundrectRatio == null ? null : Number(p.roundrectRatio), maskMargin:p.maskMargin == null ? null : Number(p.maskMargin),
-      noPaste:!!p.noPaste, poly:p.poly ? clone(p.poly) : null };
+      noPaste:!!p.noPaste, paste:p.paste||null, poly:p.poly ? clone(p.poly) : null };
   }
   function serializePad(p) {
     var result = {id:String(p.id), type:p.type, shape:p.shape, x:round(p.x), y:round(p.y), w:round(p.w), h:round(p.h),
       drill_x:round(p.drillX||0), drill_y:round(p.drillY||0), no_paste:!!p.noPaste};
     if (p.roundrectRatio != null) result.roundrect_ratio=round(p.roundrectRatio);
     if (p.maskMargin != null) result.mask_margin=round(p.maskMargin);
+    if (p.paste) result.paste=clone(p.paste);
     if (p.poly) result.poly=clone(p.poly);
     return result;
   }
@@ -162,6 +163,7 @@
     var node=FP.padShape(p,{scale:1,cls:'fp-pad'+(p.type==='npth'?' npth':'')+(isSelected(p._key)?' selected':'')});
     node.setAttribute('data-pad-key',p._key);parent.appendChild(node);
     if(p.drillX>0){var hole=E(p.drillX===p.drillY?'circle':'ellipse',{cx:p.x,cy:p.y,'class':'fp-hole','pointer-events':'none'});if(hole.tagName==='circle')hole.setAttribute('r',p.drillX/2);else{hole.setAttribute('rx',p.drillX/2);hole.setAttribute('ry',p.drillY/2);}parent.appendChild(hole);}
+    (p.noPaste?[]:(p.paste||[])).forEach(function(v){parent.appendChild(E('rect',{x:p.x+v.x-v.w/2,y:p.y+v.y-v.h/2,width:v.w,height:v.h,fill:'#b4d8d0',opacity:.65,'pointer-events':'none'}));});
     var label=FP.padLabel(p,1);if(label){label.setAttribute('class','fp-label');parent.appendChild(label);}
   }
   function render() {
