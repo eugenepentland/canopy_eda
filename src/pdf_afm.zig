@@ -174,6 +174,30 @@ fn decodeAt(bytes: []const u8) Decoded {
     return .{ .cp = cp, .len = n };
 }
 
+// THIRD-PARTY DATA — the two tables below are transcribed from Adobe's Core
+// 14 AFM files (`Helvetica.afm` and `Helvetica-Bold.afm`, AFM 4.1, 1997):
+//
+//   Copyright (c) 1985, 1987, 1989, 1990, 1997 Adobe Systems Incorporated.
+//   All Rights Reserved.
+//
+// Adobe's redistribution notice, reproduced verbatim from `MustRead.html` in
+// that distribution, and not to be modified:
+//
+//   This file and the 14 PostScript(R) AFM files it accompanies may be used,
+//   copied, and distributed for any purpose and without charge, with or
+//   without modification, provided that all copyright notices are retained;
+//   that the AFM files are not distributed without this file; that all
+//   modifications to this file or any of the AFM files are prominently noted
+//   in the modified file(s); and that this paragraph is not modified. Adobe
+//   Systems has no responsibility or obligation to support the use of the AFM
+//   files.
+//
+// Modification, prominently noted as that notice requires: no AFM file is
+// present in this repository. The advance widths were re-indexed from AFM
+// glyph names to WinAnsi codes and written as the two `[256]u16` arrays
+// below; nothing else of the AFM files was taken, and no font program is
+// embedded in any PDF this writer produces. See THIRD_PARTY_NOTICES.md.
+
 /// Adobe AFM advance widths for `Helvetica`, indexed by WinAnsi code
 /// (1/1000 em). Zero marks a code WinAnsi leaves undefined.
 const helvetica_widths = [256]u16{
