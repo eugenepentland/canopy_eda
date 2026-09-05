@@ -1,5 +1,7 @@
 # Netlisp
 
+[![CI](https://github.com/eugenepentland/netlisp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/eugenepentland/netlisp/actions/workflows/ci.yml)
+
 *Schematics as S-expressions, written by an agent, compiled to KiCad.*
 
 Netlisp is a command-line electronic design automation tool. A design is a
