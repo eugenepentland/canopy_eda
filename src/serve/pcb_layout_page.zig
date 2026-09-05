@@ -1,4 +1,5 @@
-//! GET /pcb-layout/:name — interactive force-directed placement preview.
+//! GET /pcb-layout/:name — interactive force-directed placement preview, and
+//! the request-facing half of the PCB editor.
 //!
 //! The server evaluates the design, runs the optimizer, and emits the result
 //! as JSON plus a small client renderer. The board is drawn client-side so
@@ -7,6 +8,21 @@
 //! compare a hand placement against the auto one. A sidebar lists every
 //! component and the net on each pin; hovering cross-highlights, and hovering
 //! a pad (or net chip) reds every pad on that net.
+//!
+//! This module owns what a REQUEST decides: which board and which saved layout
+//! the caller means (`chooseLayout` and the `LayoutSource` ladder), the page
+//! and API route handlers, the sidecar reads and writes behind them, and the
+//! shown-view resolution the rest of the split shares. What it hands off:
+//!
+//!   * `pcb_layout_chrome.zig` — the page's HTML and CSS
+//!   * `pcb_layout_blob.zig`   — the JSON the board renderer reads
+//!   * `pcb_layout_fab.zig`    — fab view, readiness gate, Gerbers, release
+//!   * `pcb_layout_mcp.zig`    — the agent-facing layout-mutation tools
+//!   * `pcb_layout_seeds.zig`  — sub-circuit routing seeds
+//!
+//! Those five take already-resolved inputs and never read a request; the
+//! aliases below re-export the names their callers reach through this module,
+//! so the split is invisible outside the six files.
 
 const std = @import("std");
 const httpz = @import("httpz");
