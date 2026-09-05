@@ -7888,7 +7888,7 @@ is what makes the predicate exact rather than approximately right.
 - The compare_layout_to_starred MCP tool and the layout-match endpoint share one scorer, so both report the same agreement against the starred layout
 - The list_history MCP tool and the history endpoint write one snapshot list through one serializer, so a snapshot with no note reads the same on both
 - The save_pcb_layout MCP tool and the pcb-layouts save endpoint persist the same board, so a layout saved through either surface carries identical poses and copper
-- The designs CLI listing, the designs endpoint and the list_designs MCP tool name the same designs with the same titles, and all three skip a design's sidecar .sexp files
+- The designs CLI listing, the designs endpoint and the list_designs MCP tool name the same designs with the same titles, and all three skip a design's autoloaded sidecar .sexp files
 - The instances CLI subcommand and the list_instances MCP tool emit one payload at one default scope, so a flattened or top-level listing reads the same on both
 - The check CLI subcommand, the erc endpoint and the run_checks MCP tool run one electrical-rule check over one design, so all three report the same violations in the same order
 - The export-kicad-sch CLI subcommand, the kicad-sch endpoint and the export_kicad_sch MCP tool run one exporter, so all three produce the same sheet files byte for byte
