@@ -41,19 +41,33 @@
         .httpz = .{
             .path = "vendor/httpz",
         },
-        // Guardian (code-quality gate) is an unpinned *relative-path* dep: a
-        // sibling guardian-zig checkout at ~/ai/canopy/guardian-zig. The path is
-        // spelled `../../canopy/guardian-zig` (not `../guardian-zig`) so it
-        // normalizes to the SAME dependency key the `ward` dep composes to
-        // (ward → `../canopy/guardian-zig`); otherwise Zig sees guardian-zig as
-        // two modules and fails with "file exists in modules". From the main
-        // checkout this resolves directly; worktrees resolve it via the
-        // `.claude/canopy` symlink. There is no published URL+hash yet, so a
-        // fresh clone must also clone guardian-zig alongside it for `zig build`
-        // to succeed (Guardian gates every build). Repin to a `.url`+`.hash`
-        // once guardian-zig ships a tagged release artifact.
+        // Guardian (code-quality gate, MIT) runs on EVERY build, so this dep is
+        // load-bearing for `zig build`, not optional tooling. Pinned by
+        // `.url`+`.hash` to a tagged release of the public repo
+        // github.com/eugenepentland/guardian-zig, so a fresh clone builds with
+        // nothing beside it: the first build downloads the tarball once (the
+        // only network access the build needs — `zig build --fetch` gets it
+        // ahead of time), then Zig's global cache serves every later build
+        // offline.
+        //
+        // Developing against a LOCAL guardian checkout, no zon edit needed:
+        //
+        //   zig build --system <dir>
+        //
+        // where <dir> holds one entry per fetched package named exactly as its
+        // hash, e.g.
+        // `ln -s ~/ai/canopy/guardian-zig <dir>/guardian-0.2.0-<hash>`.
+        // `--system` resolves packages by directory name only — no hash
+        // verification — so the link may point at a dirty working tree.
+        // Guardian is the only URL dep here; everything else is vendored or a
+        // path dep, so that one entry is the whole override. Bump the pin by
+        // tagging guardian-zig and re-running
+        // `zig fetch --save=guardian <tarball-url>` (with this entry deleted
+        // first — `--save` over an existing entry rewrites the value in place
+        // and drops the hash).
         .guardian = .{
-            .path = "../../canopy/guardian-zig",
+            .url = "https://github.com/eugenepentland/guardian-zig/archive/refs/tags/v0.2.0.tar.gz",
+            .hash = "guardian-0.2.0-Qv8iuw80OwBJQXkgomi45M1Us102SeTJImRzWsQ7Htqf",
         },
         // Latest upstream main at migration time, vendored so the small Zig
         // master compatibility delta is durable and reviewed with this tree.
