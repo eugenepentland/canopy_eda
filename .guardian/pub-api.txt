@@ -3501,10 +3501,13 @@ src/placement/router.zig::Arc value
 src/placement/router.zig::CleanupBoard struct_
 src/placement/router.zig::CoreOutcome union_
 src/placement/router.zig::CoupledRun struct_
+src/placement/router.zig::CtxResult union_
 src/placement/router.zig::Curves struct_
+src/placement/router.zig::DijkstraHit struct_
 src/placement/router.zig::DirectPath struct_
 src/placement/router.zig::DirectRun struct_
 src/placement/router.zig::EscalateRun struct_
+src/placement/router.zig::FineRescueRun struct_
 src/placement/router.zig::FinishedRoute struct_
 src/placement/router.zig::FinishedRun struct_
 src/placement/router.zig::FoldedNet value
@@ -3519,6 +3522,7 @@ src/placement/router.zig::GapSink value
 src/placement/router.zig::GapWindow value
 src/placement/router.zig::Grid value
 src/placement/router.zig::LoopRouter struct_
+src/placement/router.zig::MazeEnds struct_
 src/placement/router.zig::NetFold value
 src/placement/router.zig::NetPt value
 src/placement/router.zig::NetRouted struct_
@@ -3536,8 +3540,10 @@ src/placement/router.zig::RouteParams value
 src/placement/router.zig::RouteResult value
 src/placement/router.zig::RouteRun value
 src/placement/router.zig::ShapeAsk struct_
+src/placement/router.zig::ShapeRefusal enum_
 src/placement/router.zig::ShapeTier value
 src/placement/router.zig::SharpBend value
+src/placement/router.zig::StitchTarget enum_
 src/placement/router.zig::TautProbe struct_
 src/placement/router.zig::TerminalVia value
 src/placement/router.zig::TimelineCapture enum_
@@ -3547,12 +3553,15 @@ src/placement/router.zig::VisionInput struct_
 src/placement/router.zig::VisionMask struct_
 src/placement/router.zig::adaptivePowerWidth | fn adaptivePowerWidth(self: CleanupBoard, net_i: usize) ?f64
 src/placement/router.zig::addGroundPadStitches | fn addGroundPadStitches( arena: std.mem.Allocator, placement: optimizer.Placement, routed: RouteResult, ) std.mem.Allocator.Error!RouteResult
+src/placement/router.zig::anyDeclaredResolution | fn anyDeclaredResolution(placement: optimizer.Placement) bool
 src/placement/router.zig::arena | fn arena(self: CleanupBoard) std.mem.Allocator
 src/placement/router.zig::beginNet | fn beginNet(self: CleanupBoard, net_i: usize) void
 src/placement/router.zig::bend_cost_mult value
 src/placement/router.zig::blocked value
 src/placement/router.zig::buildObstacles value
 src/placement/router.zig::buildPairViaBan | fn buildPairViaBan( run: CoupledRun, at: []const [2]f64, radius: f64, ) std.mem.Allocator.Error![]const bool
+src/placement/router.zig::buildPerimeterTrackMask | fn buildPerimeterTrackMask( arena: std.mem.Allocator, placement: optimizer.Placement, grid: Grid, track_width: f64, ) std.mem.Allocator.Error!?[]const bool
+src/placement/router.zig::buildRouteCtx | fn buildRouteCtx( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, selected_nets: []const bool, requested_grid_scale: f64, ) std.mem.Allocator.Error!CtxResult
 src/placement/router.zig::canonicalizeTraceJunctions | fn canonicalizeTraceJunctions( arena: std.mem.Allocator, tracks: *std.ArrayList(Track), mutable: *std.ArrayList(bool), vias: []const Via, ) std.mem.Allocator.Error!void
 src/placement/router.zig::cleanupBoard | fn cleanupBoard( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, options: route_policy.Options, copper: struct { tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via) }, ) std.mem.Allocator.Error!?CleanupBoard
 src/placement/router.zig::clear | fn clear(self: OctiJoin, a: [2]f64, b: [2]f64) bool
@@ -3563,20 +3572,24 @@ src/placement/router.zig::clearMaskPockets | fn clearMaskPockets( run: CoupledRu
 src/placement/router.zig::clearSearchLimit | fn clearSearchLimit(ctx: *Ctx, net_i: usize) void
 src/placement/router.zig::clearWidth | fn clearWidth(self: TautProbe, layer: u8, a: [2]f64, b: [2]f64, width: f64) bool
 src/placement/router.zig::clearance_eps value
-src/placement/router.zig::closeGaps | fn closeGaps( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, board: GapBoard, gaps: []const Gap, opts: GapOptions, ) std.mem.Allocator.Error![]const ?GapPath
+src/placement/router.zig::closeGaps value
 src/placement/router.zig::collectRippable | fn collectRippable( scratch: std.mem.Allocator, placement: optimizer.Placement, routable: []const RipNet, blockers: []const i32, fail_pri: u64, ) std.mem.Allocator.Error![]usize
 src/placement/router.zig::copperCompacted value
 src/placement/router.zig::detectBlockers | fn detectBlockers( ctx: *Ctx, placement: optimizer.Placement, idx_of: *std.StringHashMapUnmanaged(usize), net_i: usize, scratch: std.mem.Allocator, ) std.mem.Allocator.Error![]i32
+src/placement/router.zig::dijkstra | fn dijkstra( ctx: *Ctx, net: i32, ends: MazeEnds, tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via), ) std.mem.Allocator.Error!?DijkstraHit
 src/placement/router.zig::direct | fn direct(self: CoupledRun, net: usize) DirectRun
 src/placement/router.zig::directViaClear | fn directViaClear(run: DirectRun, pos: [2]f64) bool
 src/placement/router.zig::emitDoglegSegment | fn emitDoglegSegment( path: DirectPath, a: [2]f64, b: [2]f64, tracks: *std.ArrayList(Track), ) std.mem.Allocator.Error!void
+src/placement/router.zig::emitShapeRoute | fn emitShapeRoute(run: DirectRun, found: cdt_layers.Route, stamp: bool) std.mem.Allocator.Error!bool
 src/placement/router.zig::empty_cell value
 src/placement/router.zig::enabled | fn enabled(self: CleanupBoard, net_i: usize) bool
 src/placement/router.zig::escapeActive | fn escapeActive(ctx: *const Ctx) bool
+src/placement/router.zig::fineRescueEligible | fn fineRescueEligible(run: FineRescueRun, net_i: usize) bool
 src/placement/router.zig::finish | fn finish(self: RouteCore) std.mem.Allocator.Error!RouteRun
 src/placement/router.zig::finishBatch | fn finishBatch(core: RouteCore) std.mem.Allocator.Error!RouteRun
 src/placement/router.zig::foldNetBranches | fn foldNetBranches(run: NetFold) std.mem.Allocator.Error!FoldedNet
 src/placement/router.zig::gap_grid_divisor value
+src/placement/router.zig::gateStub | fn gateStub( ctx: *Ctx, net: i32, pt: NetPt, key: usize, placed_vias: []const Via, tracks: *std.ArrayList(Track), ) std.mem.Allocator.Error!void
 src/placement/router.zig::glossFinishedTracks | fn glossFinishedTracks( arena: std.mem.Allocator, placement: optimizer.Placement, tracks: *std.ArrayList(Track), mutable: *std.ArrayList(bool), vias: []const Via, ) std.mem.Allocator.Error!void
 src/placement/router.zig::groundVias | fn groundVias(arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams) std.mem.Allocator.Error![]Via
 src/placement/router.zig::init | fn init( arena: std.mem.Allocator, parts: []const Part, nets: []const FlatNet, idx_of: *std.StringHashMapUnmanaged(usize), params: RouteParams, ) std.mem.Allocator.Error!LoopRouter
@@ -3586,12 +3599,14 @@ src/placement/router.zig::layerInMask value
 src/placement/router.zig::legLen | fn legLen(self: *LoopRouter, cap_c: [2]f64, hub_c: [2]f64, net_id: i32) std.mem.Allocator.Error!?f64
 src/placement/router.zig::liveCurves | fn liveCurves(arena: std.mem.Allocator, ctx: *const Ctx, net_count: usize) std.mem.Allocator.Error!Curves
 src/placement/router.zig::localSupplyBonds value
+src/placement/router.zig::markForbiddenDisc | fn markForbiddenDisc(grid: Grid, mask: []bool, x: f64, y: f64, radius: f64) void
 src/placement/router.zig::netEnabled value
 src/placement/router.zig::netHasPlane value
 src/placement/router.zig::netLayerAuthored value
 src/placement/router.zig::netPoints value
 src/placement/router.zig::netPourCovers value
 src/placement/router.zig::netPourLayers value
+src/placement/router.zig::padGateways | fn padGateways(ctx: *Ctx, tracks: []const Track, vias: []const Via, pt: NetPt, net: i32, out: *std.ArrayList(usize)) std.mem.Allocator.Error!void
 src/placement/router.zig::pairCouplable | fn pairCouplable(ctx: *const Ctx, pair: diff_pairs.DiffPair) bool
 src/placement/router.zig::pairOf | fn pairOf(ctx: *const Ctx, pairs: []const diff_pairs.DiffPair, p_net: usize) ?diff_pairs.DiffPair
 src/placement/router.zig::path | fn path(self: DirectRun, layer: u8) DirectPath
@@ -3627,14 +3642,22 @@ src/placement/router.zig::searchWasLimited | fn searchWasLimited(ctx: *const Ctx
 src/placement/router.zig::seg | fn seg(self: OctiJoin, a: [2]f64, b: [2]f64) std.mem.Allocator.Error!void
 src/placement/router.zig::setNetParams value
 src/placement/router.zig::setNetRoutePolicy value
+src/placement/router.zig::shapeFirst | fn shapeFirst(opts: GapOptions, from: NetPt, to: NetPt) bool
 src/placement/router.zig::shapeInput | fn shapeInput(run: DirectRun, ask: ShapeAsk) std.mem.Allocator.Error!?cdt_layers.Input
+src/placement/router.zig::shapeRefusal | fn shapeRefusal(run: DirectRun, found: cdt_layers.Route) ShapeRefusal
+src/placement/router.zig::shape_first_hop_mm value
 src/placement/router.zig::shortName value
 src/placement/router.zig::shrinkCopper | fn shrinkCopper(t: *std.ArrayList(Track), v: *std.ArrayList(Via), tm: usize, vm: usize) void
+src/placement/router.zig::softProbe | fn softProbe(ctx: *Ctx, net: i32, src: NetPt, goal: NetPt, crossed: *std.AutoHashMapUnmanaged(i32, void), scratch: std.mem.Allocator) std.mem.Allocator.Error!void
+src/placement/router.zig::stitchTarget | fn stitchTarget(state: *GapState, pt: NetPt, net: i32, reach: f64) StitchTarget
 src/placement/router.zig::tautProbe | fn tautProbe(self: CleanupBoard, net: i32) TautProbe
 src/placement/router.zig::trackWidth | fn trackWidth(self: CleanupBoard) f64
+src/placement/router.zig::tryDirectPair | fn tryDirectPair(run: DirectRun, from: NetPt, to: NetPt) std.mem.Allocator.Error!bool
 src/placement/router.zig::tryMazeTerminalTree | fn tryMazeTerminalTree( ctx: *Ctx, net: i32, pts: []const NetPt, tracks: *std.ArrayList(Track), vias: *std.ArrayList(Via), partial_after: usize, ) std.mem.Allocator.Error!bool
+src/placement/router.zig::tryTwoViaSeededMaze | fn tryTwoViaSeededMaze(run: DirectRun, from: NetPt, to: NetPt) std.mem.Allocator.Error!bool
 src/placement/router.zig::visionMask | fn visionMask( arena: std.mem.Allocator, in: VisionInput, ) std.mem.Allocator.Error!?VisionMask
 src/placement/router.zig::waveOrdered | fn waveOrdered(core: *const RouteCore, net_i: usize) bool
+src/placement/router.zig::windowCtx | fn windowCtx( master: *const Ctx, placement: optimizer.Placement, rect: fine_window.WindowRect, g: f64, ) std.mem.Allocator.Error!?Ctx
 src/placement/router_ctx.zig::Ctx struct_
 src/placement/router_ctx.zig::Grid value
 src/placement/router_ctx.zig::KeepStamp struct_
@@ -3727,6 +3750,16 @@ src/placement/router_ctx.zig::zoneBlocksPoint | fn zoneBlocksPoint( ctx: *const 
 src/placement/router_ctx.zig::zoneBounds | fn zoneBounds(poly: []const [2]f64) optimizer.BoardRect
 src/placement/router_ctx.zig::zoneClipped | fn zoneClipped(ctx: *const Ctx, zone: route_policy.ExistingZone, x: f64, y: f64) bool
 src/placement/router_ctx.zig::zonePoured | fn zonePoured(ctx: *const Ctx, zone: route_policy.ExistingZone, x: f64, y: f64) bool
+src/placement/router_gap_close.zig::GapState struct_
+src/placement/router_gap_close.zig::buildGapCtx | fn buildGapCtx( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, divisor: f64, window: ?GapWindow, ) std.mem.Allocator.Error!CtxResult
+src/placement/router_gap_close.zig::closeGaps | fn closeGaps( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, board: GapBoard, gaps: []const Gap, opts: GapOptions, ) std.mem.Allocator.Error![]const ?GapPath
+src/placement/router_gap_close.zig::exactGapRescue | fn exactGapRescue( state: *GapState, live: GapBoard, from: NetPt, to: NetPt, net: i32, ) std.mem.Allocator.Error!?GapPath
+src/placement/router_gap_close.zig::gapLayers | fn gapLayers(ctx: *const Ctx, net: i32) u64
+src/placement/router_gap_close.zig::gap_max_expansions value
+src/placement/router_gap_close.zig::markTerminalViaBan | fn markTerminalViaBan(state: *GapState, gap: Gap, net: i32) void
+src/placement/router_gap_close.zig::ownPadBox | fn ownPadBox(ctx: *Ctx, pt: NetPt, net: i32) ?Rect
+src/placement/router_gap_close.zig::scaledGapCeiling | fn scaledGapCeiling(base: usize, divisor: f64) usize
+src/placement/router_gap_close.zig::stampGapBoard | fn stampGapBoard(ctx: *Ctx, live: GapBoard, net: i32) void
 src/placement/router_support.zig::RouteParams struct_
 src/placement/router_support.zig::anyBottomPads | fn anyBottomPads(obstacles: anytype) bool
 src/placement/router_support.zig::padGatewayWidth | fn padGatewayWidth(params: RouteParams, distance: f64) f64
