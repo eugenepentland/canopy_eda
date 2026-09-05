@@ -12,6 +12,7 @@ const env = @import("../eval/env.zig");
 const export_kicad = @import("../export_kicad.zig");
 const optimizer = @import("../placement/optimizer.zig");
 const board_shape = @import("../board_shape.zig");
+const board_layers = @import("../board_layers.zig");
 const route_policy = @import("../placement/route_policy.zig");
 const router = @import("../placement/router.zig");
 const route_plan = @import("route_plan.zig");
@@ -19,6 +20,7 @@ const pad_neck_shape = @import("../pad_neck_shape.zig");
 const seed_drc = @import("../subcircuit_seed_drc.zig");
 const clock = @import("../infra/clock.zig");
 const drc = @import("../placement/drc.zig");
+const fab_readiness = @import("../fab_readiness.zig");
 
 /// One parent-indexed track produced by an isolated sub-circuit pass.
 pub const SeedTrack = struct { copper: route_policy.ExistingTrack, net: usize };
@@ -445,14 +447,14 @@ fn preferCommonTerminalSurface(
             policies[ni].max_vias = 0;
             continue;
         }
-        const layer_count = @min(@as(u8, 64), placement.rules.copper_layers);
-        const board_mask = if (layer_count == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(layer_count)) - 1;
-        const alternate = board_mask & ~surface_mask;
-        if (alternate == 0) continue;
-        const mask = @as(u64, 1) << @intCast(63 - @clz(alternate));
+        // Outer faces are routing indices 0/1 on every stack. Physical
+        // copper counts include planes and cannot index the routing lattice.
+        const opposite: board_layers.SignalIndex = if (surface.? == board_layers.SignalIndex.top.int()) .bottom else .top;
+        const mask = @as(u64, 1) << opposite.bit().?;
+        if (policies[ni].allowed_layers != 0 and policies[ni].allowed_layers & mask == 0) continue;
         policies[ni].allowed_layers = mask;
         policies[ni].preferred_layers = mask;
-        policies[ni].max_vias = 2;
+        policies[ni].max_vias = if (policies[ni].max_vias) |limit| @min(limit, 2) else 2;
     }
     out.net = policies;
     return out;
@@ -649,6 +651,28 @@ fn appendSuccessfulCopper(
         out.nets[ni] = true;
         try appendVia(out.alloc, out.vias, via);
     }
+}
+
+/// A stopped router may have skipped its ordinary completion gate. Harvest
+/// only oracle-complete signal trees; the assembled-board seed DRC still
+/// validates their geometry before they can become frozen source copper.
+fn appendLocalSignals(
+    out: CopperOutput,
+    routed: router.RouteResult,
+    placement: optimizer.Placement,
+    selected: []const bool,
+    options: route_policy.Options,
+) std.mem.Allocator.Error!void {
+    var checked = routed;
+    if (routed.cancelled) {
+        const tally = try fab_readiness.routableTally(out.alloc, placement, .{
+            .tracks = routed.tracks,
+            .vias = routed.vias,
+            .zones = try route_plan.retainedZones(out.alloc, placement, options),
+        });
+        checked.failed = tally.open;
+    }
+    try appendSuccessfulCopper(out, checked, placement, selected);
 }
 
 fn appendTwoTerminalClosures(
@@ -1482,13 +1506,13 @@ pub fn routeAllClassified(
                     vias.items[bond_via_mark..],
                 ),
             );
+            const copper_out = CopperOutput{ .alloc = alloc, .nets = nets, .tracks = &tracks, .vias = &vias };
+            try appendLocalSignals(copper_out, routed, plan_view, selected, sub_base);
             if (routed.cancelled and stopped(sub_base)) {
                 timed_out += 1;
                 try progress.emit(.subcircuit_failed, sub.name, attempted, block.sub_blocks.len);
                 continue;
             }
-            const copper_out = CopperOutput{ .alloc = alloc, .nets = nets, .tracks = &tracks, .vias = &vias };
-            try appendSuccessfulCopper(copper_out, routed, plan_view, selected);
 
             // Retry only primary failures in the standalone physical view,
             // then offer the reordered result to the full-board DRC below.
@@ -1591,6 +1615,121 @@ pub fn regressed(
 }
 
 const testing = std.testing;
+
+// spec: serve/subcircuit-route - a timed-out local pass retains only oracle-complete selected signal trees for board-level DRC acceptance
+test "hierarchical timeout preserves complete signals without trusting attempt counts" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const Pad = std.meta.Child(@FieldType(optimizer.Part, "pads"));
+    const pads = [_]Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.8, .h = 0.8 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "m/A", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false },
+        .{ .ref_des = "m/B", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 4 },
+        .{ .ref_des = "m/C", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .y = 3 },
+        .{ .ref_des = "m/D", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 4, .y = 3 },
+    };
+    const closed_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "m/A", .pin = "1" }, .{ .ref_des = "m/B", .pin = "1" } };
+    const open_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "m/C", .pin = "1" }, .{ .ref_des = "m/D", .pin = "1" } };
+    const nets = [_]optimizer.FlatNet{ .{ .name = "CLOSED", .pins = &closed_pins }, .{ .name = "OPEN", .pins = &open_pins } };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -1,
+        .miny = -1,
+        .maxx = 5,
+        .maxy = 4,
+        .generated = false,
+        .rules = .{ .copper_layers = 2, .plane_nets = &.{} },
+    };
+    const copper = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 4, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 0, .y1 = 3, .x2 = 1, .y2 = 3, .layer = 0, .width = 0.2, .net = 1 },
+    };
+    // The cancelled raw result claims OPEN and calls CLOSED failed. Only the
+    // actual copper may decide what survives, not these stale attempt counts.
+    const partial = router.RouteResult{ .tracks = &copper, .vias = &.{}, .routed = 1, .total = 2, .failed = &.{"CLOSED"}, .cancelled = true };
+    var tracks: std.ArrayList(SeedTrack) = .empty;
+    var vias: std.ArrayList(SeedVia) = .empty;
+    var emitted = [_]bool{ false, false };
+    const out = CopperOutput{ .alloc = alloc, .tracks = &tracks, .vias = &vias, .nets = &emitted };
+    try appendLocalSignals(out, partial, placement, &.{ true, true }, .{});
+    try testing.expectEqual(@as(usize, 1), tracks.items.len);
+    try testing.expect(emitted[0] and !emitted[1]);
+    var rejected = [_]bool{ false, false };
+    try seed_drc.reject(alloc, .{ .placement = placement, .params = router.RouteParams{}, .options = route_policy.Options{}, .rejected = &rejected, .tracks = tracks.items, .vias = vias.items });
+    try testing.expect(!rejected[0]);
+
+    tracks.clearRetainingCapacity();
+    @memset(&emitted, false);
+    try appendLocalSignals(out, partial, placement, &.{ false, true }, .{});
+    try testing.expectEqual(@as(usize, 0), tracks.items.len);
+}
+
+fn setRecoverySide(parts: []optimizer.Part, side: optimizer.Side) void {
+    for (parts) |*part| part.side = side;
+}
+
+// spec: serve/subcircuit-route - ordinary local recovery crosses onto the opposite routable outer face on a six-layer plane stack and preserves hard layer and via limits
+test "hierarchical recovery uses the opposite routable face through a surface barrier" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const Pad = std.meta.Child(@FieldType(optimizer.Part, "pads"));
+    const pads = [_]Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.8, .h = 0.8 }};
+    const wall = [_]Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1, .h = 8 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "A", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false },
+        .{ .ref_des = "B", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 8 },
+        .{ .ref_des = "WALL", .kind = .hub, .hw = 0.5, .hh = 4, .pads = &wall, .fallback = false, .x = 4 },
+    };
+    const pins = [_]export_kicad.FlatPin{ .{ .ref_des = "A", .pin = "1" }, .{ .ref_des = "B", .pin = "1" } };
+    const nets = [_]optimizer.FlatNet{.{ .name = "SIGNAL", .pins = &pins }};
+    const planes = [_]optimizer.PlaneAt{ .{ .index = 2, .net = "GND" }, .{ .index = 5, .net = "GND" } };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 10,
+        .maxy = 2,
+        .generated = false,
+        .board_rect = .{ .minx = -2, .miny = -2, .w = 12, .h = 4 },
+        .rules = .{ .copper_layers = 6, .plane_nets = &.{"GND"}, .planes = .{ .declared = &planes } },
+    };
+    for ([_]optimizer.Side{ .top, .bottom }) |side| {
+        setRecoverySide(&parts, side);
+        const options = try preferCommonTerminalSurface(alloc, placement, &.{true}, .{});
+        const opposite: u8 = if (side == .top) 1 else 0;
+        try testing.expectEqual(@as(u64, 1) << @intCast(opposite), options.net[0].allowed_layers);
+        const routed = try router.routeWithOptions(alloc, placement, .{}, options);
+        try testing.expectEqual(@as(usize, 0), routed.failed.len);
+        try testing.expect(routed.vias.len > 0);
+        var crossed = false;
+        for (routed.tracks) |track| crossed = crossed or track.layer == opposite;
+        try testing.expect(crossed);
+        const tally = try fab_readiness.routableTally(alloc, placement, .{ .tracks = routed.tracks, .vias = routed.vias });
+        try testing.expectEqual(@as(usize, 1), tally.routed);
+    }
+    setRecoverySide(&parts, .top);
+    const surface_only = [_]route_policy.NetPolicy{.{ .allowed_layers = 1, .max_vias = 0 }};
+    const constrained = try preferCommonTerminalSurface(alloc, placement, &.{true}, .{ .net = &surface_only });
+    try testing.expectEqual(@as(u64, 1), constrained.net[0].allowed_layers);
+    try testing.expectEqual(@as(?u16, 0), constrained.net[0].max_vias);
+    const one_via = [_]route_policy.NetPolicy{.{ .allowed_layers = 3, .max_vias = 1 }};
+    const limited = try preferCommonTerminalSurface(alloc, placement, &.{true}, .{ .net = &one_via });
+    try testing.expectEqual(@as(?u16, 1), limited.net[0].max_vias);
+}
 
 // spec: serve/subcircuit-route - a sub-circuit routing view keeps every board component as an obstacle, exposes only its own net terminals, and uses local bounds
 test "isolated sub-circuit view retains foreign physical obstacles" {

@@ -682,3 +682,8 @@ matters when the person re-recording is the author of the change.
 ## 2026-09-05 · codex · resolve Guardian contract findings
 - **friction:** New test-bearing modules require both the explicit import bridge in `src/test_root.zig` and the filters in `src/test_shards.zig`; two focused runs initially selected no named tests. A scaffold command that adds both entries would remove these retries.
 - **wish:** The sidecar lock-order tests match literal function-call spellings, and the shard smoke test asserts fixed array indexes. Replacing permissive reads with strict reads required three spelling updates; inserting new shard filters before the existing entries failed unrelated assertions. Prefer declaration-aware lock checks and membership assertions so these tests preserve their guarantees through routine refactoring.
+
+## 2026-09-05 · codex · local autorouter completion fixes
+- **friction:** `bench-route` reports aggregate local timeouts and rejected seed nets, but no per-subcircuit names, accepted local connectivity, or rejection reasons. The Barracuda/LMX2595 audit therefore required tracing three routing modules to distinguish timeout loss from board DRC rejection; its read-only `route_experiment` sibling bypasses hierarchical seeding and cannot isolate that phase.
+- **idea:** Add a read-only local-phase benchmark mode with per-subcircuit time, completed local nets, and fresh/saved seed rejection reasons so a module-versus-board discrepancy can be reproduced directly.
+- **status:** open

@@ -2313,9 +2313,8 @@ fn appendModuleSeedCopper(
         const supply = ni < ctx.supply.len and ctx.supply[ni];
         if (supply and !subcircuit_route.savedSupplyFallbackAllowed(ctx.placement, ctx.options, slug, ni)) continue;
         if (!supply and ctx.placement.rules.carriesPlane(ctx.placement.nets[ni].name)) continue;
-        // A fresh isolated route is authoritative for this net. The saved
-        // module snapshot remains a fallback only when the local autorouter
-        // emitted no copper for it.
+        // Accepted fresh copper is authoritative. A rejected local candidate
+        // must leave this saved-module alternative available.
         if (!needsSavedSeedFallback(ctx.acc.isolated, ni)) continue;
         ctx.acc.candidate[ni] = true;
         ctx.acc.stats.copper.candidate_tracks += 1;
@@ -2392,15 +2391,99 @@ fn appendSubcircuitCandidate(
     try appendModuleSeedCopper(ctx, sb.name, seeds, xf);
 }
 
-fn rejectSeedViaBudgets(options: route_policy.Options, acc: *SeedAccumulator) void {
-    for (acc.rejected, 0..) |_, ni| {
-        if (ni >= options.net.len or options.net[ni].max_vias == null) continue;
-        var count: usize = 0;
-        for (acc.vias.items) |item| if (item.net == ni) {
-            count += 1;
-        };
-        if (count > options.net[ni].max_vias.?) acc.rejected[ni] = true;
+fn validateSeedCandidates(ctx: SeedContext) std.mem.Allocator.Error!void {
+    try subcircuit_seed_drc.reject(ctx.alloc, .{
+        .placement = ctx.placement,
+        .params = ctx.params,
+        .options = ctx.options,
+        .rejected = ctx.acc.rejected,
+        .tracks = ctx.acc.tracks.items,
+        .vias = ctx.acc.vias.items,
+        .track_list = &ctx.acc.tracks,
+        .via_list = &ctx.acc.vias,
+        .candidate = ctx.acc.candidate,
+    });
+}
+
+// spec: serve/subcircuit-route - saved module copper can replace a rejected fresh candidate but cannot supersede or collide with accepted fresh copper
+test "hierarchical saved fallback follows fresh DRC acceptance" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.8, .h = 0.8 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "m/A", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false },
+        .{ .ref_des = "m/B", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 4 },
+        .{ .ref_des = "m/C", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .y = 3 },
+        .{ .ref_des = "m/D", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 4, .y = 3 },
+    };
+    const a_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "m/A", .pin = "1" }, .{ .ref_des = "m/B", .pin = "1" } };
+    const b_pins = [_]export_kicad.FlatPin{ .{ .ref_des = "m/C", .pin = "1" }, .{ .ref_des = "m/D", .pin = "1" } };
+    const nets = [_]optimizer.FlatNet{ .{ .name = "m/FIRST", .pins = &a_pins }, .{ .name = "m/SECOND", .pins = &b_pins } };
+    var instances: [4]export_kicad.FlatInstance = undefined;
+    var poses = std.StringHashMapUnmanaged(SyncPose).empty;
+    var pin_nets: [4]SubPinNet = undefined;
+    for (parts, 0..) |part, i| {
+        const origin = part.ref_des[2..];
+        instances[i] = .{ .ref_des = part.ref_des, .origin_key = origin, .component = "pad", .value = "", .footprint = "", .properties = &.{}, .uuid = "" };
+        try poses.put(alloc, origin, .{ .x = part.x, .y = part.y, .rot = 0 });
+        pin_nets[i] = .{ .net = if (i < 2) "FIRST" else "SECOND", .origin_key = origin, .pad = "1" };
     }
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &instances,
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -1,
+        .miny = -1,
+        .maxx = 5,
+        .maxy = 4,
+        .generated = false,
+        .rules = .{ .copper_layers = 2, .plane_nets = &.{} },
+    };
+    var rejected = [_]bool{ false, false };
+    var candidate = [_]bool{ true, true };
+    var acc = SeedAccumulator{ .rejected = &rejected, .candidate = &candidate, .isolated = &.{ true, true }, .supply = &.{ false, false } };
+    try acc.tracks.appendSlice(alloc, &.{
+        .{ .net = 0, .copper = .{ .x1 = 0, .y1 = 0, .x2 = 4, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 } },
+        .{ .net = 1, .copper = .{ .x1 = 0, .y1 = 3, .x2 = 2, .y2 = 0, .layer = 0, .width = 0.2, .net = 1 } },
+        .{ .net = 1, .copper = .{ .x1 = 2, .y1 = 0, .x2 = 4, .y2 = 3, .layer = 0, .width = 0.2, .net = 1 } },
+    });
+    var ctx = SeedContext{ .alloc = alloc, .placement = placement, .params = .{}, .options = .{}, .supply = acc.supply, .acc = &acc };
+    try validateSeedCandidates(ctx);
+    try std.testing.expect(!rejected[0] and rejected[1]);
+    acc.isolated = try subcircuit_seed_drc.retainAccepted(SeedAccumulator, alloc, &acc);
+    try std.testing.expect(acc.isolated[0] and !acc.isolated[1]);
+    try std.testing.expectEqual(@as(usize, 1), acc.tracks.items.len);
+    // Without a fallback, the discarded fresh candidate must still report as
+    // rejected, not as an accepted net with no copper.
+    try subcircuit_seed_drc.rejectEmpty(SeedAccumulator, alloc, &acc);
+    try std.testing.expect(rejected[1]);
+    rejected[1] = false;
+    const saved = [_]SavedTrack{
+        .{ .x1 = 0, .y1 = 0, .x2 = 4, .y2 = 0, .l = 0, .w = 0.4, .net = "FIRST" },
+        .{ .x1 = 0, .y1 = 3, .x2 = 4, .y2 = 3, .l = 0, .w = 0.2, .net = "SECOND" },
+    };
+    const seeds = SubBlockSeeds{ .map = poses, .layout_name = "saved", .starred = true, .pin_nets = &pin_nets, .routes = .{ .tracks = &saved, .vias = &.{} } };
+    try appendModuleSeedCopper(&ctx, "m", seeds, .{});
+    try validateSeedCandidates(ctx);
+    try subcircuit_seed_drc.rejectEmpty(SeedAccumulator, alloc, &acc);
+    try std.testing.expect(!rejected[0] and !rejected[1]);
+    try std.testing.expectEqual(@as(usize, 2), acc.tracks.items.len);
+    try std.testing.expectEqual(@as(f64, 0.2), acc.tracks.items[0].copper.width);
+    var options = route_policy.Options{};
+    try mergeAcceptedSeeds(alloc, &options, &acc);
+    const retained = try route_plan.retainedCopper(alloc, options, &.{});
+    const tally = try fab_readiness.routableTally(alloc, placement, retained);
+    try std.testing.expectEqual(@as(usize, 2), tally.routed);
+
+    // A conflicting fallback is refused without evicting the fresh survivor.
+    acc.tracks.items[1].copper.y2 = 0;
+    try validateSeedCandidates(ctx);
+    try std.testing.expect(!rejected[0] and rejected[1]);
 }
 
 fn sameSeedTrack(a: route_policy.ExistingTrack, b: route_policy.ExistingTrack) bool {
@@ -2457,7 +2540,7 @@ fn mergeAcceptedSeeds(
 }
 
 /// Route every sub-circuit first in a component-only view, then add compatible
-/// starred module copper only for nets the isolated router could not emit. The
+/// starred module copper only for nets without accepted fresh local copper. The
 /// assembled board's rules and DRC are authoritative: disallowed layers / via
 /// budgets reject a net, and a board DRC error drops that net's local copper
 /// before the global maze sees it.
@@ -2495,19 +2578,16 @@ pub fn addSubcircuitRouteSeeds(
     acc.stats.phase.timed_out_subcircuits = local.phase.timed_out_subcircuits;
     acc.stats.phase.deferred_supply_nets = local.phase.deferred_supply_nets;
     var ctx = SeedContext{ .alloc = alloc, .placement = placement, .params = params, .options = options.*, .supply = supply, .acc = &acc };
+    try validateSeedCandidates(ctx);
+    acc.isolated = try subcircuit_seed_drc.retainAccepted(SeedAccumulator, alloc, &acc);
+    const fresh_tracks = acc.tracks.items.len;
+    const fresh_vias = acc.vias.items.len;
     for (block.sub_blocks) |sb| try appendSubcircuitCandidate(&ctx, project_dir, sb);
-    rejectSeedViaBudgets(options.*, &acc);
-    try subcircuit_seed_drc.reject(alloc, .{
-        .placement = placement,
-        .params = params,
-        .options = options.*,
-        .rejected = acc.rejected,
-        .tracks = acc.tracks.items,
-        .vias = acc.vias.items,
-        .track_list = &acc.tracks,
-        .via_list = &acc.vias,
-        .candidate = candidate,
-    });
+    // Fresh survivors precede saved alternatives, preserving their channels
+    // when a fallback collides. Avoid repeating the gate with no added copper.
+    if (acc.tracks.items.len != fresh_tracks or acc.vias.items.len != fresh_vias)
+        try validateSeedCandidates(ctx);
+    try subcircuit_seed_drc.rejectEmpty(SeedAccumulator, alloc, &acc);
     for (local.complete_planes, 0..) |complete, ni| {
         if (complete and rejected[ni]) acc.stats.phase.deferred_supply_nets += 1;
     }

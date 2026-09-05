@@ -678,6 +678,9 @@ copper for the single global pass.
 - a local sub-circuit uses the child plan's authored effort and the same completion gate as the standalone module Route button before its copper is offered to the assembled-board gate
 - a module-only retry drops an impossible parent-only route constraint, follows standalone surface and pad-neck geometry, then must pass the parent's via budget and full-board DRC
 - local signal routing treats the same module's exact supply bonds as immutable physical obstacles
+- a timed-out local pass retains only oracle-complete selected signal trees for board-level DRC acceptance
+- ordinary local recovery crosses onto the opposite routable outer face on a six-layer plane stack and preserves hard layer and via limits
+- saved module copper can replace a rejected fresh candidate but cannot supersede or collide with accepted fresh copper
 - completeness-waiver: empty inputs (a block with no sub-circuits or no net with two local terminals returns empty copper and the caller takes the plain global path)
 - completeness-waiver: large inputs (sub-circuits route serially on component-local lattices; all allocations share the caller's request arena and the global quality comparison is bounded to the two existing candidates)
 - completeness-waiver: unauthorized access (an in-process routing phase over an already-authorized design and placement, with no file, request, or mutation surface)

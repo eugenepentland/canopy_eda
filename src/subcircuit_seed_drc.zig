@@ -211,6 +211,43 @@ fn normalizeCandidates(
     } });
 }
 
+/// Discard rejected fresh candidates before reading saved alternatives.
+/// Only copper that passed the board gate may suppress a saved module tree.
+pub fn retainAccepted(comptime Acc: type, alloc: std.mem.Allocator, acc: *Acc) std.mem.Allocator.Error![]const bool {
+    const accepted = try alloc.alloc(bool, acc.candidate.len);
+    @memset(accepted, false);
+    var track_count: usize = 0;
+    for (acc.tracks.items) |item| {
+        if (acc.rejected[item.net]) continue;
+        acc.tracks.items[track_count] = item;
+        track_count += 1;
+        accepted[item.net] = true;
+    }
+    acc.tracks.shrinkRetainingCapacity(track_count);
+    var via_count: usize = 0;
+    for (acc.vias.items) |item| {
+        if (acc.rejected[item.net]) continue;
+        acc.vias.items[via_count] = item;
+        via_count += 1;
+        accepted[item.net] = true;
+    }
+    acc.vias.shrinkRetainingCapacity(via_count);
+    @memset(acc.rejected, false);
+    return accepted;
+}
+
+/// Keep a discarded candidate rejected when no saved alternative supplied copper.
+pub fn rejectEmpty(comptime Acc: type, alloc: std.mem.Allocator, acc: *Acc) std.mem.Allocator.Error!void {
+    const present = try alloc.alloc(bool, acc.candidate.len);
+    defer alloc.free(present);
+    @memset(present, false);
+    for (acc.tracks.items) |item| present[item.net] = true;
+    for (acc.vias.items) |item| present[item.net] = true;
+    for (acc.candidate, present, 0..) |candidate_net, has_copper, ni| {
+        if (candidate_net and !has_copper) acc.rejected[ni] = true;
+    }
+}
+
 /// Reject invalid candidates in place while preserving every earlier valid net.
 pub fn reject(alloc: std.mem.Allocator, input: anytype) std.mem.Allocator.Error!void {
     const placement = input.placement;
@@ -249,6 +286,16 @@ pub fn reject(alloc: std.mem.Allocator, input: anytype) std.mem.Allocator.Error!
 
     for (order.items) |ni| {
         if (rejected[ni]) continue;
+        if (ni < options.net.len) if (options.net[ni].max_vias) |limit| {
+            var count: usize = 0;
+            for (vias) |item| if (item.net == ni) {
+                count += 1;
+            };
+            if (count > limit) {
+                rejected[ni] = true;
+                continue;
+            }
+        };
         const track_mark = accepted_tracks.items.len;
         const via_mark = accepted_vias.items.len;
         for (tracks) |item| if (item.net == ni and !hasTrack(options.existing_tracks, item.copper)) {

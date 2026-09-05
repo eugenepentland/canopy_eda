@@ -5275,6 +5275,8 @@ src/spurious.zig::requiredRf | fn requiredRf(lo_hz: f64, band: Band, side: Sideb
 src/spurious.zig::signedProduct | fn signedProduct(m: f64, n: f64, rf: Band, lo_hz: f64) Band
 src/spurious.zig::width | fn width(self: Band) f64
 src/subcircuit_seed_drc.zig::reject | fn reject(alloc: std.mem.Allocator, input: anytype) std.mem.Allocator.Error!void
+src/subcircuit_seed_drc.zig::rejectEmpty | fn rejectEmpty(comptime Acc: type, alloc: std.mem.Allocator, acc: *Acc) std.mem.Allocator.Error!void
+src/subcircuit_seed_drc.zig::retainAccepted | fn retainAccepted(comptime Acc: type, alloc: std.mem.Allocator, acc: *Acc) std.mem.Allocator.Error![]const bool
 src/subcircuit_silkscreen.zig::Annotation struct_
 src/subcircuit_silkscreen.zig::FabricationIdObstacles struct_
 src/subcircuit_silkscreen.zig::Keepout struct_
