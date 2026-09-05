@@ -1474,6 +1474,29 @@ Everything else is a sub-form — see
   (nominal 3.3))                ;; nominal voltage
 ```
 
+**The numbers are expressions.** Both `(nominal V)` and **both bounds** of
+`(rated LO HI)` are evaluated, so a parameterized module states its own window
+in terms of its own arguments instead of making every board restate it — the
+same rule module-scope `(net-envelope … (rated …))` follows:
+
+```scheme
+;; lib/modules/bcuda-lt3045-ldo.sexp — one line covers every instantiation
+(port "VOUT" out power
+  (nominal vout)
+  (rated (* vout 0.95) (* vout 1.05))
+  (current 0.5 0.5) (efficiency linear))
+```
+
+A bound that does not evaluate to a number, and a `LO` above its `HI`, are
+both **errors naming the port** — an absent rated window is exactly what the
+release rating checks cannot detect, so it is never dropped quietly. A literal
+number evaluates to itself, so nothing already written parses differently.
+
+The same evaluation applies to a `(port …)` written inside a `(section …)`.
+A section port is a boundary/diagram declaration, so its `(rated …)` is
+recorded and validated but does not itself seed a derived envelope; the module
+port that actually publishes the rail does that.
+
 Two older spellings still work and always will, each recording a
 `deprecated_form` info that names its replacement:
 

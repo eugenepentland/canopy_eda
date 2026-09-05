@@ -5865,6 +5865,14 @@ Public functions: analyze
 - stackup form captures layer count and plane assignments on the design block
 - net-envelope form publishes an authored voltage envelope on the design block
 - net-envelope rated bounds are evaluated so a module can express them from its own parameters
+- a design-block port's rated bounds are evaluated so a parameterized module can publish its own window
+- literal rated bounds on a port keep parsing exactly as they did
+- a section port's rated bounds are evaluated and recorded on the section port
+- a diff-port replays evaluated rated bounds onto both lanes
+- a port-group replays evaluated rated bounds onto every expanded lane
+- a rated bound that does not evaluate to a number is an error naming the port
+- an inverted rated window on a port is an error naming the port
+- a module port's evaluated rated window reaches the parent's derived rail and net envelope
 - pdn form captures an explicit AC-domain target and source model
 - stackup captures per-layer copper foil and core/prepreg construction details
 - stackup process entries capture stepped soldermask and per-layer trapezoidal etch geometry

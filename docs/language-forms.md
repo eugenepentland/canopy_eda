@@ -332,7 +332,7 @@ option warns.
 
 | Form | Summary |
 | --- | --- |
-| `(rated LO HI)` | The absolute voltage window this port's net may sit in; the release rating checks compare the design's proven envelope against it. |
+| `(rated LO HI)` | The absolute voltage window this port's net may sit in; the release rating checks compare the design's proven envelope against it. BOTH bounds are evaluated, exactly as `(nominal …)` is, so a parameterized regulator module publishes its own output window as arithmetic over its parameters ((rated (* vout 0.95) (* vout 1.05))) instead of every board restating the two numbers. A bound that does not evaluate to a number, or a LO above the HI, is an error naming the port — never a silently absent window. |
 | `(nominal VOLTS)` | The port's nominal voltage. The argument is evaluated, so a regulator module can publish an output computed from its own feedback-divider parameters. A bare trailing number means the same thing. |
 | `(current TYP [MAX])` | What the port carries, feeding the rail budget. |
 | `(efficiency RATIO) \| (efficiency linear)` | Conversion efficiency of the module behind an output port, so its input draw and dissipation can be back-computed. `linear` states the pass-through case. |
