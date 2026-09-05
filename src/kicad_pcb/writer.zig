@@ -3022,15 +3022,13 @@ test "applyOpsToSource escapes a set_field value containing a quote and backslas
         }
     }
     try std.testing.expect(found != null);
-    // The stored token is escaped; decode \x→x and compare to the raw input.
-    var decoded: std.ArrayList(u8) = .empty;
-    const raw = found.?;
-    var i: usize = 0;
-    while (i < raw.len) : (i += 1) {
-        if (raw[i] == '\\' and i + 1 < raw.len) i += 1;
-        try decoded.append(arena.allocator(), raw[i]);
-    }
-    try std.testing.expectEqualStrings("a\"b\\", decoded.items);
+    // The stored token is escaped; the production decoder must give back the
+    // raw input. Going through `fmt_const.sexprUnescape` (not a test-local
+    // decode loop) is what makes this a round-trip proof of the shipped pair.
+    try std.testing.expectEqualStrings(
+        "a\"b\\",
+        try fmt_const.sexprUnescape(arena.allocator(), found.?),
+    );
 }
 
 // spec: kicad_pcb/writer - an authoritative layout push moves footprints and replaces tracks vias groups and Edge.Cuts while preserving zones and unrelated drawings

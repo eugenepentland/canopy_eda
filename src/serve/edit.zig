@@ -433,7 +433,7 @@ pub fn editFootprintApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
         return;
     };
 
-    std.debug.print("Edited footprint {s} {s} -> \"{s}\"\n", .{ name, old_component, new_component });
+    log.progress("Edited footprint {s} {s} -> \"{s}\"", .{ name, old_component, new_component });
 
     // Rebuild and push live update
     const board_path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch {
@@ -1451,7 +1451,7 @@ pub fn removeInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response
         return;
     };
 
-    std.debug.print("Removed instance {s} from {s}\n", .{ ref_des, name });
+    log.progress("Removed instance {s} from {s}", .{ ref_des, name });
     rebuildAndPush(ctx, name, res) catch {
         res.status = 500;
         res.body = err_rebuild_failed;

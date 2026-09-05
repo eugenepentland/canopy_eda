@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
+const exit = @import("exit.zig");
 const config = @import("config.zig");
 const parser = @import("sexpr/parser.zig");
 const printer = @import("sexpr/printer.zig");
@@ -123,8 +124,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (std.mem.eql(u8, command, "parse")) {
         if (args.len < 3) {
-            std.debug.print("Usage: netlisp parse <file>\n", .{});
-            std.process.exit(1);
+            exit.fatal("Usage: netlisp parse <file>\n", .{});
         }
         try cmdParse(allocator, args[2]);
     } else if (std.mem.eql(u8, command, "build")) {
@@ -133,34 +133,29 @@ pub fn main(init: std.process.Init) !void {
         try commands.cmdCheck(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "convert-footprint")) {
         if (args.len < 3) {
-            std.debug.print("Usage: netlisp convert-footprint <file.kicad_mod>\n", .{});
-            std.process.exit(1);
+            exit.fatal("Usage: netlisp convert-footprint <file.kicad_mod>\n", .{});
         }
         try cmdConvertFootprint(allocator, args[2]);
     } else if (std.mem.eql(u8, command, "convert-symbol")) {
         if (args.len < 3) {
-            std.debug.print("Usage: netlisp convert-symbol <file.kicad_sym> [--filter <name>]\n", .{});
-            std.process.exit(1);
+            exit.fatal("Usage: netlisp convert-symbol <file.kicad_sym> [--filter <name>]\n", .{});
         }
         try cmdConvertSymbol(allocator, args[2], optionalArg(args[3..], filter_flag));
     } else if (std.mem.eql(u8, command, "convert-package")) {
         if (args.len < 4) {
-            std.debug.print("Usage: netlisp convert-package <file.kicad_sym> <file.kicad_mod> [--name <n>] [--filter <f>]\n", .{});
-            std.process.exit(1);
+            exit.fatal("Usage: netlisp convert-package <file.kicad_sym> <file.kicad_mod> [--name <n>] [--filter <f>]\n", .{});
         }
         const pkg_name = optionalArg(args[4..], "--name") orelse "package";
         const filter = optionalArg(args[4..], filter_flag);
         try cmdConvertPackage(allocator, args[2], args[3], pkg_name, filter);
     } else if (std.mem.eql(u8, command, "convert-pinout")) {
         if (args.len < 3) {
-            std.debug.print("Usage: netlisp convert-pinout <file.kicad_sym> [--filter <name>]\n", .{});
-            std.process.exit(1);
+            exit.fatal("Usage: netlisp convert-pinout <file.kicad_sym> [--filter <name>]\n", .{});
         }
         try cmdConvertPinout(allocator, args[2], optionalArg(args[3..], filter_flag));
     } else if (std.mem.eql(u8, command, "merge-alt-functions")) {
         if (args.len < 4) {
-            std.debug.print("Usage: netlisp merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]\n", .{});
-            std.process.exit(1);
+            exit.fatal("Usage: netlisp merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]\n", .{});
         }
         try cmdMergeAltFunctions(allocator, args[2], args[3], hasFlag(args[4..], "--write"));
     } else if (std.mem.eql(u8, command, "export-kicad")) {
@@ -357,25 +352,22 @@ fn cmdGenLanguageDocs(allocator: std.mem.Allocator, out_path: []const u8, check_
 
     if (check_only) {
         const committed = infra_fs.cwd().readFileAlloc(allocator, out_path, 1024 * 1024) catch |err| {
-            std.debug.print("docs check FAILED: cannot read {s} ({any}) — run `zig build docs` to generate it\n", .{ out_path, err });
-            std.process.exit(1);
+            exit.fatal("docs check FAILED: cannot read {s} ({any}) — run `zig build docs` to generate it\n", .{ out_path, err });
         };
         defer allocator.free(committed);
         if (!std.mem.eql(u8, committed, rendered)) {
-            std.debug.print("docs check FAILED: {s} is out of date with the dispatch tables — run `zig build docs` to regenerate\n", .{out_path});
-            std.process.exit(1);
+            exit.fatal("docs check FAILED: {s} is out of date with the dispatch tables — run `zig build docs` to regenerate\n", .{out_path});
         }
-        std.debug.print("docs check OK: {s} matches the dispatch tables\n", .{out_path});
+        try printStdout("docs check OK: {s} matches the dispatch tables\n", .{out_path});
         return;
     }
 
     const file = infra_fs.cwd().createFile(out_path, .{ .truncate = true }) catch |err| {
-        std.debug.print("Error opening {s}: {}\n", .{ out_path, err });
-        std.process.exit(1);
+        exit.fatal("Error opening {s}: {}\n", .{ out_path, err });
     };
     defer file.close();
     try file.writeAll(rendered);
-    std.debug.print("Wrote {s} ({d} bytes)\n", .{ out_path, rendered.len });
+    try printStdout("Wrote {s} ({d} bytes)\n", .{ out_path, rendered.len });
 }
 
 /// Resolve and start the web server (`serve` command). Extracted from
@@ -405,8 +397,7 @@ fn cmdVersion() !void {
 
 fn cmdParse(allocator: std.mem.Allocator, path: []const u8) !void {
     const source = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print(error_reading_fmt, .{ path, err });
-        std.process.exit(1);
+        exit.fatal(error_reading_fmt, .{ path, err });
     };
     defer allocator.free(source);
 
@@ -414,8 +405,7 @@ fn cmdParse(allocator: std.mem.Allocator, path: []const u8) !void {
     const nodes = parser.parseDiag(allocator, source, &diag) catch {
         // Compiler-style `file:line:col: error: message` — the same shape the
         // build/check paths and the server use for eval errors.
-        std.debug.print("{s}:{d}:{d}: error: {s}\n", .{ path, diag.span.line, diag.span.col, diag.message });
-        std.process.exit(1);
+        exit.fatal("{s}:{d}:{d}: error: {s}\n", .{ path, diag.span.line, diag.span.col, diag.message });
     };
     defer parser.freeNodes(allocator, nodes);
 
@@ -428,14 +418,12 @@ fn cmdParse(allocator: std.mem.Allocator, path: []const u8) !void {
 
 fn cmdConvertFootprint(allocator: std.mem.Allocator, path: []const u8) !void {
     const source = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print(error_reading_fmt, .{ path, err });
-        std.process.exit(1);
+        exit.fatal(error_reading_fmt, .{ path, err });
     };
     defer allocator.free(source);
 
     const output = footprint_conv.convertFootprint(allocator, source) catch |err| {
-        std.debug.print(convert_error_fmt, .{err});
-        std.process.exit(1);
+        exit.fatal(convert_error_fmt, .{err});
     };
     defer allocator.free(output);
 
@@ -444,19 +432,16 @@ fn cmdConvertFootprint(allocator: std.mem.Allocator, path: []const u8) !void {
 
 fn cmdConvertPackage(allocator: std.mem.Allocator, sym_path: []const u8, fp_path: []const u8, name: []const u8, filter: ?[]const u8) !void {
     const sym_source = infra_fs.cwd().readFileAlloc(allocator, sym_path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print(error_reading_fmt, .{ sym_path, err });
-        std.process.exit(1);
+        exit.fatal(error_reading_fmt, .{ sym_path, err });
     };
     defer allocator.free(sym_source);
     const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print(error_reading_fmt, .{ fp_path, err });
-        std.process.exit(1);
+        exit.fatal(error_reading_fmt, .{ fp_path, err });
     };
     defer allocator.free(fp_source);
 
     const output = symbol_conv.generatePackage(allocator, sym_source, fp_source, name, filter) catch |err| {
-        std.debug.print(convert_error_fmt, .{err});
-        std.process.exit(1);
+        exit.fatal(convert_error_fmt, .{err});
     };
     defer allocator.free(output);
 
@@ -465,32 +450,27 @@ fn cmdConvertPackage(allocator: std.mem.Allocator, sym_path: []const u8, fp_path
 
 fn cmdMergeAltFunctions(allocator: std.mem.Allocator, pinout_path: []const u8, src_path: []const u8, write_back: bool) !void {
     const pinout_src = infra_fs.cwd().readFileAlloc(allocator, pinout_path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print(error_reading_fmt, .{ pinout_path, err });
-        std.process.exit(1);
+        exit.fatal(error_reading_fmt, .{ pinout_path, err });
     };
     defer allocator.free(pinout_src);
     const alt_src = infra_fs.cwd().readFileAlloc(allocator, src_path, alt_source_max_bytes) catch |err| {
-        std.debug.print(error_reading_fmt, .{ src_path, err });
-        std.process.exit(1);
+        exit.fatal(error_reading_fmt, .{ src_path, err });
     };
     defer allocator.free(alt_src);
 
     const entries = alt_functions.parseAltSource(allocator, alt_src) catch |err| {
-        std.debug.print("Alt-function parse error: {}\n", .{err});
-        std.process.exit(1);
+        exit.fatal("Alt-function parse error: {}\n", .{err});
     };
     const output = alt_functions.mergePinoutWithAlts(allocator, pinout_src, entries) catch |err| {
-        std.debug.print("Merge error: {}\n", .{err});
-        std.process.exit(1);
+        exit.fatal("Merge error: {}\n", .{err});
     };
     defer allocator.free(output);
 
     if (write_back) {
         infra_fs.cwd().writeFile(.{ .sub_path = pinout_path, .data = output }) catch |err| {
-            std.debug.print("Error writing {s}: {}\n", .{ pinout_path, err });
-            std.process.exit(1);
+            exit.fatal("Error writing {s}: {}\n", .{ pinout_path, err });
         };
-        std.debug.print("Merged {d} alt-function rows into {s}\n", .{ entries.len, pinout_path });
+        try printStdout("Merged {d} alt-function rows into {s}\n", .{ entries.len, pinout_path });
     } else {
         try writeStdout(output);
     }
@@ -498,14 +478,12 @@ fn cmdMergeAltFunctions(allocator: std.mem.Allocator, pinout_path: []const u8, s
 
 fn cmdConvertPinout(allocator: std.mem.Allocator, path: []const u8, filter: ?[]const u8) !void {
     const source = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print(error_reading_fmt, .{ path, err });
-        std.process.exit(1);
+        exit.fatal(error_reading_fmt, .{ path, err });
     };
     defer allocator.free(source);
 
     const output = symbol_conv.generatePinout(allocator, source, filter) catch |err| {
-        std.debug.print(convert_error_fmt, .{err});
-        std.process.exit(1);
+        exit.fatal(convert_error_fmt, .{err});
     };
     defer allocator.free(output);
 
@@ -514,14 +492,12 @@ fn cmdConvertPinout(allocator: std.mem.Allocator, path: []const u8, filter: ?[]c
 
 fn cmdConvertSymbol(allocator: std.mem.Allocator, path: []const u8, filter: ?[]const u8) !void {
     const source = infra_fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print(error_reading_fmt, .{ path, err });
-        std.process.exit(1);
+        exit.fatal(error_reading_fmt, .{ path, err });
     };
     defer allocator.free(source);
 
     const output = symbol_conv.convertSymbol(allocator, source, filter) catch |err| {
-        std.debug.print(convert_error_fmt, .{err});
-        std.process.exit(1);
+        exit.fatal(convert_error_fmt, .{err});
     };
     defer allocator.free(output);
 
@@ -530,6 +506,17 @@ fn cmdConvertSymbol(allocator: std.mem.Allocator, path: []const u8, filter: ?[]c
 
 fn writeStdout(bytes: []const u8) !void {
     try std.Io.File.stdout().writeStreamingAll(infra_fs.currentIo(), bytes);
+}
+
+/// The `writeStdout` companion for command output that needs interpolation.
+/// Command results are the program doing its job, so they belong on stdout —
+/// `std.debug.print` would put them on stderr, where they corrupt nothing but
+/// also cannot be piped or captured with the rest of a command's output.
+/// A result longer than the scratch buffer is an error rather than a silent
+/// truncation: every caller here writes one short line.
+fn printStdout(comptime fmt: []const u8, args: anytype) !void {
+    var buf: [4096]u8 = undefined;
+    try writeStdout(try std.fmt.bufPrint(&buf, fmt, args));
 }
 
 fn printUsage() !void {

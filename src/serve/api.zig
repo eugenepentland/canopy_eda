@@ -129,7 +129,7 @@ pub fn pushApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerE
     serve_root.setLiveLayoutJson(name, new_layout);
     const v = serve_root.bumpLiveVersion(name);
 
-    std.debug.print("Pushed {s} (v{d})\n", .{ name, v });
+    log.progress("Pushed {s} (v{d})", .{ name, v });
     res.body = "ok";
 }
 

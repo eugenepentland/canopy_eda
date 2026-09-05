@@ -246,7 +246,7 @@ pub fn exportKicad(
         const f = try infra_fs.cwd().createFile(mod_path, .{});
         defer f.close();
         try f.writeAll(mod_output);
-        std.debug.print("  Wrote {s}\n", .{mod_path});
+        log.progress("  Wrote {s}", .{mod_path});
 
         // Copy STEP model if found
         if (model_name) |mname| {
@@ -259,7 +259,7 @@ pub fn exportKicad(
             infra_fs.cwd().copyFile(src_path, infra_fs.cwd(), dst_path, .{}) catch |err| {
                 log.warn("failed to copy model {s}: {}", .{ mname, err });
             };
-            std.debug.print("  Copied model {s}\n", .{mname});
+            log.progress("  Copied model {s}", .{mname});
         }
     }
 
@@ -277,7 +277,7 @@ pub fn exportKicad(
     const nf = try infra_fs.cwd().createFile(net_path, .{});
     defer nf.close();
     try nf.writeAll(netlist);
-    std.debug.print("  Wrote {s}\n", .{net_path});
+    log.progress("  Wrote {s}", .{net_path});
 
     if (opts.schematic) try writeSchematicInto(allocator, block, project_dir, output_dir, design_name);
 }

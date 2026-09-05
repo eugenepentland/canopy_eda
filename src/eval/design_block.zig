@@ -4227,10 +4227,7 @@ test "design-block captures (kicad-pcb path)" {
     defer env.deinit();
 
     const value = try evalDesignBlock(&eval, form_children[1..], &env);
-    const block = switch (value) {
-        .design_block => |b| b,
-        else => return error.TestUnexpectedResult,
-    };
+    const block = try designBlockOf(value);
     try testing.expect(block.kicad_pcb_path != null);
     try testing.expectEqualStrings("/mnt/nas/test.kicad_pcb", block.kicad_pcb_path.?);
 }
@@ -4287,10 +4284,7 @@ test "design-block captures (stackup …)" {
     var env = env_mod.Env.init(a, null);
     defer env.deinit();
     const value = try evalDesignBlock(&eval, form_children[1..], &env);
-    const block = switch (value) {
-        .design_block => |b| b,
-        else => return error.TestUnexpectedResult,
-    };
+    const block = try designBlockOf(value);
     try testing.expect(block.stackup.present);
     try testing.expectEqual(@as(u8, 4), block.stackup.layers);
     try testing.expectEqual(@as(usize, 2), block.stackup.planes.len);
@@ -4643,10 +4637,7 @@ test "design-block captures a plane-less (stackup 2)" {
     var env = env_mod.Env.init(a, null);
     defer env.deinit();
     const value = try evalDesignBlock(&eval, form_children[1..], &env);
-    const block = switch (value) {
-        .design_block => |b| b,
-        else => return error.TestUnexpectedResult,
-    };
+    const block = try designBlockOf(value);
     try testing.expect(block.stackup.present);
     try testing.expectEqual(@as(u8, 2), block.stackup.layers);
     try testing.expect(!block.stackup.hasPlanes());
@@ -4728,10 +4719,7 @@ test "design-block captures (net-class …) rules" {
     var env = env_mod.Env.init(a, null);
     defer env.deinit();
     const value = try evalDesignBlock(&eval, form_children[1..], &env);
-    const block = switch (value) {
-        .design_block => |b| b,
-        else => return error.TestUnexpectedResult,
-    };
+    const block = try designBlockOf(value);
     try testing.expectEqual(@as(usize, 4), block.net_classes.len);
     const nc = block.net_classes[0];
     try testing.expectEqualStrings("power", nc.name);
@@ -4967,10 +4955,7 @@ test "design-block captures (design-rules …)" {
     var env = env_mod.Env.init(a, null);
     defer env.deinit();
     const value = try evalDesignBlock(&eval, form_children[1..], &env);
-    const block = switch (value) {
-        .design_block => |b| b,
-        else => return error.TestUnexpectedResult,
-    };
+    const block = try designBlockOf(value);
     const dr = block.design_rules;
     try testing.expect(dr.present);
     try testing.expectEqual(@as(f64, 0.15), dr.clearance);
@@ -5066,10 +5051,7 @@ test "design-block without (design-rules …) has no rules present" {
     var env = env_mod.Env.init(a, null);
     defer env.deinit();
     const value = try evalDesignBlock(&eval, form_children[1..], &env);
-    const block = switch (value) {
-        .design_block => |b| b,
-        else => return error.TestUnexpectedResult,
-    };
+    const block = try designBlockOf(value);
     // No form ⇒ not present, every field the zero sentinel — the consumer
     // (`optimizer.designRulesOf`) then fills in the built-in defaults.
     try testing.expect(!block.design_rules.present);
