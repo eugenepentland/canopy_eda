@@ -100,15 +100,11 @@ test "sexprEscape escapes quotes and backslashes, passes clean text through" {
     var tokenizer = tok.Tokenizer.init(quoted);
     const t = try tokenizer.next();
     try std.testing.expectEqual(tok.TokenTag.string, t.tag);
-    // The tokenizer captures the escaped bytes between the quotes; decoding
-    // `\x`→`x` must recover the raw input exactly.
-    var decoded: std.ArrayList(u8) = .empty;
-    var i: usize = 0;
-    while (i < t.text.len) : (i += 1) {
-        if (t.text[i] == '\\' and i + 1 < t.text.len) i += 1;
-        try decoded.append(a, t.text[i]);
-    }
-    try std.testing.expectEqualStrings(raw, decoded.items);
+    // The tokenizer captures the escaped bytes between the quotes; the
+    // production decoder must recover the raw input exactly. Decoding through
+    // `sexprUnescape` rather than a test-local copy of it is the point: a
+    // hand-rolled loop here would keep passing if the real decoder drifted.
+    try std.testing.expectEqualStrings(raw, try sexprUnescape(a, t.text));
 }
 
 // spec: kicad_pcb/format - padNumberText reads quoted, bare-atom, and bare-int pad numbers

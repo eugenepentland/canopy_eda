@@ -708,16 +708,13 @@ fn mergeProps(
 /// bare ref-des would give a top-level `C3`'s uuid to every same-named
 /// sub-block twin.
 ///
-/// `props_map` is optional: the read-only uuid-only application
-/// (`bom.applyBomUuids`, which serve handlers call) passes null and gets
-/// exactly the uuid half of this walk. It is the same recursion either way —
-/// two copies of it could disagree about the prefix and quietly hand two parts
-/// one identity.
+/// One recursion for uuids AND properties: two copies of it could disagree
+/// about the prefix and quietly hand two parts one identity.
 pub fn applyBom(
     allocator: std.mem.Allocator,
     block: *const DesignBlock,
     uuid_map: *const std.StringHashMapUnmanaged([]const u8),
-    props_map: ?*const std.StringHashMapUnmanaged([]const Property),
+    props_map: *const std.StringHashMapUnmanaged([]const Property),
     prefix: []const u8,
 ) std.mem.Allocator.Error!void {
     const instances: []Instance = @constCast(block.instances);
@@ -732,11 +729,9 @@ pub fn applyBom(
             inst.uuid = allocator.dupe(u8, uuid) catch uuid;
         }
 
-        if (props_map) |props| {
-            if (props.get(key)) |bom_props| {
-                if (bom_props.len > 0) {
-                    inst.properties = try mergeProps(allocator, inst.properties, bom_props);
-                }
+        if (props_map.get(key)) |bom_props| {
+            if (bom_props.len > 0) {
+                inst.properties = try mergeProps(allocator, inst.properties, bom_props);
             }
         }
     }
@@ -1549,6 +1544,18 @@ test "deterministic identity ignores a stale prior .bom" {
     try std.testing.expect(std.mem.indexOf(u8, bom1, "11111111-1111-5111") == null);
 }
 
+/// Value of the `key` property on a loaded `.bom` entry, or null when the
+/// entry carries no such property. Hoisted out of the round-trip test below,
+/// which looks the same property up on each of two reloads — a search loop
+/// inlined per assertion is the shape that lets a test pass while the
+/// assertion it was meant to pin never runs.
+fn bomPropertyValue(properties: []const Property, key: []const u8) ?[]const u8 {
+    for (properties) |p| {
+        if (std.mem.eql(u8, p.key, key)) return p.value;
+    }
+    return null;
+}
+
 // spec: bom-resolve - A property value containing a quote/backslash round-trips through the .bom without corrupting it
 test "setBomProperty escapes a value with a quote and reloads cleanly" {
     // `writeBomEntries` escapes each quoted field with `kicad_format.sexprEscape`,
@@ -1593,10 +1600,7 @@ test "setBomProperty escapes a value with a quote and reloads cleanly" {
     }
     try std.testing.expectEqual(@as(usize, 1), entries.len);
     try std.testing.expectEqualStrings("U1", entries[0].ref_des);
-    var got: ?[]const u8 = null;
-    for (entries[0].properties) |p| {
-        if (std.mem.eql(u8, p.key, "mpn")) got = p.value;
-    }
+    const got = bomPropertyValue(entries[0].properties, "mpn");
     try std.testing.expect(got != null);
     try std.testing.expectEqualStrings(nasty, got.?);
 
@@ -1622,10 +1626,7 @@ test "setBomProperty escapes a value with a quote and reloads cleanly" {
         }
         alloc.free(again);
     }
-    var got2: ?[]const u8 = null;
-    for (again[0].properties) |p| {
-        if (std.mem.eql(u8, p.key, "mpn")) got2 = p.value;
-    }
+    const got2 = bomPropertyValue(again[0].properties, "mpn");
     try std.testing.expect(got2 != null);
     try std.testing.expectEqualStrings(nasty, got2.?);
 }

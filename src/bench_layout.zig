@@ -38,6 +38,19 @@ const numeric = @import("numeric.zig");
 /// finished (vs. the process dying mid-list).
 const bench_done = "BENCH_DONE\n";
 
+/// Emit one result line. Every line this benchmark prints is structured data a
+/// driver parses (`BENCH` / `SCORE` / `FULL` / `SEED` / `BENCH_DONE`), so it
+/// belongs on stdout, where a harness can redirect it on its own —
+/// `std.debug.print` put the measurements on stderr, interleaved with whatever
+/// the optimizer traced there. Best-effort: a benchmark that cannot write its
+/// own result line has nothing useful left to do about it.
+fn report(comptime fmt: []const u8, args: anytype) void {
+    var buf: [4096]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(infra_fs.currentIo(), &buf);
+    stdout.interface.print(fmt, args) catch return;
+    stdout.interface.flush() catch return;
+}
+
 const default_reps: usize = 5;
 const ns_per_ms: f64 = 1_000_000.0;
 
@@ -186,7 +199,7 @@ fn loadPoses(arena: std.mem.Allocator, path: []const u8) ![]optimizer.RefPose {
 /// (kept distinct from the `BENCH` timing line so a downstream parser can tell a
 /// scored-layout result from a timed solve). `tag` labels which layout it is.
 fn printScore(tag: []const u8, name: []const u8, bd: optimizer.Breakdown, routed: f64) void {
-    std.debug.print(
+    report(
         "SCORE {s} {s} objective={d:.4} routed={d:.4} hpwl={d:.4} loop_nh_w={d:.4} loop_raw_mm={d:.4} align={d:.4} congest={d:.4} footprint={d:.4}\n",
         .{ tag, name, bd.objective, routed, bd.hpwl, bd.loop_nh_weighted, bd.loop_raw, bd.alignment, bd.congestion, bd.footprint },
     );
@@ -212,12 +225,12 @@ fn fullEvalParams(params: optimizer.Params) optimizer.Params {
 /// rather than the RSMT estimate. `FULL … unroutable` when the board can't grid.
 fn printFull(tag: []const u8, name: []const u8, fr: ?optimizer.FullRouted) void {
     if (fr) |f| {
-        std.debug.print(
+        report(
             "FULL {s} {s} cost={d:.4} trace_mm={d:.2} vias={d} drc={d} unrouted={d} loop_nh_w={d:.4}\n",
             .{ tag, name, f.cost, f.trace_mm, f.vias, f.drc, f.unrouted, f.loop_nh_weighted },
         );
     } else {
-        std.debug.print("FULL {s} {s} unroutable\n", .{ tag, name });
+        report("FULL {s} {s} unroutable\n", .{ tag, name });
     }
 }
 
@@ -255,7 +268,7 @@ fn seedOne(gpa: std.mem.Allocator, project_dir: []const u8, name: []const u8, po
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const placed = try optimizer.solve(arena.allocator(), block, project_dir, poses, params, .place);
-    std.debug.print("SEED {s} applied_verbatim={} place_obj={d:.4}\n", .{ name, !placed.generated, placed.breakdown.objective });
+    report("SEED {s} applied_verbatim={} place_obj={d:.4}\n", .{ name, !placed.generated, placed.breakdown.objective });
     const refined = try optimizer.solve(arena.allocator(), block, project_dir, poses, params, .refine);
     const rposes = try arena.allocator().alloc(optimizer.RefPose, refined.parts.len);
     for (refined.parts, 0..) |p, i| rposes[i] = .{ .ref = p.ref_des, .x = p.x, .y = p.y, .rot = p.rot };
@@ -313,7 +326,7 @@ pub fn main(init: std.process.Init) !void {
             // A silent fallback to DEFAULT_REPS on a typo would quietly change
             // the rep count and invalidate a timing protocol — flag it loudly.
             reps = std.fmt.parseInt(usize, args[i + 1], 10) catch blk: {
-                std.debug.print("bench-layout: unparseable --reps {s}, using default {d}\n", .{ args[i + 1], default_reps });
+                report("bench-layout: unparseable --reps {s}, using default {d}\n", .{ args[i + 1], default_reps });
                 break :blk default_reps;
             };
             i += 1;
@@ -366,7 +379,7 @@ pub fn main(init: std.process.Init) !void {
     if (reps == 0) reps = 1;
 
     if (names.items.len == 0) {
-        std.debug.print("Usage: bench-layout --project-dir <dir> [--reps N] [--poses <json> --tag <t>] [--breakdown] <design> ...\n", .{});
+        report("Usage: bench-layout --project-dir <dir> [--reps N] [--poses <json> --tag <t>] [--breakdown] <design> ...\n", .{});
         std.process.exit(2);
     }
 
@@ -376,43 +389,43 @@ pub fn main(init: std.process.Init) !void {
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
         const poses = loadPoses(arena.allocator(), pf) catch |err| {
-            std.debug.print("POSES_ERR {s} {s}\n", .{ pf, @errorName(err) });
+            report("POSES_ERR {s} {s}\n", .{ pf, @errorName(err) });
             std.process.exit(1);
         };
         for (names.items) |name| {
             if (want_seed) {
                 seedOne(gpa, project_dir, name, poses, params) catch |err|
-                    std.debug.print("SEED_ERR {s} {s}\n", .{ name, @errorName(err) });
+                    report("SEED_ERR {s} {s}\n", .{ name, @errorName(err) });
             } else {
                 scoreOne(gpa, project_dir, name, tag, poses, params) catch |err|
-                    std.debug.print("SCORE_ERR {s} {s}\n", .{ name, @errorName(err) });
+                    report("SCORE_ERR {s} {s}\n", .{ name, @errorName(err) });
             }
         }
-        std.debug.print(bench_done, .{});
+        report(bench_done, .{});
         return;
     }
     if (want_breakdown) {
         for (names.items) |name| {
             breakdownOne(gpa, project_dir, name, params) catch |err|
-                std.debug.print("SCORE_ERR {s} {s}\n", .{ name, @errorName(err) });
+                report("SCORE_ERR {s} {s}\n", .{ name, @errorName(err) });
         }
-        std.debug.print(bench_done, .{});
+        report(bench_done, .{});
         return;
     }
 
     const times = try gpa.alloc(u64, reps);
     defer gpa.free(times);
 
-    std.debug.print("# bench-layout reps={d} project_dir={s}\n", .{ reps, project_dir });
+    report("# bench-layout reps={d} project_dir={s}\n", .{ reps, project_dir });
     for (names.items) |name| {
         if (benchOne(gpa, project_dir, name, reps, times, profile_solve)) |r| {
-            std.debug.print(
+            report(
                 "BENCH {s} parts={d} median_ms={d:.3} min_ms={d:.3} checksum={x:0>16} objective={d:.4} routed={d:.4}\n",
                 .{ name, r.parts, ms(r.median_ns), ms(r.min_ns), r.checksum, r.objective, r.routed },
             );
         } else |err| {
-            std.debug.print("BENCH_ERR {s} {s}\n", .{ name, @errorName(err) });
+            report("BENCH_ERR {s} {s}\n", .{ name, @errorName(err) });
         }
     }
-    std.debug.print(bench_done, .{});
+    report(bench_done, .{});
 }

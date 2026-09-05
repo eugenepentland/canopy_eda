@@ -13,6 +13,7 @@ const numeric = @import("numeric.zig");
 const poly_scanline = @import("poly_scanline.zig");
 const board_layers = @import("board_layers.zig");
 const kicad_format = @import("kicad_pcb/format.zig");
+const log = @import("infra/log.zig");
 /// Error set for footprint emission helpers — covers the parse step on the
 /// project source and the allocator failures from string formatting, plus
 /// the local `InvalidFormat` thrown when the input doesn't look like a
@@ -416,7 +417,7 @@ fn emitKicadPad(allocator: std.mem.Allocator, w: anytype, node: ast.Node) !void 
             // annular ring) — an unmanufacturable footprint. Warn loudly so the
             // omission is fixed at the source .sexp rather than shipped silently.
             const drill = @min(sx, sy);
-            std.log.warn(
+            log.warn(
                 "export-kicad: thru-hole pad \"{s}\" has no (drill …) — guessing {d:.4} mm (pad min dimension, zero annular ring); add an explicit drill to the footprint",
                 .{ pad_name, drill },
             );

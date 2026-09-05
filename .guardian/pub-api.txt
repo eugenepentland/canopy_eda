@@ -229,7 +229,6 @@ src/board_theme.zig::writeCssVars | fn writeCssVars(w: *std.Io.Writer) std.Io.Wr
 src/bom.zig::BomEntry struct_
 src/bom.zig::BomError value
 src/bom.zig::FlatInfo struct_
-src/bom.zig::applyBomUuids | fn applyBomUuids( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, ) BomError!void
 src/bom.zig::applyExisting value
 src/bom.zig::applyResolvedSelections value
 src/bom.zig::collectFlatInstances | fn collectFlatInstances( allocator: std.mem.Allocator, block: *const DesignBlock, prefix: []const u8, list: *std.ArrayList(FlatInfo), ) std.mem.Allocator.Error!void
@@ -241,7 +240,7 @@ src/bom.zig::netOverlap | fn netOverlap(a: []const []const u8, b: []const []cons
 src/bom.zig::resolveIdentities value
 src/bom_resolve.zig::ResolveError value
 src/bom_resolve.zig::SetPropertyError value
-src/bom_resolve.zig::applyBom | fn applyBom( allocator: std.mem.Allocator, block: *const DesignBlock, uuid_map: *const std.StringHashMapUnmanaged([]const u8), props_map: ?*const std.StringHashMapUnmanaged([]const Property), prefix: []const u8, ) std.mem.Allocator.Error!void
+src/bom_resolve.zig::applyBom | fn applyBom( allocator: std.mem.Allocator, block: *const DesignBlock, uuid_map: *const std.StringHashMapUnmanaged([]const u8), props_map: *const std.StringHashMapUnmanaged([]const Property), prefix: []const u8, ) std.mem.Allocator.Error!void
 src/bom_resolve.zig::applyExisting | fn applyExisting( allocator: std.mem.Allocator, block: *const DesignBlock, bom_path: []const u8, project_dir: []const u8, ) ResolveError!void
 src/bom_resolve.zig::applyResolvedSelections | fn applyResolvedSelections( allocator: std.mem.Allocator, block: *const DesignBlock, bom_path: []const u8, project_dir: []const u8, ) ResolveError!void
 src/bom_resolve.zig::entryMatchesSource | fn entryMatchesSource(entry: bom_mod.BomEntry, current: FlatInfo) bool

@@ -215,9 +215,13 @@ pub fn cmdReference(allocator: std.mem.Allocator, args: []const []const u8) Quer
         try emit(slice);
         return;
     }
-    std.debug.print("reference: no section matching '{s}'. Available sections:\n", .{section.?});
-    printSectionHeaders(full);
-    exit.failure();
+    // One diagnostic, one funnel: the header list IS the useful half of this
+    // failure (it names every value that would have worked), so it goes out
+    // with the error rather than on a second, separate channel.
+    var headers: std.Io.Writer.Allocating = .init(allocator);
+    defer headers.deinit();
+    try writeSectionHeaders(&headers.writer, full);
+    exit.fatal("reference: no section matching '{s}'. Available sections:\n{s}", .{ section.?, headers.written() });
 }
 
 /// Return the `## ` section whose title contains `query` (case-insensitive),
@@ -237,12 +241,13 @@ fn extractSection(md: []const u8, query: []const u8) ?[]const u8 {
     return null;
 }
 
-fn printSectionHeaders(md: []const u8) void {
+/// Write every `## ` header in `md` to `w`, one indented line each.
+fn writeSectionHeaders(w: *std.Io.Writer, md: []const u8) std.Io.Writer.Error!void {
     var idx: usize = 0;
     while (std.mem.indexOfPos(u8, md, idx, "\n## ")) |h| {
         const title_start = h + "\n## ".len;
         const title_end = std.mem.indexOfScalarPos(u8, md, title_start, '\n') orelse md.len;
-        std.debug.print("  {s}\n", .{md[title_start..title_end]});
+        try w.print("  {s}\n", .{md[title_start..title_end]});
         idx = title_end;
     }
 }

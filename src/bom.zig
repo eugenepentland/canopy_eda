@@ -249,39 +249,6 @@ pub fn netOverlap(a: []const []const u8, b: []const []const u8) f64 {
     return @as(f64, @floatFromInt(matches)) / max_len;
 }
 
-/// Lightweight UUID application: reads existing .bom file and applies UUIDs
-/// to matching instances by ref-des. Does NOT generate new UUIDs or save.
-/// Safe to call from serve handlers (no @constCast issues with arena allocators).
-pub fn applyBomUuids(
-    allocator: std.mem.Allocator,
-    block: *const DesignBlock,
-    project_dir: []const u8,
-    design_name: []const u8,
-) BomError!void {
-    const bom_path = try paths.designSiblingPath(allocator, project_dir, design_name, ".bom");
-    defer allocator.free(bom_path);
-
-    const entries = try loadBom(allocator, bom_path);
-    if (entries.len == 0) return;
-
-    // Build ref_des → uuid map. `.bom` keys for sub-block parts are
-    // hierarchical (`buck/C3`), so uuids must be matched against the same
-    // prefixed key — matching on the child's bare ref_des applied a top-level
-    // `C3`'s uuid to every same-named sub-block twin (duplicate identities).
-    var uuid_map = std.StringHashMapUnmanaged([]const u8).empty;
-    defer uuid_map.deinit(allocator);
-    for (entries) |entry| {
-        if (entry.uuid.len > 0) {
-            try uuid_map.put(allocator, entry.ref_des, entry.uuid);
-        }
-    }
-
-    // The uuid half of `bom_resolve.applyBom` — same recursion, same
-    // prefix threading, no property merge. (`@constCast` is safe: the caller
-    // owns the block it just evaluated.)
-    try bom_resolve.applyBom(allocator, block, &uuid_map, null, "");
-}
-
 // spec: bom - Generates deterministic UUIDs in the expected format
 test "generate uuid format" {
     const alloc = std.testing.allocator;

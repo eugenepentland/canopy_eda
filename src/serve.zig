@@ -910,7 +910,7 @@ pub fn serve(
     // request must authenticate. See Server.dev_mode. Read via config.zig so
     // the ban-env policy holds (only config.zig touches the environment).
     const dev_mode = @import("config.zig").devMode(allocator);
-    if (dev_mode) std.debug.print("netlisp: NETLISP_DEV set — loopback requests bypass auth as dev@localhost\n", .{});
+    if (dev_mode) log.warn("netlisp: NETLISP_DEV set — loopback requests bypass auth as dev@localhost", .{});
     var state: ServerState = .{
         .caches = .init(allocator),
         // The reconcile store retains an evaluated design, its placement and a
@@ -1106,7 +1106,8 @@ pub fn serve(
     // RFC 9728 protected-resource metadata only (wardd is the auth server now).
     router.get("/.well-known/oauth-protected-resource", ward_auth.metadataProtectedResource, .{});
 
-    std.debug.print("Listening on http://localhost:{d}\nProject: {s}\n", .{ port, project_dir });
+    log.progress("Listening on http://localhost:{d}", .{port});
+    log.progress("Project: {s}", .{project_dir});
     // Open the day's interaction log with a line naming this process, and say
     // on stderr where it is — a log nobody can find diagnoses nothing.
     request_log.emitServerStart(&state.request_log, allocator, port);

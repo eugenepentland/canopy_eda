@@ -312,26 +312,28 @@ test "format mixed" {
 
 // spec: eval/fmt - The directives table and format()'s dispatch recognise exactly the same specifier characters
 test "directive table matches format() dispatch" {
-    try std.testing.expect(directiveTableMatchesDispatch(std.testing.allocator));
+    // Asserting on the offending BYTE rather than on a bool is what makes a
+    // failure readable: `expected null, found 120` names `~x` on the spot.
+    // The previous shape returned a bare bool and printed the culprit itself,
+    // which put the only diagnostic on stderr — where a captured test run
+    // loses it — and left the assertion saying merely "false".
+    try std.testing.expectEqual(@as(?u8, null), firstDirectiveMismatch(std.testing.allocator));
 }
 
 /// Try every possible specifier byte: `format()` must reject it with
 /// FormatError exactly when `directives` doesn't list it. This keeps the
 /// documented directive set (rendered into docs/language-forms.md)
-/// mechanically in sync with the switch in `format()`.
-fn directiveTableMatchesDispatch(alloc: std.mem.Allocator) bool {
+/// mechanically in sync with the switch in `format()`. Returns the first
+/// specifier the two disagree about, or null when they agree on all 256.
+fn firstDirectiveMismatch(alloc: std.mem.Allocator) ?u8 {
     for (0..256) |c| {
         const spec: u8 = @intCast(c);
         const in_table = for (directives) |d| {
             if (d.spec == spec) break true;
         } else false;
-        const recognized = specRecognized(alloc, spec);
-        if (in_table != recognized) {
-            std.debug.print("fmt directive '~{c}' (0x{x:0>2}): in table={}, dispatched={}\n", .{ spec, spec, in_table, recognized });
-            return false;
-        }
+        if (in_table != specRecognized(alloc, spec)) return spec;
     }
-    return true;
+    return null;
 }
 
 /// True when `format()` dispatches the specifier — any outcome other

@@ -15,7 +15,7 @@ const http_bad_request: u16 = 400;
 const http_internal_error: u16 = 500;
 const boundary_prefix = "boundary=";
 const filename_prefix = "filename=\"";
-const upload_log_template = "Upload: {s}\n";
+const upload_log_template = "Upload: {s}";
 const sexp_path_template = "{s}/{s}.sexp";
 
 /// Error set for HTTP handlers in this module.
@@ -221,6 +221,6 @@ pub fn uploadPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response)
         res.body = "OK";
         return;
     };
-    std.debug.print(upload_log_template, .{msg});
+    log.progress(upload_log_template, .{msg});
     res.body = msg;
 }
