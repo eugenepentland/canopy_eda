@@ -1299,6 +1299,34 @@ test "eval assert-range pass" {
     alloc.free(eval.assertions.items[0].message);
 }
 
+// spec: eval/evaluator - A recorded assertion carries the span of the form that raised it
+test "assertions carry the span of their own form" {
+    // page_allocator: assertion messages are allocated and never freed here.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    // One assertion per line, so a recorded span that is merely 1:1 (or the
+    // other assertion's) cannot pass by accident.
+    const nodes = try parser.parse(alloc,
+        \\(let v 20.0)
+        \\(assert-range v 0.6 16.0 "VOUT")
+        \\(assert (> v 100.0) "headroom")
+    );
+
+    _ = try eval.evalNodes(nodes, &env);
+    try std.testing.expectEqual(@as(usize, 2), eval.assertions.items.len);
+    // The span is what lets `netlisp build` print a failing assertion the way
+    // it prints a compiler error, instead of a bare message with no location.
+    try std.testing.expectEqual(@as(u32, 2), eval.assertions.items[0].span.line);
+    try std.testing.expectEqual(@as(u32, 3), eval.assertions.items[1].span.line);
+    try std.testing.expect(!eval.assertions.items[0].passed);
+    try std.testing.expect(!eval.assertions.items[1].passed);
+}
+
 // spec: eval/evaluator - Evaluates assert-range that fails when value is out of bounds
 test "eval assert-range fail" {
     const alloc = std.testing.allocator;

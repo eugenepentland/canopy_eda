@@ -5011,6 +5011,7 @@ against its own file rather than the design's.
 - A failing fmt directive records a located diagnostic naming the directive
 - Evaluates assert-range that passes when value is in bounds
 - Evaluates assert-range that fails when value is out of bounds
+- A recorded assertion carries the span of the form that raised it
 - evalFile auto-imports the standard passives prelude before user nodes run
 - Module files loaded via resolveImport get the same passives prelude before their body evaluates
 - componentPrefix maps passive families to their ref-des letters

@@ -558,8 +558,8 @@ fn printUsage() !void {
         \\
         \\Usage:
         \\  netlisp parse <file>                   Parse and pretty-print an S-expression file
-        \\  netlisp build [--project-dir <d>] [--variant <v>]  Evaluate and emit resolved design
-        \\  netlisp check [--project-dir <d>] [--severity <s>] [--profile authoring|preflight|release] [--variant <v>] <name>  Run ERC + requirements
+        \\  netlisp build [--project-dir <d>] [--variant <v>]  Evaluate and emit resolved design (a failed assertion prints at file:line:col, emits nothing, and exits 1 — see Assertions below)
+        \\  netlisp check [--project-dir <d>] [--severity <s>] [--profile authoring|preflight|release] [--variant <v>] <name>  Run ERC + requirements (a failed assertion is one finding among them; the whole report still prints)
         \\  netlisp system-check [--project-dir <d>] <system>  Print system review/fabrication readiness as JSON; fail while blocked
         \\                                                    (contract: src/systems/<system>/system.sexp, else system.json)
         \\  netlisp review-audit [--project-dir <d>] [--layout <name>] [--output <file.md>] <design>  Write the generated Board Review Audit (Markdown) from release-profile checks, profiles, ladder, fab gate, notes
@@ -603,6 +603,23 @@ fn printUsage() !void {
         \\  netlisp gen-language-docs [--output <path>] [--check]  Regenerate (or verify with --check) docs/language-forms.md from the dispatch tables
         \\  netlisp version                          Print the runtime build id (the netlisp commit, or the current checkout's HEAD)
         \\  netlisp help                            Show this help
+        \\
+        \\Assertions ((assert …) / (assert-range …)):
+        \\  Evaluation NEVER stops at a failed assertion — the design is evaluated to
+        \\  the end and every assertion is recorded, so one run reports all of them.
+        \\  What happens next is decided per command, by what it hands you:
+        \\    HAND OFF THE BOARD — build, export-kicad. A failed assertion is fatal:
+        \\      every assertion prints (a failing one at file:line:col), NOTHING is
+        \\      written — no resolved netlist, no .bom, no KiCad project — exit 1.
+        \\    REPORT — check. The failure is one error-severity finding beside ERC and
+        \\      the requirement checks; the whole report still prints, exit 1.
+        \\    REVIEW — export-pdf, serve's pages, review-audit. The failure appears in
+        \\      the validation table / page and the document is still produced: a
+        \\      review of a board that fails its own arithmetic is the thing to read.
+        \\  Every other export (export-kicad-sch, export-spice, export-pinmap, …) is a
+        \\  derived view and is produced regardless.
+        \\  An advisory assertion (raised by the frequency-plan / PLL analyses) prints
+        \\  as WARN and blocks nothing.
         \\
         \\Library resolution (any command above):
         \\  --lib-dir <d>          Search <d>/lib/... after the project's own lib/ (env: NETLISP_LIB_DIR)

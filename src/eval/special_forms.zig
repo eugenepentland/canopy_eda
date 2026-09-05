@@ -300,8 +300,13 @@ fn directiveArgName(spec: u8) []const u8 {
 }
 
 /// Evaluate `(assert cond "message")`: append a pass/fail entry to the
-/// evaluator's assertions list. The build never aborts on failure — the
-/// review page surfaces the failures so the designer can decide.
+/// evaluator's assertions list, tagged with the form's own span.
+///
+/// EVALUATION never aborts on a failure: the design is evaluated to the end
+/// and every assertion is recorded, so one run reports all of them. What the
+/// caller then does with the list is the layer's decision — a command that
+/// EMITS an artifact refuses to write one (`commands.reportAssertions`), while
+/// `check`, the review PDF and the served pages report it as a finding.
 pub fn evalAssert(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     try checkArity(self, .assert_, args);
     const cond = try self.evalNode(args[0], env);
@@ -313,6 +318,8 @@ pub fn evalAssert(self: *Evaluator, args: []const Node, env: *Env) EvalError!Val
     try self.assertions.append(self.allocator, .{
         .passed = cond.isTruthy(),
         .message = msg,
+        .span = args[0].span,
+        .file = self.current_file,
     });
     return .nil;
 }
@@ -352,6 +359,8 @@ pub fn evalAssertRange(self: *Evaluator, args: []const Node, env: *Env) EvalErro
     try self.assertions.append(self.allocator, .{
         .passed = passed,
         .message = message,
+        .span = args[0].span,
+        .file = self.current_file,
     });
     return .nil;
 }
