@@ -93,6 +93,7 @@ test {
     _ = @import("eval/power_budget.zig");
     _ = @import("eval/power_sequencing.zig");
     _ = @import("eval/net_envelopes.zig");
+    _ = @import("eval/net_envelope_rules.zig");
     _ = @import("eval/rails.zig");
     _ = @import("eval/section_maturity.zig");
     _ = @import("eval/stackup_presets.zig");

@@ -34,6 +34,8 @@ const std = @import("std");
 const env_mod = @import("env.zig");
 const flat_netlist = @import("../flat_netlist.zig");
 const na = @import("net_analysis.zig");
+const rules_mod = @import("net_envelope_rules.zig");
+const req = @import("../req_checks.zig");
 
 const DesignBlock = env_mod.DesignBlock;
 const NetEnvelope = env_mod.NetEnvelope;
@@ -83,6 +85,16 @@ pub const Declaration = env_mod.NetEnvelopeDecl;
 pub const Input = struct {
     /// `(net-envelope …)` forms written in this block's own body.
     declarations: []const Declaration = &.{},
+    /// Library-declared node potentials (`eval/net_envelope_rules`): a
+    /// feedback pin's reference, a SET pin's programmed voltage. Applied only
+    /// to nets nothing else bounds, so a datasheet default never rewrites a
+    /// fact the design states outright.
+    rules: []const rules_mod.Seed = &.{},
+    /// Library `(electrical … (max-voltage V))` ceilings, resolved to pins and
+    /// flat nets. A device pin cannot push a node past its own declared
+    /// maximum, so a driven domain is bounded by the PIN rather than by the
+    /// widest supply the part happens to reach.
+    pin_limits: []const rules_mod.PinLimit = &.{},
 };
 
 /// Read one net's proven potential the way every rating surface must read it:
@@ -225,10 +237,29 @@ pub fn build(
         .contradictions = &contradictions,
     });
 
+    // Library-declared node potentials fill what nothing above bounds. They
+    // never widen or narrow an existing entry: a datasheet default must not
+    // rewrite a fact the design states outright.
+    for (input.rules) |seed| {
+        if (!(seed.max >= seed.min)) continue;
+        const root = rootOf(&aliases, &parent, seed.net);
+        if (by_root.contains(root) or na.isRatingZeroVolts(root)) continue;
+        try by_root.put(allocator, root, .{
+            .min = seed.min,
+            .max = seed.max,
+            .origin = .derived,
+            .provenance = .{ .rule = seed.rule },
+        });
+    }
+
     // Series-domain derivation runs LAST, over everything already known —
     // seeds and authored declarations alike — and only ever fills nets that
     // are still unknown, so nothing above can be widened or narrowed by it.
-    var domains = try deriveSeriesDomains(allocator, instances.items, nets.items, &parent, &by_root);
+    var domains = try deriveSeriesDomains(allocator, .{
+        .instances = instances.items,
+        .nets = nets.items,
+        .pin_limits = input.pin_limits,
+    }, &parent, &by_root);
     defer domains.deinit(allocator);
 
     // Emit one entry per flat net whose class carries a potential. Nets with no
@@ -576,8 +607,53 @@ fn seedSpanOf(by_root: *const std.StringHashMapUnmanaged(Span), root: []const u8
 
 /// One connected component of unknown nets joined by series conductors, while
 /// its envelope is being assembled.
+/// The one shape zero-drop propagation may not model but Ohm's law can: a
+/// single unknown node reached from exactly TWO different known nets through
+/// two parseable resistors — a divider tap. Current between the anchors is
+/// guaranteed, which is why the general rule refuses the domain; here the
+/// potential is simply the ratio, evaluated at the anchors' own corners.
+///
+/// Every condition is a refusal, not a guess: a third leg, an unparseable
+/// value, a zero resistance, an inductor, or a domain of more than one node all
+/// leave `usable` false and the domain unproven, exactly as before. The one
+/// thing the ratio assumes is that the pin on the tap SENSES it — which is what
+/// a divider is for; a part that DRIVES a tap must say so with a
+/// `(net-envelope …)`, and that declaration wins because it is applied first.
+const TapCandidate = struct {
+    /// One resistive path from the tap to a bounded net. The anchor's own
+    /// corners are stored flat rather than as a `Span`, so an unused slot is a
+    /// zero leg rather than an `undefined` one nothing may read.
+    const Leg = struct { min: f64 = 0, max: f64 = 0, ohms: f64 = 0 };
+
+    legs: [2]Leg = .{ .{}, .{} },
+    count: usize = 0,
+    usable: bool = true,
+    /// Set by `compose` when the ratio actually decided the span. Such a
+    /// domain claims NO series correlation: the legs DO carry the full drop,
+    /// which is the opposite of the zero-drop case `domain` exists for.
+    resolved: bool = false,
+
+    fn addLeg(self: *TapCandidate, anchor: Span, ohms: ?f64) void {
+        const resistance = ohms orelse {
+            self.usable = false;
+            return;
+        };
+        if (!(resistance > 0) or self.count >= self.legs.len) {
+            self.usable = false;
+            return;
+        }
+        self.legs[self.count] = .{ .min = anchor.min, .max = anchor.max, .ohms = resistance };
+        self.count += 1;
+    }
+};
+
 const DomainAcc = struct {
     anchors: std.ArrayList(Span) = .empty,
+    /// Divider-tap evidence for this domain — see `TapCandidate`.
+    tap: TapCandidate = .{},
+    /// How many unknown roots this domain joins. The ratio rule applies to one
+    /// node only; a chain of them is not a two-resistor divider.
+    members: usize = 0,
     /// The one known root all anchors must share. Two DIFFERENT known nets
     /// conducting into one unknown domain is a divider/bridge: current between
     /// them is guaranteed, which is exactly what zero-drop propagation may not
@@ -607,7 +683,8 @@ const DomainAcc = struct {
     /// a poisoned domain, one nothing bounds, and one anchored by more than
     /// one distinct known net all stay unknown.
     fn compose(self: *DomainAcc) bool {
-        if (self.poisoned or self.multi_root) return false;
+        if (self.poisoned) return false;
+        if (self.multi_root) return self.composeTap();
         if (self.anchors.items.len == 0 and !self.has_device) return false;
         var lo: f64 = std.math.inf(f64);
         var hi: f64 = -std.math.inf(f64);
@@ -623,12 +700,30 @@ const DomainAcc = struct {
         self.span_max = hi;
         return true;
     }
+
+    /// Resolve a two-anchor domain by the divider ratio, or refuse it as
+    /// before. `V = (Va*Rb + Vb*Ra) / (Ra + Rb)` rises with both anchors, so
+    /// the interval corners are the anchors' corners.
+    fn composeTap(self: *DomainAcc) bool {
+        if (!self.tap.usable or self.tap.count != 2 or self.members != 1) return false;
+        const a = self.tap.legs[0];
+        const b = self.tap.legs[1];
+        const total = a.ohms + b.ohms;
+        if (!(total > 0)) return false;
+        self.span_min = (a.min * b.ohms + b.min * a.ohms) / total;
+        self.span_max = (a.max * b.ohms + b.max * a.ohms) / total;
+        self.tap.resolved = true;
+        return true;
+    }
 };
 
 /// Shared state of one derivation run over a flattened design.
 const DomainPass = struct {
     allocator: std.mem.Allocator,
     instances: []const flat_netlist.FlatInstance,
+    /// Library `(electrical … (max-voltage V))` ceilings, still keyed by FLAT
+    /// net name; `limitFor` maps each to its ferrite root on demand.
+    pin_limits: []const rules_mod.PinLimit = &.{},
     by_root: *std.StringHashMapUnmanaged(Span),
     /// Ferrite-class roots each part touches, deduplicated, in net order.
     roots_by_ref: std.StringHashMapUnmanaged(std.ArrayList([]const u8)) = .empty,
@@ -696,7 +791,9 @@ const DomainPass = struct {
 
     fn register(self: *DomainPass, root: []const u8) std.mem.Allocator.Error!void {
         const member = try self.member_set.getOrPut(self.allocator, root);
-        if (!member.found_existing) try self.member_list.append(self.allocator, root);
+        if (member.found_existing) return;
+        try self.member_list.append(self.allocator, root);
+        (try self.accFor(root)).members += 1;
     }
 
     fn accFor(self: *DomainPass, root: []const u8) std.mem.Allocator.Error!*DomainAcc {
@@ -725,6 +822,9 @@ const DomainPass = struct {
             const entry = try self.accFor(if (span_a == null) pair[0] else pair[1]);
             try entry.anchors.append(self.allocator, anchor);
             entry.noteAnchorRoot(anchor_root);
+            // An inductor's value is not a resistance, so a bias choke can
+            // anchor a domain but can never be a divider leg.
+            entry.tap.addLeg(anchor, if (isInductor(inst.component)) null else req.parseOhms(inst.value));
         }
     }
 
@@ -749,9 +849,33 @@ const DomainPass = struct {
                 if (!self.member_set.contains(root)) continue;
                 if (seedSpanOf(self.by_root, root) != null) continue;
                 const entry = try self.accFor(root);
-                if (bound) |b| entry.boundByDevice(b.min, b.max) else entry.poisoned = true;
+                const b = bound orelse {
+                    entry.poisoned = true;
+                    continue;
+                };
+                // A pin's own declared absolute maximum is the tighter of the
+                // two feasibility statements: the part cannot present more on
+                // THIS pin than its library says, whatever its supplies reach.
+                const ceiling = if (self.limitFor(inst.ref_des, root)) |limit|
+                    @min(b.max, limit)
+                else
+                    b.max;
+                entry.boundByDevice(b.min, @max(b.min, ceiling));
             }
         }
+    }
+
+    /// The tightest library `(electrical … (max-voltage V))` this part declares
+    /// on any pin sitting on `root`, or null when it declares none there.
+    fn limitFor(self: *DomainPass, ref_des: []const u8, root: []const u8) ?f64 {
+        var tightest: ?f64 = null;
+        for (self.pin_limits) |limit| {
+            if (!std.mem.eql(u8, limit.ref_des, ref_des)) continue;
+            const limit_root = na.findRoot(&self.dparent, limit.net);
+            if (!std.mem.eql(u8, limit_root, root) and !std.mem.eql(u8, limit.net, root)) continue;
+            tightest = if (tightest) |t| @min(t, limit.max_voltage) else limit.max_voltage;
+        }
+        return tightest;
     }
 
     /// Compose each domain once, in first-member order so ids are stable, and
@@ -778,14 +902,22 @@ const DomainPass = struct {
                 .min = entry.span_min,
                 .max = entry.span_max,
                 .origin = .derived,
-                .provenance = .{ .rule = "series-domain" },
+                .provenance = .{ .rule = if (entry.tap.resolved) "divider-tap" else "series-domain" },
             });
             try domains.put(self.allocator, root, .{
-                .domain = idgop.value_ptr.*,
-                .bounded = entry.has_device,
+                .domain = if (entry.tap.resolved) 0 else idgop.value_ptr.*,
+                .bounded = entry.has_device and !entry.tap.resolved,
             });
         }
     }
+};
+
+/// The flattened design one derivation run reads, plus the library ceilings
+/// that tighten a driven node's bound.
+const FlatDesign = struct {
+    instances: []const flat_netlist.FlatInstance,
+    nets: []const flat_netlist.FlatNet,
+    pin_limits: []const rules_mod.PinLimit = &.{},
 };
 
 /// What the derivation established for one root: its correlation class, and
@@ -798,16 +930,20 @@ const Derived = struct { domain: u32, bounded: bool };
 /// returns root → correlation-domain id (1-based; roots absent are underived).
 fn deriveSeriesDomains(
     allocator: std.mem.Allocator,
-    instances: []const flat_netlist.FlatInstance,
-    nets: []const flat_netlist.FlatNet,
+    flat: FlatDesign,
     parent: *std.StringHashMapUnmanaged([]const u8),
     by_root: *std.StringHashMapUnmanaged(Span),
 ) std.mem.Allocator.Error!std.StringHashMapUnmanaged(Derived) {
     var domains: std.StringHashMapUnmanaged(Derived) = .empty;
     errdefer domains.deinit(allocator);
-    var pass = DomainPass{ .allocator = allocator, .instances = instances, .by_root = by_root };
+    var pass = DomainPass{
+        .allocator = allocator,
+        .instances = flat.instances,
+        .pin_limits = flat.pin_limits,
+        .by_root = by_root,
+    };
     defer pass.deinit();
-    try pass.indexRoots(nets, parent);
+    try pass.indexRoots(flat.nets, parent);
     try pass.unionUnknowns();
     try pass.collectAnchors();
     try pass.boundByDevices();
@@ -1048,15 +1184,15 @@ test "series resistor derives the RC filter node from its rail" {
     try testing.expectEqual(@as(u32, 0), rail.domain);
 }
 
-// spec: eval/net-envelopes - A divider tap anchored by two different known nets is refused rather than guessed
-test "series derivation refuses a divider strung between two rails" {
+// spec: eval/net-envelopes - A divider tap between two bounded nets is derived from the leg ratio
+test "series derivation solves a divider strung between two rails" {
     var scratch = arena();
     defer scratch.deinit();
     const alloc = scratch.allocator();
     // TAP provably carries current between V5 and ground — the one case
-    // zero-drop propagation may not model, so it must stay unknown.
+    // zero-drop propagation may not model, and the one Ohm's law does.
     const instances = [_]env_mod.Instance{
-        passive("R1", "res-0402", "10k"),
+        passive("R1", "res-0402", "30k"),
         passive("R2", "res-0402", "10k"),
     };
     const nets = [_]env_mod.Net{
@@ -1067,7 +1203,89 @@ test "series derivation refuses a divider strung between two rails" {
     const ports = [_]env_mod.Port{.{ .name = "V5", .net = "V5", .direction = "in", .kind = "power", .rated_min = 4.75, .rated_max = 5.25 }};
     const outer = flatBlock(&instances, &nets, &ports);
     const result = try build(alloc, &outer, .{});
-    try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(result, "TAP"));
+    const tap = envelopeFor(result, "TAP") orelse return error.TestExpectedEnvelope;
+    try testing.expectApproxEqAbs(@as(f64, 4.75 * 0.25), tap.min, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5.25 * 0.25), tap.max, 1e-9);
+    try testing.expectEqualStrings("divider-tap", tap.provenance.rule);
+    // The legs DO carry the full drop, so the tap claims no series correlation.
+    try testing.expectEqual(@as(u32, 0), tap.domain);
+}
+
+// spec: eval/net-envelopes - A resistor ladder with more than one unknown node is refused rather than approximated by a two-leg ratio
+test "series derivation refuses a three-resistor ladder" {
+    var scratch = arena();
+    defer scratch.deinit();
+    const alloc = scratch.allocator();
+    // The eFuse UVLO/OVLO shape: VIN — R1 — UVLO — R2 — OVLO — R3 — GND. Two
+    // unknown nodes, so the two-leg ratio simply does not describe either.
+    const instances = [_]env_mod.Instance{
+        passive("R1", "res-0402", "470k"),
+        passive("R2", "res-0402", "11k"),
+        passive("R3", "res-0402", "47k"),
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "V12", .pins = &[_]env_mod.PinRef{.{ .ref_des = "R1", .pin = "1" }} },
+        .{ .name = "UVLO", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "R1", .pin = "2" }, .{ .ref_des = "R2", .pin = "1" } } },
+        .{ .name = "OVLO", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "R2", .pin = "2" }, .{ .ref_des = "R3", .pin = "1" } } },
+        .{ .name = "GND", .pins = &[_]env_mod.PinRef{.{ .ref_des = "R3", .pin = "2" }} },
+    };
+    const ports = [_]env_mod.Port{.{ .name = "V12", .net = "V12", .direction = "in", .kind = "power", .rated_min = 11.4, .rated_max = 12.6 }};
+    const outer = flatBlock(&instances, &nets, &ports);
+    const result = try build(alloc, &outer, .{});
+    try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(result, "UVLO"));
+    try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(result, "OVLO"));
+}
+
+// spec: eval/net-envelopes - A library-declared node potential fills a net the topology cannot bound and never overwrites one it can
+test "a library rule seed fills only what nothing else proves" {
+    var scratch = arena();
+    defer scratch.deinit();
+    const alloc = scratch.allocator();
+    const instances = [_]env_mod.Instance{passive("C1", "cap-0402", "22nF")};
+    const nets = [_]env_mod.Net{
+        .{ .name = "V5", .pins = &[_]env_mod.PinRef{.{ .ref_des = "C1", .pin = "1" }} },
+        .{ .name = "FB", .pins = &[_]env_mod.PinRef{.{ .ref_des = "C1", .pin = "2" }} },
+    };
+    const ports = [_]env_mod.Port{.{ .name = "V5", .net = "V5", .direction = "in", .kind = "power", .rated_min = 4.75, .rated_max = 5.25 }};
+    const outer = flatBlock(&instances, &nets, &ports);
+    const seeds = [_]rules_mod.Seed{
+        .{ .net = "FB", .min = 0.6, .max = 0.6, .rule = "feedback reference U1.FB = 0.6 V" },
+        // V5 is already a declared supply: a datasheet default must not move it.
+        .{ .net = "V5", .min = 0, .max = 100, .rule = "bogus" },
+    };
+    const result = try build(alloc, &outer, .{ .rules = &seeds });
+    const fb = envelopeFor(result, "FB") orelse return error.TestExpectedEnvelope;
+    try testing.expectEqual(@as(f64, 0.6), fb.max);
+    try testing.expectEqualStrings("feedback reference U1.FB = 0.6 V", fb.provenance.rule);
+    const rail = envelopeFor(result, "V5") orelse return error.TestExpectedEnvelope;
+    try testing.expectEqual(@as(f64, 5.25), rail.max);
+}
+
+// spec: eval/net-envelopes - A device pin's declared max-voltage bounds the domain it drives more tightly than the part's supplies
+test "a pin max-voltage tightens the bound a driver puts on its domain" {
+    var scratch = arena();
+    defer scratch.deinit();
+    const alloc = scratch.allocator();
+    // Without the pin ceiling the 12 V supply bounds NODE; the part's own
+    // library says this pin never presents more than 6 V.
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ldo-x", .value = "", .footprint = "", .symbol = "" },
+        passive("R1", "res-0402", "10k"),
+        passive("C1", "cap-0402", "1uF"),
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "V12", .pins = &[_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "5" }} },
+        .{ .name = "NODE", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "4" }, .{ .ref_des = "R1", .pin = "1" } } },
+        .{ .name = "FAR", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "R1", .pin = "2" }, .{ .ref_des = "C1", .pin = "1" } } },
+        .{ .name = "GND", .pins = &[_]env_mod.PinRef{.{ .ref_des = "C1", .pin = "2" }} },
+    };
+    const ports = [_]env_mod.Port{.{ .name = "V12", .net = "V12", .direction = "in", .kind = "power", .rated_min = 11.4, .rated_max = 12.6 }};
+    const outer = flatBlock(&instances, &nets, &ports);
+    const wide = try build(alloc, &outer, .{});
+    try testing.expectEqual(@as(f64, 12.6), (envelopeFor(wide, "NODE") orelse return error.TestExpectedEnvelope).max);
+    const limits = [_]rules_mod.PinLimit{.{ .ref_des = "U1", .net = "NODE", .max_voltage = 6.0 }};
+    const tight = try build(alloc, &outer, .{ .pin_limits = &limits });
+    try testing.expectEqual(@as(f64, 6.0), (envelopeFor(tight, "NODE") orelse return error.TestExpectedEnvelope).max);
 }
 
 // spec: eval/net-envelopes - A device pin on a derived domain widens it to the device's own known supplies

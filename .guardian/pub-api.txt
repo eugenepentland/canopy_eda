@@ -810,6 +810,10 @@ src/eval/net_analysis.zig::refDesLocalPrefix | fn refDesLocalPrefix(ref_des: []c
 src/eval/net_analysis.zig::schematic_ground_names value
 src/eval/net_analysis.zig::subBlockNetHasCap | fn subBlockNetHasCap(block: *const DesignBlock, net_path: []const u8) bool
 src/eval/net_analysis.zig::subNetHostRef | fn subNetHostRef(name: []const u8) ?[]const u8
+src/eval/net_envelope_rules.zig::Facts struct_
+src/eval/net_envelope_rules.zig::PinLimit struct_
+src/eval/net_envelope_rules.zig::Seed struct_
+src/eval/net_envelope_rules.zig::collect | fn collect( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, ) std.mem.Allocator.Error!Facts
 src/eval/net_envelopes.zig::Contradiction struct_
 src/eval/net_envelopes.zig::Declaration value
 src/eval/net_envelopes.zig::Input struct_

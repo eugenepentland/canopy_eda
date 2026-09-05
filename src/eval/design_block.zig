@@ -24,6 +24,7 @@ const builders = @import("builders.zig");
 const special_forms = @import("special_forms.zig");
 const rails_mod = @import("rails.zig");
 const net_envelopes = @import("net_envelopes.zig");
+const net_envelope_rules = @import("net_envelope_rules.zig");
 const physical_checks = @import("../req_physical_checks.zig");
 const test_point_mod = @import("test_point.zig");
 const micro_forms = @import("micro_forms.zig");
@@ -307,8 +308,16 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     // them under its `sub-block/` prefix, which is how a module owns the
     // envelope of its own SET/FB node once instead of per instantiation.
     block.envelopes.declared = envelope_decls.toOwnedSlice(self.allocator) catch &.{};
+    // Library-declared node potentials (a feedback reference, a SET resistor's
+    // programmed output) and per-pin absolute maxima. Collected here rather
+    // than inside the derivation because a check's pin name resolves only
+    // through the part's pinout, which lives on the evaluator.
+    const facts = net_envelope_rules.collect(self.allocator, self, block) catch
+        return EvalError.OutOfMemory;
     const envelopes = net_envelopes.build(self.allocator, block, .{
         .declarations = block.envelopes.declared,
+        .rules = facts.seeds,
+        .pin_limits = facts.pin_limits,
     }) catch return EvalError.OutOfMemory;
     block.envelopes.published = envelopes.envelopes;
     for (envelopes.contradictions) |bad| {

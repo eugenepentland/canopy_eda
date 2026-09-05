@@ -218,6 +218,7 @@ candidate for deployment.
 - Ground-via seed model and endpoint tests remain claimed by the shard manifest
 - RF pad adaptation tests remain claimed by the shard manifest
 - The live sub-circuit Stamp endpoint regression remains claimed by the shard manifest
+- The library-fact envelope rules remain claimed by the shard manifest
 - The saved-pose identity tests remain claimed by the shard manifest
 - Panelization export tests remain claimed by the shard manifest
 - Bridges every test-bearing module into the shard import graph so filters alone decide a shard's contents
@@ -5662,6 +5663,23 @@ Public functions: isActiveSemiconductor, isPassThroughConnector
 - completeness-waiver: malformed encoding (descriptions are matched byte-wise with ASCII case folding, so non-UTF-8 bytes simply fail to match rather than being decoded)
 - completeness-waiver: integer overflow (the only arithmetic is a saturating pad count made at build time and compared, never summed)
 - completeness-waiver: panic-free (every path is a bounded slice comparison over caller-owned memory with no indexing beyond a length-checked loop)
+## eval/net-envelope-rules
+
+Public functions: collect
+
+- A feedback-divider requirement bounds its FB pin at the declared reference
+- A set-resistor-output requirement bounds its SET pin at the programmed voltage
+- Two resistors in parallel on a SET node are ambiguous and seed nothing
+- A library pin max-voltage is lifted to the flat net that pin sits on
+- completeness-waiver: empty inputs (a block with no instances and no sub-blocks returns both slices empty, the covered nothing-declared case)
+- completeness-waiver: large inputs (one walk of the design tree, one pinout lookup per declared pin, on an already-evaluated block)
+- completeness-waiver: unauthorized access (reads an evaluated block and the evaluator's own pinout cache; opens no file and reaches no network)
+- completeness-waiver: i/o failure (no I/O — every component file was read during evaluation)
+- completeness-waiver: concurrent access (single-threaded inside design evaluation, reading an immutable block)
+- completeness-waiver: malformed encoding (names arrive as evaluated slices and are compared bytewise; nothing here parses an external encoding)
+- completeness-waiver: integer overflow (voltages and resistances stay in f64; the only integers are slice lengths the allocator already bounds)
+- completeness-waiver: panic-free (every lookup is an optional consulted with orelse, and a non-positive current or resistance seeds nothing)
+
 ## eval/net-envelopes
 
 Public functions: build, ferriteBridges, lookup, lookupIn
@@ -5675,7 +5693,10 @@ Public functions: build, ferriteBridges, lookup, lookupIn
 - An inductor bias feed derives its bias node from the rail it taps
 - A device pin on a derived domain widens it to the device's own known supplies
 - A device with no envelope-known net anywhere poisons the domain it drives
-- A divider tap anchored by two different known nets is refused rather than guessed
+- A divider tap between two bounded nets is derived from the leg ratio
+- A resistor ladder with more than one unknown node is refused rather than approximated by a two-leg ratio
+- A library-declared node potential fills a net the topology cannot bound and never overwrites one it can
+- A device pin's declared max-voltage bounds the domain it drives more tightly than the part's supplies
 - A DNP series resistor is absent copper and derives nothing
 - An inductor between two unknown nets is a switching coil and merges nothing
 - A module's own net-envelope declaration applies to the flattened sub-block/NET name
