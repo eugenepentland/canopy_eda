@@ -7816,6 +7816,7 @@ is what makes the predicate exact rather than approximately right.
 - Design Settings edits board-level numeric rules in the GUI, preserves unrelated source forms, rebuilds, and reloads the shown layout
 - Design Settings renders validated numeric rule inputs with save-and-rebuild feedback
 - Design Settings creates a design-rules source form when a board previously relied entirely on defaults
+- Design Settings refuses to author a second copy of a rule form the design keeps in its .layout.sexp sidecar
 - Design Settings adds, edits, and deletes whole-layer copper planes without replacing physical stackup construction or comments
 - Saving plane controls on an implicit board authors the visible copper count and supports an explicitly plane-free stack
 - Design Settings exposes whole-layer copper assignments with add, edit, delete, validated save, and read-only states
