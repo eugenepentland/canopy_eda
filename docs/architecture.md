@@ -2,7 +2,7 @@
 
 A high-level map of what this tool does today. Capability-focused, language-agnostic — the implementation lives in `src/`, but this document deliberately stays out of it.
 
-- For the design language itself, see [`sexp-language.md`](sexp-language.md).
+- For the design language itself, see [`sexpr-language.md`](sexpr-language.md).
 
 ## 1. What the tool is
 
@@ -77,12 +77,12 @@ Four observations worth flagging:
 
 ### S-expression language
 
-The schematic source language. Full reference in [`sexp-language.md`](sexp-language.md). Headline features:
+The schematic source language. Full reference in [`sexpr-language.md`](sexpr-language.md). Headline features:
 
-- Special forms: `let`, `if`, `cond`, `fmt`, `assert`, `assert-range`.
+- Special forms: `let`, `if`, `repeat`, `for`, `fmt`, `assert`, `assert-range` (there is no `cond`).
 - Builtins: arithmetic (`+ - * / %`), comparison (`> >= < <= == !=`), logic (`and or not`).
 - Format directives for engineering units: `~V` (voltage), `~R` (resistance), `~C` (capacitance), `~A` (current), `~S` (string).
-- Parameterised modules (`defmodule`) with closure capture.
+- Parameterised modules — `(block name (params…) …)`, with `defmodule` as a permanent alias — with closure capture. A parameter may be a component, so a module can take the part it places.
 - `import` system that searches `lib/components/` then `lib/modules/`, project-local then shared.
 - Stable identity via auto-generated 8-char hex `(id …)` markers, flushed back to disk on build.
 - Bus shorthand for wide pin groups (`(bus "FLASH_IO" T19 P19 V19 …)` → `FLASH_IO0`, `FLASH_IO1`, …).
@@ -124,7 +124,8 @@ A structured per-design TODO log, stored as `<design>.notes.md` next to the desi
 
 ### Electrical-rule checks (ERC)
 
-A post-build pass over the resolved design block. 12 checks ship today:
+A post-build pass over the resolved design block. The complete list of finding
+kinds is `erc.ViolationKind` in `src/erc.zig`; the ones worth naming here:
 
 | Check | What it catches |
 | --- | --- |
@@ -141,6 +142,16 @@ A post-build pass over the resolved design block. 12 checks ship today:
 | `power_budget` | A net's current draw exceeds a declared rating. |
 | `pin_function_unsupported` | A pin's `(as "FN")` assertion names a function that isn't in the pinout's primary + alts list. |
 | `pin_function_required` | A pin whose pinout entry has ≥ 2 alts was wired without an `(as …)` to disambiguate. (Pins with exactly one alt auto-fill via `pin_enrichment` and don't trigger this; pins with no alts don't need one.) The pinout lookup is dual-keyed by BGA position *and* logical name, so `(pin H4 …)` and `(pin PC13 …)` both resolve. |
+
+Three kinds are **informational** — they never fail `netlisp check` and no
+profile escalates them, because each surfaces a decision the tool made on the
+author's behalf rather than a fault:
+
+| Check | What it surfaces |
+| --- | --- |
+| `layout_class_inferred` | A net whose PCB-layout criticality class was guessed from its name. Pin it with `(module-policy (placement-class "NET" <class>))`. |
+| `section_category_inferred` | A section whose system-overview category was guessed from a keyword in its name. Pin it with `(category <key>)` in the section body. |
+| `deprecated_form` | A superseded spelling, with the `file:line:col` of the form and the spelling that replaces it. Old spellings keep working; this is the only place they are reported, deliberately NOT as an evaluator warning (the release profile turns those into errors). |
 
 The `power_no_cap` violation kind exists in the enum but isn't currently invoked from the runner.
 

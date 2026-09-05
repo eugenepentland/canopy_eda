@@ -255,12 +255,14 @@ and never draw an unknown-sub-form warning.
 
 ## Section-name classifier keywords
 
-The system-overview SVG picks each section's column + colour by
-case-insensitive keyword match on the section **name**, walking
-these rules in priority order (first hit wins). A section matching
-no rule falls back to **connector** when it contains a J/P-prefixed
-instance, else **peripheral**. An explicit `(category <key>)`
-declaration overrides the heuristic.
+An explicit `(category <key>)` in the section body is the source of
+truth. Only a section without one is classified by these rules:
+case-insensitive keyword match on the section **name**, walked in
+priority order (first hit wins), falling back to **connector** when
+the section contains a J/P-prefixed instance, else **peripheral**.
+A section a NAME keyword classified is reported as a
+`section_category_inferred` ERC info naming the `(category …)` line
+that would pin it.
 
 | Category | Name keywords |
 | --- | --- |

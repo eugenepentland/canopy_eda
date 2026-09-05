@@ -14,7 +14,7 @@ There is no GUI capture step; the browser is a viewer and review surface.
 - **Language:** a small S-expression DSL with components, parameterised
   component families, modules with closures, nets inferred from pin
   connections, sections, assertions and formatting directives.
-  See [docs/sexp-language.md](docs/sexp-language.md) and the generated
+  See [docs/sexpr-language.md](docs/sexpr-language.md) and the generated
   reference [docs/language-forms.md](docs/language-forms.md).
 - **Outputs:** HTML schematic with inline SVG, ERC and requirement checks,
   BOM resolution, PCB layout (placement, autorouting, copper pours, DRC),
@@ -174,7 +174,7 @@ zig build run -- import-kicad-layout --project-dir my-board my-board
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md): what the tool does and how the pipeline fits together
-- [docs/sexp-language.md](docs/sexp-language.md): the design language, with [docs/language-forms.md](docs/language-forms.md) as the machine-checked reference
+- [docs/sexpr-language.md](docs/sexpr-language.md): the design language, with [docs/language-forms.md](docs/language-forms.md) as the machine-checked reference
 - [docs/standard-library.md](docs/standard-library.md): the bundled components and how overrides resolve
 - [docs/webserver-api.md](docs/webserver-api.md): every HTTP route and structured tool
 - [docs/auth.md](docs/auth.md): the local-only security model

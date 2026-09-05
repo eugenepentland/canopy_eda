@@ -4540,6 +4540,8 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - SectionIterator walks every ## heading of the rendered reference in order
 - The generated reference names every category key so (category …) docs follow the classifier map
 - The generated reference has a Requirement checks section rendered from the checker's check_docs table
+- Every document the generated reference links to exists in docs/
+- The section-classifier reference states that an explicit (category …) is the source of truth
 - Every isForm head atom under src/eval is reachable from a form registry or listed as a deliberate exception
 - The generated reference renders one sub-form section per compound-form registry
 

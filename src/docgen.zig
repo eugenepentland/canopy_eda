@@ -328,12 +328,14 @@ fn renderClassifierKeywords(writer: anytype) !void {
         \\
         \\## Section-name classifier keywords
         \\
-        \\The system-overview SVG picks each section's column + colour by
-        \\case-insensitive keyword match on the section **name**, walking
-        \\these rules in priority order (first hit wins). A section matching
-        \\no rule falls back to **connector** when it contains a J/P-prefixed
-        \\instance, else **peripheral**. An explicit `(category <key>)`
-        \\declaration overrides the heuristic.
+        \\An explicit `(category <key>)` in the section body is the source of
+        \\truth. Only a section without one is classified by these rules:
+        \\case-insensitive keyword match on the section **name**, walked in
+        \\priority order (first hit wins), falling back to **connector** when
+        \\the section contains a J/P-prefixed instance, else **peripheral**.
+        \\A section a NAME keyword classified is reported as a
+        \\`section_category_inferred` ERC info naming the `(category …)` line
+        \\that would pin it.
         \\
         \\| Category | Name keywords |
         \\| --- | --- |
@@ -631,6 +633,47 @@ test "category keys section covers the classifier map" {
     for (block_types.category_keys.keys()) |key| {
         try std.testing.expect(std.meta.stringToEnum(block_types.Category, key) != null);
     }
+}
+
+// spec: docgen - Every document the generated reference links to exists in docs/
+test "the reference links only to documents that exist" {
+    const alloc = std.testing.allocator;
+    const doc = try renderLanguageReference(alloc);
+    defer alloc.free(doc);
+
+    // Sibling-document links are written as `](<name>.md)`; each must name a
+    // file still in docs/. The header pointed at a deleted second grammar for
+    // months, and nothing noticed.
+    var i: usize = 0;
+    var checked: usize = 0;
+    while (std.mem.indexOfPos(u8, doc, i, "](")) |open| {
+        const close = std.mem.indexOfPos(u8, doc, open, ")") orelse break;
+        i = close + 1;
+        const target = doc[open + 2 .. close];
+        if (!std.mem.endsWith(u8, target, ".md")) continue;
+        if (std.mem.indexOfScalar(u8, target, '/') != null) continue; // not a sibling
+        const path = try std.fmt.allocPrint(alloc, "docs/{s}", .{target});
+        defer alloc.free(path);
+        infra_fs.cwd().access(path, .{}) catch |err| {
+            std.debug.print("generated reference links to missing docs/{s}: {s}\n", .{ target, @errorName(err) });
+            return error.TestUnexpectedResult;
+        };
+        checked += 1;
+    }
+    try std.testing.expect(checked >= 1);
+}
+
+// spec: docgen - The section-classifier reference states that an explicit (category …) is the source of truth
+test "classifier section names (category …) as authoritative" {
+    const alloc = std.testing.allocator;
+    const doc = try renderLanguageReference(alloc);
+    defer alloc.free(doc);
+
+    const sec = extractSection(doc, "Section-name classifier keywords").?;
+    // The name keywords are the FALLBACK; a reader must not come away thinking
+    // the section title is what decides the category.
+    try std.testing.expect(std.mem.indexOf(u8, sec, "source of\ntruth") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sec, "section_category_inferred") != null);
 }
 
 // spec: docgen - The generated reference has a Requirement checks section rendered from the checker's check_docs table

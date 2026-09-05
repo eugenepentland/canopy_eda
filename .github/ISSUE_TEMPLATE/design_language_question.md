@@ -9,7 +9,7 @@ assignees: ''
 <!--
 Before filing, the answer may already be written down:
 
-  - docs/sexp-language.md          the hand-written language reference
+  - docs/sexpr-language.md         the hand-written language reference
   - docs/language-forms.md         every form, fmt directive and SI suffix,
                                    generated from the evaluator itself
   - `netlisp reference [section]`  the same grammar, printed by the binary
