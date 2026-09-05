@@ -125,6 +125,7 @@ pub fn toolRunChecks(
         .severity = severity,
         .changed_since = changed_since,
         .profile = profile,
+        .variant = optionalString(args_val, "variant"),
     }, w);
 }
 
@@ -134,6 +135,10 @@ const RunChecksArgs = struct {
     severity: ?[]const u8,
     changed_since: ?[]const u8,
     profile: preflight.Profile,
+    /// Which assembly variant to evaluate the design in. Null selects the
+    /// design's `(default)` variant, else the base — so the checks answer for
+    /// the assembly the board is built as unless another is asked for.
+    variant: ?[]const u8 = null,
 };
 
 const ChangeFilter = struct {
@@ -305,6 +310,7 @@ fn writeFindings(
 
 fn runChecks(allocator: std.mem.Allocator, args: RunChecksArgs, w: anytype) !bool {
     var eval = Evaluator.init(allocator, args.project_dir);
+    eval.variants.requested = args.variant;
     defer eval.deinit();
     const nb = (try loadNamedBlock(allocator, args, &eval, w)) orelse return false;
     try resolveBom(allocator, args, nb);

@@ -17,7 +17,7 @@ behind an authenticating reverse proxy. `GET /healthz` answers a fixed
 Auth in full: [auth.md](auth.md).
 
 - **Design list**: `GET /` — links to all .sexp designs, with per-card health chips (ERC errors/warnings, failed assertions, open notes, green PASS)
-- **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG. The page also embeds the design-review panels inline (power-budget table, power-sequence, test-points, per-section coverage). There is no standalone review-report endpoint.
+- **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG. `?variant=NAME` renders one of the design's declared assembly variants (see “Assembly variants” below). The page also embeds the design-review panels inline (power-budget table, power-sequence, test-points, per-section coverage). There is no standalone review-report endpoint.
 - **Thermal review**: `GET /thermal/:name[?ambient=NN][?scenario=natural|fan|airflow_1ms|airflow_2ms|heatsink|fan_heatsink][?layout=<saved>][?fragment=1][?row=<saved>]` — the **Thermal** tab (last in the shared design-view bar, right after Assembly, on the schematic / PCB / 3D / assembly pages; modules get it too, without Assembly). Server-rendered dark page: the board-coupled verdict pill + sentence with the package-level screen demoted under it, the ambient window, a cooling-scenario picker, the `?thermal=1` heat-zone image of the selected scenario, the cooling ladder (four generic rungs plus a board-authored fan row when present, and a combined fan-plus-heatsink row when both physical assemblies are configured), a per-part junction table for that scenario sorted hottest first (each row cross-probing to `/pcb-layout/<name>?focus=<ref>` + `/schematics/<name>#comp-<ref>` and announcing itself on the shared `netlisp-xprobe` channel), and a coverage footer with the unplaced refs and the screening-grade caveat. In the combined rung, fan convection is confined to its selected PCB face. An opposite-face sink keeps its natural-convection resistance and receives no fan credit; a same-face board sink receives overlap-weighted cooling from outlet-to-outer-surface distance while its base replaces direct PCB convection beneath it. Every sentence and cell comes from `review_thermal.zig`, so the page and the review panel/PDF can never disagree. `?ambient` is clamped to −55…125 rather than refused and `?fragment=1` answers the two ambient-dependent regions alone (what the page's own client swaps in); switching scenario is client-side. A design with no cooling ladder shows the reason instead of the picker, the image and the ladder — never a broken image. Toolbar: `⤓ PDF` → `/api/schematic-pdf/:name`, `{ } JSON` → `/api/thermal/:name`. `?layout=<saved>` screens one named saved layout instead of the design's default board — a layout picker beside the ambient window switches it, and the choice rides into the board frame, the tab bar, the cross-probe links and the JSON link, so nothing on the page describes a board other than the one it names; a `?layout` nobody saved falls back to the default board and says so rather than screening a board under the wrong name. Below the tables a **Compare layouts** panel lists every saved layout of the design (parts, saved copper, hottest part, Tj, and Δ against the board on screen). Only the shown board's row is filled on load — every other row is a whole second solve, so rows fill one at a time on click or via a "Solve all" sweep the reader can stop; `?row=<saved>` answers one row's cells alone. A design with one board renders no panel. `:name` resolves as a design or a bare `lib/modules` module (percent-decoded first); unknown name → 404 plain text. Read-only (`src/serve/thermal_page.zig`).
 - **Scene graph**: `GET /api/scene-graph/:name` — JSON scene graph for schematic (used by the live-push pipeline)
 - **Schematic PDF**: `GET /api/schematic-pdf/:name[?theme=light]` — the design-review document as an `application/pdf` attachment (default = the viewer's dark screen theme, page background included; `?theme=light` = print palette) (`<name>.pdf`): cover, one A4-landscape sheet per `(section …)` (the section's hub blocks **plus the single-instance `(sub-block …)` modules that section owns** shelf-packed into a 2D grid at one uniform scale, each cell captioned with its pin-group label or `<sub-block> - <module title>`, the section's notes and its modules' notes under the grid; a section with no drawing at all packs as a compact entry, and the `(sub-block)` appendix keeps only what no section drew — unattached and multi-instance `x N` modules), validation appendix, power/test-point tables. The HTTP twin of `netlisp export-pdf` (`src/serve/schematic_pdf.zig` → `src/export_pdf.zig`), so the download and the CLI's output are the same document, with a real `/CreationDate` added. `:name` resolves as a design or a bare `lib/modules` module (percent-decoded first); unknown name → 404 plain text. Read-only, composed on demand, self-checked by `pdf.validate` before it is served, and then retained (`src/serve/read_cache.zig`) keyed by design and `?theme=`, against the evaluator read-set plus the placement sidecars its cooling ladder is solved from. A cached document is served without re-running `pdf.validate` — those exact bytes already passed it — and keeps the `/CreationDate` (and matching cover date) of the compose that produced it, so two downloads of an unchanged design are byte-identical. `X-Netlisp-Pdf-Cache: hit|miss|bypass` reports which happened. The schematic page's `⤓ PDF` toolbar button points here (module pages too).
@@ -489,6 +489,35 @@ Auth in full: [auth.md](auth.md).
   archive then opens as a complete KiCad project); `?schematic=0` returns the
   netlist-only bundle this endpoint used to serve, byte-identical. The CLI's
   directory flow is the other way round — opt in with `--with-schematic`.
+  `?variant=NAME` selects an assembly variant; so does `GET /api/export-bom-csv/:name`.
+
+#### Assembly variants over HTTP
+
+A design that declares `(variant "NAME" …)` forms (docs/sexpr-language.md →
+“Assembly variants”) is served as ONE of them. Every surface defaults to the
+design's `(default)` variant, and failing that the base (implicit) one.
+
+`?variant=NAME` is honoured by:
+
+- `GET /schematics/:name` — the rendered HTML cache keys each variant apart, so
+  the Lite page and the Pro page are separate cache slots rather than whichever
+  request landed first. The embedded BOM table follows the same selection.
+- the export seam shared by `GET /api/export-bom-csv/:name`,
+  `GET /api/export-kicad/:name` and the other by-name exports.
+
+Everything else — the PCB layout page and `/api/pcb-describe`, the DRC and
+routing surfaces, the assembly workspace, the system-review pages — renders the
+DEFAULT variant. That is deliberate rather than pending: an assembly variant
+changes population and values, never copper, so the board those surfaces show is
+the same board in every variant. Their caches key on the layout sidecar rather
+than on the evaluation, so adding a variant axis there would cost a cache
+dimension for a picture that does not change. A variant-aware PCB *population*
+view (which pads get paste, per-variant assembly drawings) is the real
+follow-up, and wants its own surface rather than a query parameter on this one.
+
+An undeclared variant name fails the evaluation and renders the diagnostic page
+(or a 500 on the export endpoints) rather than silently serving a different
+assembly than the caller asked for.
 - **Library upload**: `GET /library`, `POST /api/upload-symbol`, `POST /api/upload-footprint`
 - **System review workspace**: `GET /systems/:name` — the document editor over
   `src/systems/<name>/system.json`, with `GET|PUT /api/systems/:name/docs/:doc`,
@@ -684,7 +713,11 @@ Tools include:
 - **Project / introspection (read-only)**: `list_designs`, `list_library`,
   `list_history`, `list_instances`, `list_free_pins`, `get_net`,
   `describe_component`, `get_schematic`, `get_pcb_layout_image`, `get_version`,
-  `run_checks`, `review_audit`. `get_pcb_layout_image` returns the PCB layout
+  `run_checks`, `review_audit`. `list_instances` and `run_checks` take an
+  optional `variant` argument naming one of the design's declared assembly
+  variants (default: its `(default)` variant, else the base); a variant-declaring
+  design also makes `list_instances` return a `variants[]` catalog, the selected
+  `variant`, and each part's `populated_in`. `get_pcb_layout_image` returns the PCB layout
   as a PNG (same renderer as `GET /api/pcb-png/:name`) so
   an agent can visually inspect placement; args: `name`, optional `nets`/`refs`
   (arrays or comma-strings) to spotlight a subsystem, `route`, `width`, `layout`,

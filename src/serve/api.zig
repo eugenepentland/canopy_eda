@@ -566,6 +566,18 @@ fn evalDesignForExport(
     const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(board_path);
 
+    // `?variant=NAME` selects one of the design's `(variant …)` assemblies for
+    // every export that comes through this seam: same copper and the same
+    // netlist, different population and values. Omitted, the design's
+    // `(default)` variant is built. An undeclared name fails the evaluation
+    // rather than silently exporting a different assembly than the caller asked
+    // for.
+    if (req.query()) |q| {
+        if (q.get("variant")) |v| {
+            if (v.len > 0) eval.variants.requested = v;
+        }
+    } else |_| {}
+
     const result = eval.evalFile(board_path) catch {
         res.status = http_internal_error;
         res.body = err_build;

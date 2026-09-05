@@ -7613,6 +7613,7 @@ is what makes the predicate exact rather than approximately right.
 - the schematic page serves an embedded pane variant that drops the navbar, page header, and sidebar
 - the schematic layout's deep semantic-zoom layer reuses existing inset SVGs through references instead of cloning their full DOM during a wheel gesture
 - the schematic page HTML cache keys the embedded pane apart from the full page
+- the schematic page HTML cache keys each assembly variant apart
 - each assembly rework guide takes its title from its first Markdown H1 and falls back to its filename slug
 - the assembly guide panel opens as a clickable list of guide titles, renders one guide at a time, and returns to that list from any guide
 - PCB trace selection preserves layer color and component drags ignore click jitter
