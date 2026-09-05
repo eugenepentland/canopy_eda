@@ -1,3 +1,2 @@
 # guardian-snapshot v2
-8546 src/placement/router.zig
 9687 src/serve/pcb_layout_page.zig
