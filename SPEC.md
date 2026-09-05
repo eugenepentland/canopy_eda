@@ -7416,6 +7416,7 @@ is what makes the predicate exact rather than approximately right.
 - WebGPU pan and zoom frames replay a cached render bundle until geometry, layer order, or visible-pour membership changes
 - Swept variable-width RF paths remain on WebGPU as exact triangulated stencil unions, while their hidden centreline tracks are omitted from the GPU copper stream and a hidden copper layer cannot leak its taper through a visible layer's stencil cover
 - The deterministic PCB-editor zoom gate measures fit-to-8×-to-fit paints in both directions, covers the DPR-2 Canvas fallback, asserts an RF-heavy Barracuda workload stays on WebGPU, and is required metadata on every deployable release candidate
+- The deterministic PCB-editor benchmark never schedules a saved-layout migration or autosave while measuring read-only frame performance
 - Release preparation waits for a stable quiet-host window before PCB-editor timing, retries timing-budget misses after contention clears, and never retries renderer or infrastructure failures
 - The WebGPU renderer drops a track whose layer the board does not have instead of repainting it on F.Cu
 - A new copper pour defaults to the active copper layer and its picker lists every routable layer

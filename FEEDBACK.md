@@ -672,3 +672,9 @@ matters when the person re-recording is the author of the change.
 - **blocker:** Two exact-commit preparations passed all 72 Guardian checks, all 4,785 tests, and ReleaseSafe compilation, then discarded the unrelated navbar candidate on Canvas zoom outliers. The retries measured 66.8 ms and 86.5 ms zoom-in p95 against 45 ms while concurrent release jobs drove host load above 15, leaving the completed UI branch unmerged after 225 seconds of shared-lock queueing and roughly six minutes of repeated release work.
 - **idea:** Keep the verified candidate and perform one load-aware, serialized `pcb_editor_perf` retry against that exact binary after CPU load falls below the benchmark's calibrated ceiling; avoid rerunning compilation and 4,785 passing tests when only host-timing noise failed.
 - **status:** open
+
+## 2026-09-05 · codex · prototype Gerber acknowledgment
+- **blocker:** `prepare-release.sh` passed all 72 Guardian checks, all 4,750 tests, and the ReleaseSafe build, then discarded the candidate because `?fbench=zoom` scheduled the PCB editor's load-time RF retrofit and posted an identical saved-layout autosave. The read-only browser harness correctly rejected `POST /api/pcb-layouts/barracuda-base`, but benchmark mode itself had not suppressed this background migration.
+- **idea:** Keep benchmark modes side-effect-free at the shared initialization boundary: any new load-time migration should be guarded by `!FBENCH`, and the static benchmark contract should assert the guard before the expensive release gate starts.
+- **workaround:** The shared RF-retrofit scheduler now returns in benchmark mode, covering both startup and deferred-analysis completion; ordinary editor loads still migrate stale saved tapers, and focused string contracts prevent either scheduling path from returning unnoticed.
+- **status:** resolved in this change

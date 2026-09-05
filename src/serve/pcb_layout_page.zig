@@ -14849,7 +14849,8 @@ test "saved controlled-impedance copper receives an idempotent DRC-gated taper r
     try std.testing.expect(std.mem.indexOf(u8, js, "list=drawRfRetrofitDrcMerge(list)") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "drawRfRetrofitDrcClear();") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "PCB.rf_paths=original.concat(accepted)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "if(!RO&&PCB.shown_layout)setTimeout(drawRfRetrofitSaved,0);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drawRfRetrofitSchedule(){if(RO||FBENCH||!curLayout)return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(!RO&&!FBENCH&&PCB.shown_layout)setTimeout(drawRfRetrofitSaved,0);") != null);
 }
 
 // spec: Web Server - visible board silkscreen text can be selected and grid-dragged directly in Select mode, with one undo step and refreshed DRC
@@ -14909,6 +14910,13 @@ test "fabrication export explicitly acknowledges prototype findings" {
     try std.testing.expect(std.mem.indexOf(u8, js, "drcAck&&!drcAck.checked") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "drc-report.json") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "does not mark this board production-ready") != null);
+}
+
+// spec: Web Server - The deterministic PCB-editor benchmark never schedules a saved-layout migration or autosave while measuring read-only frame performance
+test "PCB editor benchmark does not schedule saved layout migration" {
+    const js = @embedFile("assets/pcb_board.js");
+    try std.testing.expect(std.mem.indexOf(u8, js, "function drawRfRetrofitSchedule(){if(RO||FBENCH||!curLayout)return;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "if(!RO&&!FBENCH&&PCB.shown_layout)setTimeout(drawRfRetrofitSaved,0)") != null);
 }
 
 test "PCB viewer replaces detected footprint pin-one circles with live collision-aware dots" {

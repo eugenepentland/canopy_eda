@@ -8252,7 +8252,7 @@ function drawRfRetrofitCheck(paths){var payload=boardStatePayload();payload.rf_p
  return fetch("/api/pcb-drc/"+encodeURIComponent(PCB.name)+subq(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)})
   .then(function(r){drcFlightEnd();if(!r.ok)throw 0;return r.json();},function(e){drcFlightEnd();throw e;});}
 var drawRfRetrofitScheduledFor="";
-function drawRfRetrofitSchedule(){if(RO||!curLayout)return;var key=curLayout+":"+PCB.rev+":"+dirtyGeneration;
+function drawRfRetrofitSchedule(){if(RO||FBENCH||!curLayout)return;var key=curLayout+":"+PCB.rev+":"+dirtyGeneration;
  if(drawRfRetrofitScheduledFor===key)return;drawRfRetrofitScheduledFor=key;setTimeout(drawRfRetrofitSaved,0);}
 function drawRfRetrofitCacheKey(){return "pcb-rf-retrofit-v2:"+PCB.name+":"+curLayout;}
 function drawRfRetrofitSignature(pending){return boardStateSignature(JSON.stringify({board:boardStatePayload(),pending:pending}));}
@@ -12243,7 +12243,7 @@ markUnplaced(PCB.placement&&PCB.placement.unplaced);
 // A named saved layout may predate automatic impedance tapers. Reconcile it
 // only after the whole script has initialized, then let the ordinary dirty /
 // autosave path persist an approved migration into that same layout row.
-if(!RO&&PCB.shown_layout)setTimeout(drawRfRetrofitSaved,0);
+if(!RO&&!FBENCH&&PCB.shown_layout)setTimeout(drawRfRetrofitSaved,0);
 // A compact first response is still resolving its server DRC; a complete page
 // already embeds the authoritative result and shows it immediately.
 if(!RO)drcChip(PCB.analysis_deferred?-1:(PCB.drc||[]).length);
