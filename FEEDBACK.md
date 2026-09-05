@@ -1,11 +1,24 @@
 # Netlisp Agent Feedback Log
 
-This append-only log captures concrete blockers and development-process ideas
-noticed by AI agents while working in this repository. Its purpose is to make
-future tasks take fewer turns, tool calls, rebuilds, and retries.
+**What this file is:** the maintainer's append-only repository log. It records
+concrete blockers and development-process ideas noticed by AI agents working in
+this tree, so that future tasks take fewer turns, tool calls, rebuilds and
+retries. It is not a changelog, not documentation, and not an issue tracker —
+[CHANGELOG.md](CHANGELOG.md) is the release record, `docs/` is the reference
+set, and GitHub issues are where a bug report belongs.
 
-This file is for the netlisp repository itself. Guardian-specific feedback belongs
-in `../guardian-zig/FEEDBACK.md` under that repository's own rules.
+**Every entry is historical.** An entry describes the tree, the tooling and the
+measurements as they were on its date, and is never edited afterwards. A
+command, a file path, a timing or a workaround quoted below may have been
+superseded many times since; read an entry as a dated observation, not as
+current guidance. The current guidance is in `docs/` and in
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+**Who appends.** Agents working on the netlisp tool itself, following the rules
+below. **Contributors sending a pull request should not append here** — put
+what you learned in the PR description instead (see
+[CONTRIBUTING.md](CONTRIBUTING.md) § 7). Guardian-specific feedback belongs in
+`../guardian-zig/FEEDBACK.md` under that repository's own rules.
 
 ## What to log
 

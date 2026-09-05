@@ -14,7 +14,7 @@ There is no GUI capture step; the browser is a viewer and review surface.
 - **Language:** a small S-expression DSL with components, parameterised
   component families, modules with closures, nets inferred from pin
   connections, sections, assertions and formatting directives.
-  See [docs/sexpr-language.md](docs/sexpr-language.md) and the generated
+  See [docs/sexp-language.md](docs/sexp-language.md) and the generated
   reference [docs/language-forms.md](docs/language-forms.md).
 - **Outputs:** HTML schematic with inline SVG, ERC and requirement checks,
   BOM resolution, PCB layout (placement, autorouting, copper pours, DRC),
@@ -173,13 +173,25 @@ zig build run -- import-kicad-layout --project-dir my-board my-board
 
 ## Documentation
 
-- [docs/architecture.md](docs/architecture.md): what the tool does and how the pipeline fits together
-- [docs/sexpr-language.md](docs/sexpr-language.md): the design language, with [docs/language-forms.md](docs/language-forms.md) as the machine-checked reference
+[docs/README.md](docs/README.md) is the index. The reference set:
+
+- [docs/architecture.md](docs/architecture.md): what the tool does and how the pipeline fits together — start here
+- [docs/sexp-language.md](docs/sexp-language.md): the design language, with [docs/language-forms.md](docs/language-forms.md) as the machine-checked reference
 - [docs/standard-library.md](docs/standard-library.md): the bundled components and how overrides resolve
+- [docs/agents.md](docs/agents.md): driving netlisp from an AI agent, and a `CLAUDE.md` for your own design repository
 - [docs/webserver-api.md](docs/webserver-api.md): every HTTP route and structured tool
 - [docs/auth.md](docs/auth.md): the local-only security model
+- [docs/build-and-run.md](docs/build-and-run.md): the full build, run and deploy reference
 - [ZIG_TOOLCHAIN.md](ZIG_TOOLCHAIN.md): the pinned compiler, mirrors and checksums
-- [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md): how agents and contributors are expected to work in this repository (worktrees, Guardian, the spec ledger)
+
+Working *on* netlisp: [CONTRIBUTING.md](CONTRIBUTING.md) first, then
+[docs/worktrees.md](docs/worktrees.md), [docs/testing-guide.md](docs/testing-guide.md)
+and [docs/build-system.md](docs/build-system.md).
+[AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md) are the instruction files an
+AI agent reads when it works in this repository — worktrees, the Guardian gate,
+the spec ledger. Historical audits, plans and research notes live in
+[docs/archive/](docs/archive), and describe nothing about how the tool behaves
+today.
 
 ## Contributing
 
