@@ -1,5 +1,4 @@
 const std = @import("std");
-const zt = @import("zt");
 const builtin = @import("builtin");
 /// The `zig build test` shard partition. Data only — no imports — so pulling it
 /// into the build script cannot drag src/ into the build graph.
@@ -63,11 +62,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const zt_dep = b.dependency("zt", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
     // Guardian — runs on every build. Baseline mode is configured in
     // guardian.toml: every check records existing violations once and
     // only fails when new ones appear, so the full check suite can be
@@ -123,37 +117,20 @@ pub fn build(b: *std.Build) void {
     // progress display, per-test failure attribution, and --fuzz support.
     const test_runner = guardian.testRunner(guardian_dep);
 
-    // Compile .zt → .zig (run before any module that imports them).
-    const templates_step = zt.addTemplates(b, zt_dep, &.{
-        b.path("src/serve/templates/pages.zt"),
-        b.path("src/serve/templates/pdf_viewer.zt"),
-        b.path("src/serve/templates/library.zt"),
-    });
-
-    // Template generation writes source files, so it must finish formatting
-    // before any compiler or Guardian process can read the tree. Keeping this
-    // as one predecessor fixes fresh-worktree races where those consumers used
-    // to run beside generation/formatting and observe missing or partial files.
-    const templates_fmt = b.addFmt(.{
-        .paths = &.{b.path("src/serve/templates")},
-        .check = false,
-    });
-    templates_fmt.step.dependOn(templates_step);
-    const templates_ready = b.step("templates", "Generate and format the zt templates");
-    templates_ready.dependOn(&templates_fmt.step);
-    const templates_prepared = b.option(
-        bool,
-        "templates-prepared",
-        "Trust the checked-in generated templates (release orchestration only)",
-    ) orelse false;
-    const prepared_templates = b.step(
-        "templates-prepared",
-        "Use templates prepared and cleanliness-checked by release orchestration",
-    );
-    const template_predecessor = if (templates_prepared)
-        prepared_templates
-    else
-        &templates_fmt.step;
+    // `src/serve/templates/*.zig` used to be generated from `.zt` sources by a
+    // third-party template compiler, and every consumer of the tree — the exe,
+    // the test binaries, the compile probe, Guardian, the fmt check — had to be
+    // ordered behind that codegen and its auto-fmt or race it on a fresh
+    // worktree. The templates are hand-maintained Zig now, so there is no
+    // generation step and no ordering to arrange: they are read like any other
+    // source file.
+    //
+    // `.githooks/prepare-release.sh` (owned outside this change) still runs
+    // `zig build templates` and passes `-Dtemplates-prepared=true`. Both are
+    // kept here as no-ops so that hook keeps working; delete them in the same
+    // commit that drops those lines from it.
+    _ = b.option(bool, "templates-prepared", "Accepted and ignored: the templates are hand-maintained sources");
+    _ = b.step("templates", "No-op: src/serve/templates/*.zig are hand-maintained sources");
 
     // Client-side WASM DRC. Compiles the SAME placement/drc.zig engine to
     // wasm32-freestanding (the fs/eval paths in optimizer.zig are lazily skipped
@@ -190,7 +167,6 @@ pub fn build(b: *std.Build) void {
     // every internal self-hosted Debug artifact keeps its debugging metadata.
     exe_mod.strip = optimize == .safe;
     exe_mod.addImport("httpz", httpz.module("httpz"));
-    exe_mod.addImport("zt", zt_dep.module("zt"));
     // Embed the compiled drc.wasm so static_assets.zig can @embedFile it.
     exe_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
 
@@ -213,7 +189,6 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
         .use_llvm = if (use_llvm) true else if (optimize == .debug) null else false,
     });
-    exe.step.dependOn(template_predecessor);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -223,11 +198,11 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // Slim PCB-layout optimizer benchmark. Its module pulls in only the
-    // optimizer + evaluator (no httpz/zt, no serve/render/diagram stack), so an
+    // optimizer + evaluator (no httpz, no serve/render/diagram stack), so an
     // edit to placement/optimizer.zig rebuilds a fraction of the full `netlisp`
     // exe — the fast inner loop for perf experiments. The `bench-layout` step
-    // deliberately does NOT depend on Guardian, fmt-check, or the templates, so
-    // a throwaway SoA/SIMD variant builds cleanly without baseline churn.
+    // deliberately does NOT depend on Guardian or the fmt-check, so a throwaway
+    // SoA/SIMD variant builds cleanly without baseline churn.
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("src/bench_layout.zig"),
         .target = target,
@@ -248,7 +223,6 @@ pub fn build(b: *std.Build) void {
         .optimize = test_opt,
     });
     test_mod.addImport("httpz", httpz.module("httpz"));
-    test_mod.addImport("zt", zt_dep.module("zt"));
     test_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
     addDeployUnitImports(b, test_mod);
 
@@ -269,10 +243,10 @@ pub fn build(b: *std.Build) void {
     // intersecting a hand-typed filter with a shard's filter list is the kind of
     // silent narrowing this repository does not allow near the test step.
     if (test_filters.len != 0) {
-        addTestShard(b, test_step, test_mod, test_runner, template_predecessor, test_filters, null);
+        addTestShard(b, test_step, test_mod, test_runner, test_filters, null);
     } else {
         for (test_shards.shards, 0..) |shard_filters, shard_index| {
-            addTestShard(b, test_step, test_mod, test_runner, template_predecessor, shard_filters, shard_index);
+            addTestShard(b, test_step, test_mod, test_runner, shard_filters, shard_index);
         }
     }
 
@@ -289,13 +263,6 @@ pub fn build(b: *std.Build) void {
         .root_module = test_mod,
         .test_runner = test_runner,
     });
-    // The probe compiles src/test_root.zig, which imports the zt-generated
-    // src/serve/templates/*.zig, so template codegen has to be a true
-    // PREDECESSOR of it — see `orderProbeAfter` below, called once
-    // `templates_fmt` exists. addTestCompileProbe returns the top-level step, so
-    // the ordering has to be applied to its dependencies (the probe's compile
-    // step); hanging it off the top-level step would let codegen and the compile
-    // run as concurrent siblings.
 
     // Mutation smoke tier. Guardian runs this focused set first for each
     // mutant, then still runs the complete test suite for every smoke survivor.
@@ -315,7 +282,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     fast_test_mod.addImport("httpz", httpz.module("httpz"));
-    fast_test_mod.addImport("zt", zt_dep.module("zt"));
     fast_test_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
     addDeployUnitImports(b, fast_test_mod);
 
@@ -358,47 +324,28 @@ pub fn build(b: *std.Build) void {
         .filters = smoke_filters,
         .test_runner = test_runner,
     });
-    fast_tests.step.dependOn(template_predecessor);
     const run_fast_tests = b.addRunArtifact(fast_tests);
     run_fast_tests.setCwd(b.path("."));
     guardian.announceFilters(run_fast_tests, smoke_filters);
     const fast_test_step = b.step("test-fast", "Run the mutation smoke-test subset");
     fast_test_step.dependOn(&run_fast_tests.step);
 
-    // Generated template files (src/serve/templates/*.zig) are auto-formatted
-    // immediately after compilation by `templates_fmt` below — skip them in the
-    // strict --check pass so the build doesn't fail on the brief unformatted
-    // window between template codegen and the auto-fmt step.
+    // The whole of src/, templates included: nothing here is generated, so
+    // nothing is exempt from the strict --check pass.
     const fmt_check = b.addFmt(.{
         .paths = &.{b.path("src")},
-        .exclude_paths = &.{b.path("src/serve/templates")},
         .check = true,
     });
-    fmt_check.step.dependOn(template_predecessor);
     b.getInstallStep().dependOn(&fmt_check.step);
     test_step.dependOn(&fmt_check.step);
-
-    b.getInstallStep().dependOn(template_predecessor);
-    test_step.dependOn(template_predecessor);
 
     // A plain `zig build` runs Guardian's external gates, which spawn `node`
     // and `python3` themselves — so the host probe guards the default step
     // too, not just `test`'s tree-policy checks.
     b.getInstallStep().dependOn(addHostPrereqCheck(b));
 
-    // Order the compile-only probe behind template codegen AND its auto-fmt.
-    // Behind codegen because the probe compiles src/test_root.zig, which imports the
-    // generated files; behind the fmt because otherwise `zig build test-compile`
-    // regenerates those files and leaves them unformatted in the tree, which
-    // reds Guardian's `formatting` check on the very next gate run — a
-    // standalone tier must leave the tree exactly as it found it.
-    orderProbeAfter(compile_probe, template_predecessor);
-
-    const gate_ordering: guardian.Options = .{
-        .prerequisites = &.{template_predecessor},
-    };
-    guardian.addAllChecks(b, check_exe, b.getInstallStep(), gate_ordering);
-    guardian.addAllChecks(b, check_exe, test_step, gate_ordering);
+    guardian.addAllChecks(b, check_exe, b.getInstallStep(), .{});
+    guardian.addAllChecks(b, check_exe, test_step, .{});
 
     // Auto-generated language reference (docs/language-forms.md).
     // `zig build docs` regenerates it from the evaluator's dispatch
@@ -473,7 +420,6 @@ fn addTestShard(
     test_step: *std.Build.Step,
     test_mod: *std.Build.Module,
     test_runner: std.Build.Step.Compile.TestRunner,
-    template_predecessor: *std.Build.Step,
     filters: []const []const u8,
     shard_index: ?usize,
 ) void {
@@ -483,7 +429,6 @@ fn addTestShard(
         .filters = filters,
         .test_runner = test_runner,
     });
-    tests.step.dependOn(template_predecessor);
     const run_tests = b.addRunArtifact(tests);
     run_tests.setCwd(b.path("."));
     // Tells the shard which row of the manifest it IS, so the unnamed
@@ -598,15 +543,6 @@ fn addAffectedTestStep(b: *std.Build) void {
     }
     const step = b.step("test-affected", "Run conservatively affected Debug tests, then analyze the whole suite");
     step.dependOn(&run.step);
-}
-
-/// Makes `predecessor` run before the compile(s) behind a `test-compile` probe
-/// step. `guardian.addTestCompileProbe` returns the TOP-LEVEL step, and a step
-/// runs after its dependencies but its dependencies run in parallel with each
-/// other — so ordering has to be applied one level down, to the probe's compile
-/// step, or codegen and the compile it feeds become concurrent siblings.
-fn orderProbeAfter(probe_step: *std.Build.Step, predecessor: *std.Build.Step) void {
-    for (probe_step.dependencies.items) |dep| dep.dependOn(predecessor);
 }
 
 /// Panics at configure time if `step`'s dependency closure reaches a step that

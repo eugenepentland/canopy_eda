@@ -9,7 +9,6 @@ branch URLs. Each nested `build.zig.zon` also pins the exact compiler minimum.
 | `httpz` | `e6c23eb959e20bc8871184622fa9082ddaf5b106` (`dev`) | MIT — [`httpz/LICENSE`](httpz/LICENSE) | Includes deferred-signal, fd deregistration, shutdown-UAF, and timeout-sweep fixes. |
 | `httpz/deps/metrics` | `21fe85eaa1761a870753a4d0b9e3f289986ac1a3` | MIT — [`httpz/deps/metrics/LICENSE`](httpz/deps/metrics/LICENSE) | Exact revision selected by httpz. |
 | `httpz/deps/websocket` | `3318a78a2c3d3b972c394717c43a354d0feb8b91` (`dev`) | MIT — [`httpz/deps/websocket/LICENSE`](httpz/deps/websocket/LICENSE) | Exact revision selected by httpz. The licence was missing from the trimmed vendoring and was restored from upstream at this revision. |
-| `zt` | `a8b94373999c2483efa5f646438263785f70743d` (`main`) | ⚠ **none** — [`zt/LICENSE-MISSING.md`](zt/LICENSE-MISSING.md) | Template compiler/runtime ported to the pinned snapshot. Upstream publishes no licence, so this directory is **not** covered by the repository's `LICENSE`. |
 
 Every package here is modified: each was ported to the pinned Zig 0.17
 snapshot, and the two `deps/` trees were trimmed of CI and packaging files.
