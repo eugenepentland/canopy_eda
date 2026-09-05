@@ -839,6 +839,7 @@ src/eval/instance.zig::PinTail struct_
 src/eval/instance.zig::ResolvedComponent struct_
 src/eval/instance.zig::TrailingArgs struct_
 src/eval/instance.zig::buildInstance | fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) EvalError!InstanceResult
+src/eval/instance.zig::checkSuffixedPinToken | fn checkSuffixedPinToken( self: *Evaluator, node: Node, ref_des: []const u8, form: []const u8, pads: PartPads, ) EvalError!void
 src/eval/instance.zig::componentFamily | fn componentFamily(val: Value) []const u8
 src/eval/instance.zig::evalFanoutForm | fn evalFanoutForm( self: *Evaluator, form_children: []const Node, env: *Env, instances: *std.ArrayList(Instance), all_pin_nets: *std.ArrayList(PinNetDecl), ) EvalError!void
 src/eval/instance.zig::evalSeriesForm | fn evalSeriesForm( self: *Evaluator, form_children: []const Node, env: *Env, instances: *std.ArrayList(Instance), all_pin_nets: *std.ArrayList(PinNetDecl), note_list: *std.ArrayList(Note), ) EvalError!void

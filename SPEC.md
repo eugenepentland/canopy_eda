@@ -4698,6 +4698,9 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - a (near …) missing its ref or pin warns and binds nothing rather than half a target
 - an instance sub-form within two edits of a real one is an error naming the spelling meant
 - an unknown sub-form head that is not a near-miss still becomes an inline property
+- a bare SI-suffixed pin token that also names one of the part's pin functions is rejected as ambiguous
+- a quoted pin name and a bare pad number are both unambiguous spellings and neither warns
+- an SI-suffixed pin token naming nothing on the part binds the numeric pad and warns about both readings
 - a pad token outside the part's known pad set is an error carrying the pad count
 - strap-ok, nc-ok and a (near …) own pad are held to the same pad set as (pin …)
 - a part with neither a pinout nor a footprint has an unknown pad set and every pad token passes
