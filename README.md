@@ -153,7 +153,7 @@ placement, tracks, vias and outline as the design's starred layout. The
 same import runs without a browser:
 
 ```bash
-zig build run -- import-kicad-layout --project-dir my-board stdlib-smoke
+zig build run -- import-kicad-layout --project-dir my-board my-board
 ```
 
 ## Documentation
