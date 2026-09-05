@@ -5007,6 +5007,7 @@ against its own file rather than the design's.
 - Evaluates let bindings that define named values in scope
 - Evaluates if conditionals selecting a branch by predicate
 - Evaluates fmt expressions producing formatted strings
+- A failing fmt directive records a located diagnostic naming the directive
 - Evaluates assert-range that passes when value is in bounds
 - Evaluates assert-range that fails when value is out of bounds
 - evalFile auto-imports the standard passives prelude before user nodes run

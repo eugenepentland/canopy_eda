@@ -762,9 +762,12 @@ src/eval/evaluator.zig::setErrorFmt | fn setErrorFmt(self: *Evaluator, span: ast
 src/eval/evaluator.zig::warnFmt | fn warnFmt(self: *Evaluator, span: ast.Span, comptime fmt: []const u8, args: anytype) void
 src/eval/fmt.zig::Directive struct_
 src/eval/fmt.zig::DirectiveArg enum_
+src/eval/fmt.zig::Failure struct_
 src/eval/fmt.zig::FmtError value
+src/eval/fmt.zig::directive_list value
 src/eval/fmt.zig::directives value
 src/eval/fmt.zig::format | fn format(allocator: std.mem.Allocator, template: []const u8, args: []const Value) FmtError![]const u8
+src/eval/fmt.zig::formatWhere | fn formatWhere( allocator: std.mem.Allocator, template: []const u8, args: []const Value, where: *Failure, ) FmtError![]const u8
 src/eval/footprint_pads.zig::PadIds value
 src/eval/footprint_pads.zig::get | fn get(self: *Evaluator, fp_name: []const u8) ?*const PadIds
 src/eval/forms.zig::ArityViolation struct_

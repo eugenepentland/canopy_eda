@@ -1240,6 +1240,45 @@ test "eval fmt" {
     try std.testing.expectEqualStrings("3.41V Buck (TPSM84338)", s);
 }
 
+// spec: eval/evaluator - A failing fmt directive records a located diagnostic naming the directive
+test "eval fmt failures carry a span and name the directive" {
+    // page_allocator: diagnostic messages are allocated and never freed.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const parser = @import("../sexpr/parser.zig");
+    const nodes = try parser.parse(alloc,
+        \\(fmt "rail is ~Q volts" 3.3)
+        \\(fmt "a ~V b ~V" 3.3)
+        \\(fmt "a ~V b" "not a number")
+    );
+
+    // An unknown directive used to fail the whole build as a bare
+    // `error.FormatError` with no file, no line and no offending directive.
+    try std.testing.expectError(EvalError.FormatError, eval.evalNode(nodes[0], &env));
+    var diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try std.testing.expectEqual(@as(u32, 1), diag.span.line);
+    try std.testing.expect(diag.span.col > 1);
+    try std.testing.expect(std.mem.indexOf(u8, diag.message, "unknown directive `~Q`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diag.message, "~a ~V ~R ~C ~A ~S ~~") != null);
+
+    // One argument short: the message says which directive ran out.
+    try std.testing.expectError(EvalError.NotEnoughArgs, eval.evalNode(nodes[1], &env));
+    diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try std.testing.expectEqual(@as(u32, 2), diag.span.line);
+    try std.testing.expect(std.mem.indexOf(u8, diag.message, "`~V`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diag.message, "wants argument 2") != null);
+
+    // Wrong kind of argument: the span points at the ARGUMENT, not the template.
+    try std.testing.expectError(EvalError.TypeError, eval.evalNode(nodes[2], &env));
+    diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try std.testing.expectEqual(@as(u32, 3), diag.span.line);
+    try std.testing.expect(std.mem.indexOf(u8, diag.message, "needs a number argument") != null);
+}
+
 // spec: eval/evaluator - Evaluates assert-range that passes when value is in bounds
 test "eval assert-range pass" {
     const alloc = std.testing.allocator;

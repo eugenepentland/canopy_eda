@@ -51,8 +51,42 @@ pub const directives = [_]Directive{
     .{ .spec = '~', .arg = .none, .summary = "Literal `~` (consumes no argument)." },
 };
 
+/// Every directive this formatter accepts, rendered from the table above so a
+/// new row reaches the diagnostic text without a second edit.
+pub const directive_list = blk: {
+    var list: []const u8 = "";
+    for (directives, 0..) |d, i| list = list ++ (if (i == 0) "" else " ") ++ "~" ++ [_]u8{d.spec};
+    break :blk list;
+};
+
+/// Where a template failed, for the caller's diagnostic. Written only on the
+/// error paths and meaningful only then: `spec` is the specifier byte after
+/// the `~` (0 when the template ended on a bare `~`), `offset` is that `~`'s
+/// byte offset in the template, and `arg_index` is the 0-based argument the
+/// directive was reaching for. Without this the evaluator could only report
+/// `error.FormatError` with no file, line, or offending directive.
+pub const Failure = struct {
+    spec: u8 = 0,
+    offset: usize = 0,
+    arg_index: usize = 0,
+};
+
 /// Format a string with ~a, ~V, ~R, ~C, ~A, ~S, ~~ specifiers.
 pub fn format(allocator: std.mem.Allocator, template: []const u8, args: []const Value) FmtError![]const u8 {
+    var where: Failure = .{};
+    return formatWhere(allocator, template, args, &where);
+}
+
+/// `format` that also records WHERE it failed. The evaluator uses this one so
+/// an unknown directive, a missing argument, or an argument of the wrong kind
+/// becomes a located `file:line:col` diagnostic naming the directive instead
+/// of a bare `Build error: error.FormatError`.
+pub fn formatWhere(
+    allocator: std.mem.Allocator,
+    template: []const u8,
+    args: []const Value,
+    where: *Failure,
+) FmtError![]const u8 {
     var buf: std.Io.Writer.Allocating = .init(allocator);
     errdefer buf.deinit();
     const writer = &buf.writer;
@@ -62,6 +96,7 @@ pub fn format(allocator: std.mem.Allocator, template: []const u8, args: []const 
     while (i < template.len) {
         if (template[i] == '~' and i + 1 < template.len) {
             const spec = template[i + 1];
+            where.* = .{ .spec = spec, .offset = i, .arg_index = arg_idx };
             i += 2;
             switch (spec) {
                 '~' => writer.writeByte('~') catch return FmtError.OutOfMemory,
