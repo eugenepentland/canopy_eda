@@ -2,6 +2,7 @@
 //! with `(virtual)` preserving the schematic-only marker behavior.
 
 const std = @import("std");
+const connect_mod = @import("connect.zig");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("env.zig");
 const evaluator_mod = @import("evaluator.zig");
@@ -21,12 +22,18 @@ const Note = env_mod.Note;
 
 const component_name = "testpoint";
 
-/// Mutable design-block collections populated by a test-point form.
+/// The accumulators a `(section …)` shares with the block it lives in: every
+/// form a section may contain appends to the enclosing design's lists, not to a
+/// section-local copy. Carried as one struct because the section and
+/// sub-section dispatchers are at the parameter-count ceiling.
 pub const EvalContext = struct {
     instances: *std.ArrayList(Instance),
     pin_nets: *std.ArrayList(PinNetDecl),
     notes: *std.ArrayList(Note),
     test_points: *std.ArrayList(TestPoint),
+    /// `(connect …)`/`(chain …)` forms queued for the block's post-build
+    /// resolution pass — see `eval/connect.zig`.
+    connects: *std.ArrayList(connect_mod.Pending),
 };
 
 /// Parse a `(test-point "TP1" "NET" [(virtual)] (purpose "...")

@@ -882,7 +882,8 @@ pub fn componentFamily(val: Value) []const u8 {
 /// else lexicographically (a BGA "A1" / "B2"). Mirrors the placement optimizer's
 /// `pinLess`; here it is the tie-break that makes a duplicated function name
 /// resolve to the same pad on every run.
-fn padLess(a: []const u8, b: []const u8) bool {
+/// Public so `(chain …)`'s two-terminal through path picks the SAME pad order.
+pub fn padLess(a: []const u8, b: []const u8) bool {
     const ai: ?i64 = std.fmt.parseInt(i64, a, 10) catch null;
     const bi: ?i64 = std.fmt.parseInt(i64, b, 10) catch null;
     if (ai != null and bi != null) return ai.? < bi.?;

@@ -273,6 +273,11 @@ pub const Evaluator = struct {
     pub const NetTie = struct {
         a: []const u8,
         b: []const u8,
+        /// Where the tie was written, when a form recorded it. Null for the
+        /// synthesized ties (auto-aliases, bus expansion) that have no single
+        /// authored site. `(connect …)` reads it to name BOTH places when a
+        /// sub-block port is wired twice.
+        span: ?ast.Span = null,
         /// True for ties synthesized from symbol pin-function matching
         /// (appendAutoAliases). These are block-local — buildNets consumes
         /// them for pin-name consolidation, but they must NOT leak into

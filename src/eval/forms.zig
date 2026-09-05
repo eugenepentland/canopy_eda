@@ -127,6 +127,8 @@ pub const ScopeForm = enum {
     fanout,
     net,
     bus_net,
+    connect,
+    chain,
     pullup,
     pulldown,
     divider,
@@ -183,6 +185,8 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "fanout", .fanout },
     .{ "net", .net },
     .{ "bus-net", .bus_net },
+    .{ "connect", .connect },
+    .{ "chain", .chain },
     .{ "pullup", .pullup },
     .{ "pulldown", .pulldown },
     .{ "divider", .divider },
@@ -498,6 +502,23 @@ pub const scope_form_docs = blk: {
         .summary = "Tie a lane range to a sub-block bus, including an optional parent suffix and offset child-port family. " ++
             "The strided form distributes the channel range sub-major across every `(over …)` sub-block " ++
             "and `(ports …)` port family, emitting one tie per `(suffixes …)` entry.",
+    } };
+    t[@backingInt(ScopeForm.connect)] = .{ .scope = all, .doc = .{
+        .syntax = "(connect END END… [(name \"NET\")] [(class \"net-class\")])",
+        .summary = "Wire two or more ends into one net without inventing a name for it. An END is " ++
+            "`\"REF.PAD\"`, `\"REF.FN\"` (a pinout function name), `\"sub/PORT\"`, or a plain net / " ++
+            "enclosing-block port name. With no `(name …)` and no plain-net end the net is named " ++
+            "`n~<end>~<end>` from the AUTHORED tokens, which survives ref-des renumbering; `(name …)` " ++
+            "supplies an authored name instead. Wiring a pad or a bridged sub-block port that already " ++
+            "carries a different net is an error, not a silent merge.",
+    } };
+    t[@backingInt(ScopeForm.chain)] = .{ .scope = all, .doc = .{
+        .syntax = "(chain \"NET_A\" ITEM… \"NET_B\" [(class \"net-class\")])",
+        .summary = "Cascade two-port items in order, with one anonymous net per gap. An ITEM is " ++
+            "`\"REF\"` (a two-terminal part, in on its first pad), `\"sub\"` (a module declaring exactly " ++
+            "one signal `out` port and, among the ports sharing that output's kind, exactly one `in`; " ++
+            "power, ground/bidi and optional ports are never candidates), or `\"REF/IN>OUT\"` naming the " ++
+            "two terminals explicitly. The first and last tokens are ordinary `(connect …)` ends.",
     } };
     t[@backingInt(ScopeForm.pullup)] = .{ .scope = all, .doc = .{
         .syntax = "(pullup \"SIGNAL\" VALUE \"RAIL\")",
