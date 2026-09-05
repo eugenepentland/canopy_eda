@@ -1,0 +1,157 @@
+# Publish a Linux x86_64 release when a `v*` tag is pushed.
+#
+# The artifact policy mirrors .githooks/prepare-release.sh — the script that
+# builds what the maintainer deploys — flag for flag: ReleaseSafe through Zig's
+# self-hosted backend (never `-Dllvm`), then `strip --strip-all`, then a
+# `readelf -S` assertion that no `.symtab`/`.debug_*` section survived, because
+# the self-hosted backend does not honour the build graph's strip request for
+# this ELF. The script itself is not reused: it also runs the maintainer's
+# browser performance workload, which no hosted runner has.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # fetch-depth: 0 — `netlisp version` resolves its build identity from
+      # git metadata at runtime, so the tag's commit has to be readable.
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore the pinned Zig toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/netlisp/zig
+          key: zig-toolchain-${{ runner.os }}-release-${{ hashFiles('.zigversion') }}
+
+      - name: Restore Zig's global package cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/zig
+          key: zig-global-${{ runner.os }}-release-${{ hashFiles('.zigversion', 'build.zig.zon') }}
+          restore-keys: |
+            zig-global-${{ runner.os }}-release-
+
+      - name: Install the pinned Zig toolchain
+        run: |
+          set -euo pipefail
+          scripts/install-zig.sh
+          dirname "$(scripts/install-zig.sh --print)" >>"$GITHUB_PATH"
+
+      - name: Verify the toolchain and the release tools
+        run: |
+          set -euo pipefail
+          pinned="$(tr -d '[:space:]' <.zigversion)"
+          echo "zig      $(zig version)  (pinned: $pinned)"
+          echo "node     $(node --version)"
+          echo "python3  $(python3 --version)"
+          echo "cpus     $(nproc)  $(lscpu | sed -n 's/^Model name: *//p' | head -n 1)"
+          test "$(zig version)" = "$pinned"
+          command -v strip
+          command -v readelf
+
+      # ReleaseSafe, self-hosted backend. `-Dllvm` is an opt-in developer
+      # escape hatch that costs 12x the compile time; no release path passes it.
+      #
+      # `-Dcpu=baseline` is the one flag prepare-release.sh does not pass and
+      # this must: that script builds on the machine that will run the binary,
+      # whereas this publishes to strangers. Zig targets the building machine's
+      # CPU by default, and a hosted runner's CPU is whatever Azure allocated —
+      # CI run 33974127676 proved the hazard by killing a natively built
+      # netlisp with SIGILL in compiler_rt on a second runner.
+      - name: Build the release artifact (ReleaseSafe, self-hosted, baseline CPU)
+        run: zig build --seed=1 -Doptimize=safe -Dcpu=baseline
+
+      - name: Strip the executable and verify no symbols remain
+        run: |
+          set -euo pipefail
+          bin=zig-out/bin/netlisp
+          echo "unstripped: $(stat -c %s "$bin") bytes"
+          strip --strip-all "$bin"
+          echo "stripped:   $(stat -c %s "$bin") bytes"
+          if readelf -S "$bin" | grep -qE '\.(debug_|symtab)'; then
+            echo "release artifact still carries symbols:" >&2
+            readelf -S "$bin" | grep -E '\.(debug_|symtab)' >&2
+            exit 1
+          fi
+          echo "no .symtab / .debug_* sections remain"
+
+      - name: Smoke-test the stripped binary
+        run: |
+          set -euo pipefail
+          bin="$PWD/zig-out/bin/netlisp"
+          echo "build id: $("$bin" version)"
+          test "$("$bin" version)" = "$(git rev-parse HEAD | cut -c1-9)"
+          "$bin" check --project-dir test/fixtures/stdlib-smoke \
+            --profile preflight stdlib-smoke
+          "$bin" export-kicad --project-dir test/fixtures/stdlib-smoke \
+            --output-dir "$RUNNER_TEMP/kicad" --with-schematic stdlib-smoke
+
+      - name: Package the tarball and its checksum
+        id: package
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          stage="$RUNNER_TEMP/netlisp-$tag-x86_64-linux"
+          mkdir -p "$stage" dist
+          cp zig-out/bin/netlisp "$stage/netlisp"
+          cp LICENSE README.md "$stage/"
+          # Optional companions: shipped when the tree has them, silently
+          # skipped when it does not, so adding either needs no edit here.
+          if [ -f THIRD_PARTY_NOTICES.md ]; then
+            cp THIRD_PARTY_NOTICES.md "$stage/"
+          fi
+          if [ -d examples ]; then
+            cp -R examples "$stage/examples"
+          fi
+          tarball="dist/netlisp-$tag-x86_64-linux.tar.gz"
+          tar -czf "$tarball" -C "$RUNNER_TEMP" "netlisp-$tag-x86_64-linux"
+          ( cd dist && sha256sum "$(basename "$tarball")" >SHA256SUMS )
+          echo "tarball=$tarball" >>"$GITHUB_OUTPUT"
+          echo "--- tarball contents ---"
+          tar -tzf "$tarball"
+          echo "--- SHA256SUMS ---"
+          cat dist/SHA256SUMS
+
+      # A pre-release-shaped tag (v1.2.3-rc1, v0.0.0-ci-test) publishes as a
+      # prerelease; a plain v1.2.3 publishes as a full release. Never a draft:
+      # the tag is the trigger, so the release it produces is the finished one.
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          prerelease=()
+          case "$tag" in
+            *-*) prerelease=(--prerelease) ;;
+          esac
+          gh release create "$tag" \
+            --title "$tag" \
+            --generate-notes \
+            "${prerelease[@]}" \
+            "${{ steps.package.outputs.tarball }}" \
+            dist/SHA256SUMS
+          gh release view "$tag" --json isDraft,isPrerelease,assets

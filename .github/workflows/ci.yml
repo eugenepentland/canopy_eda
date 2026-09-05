@@ -1,0 +1,251 @@
+# Continuous integration: prove that a fresh clone of this tree builds and
+# passes the full gate on a stock runner, with nothing from a maintainer's
+# machine involved.
+#
+# The gate is `zig build --seed=1 test`: 8 parallel Zig test-suite shards plus
+# Guardian's 71-check suite, the node/python tree-policy checks and the
+# generated-docs staleness check. It is deliberately NOT split across a matrix
+# of runners — the shards already parallelise inside one `zig build`, and a
+# second runner would pay the ~2 min cold Guardian compile again for nothing.
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      # Scratch branches for exercising these workflows themselves, so the
+      # config can be validated without opening a pull request.
+      - 'ci/**'
+  pull_request:
+
+# One run per ref; a new push supersedes the one it replaces.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # fetch-depth: 0 — Guardian's process gates and the runtime build-id
+      # stamp read git metadata directly; a depth-1 clone makes them report
+      # "unknown" instead of failing, which is the worst of both.
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore the pinned Zig toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/netlisp/zig
+          key: zig-toolchain-${{ runner.os }}-build-${{ hashFiles('.zigversion') }}
+
+      # Zig's GLOBAL cache holds the fetched guardian package and the compiled
+      # build runner. Compiled artifacts live in the per-checkout .zig-cache,
+      # which is several GB here and deliberately not cached.
+      - name: Restore Zig's global package cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/zig
+          key: zig-global-${{ runner.os }}-build-${{ hashFiles('.zigversion', 'build.zig.zon') }}
+          restore-keys: |
+            zig-global-${{ runner.os }}-build-
+
+      - name: Install the pinned Zig toolchain
+        run: |
+          set -euo pipefail
+          scripts/install-zig.sh
+          dirname "$(scripts/install-zig.sh --print)" >>"$GITHUB_PATH"
+
+      - name: Report the toolchain and the runner
+        run: |
+          set -euo pipefail
+          pinned="$(tr -d '[:space:]' <.zigversion)"
+          echo "zig      $(zig version)  (pinned: $pinned)"
+          echo "node     $(node --version)"
+          echo "python3  $(python3 --version)"
+          echo "cpus     $(nproc)  $(lscpu | sed -n 's/^Model name: *//p' | head -n 1)"
+          free -h | sed -n '1,2p'
+          df -h / | tail -n 1
+          test "$(zig version)" = "$pinned"
+
+      # `-Dcpu=baseline`, because this binary is handed to the smoke job on a
+      # DIFFERENT runner. Zig targets the building machine's own CPU by
+      # default, and GitHub's fleet is heterogeneous: run 33974127676 built
+      # here and died with SIGILL inside compiler_rt's `round_f64` over there.
+      # The `test` job below deliberately keeps the native default, so both
+      # code paths are covered.
+      - name: Build netlisp (Debug, self-hosted backend, baseline CPU)
+        run: zig build --seed=1 -Dcpu=baseline
+
+      - name: Report the build identity
+        run: ./zig-out/bin/netlisp version
+
+      # The Debug binary is ~300 MB; hand it to the smoke job rather than
+      # paying for a second cold build there.
+      - name: Upload the netlisp binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: netlisp-debug
+          path: zig-out/bin/netlisp
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Record the binary's checksum
+        run: sha256sum zig-out/bin/netlisp
+
+  smoke:
+    name: Smoke (stdlib-smoke fixture)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Download the netlisp binary
+        uses: actions/download-artifact@v4
+        with:
+          name: netlisp-debug
+          path: zig-out/bin
+
+      # Artifact downloads do not carry the executable bit.
+      - name: Make the binary executable and describe this runner
+        run: |
+          set -euo pipefail
+          chmod +x zig-out/bin/netlisp
+          sha256sum zig-out/bin/netlisp
+          echo "cpus     $(nproc)  $(lscpu | sed -n 's/^Model name: *//p' | head -n 1)"
+
+      - name: Check the bundled-standard-library fixture (preflight profile)
+        run: >-
+          zig-out/bin/netlisp check
+          --project-dir test/fixtures/stdlib-smoke
+          --profile preflight stdlib-smoke
+
+      - name: Export the fixture to KiCad
+        run: >-
+          zig-out/bin/netlisp export-kicad
+          --project-dir test/fixtures/stdlib-smoke
+          --output-dir "$RUNNER_TEMP/kicad"
+          --with-schematic stdlib-smoke
+
+      - name: Verify the exported KiCad project
+        run: |
+          set -euo pipefail
+          for f in stdlib-smoke.net stdlib-smoke.kicad_sch stdlib-smoke.kicad_pro \
+                   fp-lib-table sym-lib-table netlisp.kicad_sym; do
+            test -s "$RUNNER_TEMP/kicad/$f" || { echo "missing or empty: $f" >&2; exit 1; }
+          done
+          test -d "$RUNNER_TEMP/kicad/footprints.pretty"
+          echo "KiCad export produced $(find "$RUNNER_TEMP/kicad" -type f | wc -l) files"
+
+      # A check or an export must never rewrite the tree it read.
+      - name: Assert the working tree is unchanged
+        run: git diff --exit-code
+
+  test:
+    name: Full test suite and Guardian gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore the pinned Zig toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/netlisp/zig
+          key: zig-toolchain-${{ runner.os }}-test-${{ hashFiles('.zigversion') }}
+
+      - name: Restore Zig's global package cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/zig
+          key: zig-global-${{ runner.os }}-test-${{ hashFiles('.zigversion', 'build.zig.zon') }}
+          restore-keys: |
+            zig-global-${{ runner.os }}-test-
+
+      - name: Install the pinned Zig toolchain
+        run: |
+          set -euo pipefail
+          scripts/install-zig.sh
+          dirname "$(scripts/install-zig.sh --print)" >>"$GITHUB_PATH"
+
+      - name: Report the toolchain and the runner
+        run: |
+          set -euo pipefail
+          pinned="$(tr -d '[:space:]' <.zigversion)"
+          echo "zig      $(zig version)  (pinned: $pinned)"
+          echo "node     $(node --version)"
+          echo "python3  $(python3 --version)"
+          echo "cpus     $(nproc)  $(lscpu | sed -n 's/^Model name: *//p' | head -n 1)"
+          free -h | sed -n '1,2p'
+          df -h / | tail -n 1
+          test "$(zig version)" = "$pinned"
+
+      # scripts/check_external_gates_armed.sh builds its throwaway fixture
+      # under $TMPDIR, falling back to ~/.cache/netlisp, which a fresh runner
+      # does not have.
+      - name: Create the scratch directory the gate probe falls back to
+        run: mkdir -p ~/.cache/netlisp
+
+      # Compiles the fetched Guardian gate once, so the step below both starts
+      # warm and has a guardian-check binary to point the armed-gate probe at.
+      - name: Build netlisp (Debug, self-hosted backend)
+        run: zig build --seed=1
+
+      # `zig build test` runs scripts/check_external_gates_armed.sh, which
+      # proves a failing [[external]] still blocks. That probe needs a
+      # standalone guardian-check; this tree builds one as a dependency
+      # artifact but never installs it, so point $GUARDIAN (the script's own
+      # documented override) at the copy the build just produced. Without this
+      # the probe fails closed — by design: an unrun probe is how the defect it
+      # guards went unnoticed in the first place.
+      - name: Point the armed-gate probe at the built Guardian binary
+        run: |
+          set -euo pipefail
+          bin="$(find .zig-cache -type f -name guardian-check -perm -u+x -print -quit)"
+          if [ -z "$bin" ]; then
+            echo "no guardian-check artifact under .zig-cache" >&2
+            exit 1
+          fi
+          "$PWD/$bin" --version
+          echo "GUARDIAN=$PWD/$bin" >>"$GITHUB_ENV"
+
+      - name: Run the full suite and the Guardian gate
+        run: zig build --seed=1 test
+
+      - name: Report disk use
+        if: always()
+        run: |
+          df -h / | tail -n 1
+          du -sh .zig-cache 2>/dev/null || true
