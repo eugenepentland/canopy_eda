@@ -146,7 +146,7 @@ pub const shards: []const []const []const u8 = &.{
         "placement.rough_identity.test.",
         "placement.route_shape_score.test.",
         "placement.router.test.con",
-        "placement.router.test.imm",
+        "placement.router_rescue.test.",
         "placement.router.test.net",
         "placement.shove.test.",
         "placement.topo_plan.test.a g",

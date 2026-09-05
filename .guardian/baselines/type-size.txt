@@ -74,10 +74,10 @@
 11 src/placement/route_policy.zig|Options
 14 src/placement/route_result.zig|RouteResult
 10 src/placement/route_timing.zig|PhaseTimer
-10 src/placement/router.zig|FineRescueRun
 86 src/placement/router_ctx.zig|Ctx
 9 src/placement/router_ctx.zig|KeepState
 12 src/placement/router_gap_close.zig|GapState
+10 src/placement/router_rescue.zig|FineRescueRun
 8 src/placement/thermal_field.zig|Heatsink
 8 src/placement/thermal_field.zig|PartField
 8 src/placement/thermal_field.zig|PartInput

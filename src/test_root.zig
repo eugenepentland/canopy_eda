@@ -358,6 +358,7 @@ test {
     _ = @import("placement/router_ctx.zig");
     _ = @import("placement/router_gap_close.zig");
     _ = @import("placement/router_maze.zig");
+    _ = @import("placement/router_rescue.zig");
     _ = @import("placement/router_via_rules.zig");
     _ = @import("placement/router_vision_regression.zig");
     _ = @import("placement/router_waypoint_regression.zig");
