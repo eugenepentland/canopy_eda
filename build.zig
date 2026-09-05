@@ -77,18 +77,36 @@ pub fn build(b: *std.Build) void {
     // compiled with Guardian's counting test runner (see `test_runner`).
     //
     // Build guardian-check optimized regardless of the design's build mode. It's
-    // a tool we *run* (70 single-pass checks over the whole src/ tree), not code
-    // we ship, so a Debug guardian-check would run ~11s every build vs ~1s here.
-    // ReleaseSafe (not ReleaseFast) keeps bounds/overflow checks in guardian's
-    // parser for ~0.4s more — worth it for a build gate we trust to be correct.
+    // a tool we *run* (88 checks over the whole src/ tree) on EVERY build, not
+    // code we ship, so its run time is paid per build while its compile is paid
+    // once per build cache. ReleaseSafe (not ReleaseFast) keeps bounds/overflow
+    // checks in guardian's parser — worth it for a gate we trust to be correct.
     //
-    // In practice this compile is usually skipped entirely: `addAllChecks`
-    // reuses the binary a plain `zig build` already left in the guardian
-    // checkout's `zig-out/bin/`, behind a `guardian-selfcheck` step that fails
-    // the build when that binary's embedded source digest doesn't match the
-    // guardian source it is about to gate. That is what keeps a fresh
-    // worktree's first build at ~15s instead of a cold ReleaseSafe compile of
-    // an unchanged tool. `GUARDIAN_PREBUILT=off` forces the compile back on.
+    // Guardian is a `.url`+`.hash` package (build.zig.zon), so there is no
+    // sibling checkout with a `zig-out/bin/guardian-check` for `addAllChecks`
+    // to reuse: a fresh cache COMPILES it. ReleaseSafe means LLVM with the
+    // official toolchain, and that compile dominates a cold build. Measured on
+    // this tree (fresh ZIG_LOCAL_CACHE_DIR, warm package cache), cold `zig
+    // build` / steady-state rebuild:
+    //
+    //   .safe, LLVM (this configuration)   1m45s / 8.5s
+    //   .safe, check_exe.use_llvm = false   1m13s /  70s
+    //   .debug                              1m09s /  71s
+    //
+    // The self-hosted and Debug binaries compile ~35s faster ONCE and then cost
+    // ~60s of gate on EVERY build (guardian's `concept` check alone goes 1s →
+    // 30s), so the slow cold compile is the right trade: pay it once per cache,
+    // keep every later build at ~8s.
+    //
+    // Escape hatches, neither needed for a plain clone:
+    //   * `GUARDIAN_PREBUILT=<path>/guardian-zig/zig-out/bin/guardian-check`
+    //     reuses an already-built binary from a LOCAL guardian checkout and
+    //     skips the compile (cold build 1m45s → 17s — worth exporting if you
+    //     spin up worktrees often, since each build cache pays the compile
+    //     once). It stays honest: the `guardian-selfcheck` step makes that
+    //     binary re-derive the source digest of the FETCHED package and fail
+    //     the build unless the checkout is exactly the pinned tag.
+    //   * `GUARDIAN_PREBUILT=off` forces the compile back on.
     const guardian = @import("guardian");
     const guardian_dep = b.dependency("guardian", .{
         .target = target,

@@ -9,6 +9,10 @@ zig-out-browser-perf/
 .zig-cache
 # Isolated per-task build caches (agents pass --cache-dir .zig-cache-<tag>)
 .zig-cache-*/
+# Zig's local package directory: every build root that resolves a `.url`+`.hash`
+# dependency (guardian) gets one unpacked here. Cache-shaped and reproducible
+# from build.zig.zon, and it must not leave `git status` dirty on main.
+/zig-pkg/
 *.o
 *.swp
 *~

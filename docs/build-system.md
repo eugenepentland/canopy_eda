@@ -95,15 +95,36 @@ error-handling / allocation checks, and git-aware process gates. It runs in
 **baseline mode**: existing violations are frozen in `.guardian/`, so only NEW
 regressions fail. There is no bypass — fix the code, never loosen the gate.
 
-The gate binary is **not compiled by this build** in the normal case: guardian's
-`addAllChecks` reuses the `zig-out/bin/guardian-check` a plain `zig build`
-already left in the guardian checkout, guarded by a `guardian-selfcheck` step
-that hashes guardian's own sources and **fails the build** when that binary
-predates them (`prebuilt guardian-check is stale vs its source` → run `zig
-build` in `~/ai/canopy/guardian-zig`). This is why a brand-new worktree's first
-`zig build` here is ~15 s instead of paying a cold ReleaseSafe compile of an
-unchanged tool. `GUARDIAN_PREBUILT=off` forces the from-source compile back on;
-`zig build guardian-selfcheck` runs the guard alone.
+Guardian is a **pinned `.url`+`.hash` package** (`build.zig.zon`), fetched from
+`github.com/eugenepentland/guardian-zig` at a release tag — a fresh clone needs
+no sibling checkout, only network access on its first build (`zig build --fetch`
+gets the tarball ahead of time; every later build is offline out of Zig's global
+cache).
+
+The gate binary is therefore **compiled by this build** once per build cache:
+a cold `zig build` is ~1m45 s, of which ~1m28 s is guardian-check's ReleaseSafe
+(LLVM) compile, and every later build is ~8.5 s. Making that compile cheap makes
+the *gate* expensive — measured here, `check_exe.use_llvm = false` gives 1m13 s
+cold but ~70 s per build, and a Debug guardian-check 1m09 s cold and ~71 s per
+build — so the ReleaseSafe/LLVM compile stays.
+
+Two overrides, for a machine that has a local guardian checkout:
+
+- `GUARDIAN_PREBUILT=<path>/guardian-zig/zig-out/bin/guardian-check` reuses that
+  checkout's already-built binary instead of compiling (cold build 1m45 s →
+  17 s). `addAllChecks` guards it with a `guardian-selfcheck` step that makes
+  the binary re-derive the source digest of the **fetched** package and fails
+  the build when they differ (`prebuilt guardian-check is stale vs its source`
+  → run `zig build` in the checkout, or check it is on the pinned tag). `zig
+  build guardian-selfcheck` runs the guard alone; `GUARDIAN_PREBUILT=off`
+  forces the from-source compile back on.
+- `zig build --system <dir>`, where `<dir>` holds a link named for the pin
+  (`ln -s ~/ai/canopy/guardian-zig <dir>/guardian-0.2.0-<hash>`), builds against
+  a **local, possibly dirty** guardian tree: `--system` matches packages by
+  directory name and verifies no hash. Because the dependency root is then a
+  real checkout, its `zig-out/bin/guardian-check` is picked up automatically and
+  the build is ~16 s. This is the loop for changing guardian and netlisp
+  together; land the guardian change, tag it, and re-pin afterwards.
 
 - **Per-item ratchets.** Each shape check (file/function length, complexity,
   nesting, params, type fields, line length) records a per-item ceiling that
@@ -121,7 +142,7 @@ application/test/dev-server artifact. Keeping that checker ReleaseSafe avoids
 roughly 40x gate execution overhead; it does not create or exercise a
 ReleaseSafe netlisp build.
 
-Commands (`guardian-check` is the guardian dep's binary at
+Commands (`guardian-check` is the CLI from a local guardian checkout at
 `../guardian-zig/zig-out/bin/`, built by `zig build` there — that build now
 defaults the installed binary to **ReleaseSafe**; keep it that way. A Debug
 `guardian-check` runs the same 71-check gate in ~42 s instead of ~1.1 s, a
