@@ -3104,6 +3104,69 @@ const testing = std.testing;
 const geometry = @import("placement/geometry.zig");
 const export_kicad = @import("export_kicad.zig");
 
+// spec: placement/progress - netConnectivity reports the routable and connected counts the fab report records
+test "netConnectivity totals match the fab report stats" {
+    // Cross-module parity: the ladder in `placement/progress.zig` reads the
+    // routable/connected counts from `netConnectivity` while the fab report
+    // records its own — the two must agree. The test lives HERE, with both
+    // producers, so the pure ladder never has to import this file.
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+
+    // Two 2-location nets: SIG is routed end-to-end, OPEN has no copper.
+    const u_pads = [_]geometry.Pad{
+        .{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .{ .number = "2", .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+    };
+    const c_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    const d_pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &u_pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &c_pads, .fallback = false, .x = 10, .y = 0 },
+        .{ .ref_des = "D1", .kind = .passive, .hw = 1, .hh = 1, .pads = &d_pads, .fallback = false, .x = 0, .y = 10 },
+    };
+    const sig_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C1", .pin = "1" } };
+    const open_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "D1", .pin = "1" } };
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "SIG", .pins = &sig_pins },
+        .{ .name = "OPEN", .pins = &open_pins },
+    };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 12,
+        .maxy = 12,
+        .generated = false,
+        .board_rect = .{ .minx = -2, .miny = -2, .w = 16, .h = 16 },
+        .rules = .{ .plane_nets = &.{}, .copper_layers = 2 },
+    };
+    const tracks = [_]router.Track{.{ .x1 = 0, .y1 = 0, .x2 = 10, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 }};
+    const copper = export_gerber.Copper{ .tracks = &tracks };
+
+    const report = try check(arena, placement, copper, .{});
+    const conn = try netConnectivity(arena, placement, copper);
+    var routable: usize = 0;
+    var connected: usize = 0;
+    for (conn) |ns| {
+        if (!ns.routable) continue;
+        routable += 1;
+        if (ns.connected) connected += 1;
+    }
+    try testing.expectEqual(report.stats.routable_nets, routable);
+    try testing.expectEqual(report.stats.connected_nets, connected);
+    // Sanity: SIG connected, OPEN not → 2 routable, 1 connected.
+    try testing.expectEqual(@as(usize, 2), routable);
+    try testing.expectEqual(@as(usize, 1), connected);
+}
+
 // spec: fab_readiness - pad-to-track connectivity requires a full cross-section of the narrower copper feature; a capsule-only edge or corner graze stays open
 test "pad connectivity rejects a corner graze and accepts a full-width entry" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
