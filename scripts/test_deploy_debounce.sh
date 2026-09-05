@@ -35,7 +35,14 @@ ck() {
   fi
 }
 
-git init -q "$T/repo"
+# `-b main`, explicitly: deploy-debounce.sh deploys only from a checkout on
+# `main` and otherwise leaves the marker armed, so the fixture's branch name is
+# load-bearing — and `git init` takes it from the HOST's `init.defaultBranch`.
+# Without this the whole suite passes on a box configured for `main` and fails
+# 29 of its checks on a stock GitHub runner (`master`), every failure reading
+# "deployed at once: want <sha>, got ''". Found the day this test was wired
+# into `zig build test`.
+git init -q -b main "$T/repo"
 cd "$T/repo" || exit 1
 git config user.email test@example.invalid
 git config user.name test
