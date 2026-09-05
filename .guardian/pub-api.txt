@@ -286,6 +286,14 @@ src/config.zig::digikeyMinIntervalMs | fn digikeyMinIntervalMs(allocator: std.me
 src/config.zig::gitAutocommitEnabled | fn gitAutocommitEnabled(allocator: std.mem.Allocator) bool
 src/config.zig::libDir | fn libDir(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::stdlibDir | fn stdlibDir(allocator: std.mem.Allocator) ?[]u8
+src/config.zig::wardAuthServerUrl | fn wardAuthServerUrl(allocator: std.mem.Allocator) ?[]u8
+src/config.zig::wardCacheTtlSecs | fn wardCacheTtlSecs(allocator: std.mem.Allocator, default: i64) i64
+src/config.zig::wardEnabled | fn wardEnabled(allocator: std.mem.Allocator) error{InvalidAuthMode}!bool
+src/config.zig::wardIntrospectUrl | fn wardIntrospectUrl(allocator: std.mem.Allocator) ?[]u8
+src/config.zig::wardLoginUrl | fn wardLoginUrl(allocator: std.mem.Allocator) ?[]u8
+src/config.zig::wardServiceName | fn wardServiceName(allocator: std.mem.Allocator) ?[]u8
+src/config.zig::wardServiceUrl | fn wardServiceUrl(allocator: std.mem.Allocator) ?[]u8
+src/config.zig::wardVerifyUrl | fn wardVerifyUrl(allocator: std.mem.Allocator) ?[]u8
 src/convert/alt_functions.zig::AltEntry struct_
 src/convert/alt_functions.zig::AltError value
 src/convert/alt_functions.zig::mergePinoutWithAlts | fn mergePinoutWithAlts( allocator: std.mem.Allocator, pinout_source: []const u8, alts: []const AltEntry, ) AltError![]const u8
@@ -1327,6 +1335,8 @@ src/infra/fs.zig::writeFile | fn writeFile(self: Dir, options: std.Io.Dir.WriteF
 src/infra/log.zig::emitLine | fn emitLine(buf: []u8, res: std.fmt.BufPrintError![]u8) void
 src/infra/log.zig::progress | fn progress(comptime fmt: []const u8, args: anytype) void
 src/infra/log.zig::warn | fn warn(comptime fmt: []const u8, args: anytype) void
+src/infra/net.zig::HttpClient value
+src/infra/net.zig::initHttpClient | fn initHttpClient(allocator: std.mem.Allocator) HttpClient
 src/infra/process_alloc.zig::durable value
 src/infra/random.zig::bytes | fn bytes(buf: []u8) std.Io.RandomSecureError!void
 src/infra/source_transaction.zig::Guard struct_
@@ -5166,6 +5176,16 @@ src/serve/vfs.zig::listDir | fn listDir( allocator: std.mem.Allocator, project_d
 src/serve/vfs.zig::moveFile | fn moveFile( allocator: std.mem.Allocator, project_dir: []const u8, from_rel: []const u8, to_rel: []const u8, out: *std.ArrayList(u8), ) VfsError!bool
 src/serve/vfs.zig::readFile | fn readFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, offset: ?u64, limit: ?u64, out: *std.ArrayList(u8), ) VfsError!bool
 src/serve/vfs.zig::writeFile | fn writeFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, content: []const u8, opts: WriteOpts, out: *std.ArrayList(u8), ) VfsError!bool
+src/serve/ward_auth.zig::AuthError value
+src/serve/ward_auth.zig::Role value
+src/serve/ward_auth.zig::WardState struct_
+src/serve/ward_auth.zig::authMiddleware | fn authMiddleware(ctx: *Server, req: *httpz.Request, res: *httpz.Response) AuthError!bool
+src/serve/ward_auth.zig::authServerUrl | fn authServerUrl(ctx: *Server) []const u8
+src/serve/ward_auth.zig::deriveAuthServer | fn deriveAuthServer(login_url: []const u8) []const u8
+src/serve/ward_auth.zig::init | fn init(self: *WardState, allocator: std.mem.Allocator) void
+src/serve/ward_auth.zig::mapWardRole | fn mapWardRole(role: ward.verdict.Role) Role
+src/serve/ward_auth.zig::metadataProtectedResource | fn metadataProtectedResource(ctx: *Server, req: *httpz.Request, res: *httpz.Response) AuthError!void
+src/serve/ward_auth.zig::verify | fn verify( self: *FakeVerifier, allocator: std.mem.Allocator, token: []const u8, ) std.mem.Allocator.Error!ward.verdict.Verdict
 src/serve/warm_sched.zig::Flight struct_
 src/serve/warm_sched.zig::claim | fn claim(self: *Flight, key: []const u8) bool
 src/serve/warm_sched.zig::enterInteractive | fn enterInteractive() void

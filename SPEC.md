@@ -6077,6 +6077,40 @@ Public functions: notFound, serve
 - A sync request whose bearer header is empty or blank is not admitted by the plugin path
 - A malformed authorization header is not a plugin token while a lowercase scheme still is
 
+Optional Ward hosting:
+
+- Hosting mode defaults separately and rejects unknown explicit policies
+- Ward hosting and the unauthenticated remote override cannot be combined
+- A configured browsable url is reported to ward while an unset one omits the header
+- Ward member maps to the writer role, admin to admin, and an unknown role to reader
+- An unconfigured ward adapter reports session and bearer paths unconfigured so requests fail closed
+- The service scope check accepts a scope containing the service name and rejects one without it
+- The sync bearer grant requires both a service scope and a writer-capable role
+- Every read-only post prefix exempts only its own route family while safe methods are never write-gated
+- Every public route entry is served without a session while a sibling sharing its leading text is not
+- The system dossier page is session-gated and refuses like its sibling system page rather than as a JSON api
+- The ward auth-server url is derived by stripping the login path from the configured login url
+- The auth-server url prefers explicit config over the login-path strip
+- A cookieless session request is decided as a redirect to the ward login url carrying the return target
+- An api path is distinguished from a non-api path for the 401-versus-redirect choice
+- The ward session cookie value is read from the cookie header and absent when empty or missing
+- A cached session role is read back by token and reported unknown when absent or expired
+- An unavailable session verifier resolves the request to fail closed rather than admit it
+- Ward state initialization builds distinct http clients for the session and bearer verify paths
+- An unauthenticated api request is answered 401 json rather than a login redirect
+- An unauthenticated page request is redirected 302 to the ward login carrying the return url
+- A reader's mutating request is forbidden while a writer, a safe method, or a read-only post passes
+- A reader drives the read-only pcb-drc and pcb-score-batch posts but not the pcb-drc-rules write
+- A valid plugin token admits a sync request without a ward call while an invalid one falls through
+- A live ward bearer admits a sync request as the fallback when no plugin token matches
+- A ward reader's netlisp-scoped bearer does not admit the destructive sync write while a member's and an admin's do
+- A sync bearer scoped for another service is not admitted and falls through to the session gate
+- A malformed sync bearer with ward configured falls through to the session gate rather than admitting
+- An allocation failure during the sync bearer fallback surfaces as an error rather than admitting
+- The protected-resource metadata derives its resource url from the host and names the ward server
+- Ward hosting fails closed without configuration even for loopback or allow-remote requests
+- Ward hosting serves health probes and metadata before verification
+
 ## serve/sync
 
 Public functions: runSyncPlan, syncKicadPcbApi

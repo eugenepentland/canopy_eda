@@ -180,6 +180,7 @@ test {
     _ = @import("leak_tests/render.zig");
     _ = @import("leak_tests/review_bom.zig");
     _ = @import("leak_tests/serve_auth_request.zig");
+    _ = @import("leak_tests/serve_ward_request.zig");
     _ = @import("leak_tests/serve_request.zig");
     _ = @import("leak_tests/serve_stores.zig");
     _ = @import("leak_tests/sexpr.zig");

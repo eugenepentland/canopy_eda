@@ -78,6 +78,86 @@ pub fn digikeyMaxInFlight(allocator: std.mem.Allocator) u32 {
     return @intCast(lookupU64(allocator, "DIGIKEY_MAX_IN_FLIGHT", 2));
 }
 
+/// Hosting policy. Local is the default; Ward must be explicitly selected.
+/// Unknown values fail startup rather than silently enabling local access.
+pub fn wardEnabled(allocator: std.mem.Allocator) error{InvalidAuthMode}!bool {
+    const value = lookup(allocator, "NETLISP_AUTH") orelse return false;
+    defer allocator.free(value);
+    return parseAuthMode(value);
+}
+
+fn parseAuthMode(value: []const u8) error{InvalidAuthMode}!bool {
+    if (std.mem.eql(u8, value, "ward")) return true;
+    if (std.mem.eql(u8, value, "local")) return false;
+    return error.InvalidAuthMode;
+}
+
+// spec: serve - Hosting mode defaults separately and rejects unknown explicit policies
+test "hosting auth mode accepts local and ward and rejects typos" {
+    try std.testing.expect(try parseAuthMode("ward"));
+    try std.testing.expect(!try parseAuthMode("local"));
+    try std.testing.expectError(error.InvalidAuthMode, parseAuthMode("wards"));
+}
+
+/// Ward verify endpoint (`WARD_VERIFY_URL`, e.g. http://127.0.0.1:9000/verify)
+/// the session middleware asks about each `ward_session` cookie. Null when
+/// unset — the serve layer then fails every session-gated request closed.
+pub fn wardVerifyUrl(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "WARD_VERIFY_URL");
+}
+
+/// Ward login page (`WARD_LOGIN_URL`) an unauthenticated session is redirected
+/// to; wardd appends its own `?rd=` return target. Null when unset.
+pub fn wardLoginUrl(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "WARD_LOGIN_URL");
+}
+
+/// Ward token-introspection endpoint (`WARD_INTROSPECT_URL`) the CLI bearer
+/// path POSTs `token=…` to. Null when unset — the bearer path then fails
+/// closed rather than admit an unverifiable token.
+pub fn wardIntrospectUrl(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "WARD_INTROSPECT_URL");
+}
+
+/// This service's ward name/scope (`WARD_SERVICE_NAME`), sent as the
+/// `X-Ward-Service` header and matched against a bearer token's scope. Null
+/// when unset — the caller substitutes its own default.
+pub fn wardServiceName(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "WARD_SERVICE_NAME");
+}
+
+/// This service's browsable URL (`WARD_SERVICE_URL`), sent as the
+/// `X-Ward-Service-Url` header so ward's home page links the app it lists
+/// instead of naming it as plain text. Null when unset — the header is then
+/// omitted and ward keeps whatever URL it already recorded, if any.
+pub fn wardServiceUrl(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "WARD_SERVICE_URL");
+}
+
+/// Optional explicit ward authorization-server base URL (`WARD_AUTH_SERVER_URL`)
+/// published in the RFC 9728 protected-resource metadata document. Null when
+/// unset — the serve layer then derives it by stripping the `/login` suffix off
+/// `WARD_LOGIN_URL` (correct whenever the login URL ends in `/login`).
+pub fn wardAuthServerUrl(allocator: std.mem.Allocator) ?[]u8 {
+    return lookup(allocator, "WARD_AUTH_SERVER_URL");
+}
+
+/// Ward verdict-cache lifetime in seconds (`WARD_CACHE_TTL_SECS`), bounding
+/// how long a logout/revocation lags. Falls back to `default` when unset or
+/// non-numeric.
+pub fn wardCacheTtlSecs(allocator: std.mem.Allocator, default: i64) i64 {
+    return wardCacheTtlFromRaw(lookupU64(allocator, "WARD_CACHE_TTL_SECS", 0), default);
+}
+
+/// Map a raw parsed TTL onto i64: an unset/zero value and any value that would
+/// overflow i64 both fall back to `default`. A checked cast (not `@intCast`)
+/// keeps a hostile `WARD_CACHE_TTL_SECS` in (i64_max, u64_max] from panicking
+/// the server on boot under ReleaseSafe.
+fn wardCacheTtlFromRaw(raw: u64, default: i64) i64 {
+    if (raw == 0) return default;
+    return std.math.cast(i64, raw) orelse default;
+}
+
 /// Resolve `key` as a u64, falling back to `default` when unset or unparseable.
 fn lookupU64(allocator: std.mem.Allocator, key: []const u8, default: u64) u64 {
     const v = lookup(allocator, key) orelse return default;

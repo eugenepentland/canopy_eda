@@ -1,0 +1,14 @@
+# Install as ~/.config/systemd/user/netlisp.service.d/ward.conf.
+# Customize the URLs; the Ward cookie domain must cover both public hosts.
+# This override survives regeneration of netlisp.service by deployment.
+[Unit]
+Wants=wardd.service
+After=wardd.service
+
+[Service]
+Environment=NETLISP_AUTH=ward
+Environment=WARD_VERIFY_URL=http://127.0.0.1:9000/verify
+Environment=WARD_LOGIN_URL=https://ward.example.com/login
+Environment=WARD_INTROSPECT_URL=http://127.0.0.1:9000/oauth/introspect
+Environment=WARD_SERVICE_NAME=netlisp
+Environment=WARD_SERVICE_URL=https://netlisp.example.com

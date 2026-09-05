@@ -30,6 +30,7 @@ const routes = {
   "/pcb-route-lab/:name": { coverage: "redirect", scenario: "route_lab_redirect" },
   "/style.css": { coverage: "asset", reason: "shared stylesheet, not an interactive page" },
   "/static/:name": { coverage: "asset", reason: "static asset dispatcher, not an interactive page" },
+  "/.well-known/oauth-protected-resource": { coverage: "metadata", reason: "optional Ward OAuth resource discovery, not an interactive page" },
   "/healthz": { coverage: "metadata", reason: "fixed-body liveness probe for deployment health checks, not an interactive page" },
   "/systems/:name": { coverage: "surface", surface: "system_review" },
   "/systems/:name/cad": {

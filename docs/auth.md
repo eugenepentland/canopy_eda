@@ -1,7 +1,7 @@
 # Auth
 
 netlisp is a **local tool**. It has no user database, no session store, no
-passwords or passkeys, and no external auth service. The entire model is three
+passwords or passkeys. By default it needs no external auth service. Local mode uses three
 rules in `src/serve/auth.zig`, and `authMiddleware` there is the single seam
 every request passes through before dispatch.
 
@@ -63,16 +63,64 @@ names reach the per-mutation git auto-commit author line
 ## Roles
 
 The `Role` enum (`admin` / `writer` / `reader`) survives because the review and
-system surfaces gate on `role.canWrite()`. In practice an admitted request is
+system surfaces gate on `role.canWrite()`. In local mode an admitted request is
 `admin`; the plugin-token sync path leaves the request at the default `reader`
 because that token authorizes a route rather than an identity.
 
-## What used to be here
+## Optional Ward hosting
 
-Up to 2026-09 netlisp delegated auth to an external `ward` server: browser
-sessions verified against a `wardd` `GET /verify`, OAuth bearers introspected,
-an RFC 9728 `/.well-known/oauth-protected-resource` document, `WARD_*`
-configuration, and a `NETLISP_DEV=1` loopback bypass. All of it is gone, along
-with the `ward` build dependency — a fresh clone builds with no sibling auth
-checkout. `NETLISP_DEV` is replaced by the default (loopback *is* admin), and
-the deployment case it never covered is `--allow-remote`.
+Set `NETLISP_AUTH=ward` to authenticate hosted requests using an existing
+Ward server. The default is `NETLISP_AUTH=local`; merely setting `WARD_*`
+URLs does not change local mode. An unknown auth mode aborts startup.
+The client is bundled under `vendor/ward`, so building netlisp needs neither
+a sibling Ward checkout nor a running Ward service.
+
+```dotenv
+NETLISP_AUTH=ward
+WARD_VERIFY_URL=http://127.0.0.1:9000/verify
+WARD_LOGIN_URL=https://ward.example.com/login
+WARD_INTROSPECT_URL=http://127.0.0.1:9000/oauth/introspect
+WARD_SERVICE_NAME=netlisp
+WARD_SERVICE_URL=https://netlisp.example.com
+# Optional: otherwise derived from WARD_LOGIN_URL by removing /login.
+# WARD_AUTH_SERVER_URL=https://ward.example.com
+# Optional successful-verdict cache lifetime (default 30 seconds).
+# WARD_CACHE_TTL_SECS=30
+```
+
+Ward mode verifies the `ward_session` cookie, redirects unauthenticated page
+requests to Ward login with a return URL, and answers unauthenticated API
+requests with JSON `401`. Ward must issue its cookie for a parent domain
+shared by the login and app hosts. Keep its verify/introspection endpoints
+on a trusted network, preferably loopback. Keep netlisp on loopback behind
+your HTTPS reverse proxy or tunnel; it must preserve the original Host and
+set `X-Forwarded-Proto: https` for correct login return URLs.
+
+Ward `admin` maps to netlisp admin, `member` to writer, and unknown roles to
+reader. Mutations require writer access, apart from the existing compute-only
+POST routes. KiCad sync accepts its route-scoped plugin token or a valid Ward
+bearer with this service's scope and a writer-capable role. The
+`/.well-known/oauth-protected-resource` route publishes Ward discovery metadata.
+Ward grants for other services cannot authorize sync.
+
+The Ward gate also applies to direct loopback requests. Combining Ward mode
+with `--allow-remote` or `NETLISP_ALLOW_REMOTE` aborts startup. Missing Ward
+configuration or an unavailable verifier fails closed with `503`; health
+probes and static assets remain public. Successful verification is cached for
+30 seconds by default, bounding the delay before logout/revocation is seen.
+
+### Keeping one hosted installation public
+
+Use a machine-local systemd drop-in, which deployment's generated base unit
+will preserve. See `systemd/netlisp-ward.conf.example`. Copy it to
+`~/.config/systemd/user/netlisp.service.d/ward.conf`, customize the URLs, then
+run `systemctl --user daemon-reload` and `systemctl --user restart netlisp`.
+Do not add `--allow-remote`: Ward performs authentication inside netlisp.
+Other installations continue to use the shipped local-only base unit.
+
+### Verification
+
+`zig build test` includes the bundled Ward client tests and
+`scripts/test_ward_hosting.py`, which starts disposable loopback services and
+checks local defaults, Ward sessions, roles, discovery, startup policy errors,
+and backend outages. It never reads production sessions or edits live designs.

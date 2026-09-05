@@ -63,6 +63,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const ward_mod = b.createModule(.{
+        .root_source_file = b.path("vendor/ward/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const zt_dep = b.dependency("zt", .{
         .target = target,
         .optimize = optimize,
@@ -190,6 +196,7 @@ pub fn build(b: *std.Build) void {
     // every internal self-hosted Debug artifact keeps its debugging metadata.
     exe_mod.strip = optimize == .safe;
     exe_mod.addImport("httpz", httpz.module("httpz"));
+    exe_mod.addImport("ward", ward_mod);
     exe_mod.addImport("zt", zt_dep.module("zt"));
     // Embed the compiled drc.wasm so static_assets.zig can @embedFile it.
     exe_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
@@ -248,11 +255,21 @@ pub fn build(b: *std.Build) void {
         .optimize = test_opt,
     });
     test_mod.addImport("httpz", httpz.module("httpz"));
+    test_mod.addImport("ward", ward_mod);
     test_mod.addImport("zt", zt_dep.module("zt"));
     test_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
     addDeployUnitImports(b, test_mod);
 
     const test_step = b.step("test", "Run unit tests");
+    // A real listener catches route-registration and Ward HTTP protocol drift
+    // that request-double tests cannot see. Uses isolated temporary state.
+    const ward_hosting_test = b.addSystemCommand(&.{"python3"});
+    ward_hosting_test.addFileArg(b.path("scripts/test_ward_hosting.py"));
+    ward_hosting_test.addArtifactArg(exe);
+    test_step.dependOn(&ward_hosting_test.step);
+    const ward_client_tests = b.addTest(.{ .root_module = ward_mod });
+    const ward_client_run = b.addRunArtifact(ward_client_tests);
+    test_step.dependOn(&ward_client_run.step);
     addTreePolicyChecks(b, test_step);
     // SHARDED. `test` compiles one test binary per shard in src/test_shards.zig
     // and runs them concurrently — the build system executes independent steps
@@ -315,6 +332,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     fast_test_mod.addImport("httpz", httpz.module("httpz"));
+    fast_test_mod.addImport("ward", ward_mod);
     fast_test_mod.addImport("zt", zt_dep.module("zt"));
     fast_test_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
     addDeployUnitImports(b, fast_test_mod);

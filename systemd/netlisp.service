@@ -21,6 +21,8 @@ Environment=NETLISP_GIT_AUTOCOMMIT=0
 # to ExecStart (before `--port`): with that flag EVERY request netlisp receives
 # is an admin, so it is correct only while the proxy authenticates callers —
 # see docs/auth.md.
+# For Ward hosting, use the persistent drop-in shown in
+# systemd/netlisp-ward.conf.example instead of changing ExecStart.
 ExecStart=/home/epentland/ai/canopy/eda/.deploy/bin/netlisp serve --project-dir /home/epentland/ai/canopy/eda/projects/designs --port 7050
 # `always` also recovers from signals systemd classifies as clean exits, while
 # still honoring an explicit `systemctl --user stop`.

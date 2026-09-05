@@ -20,6 +20,8 @@ Environment=NETLISP_GIT_AUTOCOMMIT=0
 # to ExecStart (before `--port`): with that flag EVERY request netlisp receives
 # is an admin, so it is correct only while the proxy authenticates callers —
 # see docs/auth.md.
+# For Ward hosting, use the persistent drop-in shown in
+# systemd/netlisp-ward.conf.example instead of changing ExecStart.
 ExecStart=@TOP@/.deploy/bin/netlisp serve --project-dir @TOP@/projects/designs --port @PORT@
 # Restart=always, NOT on-failure (2026-07-25): systemd counts termination by
 # SIGTERM/SIGINT/SIGHUP/SIGPIPE as a CLEAN exit, so `pkill netlisp` or

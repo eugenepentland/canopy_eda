@@ -8,7 +8,9 @@
 //! `--allow-remote`, the deployment switch that hands authentication to an
 //! operator-run reverse proxy in front of netlisp.
 //!
-//! There is no user database, no session store, and no external auth service:
+//! Optional `NETLISP_AUTH=ward` verifies hosted sessions through Ward before
+//! any local or allow-remote bypass. Local mode needs no external auth service.
+//! In local mode,
 //! locality is derived from the connected socket, never from a request header,
 //! because a header is fully attacker-controlled (`Host: localhost` once bought
 //! unauthenticated admin here).
@@ -175,6 +177,10 @@ fn validatePluginBearerToken(ctx: *Server, req: *httpz.Request) bool {
 pub fn authMiddleware(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!bool {
     const path = req.url.path;
     if (isPublicPath(path)) return true;
+    if (ctx.state.ward.enabled) {
+        if (req.method == .POST and std.mem.startsWith(u8, path, sync_path_prefix) and validatePluginBearerToken(ctx, req)) return true;
+        return @import("ward_auth.zig").authMiddleware(ctx, req, res);
+    }
     if (ctx.allow_remote) return grant(ctx, remote_identity);
     if (isLocalRequest(req)) return grant(ctx, local_identity);
     if (std.mem.startsWith(u8, path, sync_path_prefix) and validatePluginBearerToken(ctx, req)) return true;

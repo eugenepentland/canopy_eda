@@ -690,3 +690,8 @@ matters when the person re-recording is the author of the change.
 
 ## 2026-09-05 · codex · Autorouter audit fixes
 - **idea:** Add a benchmark mode that routes one module in its parent board and dumps the effective local and global policies before search. Barracuda trials cost about 210 seconds each; discovering that an absent child plan inherited global waypoints required source inspection and a new regression fixture. A policy comparison with standalone defaults would expose that mismatch before a whole-board run.
+
+## 2026-09-05 · codex · restore optional Ward hosting
+- **friction:** Request-double auth tests passed while the real HTTP listener lacked the restored OAuth metadata route; unknown URLs return 404 before `Server.dispatch`. A live outage test also exposed the old Ward client's SO_RCVTIMEO/EAGAIN crash under pinned Zig 0.17. Both issues required real HTTP probes beyond middleware tests.
+- **idea:** Keep `scripts/test_ward_hosting.py` on the `zig build test` dependency chain: it exercises registered routes, authenticated/unauthenticated requests, roles, and a stalled Ward verifier using temporary project state. This catches protocol and routing regressions before deployment without a real account or production restart.
+- **status:** resolved in this change.

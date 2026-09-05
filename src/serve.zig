@@ -22,6 +22,7 @@ const gzip_cache = @import("serve/gzip_cache.zig");
 /// intentionally broad because the http server's own surface is wide; we
 /// derive it from the actual `listen()` return type so it stays in sync.
 pub const ServeError = std.mem.Allocator.Error ||
+    error{ InvalidAuthMode, ConflictingAuthModes } ||
     @typeInfo(@typeInfo(@TypeOf(httpz.Server(*Server).listen)).@"fn".return_type.?).error_union.error_set ||
     @typeInfo(@typeInfo(@TypeOf(httpz.Server(*Server).router)).@"fn".return_type.?).error_union.error_set ||
     @typeInfo(@typeInfo(@TypeOf(httpz.Server(*Server).init)).@"fn".return_type.?).error_union.error_set ||
@@ -100,6 +101,7 @@ const layout_match = @import("serve/layout_match.zig");
 const rough_best = @import("serve/rough_best.zig");
 const modules_page = @import("serve/modules.zig");
 const auth = @import("serve/auth.zig");
+const ward_auth = @import("serve/ward_auth.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
 const static_assets = @import("serve/static_assets.zig");
 const sync = @import("serve/sync.zig");
@@ -441,6 +443,8 @@ pub const Caches = struct {
 /// what makes per-test servers possible. Every field defaults to empty so
 /// `.{}` yields a fresh, unloaded server.
 pub const ServerState = struct {
+    /// Optional hosted authentication; uninitialized in local mode.
+    ward: ward_auth.WardState = .{},
     plugin_tokens: plugin_tokens.PluginTokenStore = .{},
     /// Interactive routing sessions, keyed by design name — mutex-guarded,
     /// idle-evicted, and capped (see `route_session_api.Store`). Held here so
@@ -941,7 +945,9 @@ pub fn serve(
     // the ban-env policy holds) turns netlisp's own gate OFF: every request is
     // an admin, and the operator's reverse proxy is the only thing left
     // authenticating anyone. Loud on stderr because it is not a local default.
+    const ward_enabled = try @import("config.zig").wardEnabled(allocator);
     const allow_remote = options.allow_remote or @import("config.zig").allowRemote(allocator);
+    try validateAuthModes(ward_enabled, allow_remote);
     if (allow_remote) log.warn("netlisp: --allow-remote — EVERY request is an admin; an authenticating reverse proxy must sit in front of this server", .{});
     var state: ServerState = .{
         .caches = .init(allocator),
@@ -958,6 +964,8 @@ pub fn serve(
         // stack-owned `ServerState` could not survive.
         .reviews = .{ .dossiers = .{ .background = true, .project_dir = project_dir } },
     }; // owned here; shared by pointer
+    state.ward.enabled = ward_enabled;
+    if (ward_enabled) state.ward.init(allocator);
     defer state.caches.deinit();
     // A real server may run background full-board DRC sweeps behind the
     // editor's reconciles; nothing else does, which is what keeps every test's
@@ -1144,6 +1152,7 @@ pub fn serve(
     // Unauthenticated liveness probe for deployment health checks — the
     // cheapest route in the tree (see `serve/api.zig`).
     router.get("/healthz", api.healthzApi, .{});
+    if (ward_enabled) router.get("/.well-known/oauth-protected-resource", ward_auth.metadataProtectedResource, .{});
 
     log.progress("Listening on http://{s}:{d}", .{ options.bind, port });
     log.progress("Project: {s}", .{project_dir});
@@ -1170,4 +1179,17 @@ pub fn serve(
     else
         warmup.spawn(&handler);
     try server.listen();
+}
+
+/// Reject conflicting policies before any listener is started.
+fn validateAuthModes(ward_enabled: bool, allow_remote: bool) error{ConflictingAuthModes}!void {
+    if (ward_enabled and allow_remote) return error.ConflictingAuthModes;
+}
+
+// spec: serve - Ward hosting and the unauthenticated remote override cannot be combined
+test "Ward hosting rejects ConflictingAuthModes" {
+    try std.testing.expectError(error.ConflictingAuthModes, validateAuthModes(true, true));
+    try validateAuthModes(true, false);
+    try validateAuthModes(false, true);
+    try validateAuthModes(false, false);
 }

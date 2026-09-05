@@ -112,13 +112,16 @@ tool schemas are the contract an agent should read first.
 
 ## Serving beyond localhost
 
-Netlisp has no accounts, sessions or passwords. It binds `127.0.0.1`, admits
-a loopback request that did not pass through a proxy as an admin, and
-answers everything else with `403`. To publish it, put an authenticating
-reverse proxy in front and start the server with `--allow-remote`, which
-makes **every** request it receives an admin. `--bind <addr>` widens the
-listening socket. Details and the plugin-token path for the KiCad sync
-endpoint are in [docs/auth.md](docs/auth.md).
+Netlisp defaults to local hosting: it binds `127.0.0.1`, admits an unproxied
+loopback request as admin, and refuses other requests. To keep a public
+installation authenticated by Ward, set `NETLISP_AUTH=ward` and configure the
+`WARD_*` URLs. The Ward client is bundled; local users need no auth server.
+
+Alternatively, an authenticating reverse proxy can own auth with
+`--allow-remote`, which makes **every** request netlisp receives an admin.
+That flag cannot be combined with Ward mode. `--bind <addr>` controls the
+listening interface. Configuration, systemd hosting, and KiCad sync tokens
+are documented in [docs/auth.md](docs/auth.md).
 
 ## Building and testing
 
