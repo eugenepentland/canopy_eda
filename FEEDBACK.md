@@ -726,3 +726,25 @@ real time and none is specific to that board.
   `.gitignore` now excludes them under `examples/*/`.
 - **`export-schematic-png` refuses more than 8 hubs**, and test points and
   mounting holes count as hubs, so a 20-part board already needs `--ref`.
+
+## 2026-09-05 — module-owned net envelopes (DSL wave)
+
+- **A full disk truncated a source file to 0 bytes mid-edit.** Eleven parallel
+  worktrees each hold a ~5 GB `.zig-cache`; the 466 GB volume hit 100 % and a
+  write to `src/eval/net_envelopes.zig` failed after the file had been
+  truncated, silently losing ~20 minutes of work (recovered from HEAD and
+  re-applied). Anything that fans a wave out across worktrees should either cap
+  concurrent worktrees or reap `.zig-cache` from worktrees whose branch is
+  merged. A pre-write free-space guard in the harness would turn this from data
+  loss into an error.
+- **`(port … (rated LO HI))` silently drops evaluated bounds.** The port parser
+  reads both numbers with `asNumber()` and never evaluates them, while the
+  sibling `(nominal …)` on the same form does evaluate. So
+  `lib/modules/bcuda-lt3045-ldo.sexp`'s
+  `(port "VOUT" out power (nominal vout) (rated (* vout 0.95) (* vout 1.05)))`
+  contributes NO rated range at all — the rail derives as the single point
+  `vout`, which is why `V_BASE_5V15` and `lna/VDD_FILT` come out as
+  5.110–5.110 V against boards that author 5.05–5.17 V. It is silent: no
+  warning, and the form looks like it works. Either evaluate the two bounds
+  (`net-envelope`'s `(rated …)` now does) or warn when they are not literals.
+  Fixing it changes derived rails corpus-wide, so it wants its own change.
