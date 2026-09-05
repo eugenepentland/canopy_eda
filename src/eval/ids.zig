@@ -342,6 +342,20 @@ pub fn prescanRefDes(self: *Evaluator, forms: []const Node) void {
     }
 }
 
+/// The library-part prefixes that mint a `Q` ref-des: Alpha & Omega's AO3xxx /
+/// AO4xxx, the BSS/DMN/DMP small-signal MOSFETs, the 2N BJT series and the
+/// IRLML logic-level parts. A LIST rather than a chain of `or`s so a new
+/// transistor family is one entry and the test reads as membership.
+const transistor_family_prefixes = [_][]const u8{ "ao3", "ao4", "bss", "dmn", "dmp", "2n", "irlml" };
+
+/// True when `family` begins with any member of `prefixes`.
+fn startsWithAny(family: []const u8, prefixes: []const []const u8) bool {
+    for (prefixes) |prefix| {
+        if (std.mem.startsWith(u8, family, prefix)) return true;
+    }
+    return false;
+}
+
 /// Get the ref-des prefix letter for a component family name.
 pub fn componentPrefix(family: []const u8) u8 {
     // Known passive/generic families
@@ -366,13 +380,7 @@ pub fn componentPrefix(family: []const u8) u8 {
     if (std.mem.eql(u8, family, "abm8")) return 'Y';
     if (std.mem.startsWith(u8, family, "fc-") or std.mem.startsWith(u8, family, "crystal")) return 'Y';
     // Discrete transistors (MOSFETs + BJTs) — Q prefix
-    if (std.mem.startsWith(u8, family, "ao3") or
-        std.mem.startsWith(u8, family, "ao4") or
-        std.mem.startsWith(u8, family, "bss") or
-        std.mem.startsWith(u8, family, "dmn") or
-        std.mem.startsWith(u8, family, "dmp") or
-        std.mem.startsWith(u8, family, "2n") or
-        std.mem.startsWith(u8, family, "irlml")) return 'Q';
+    if (startsWithAny(family, &transistor_family_prefixes)) return 'Q';
     // Everything else is an IC
     if (family.len > 0) return 'U';
     return 'X';
@@ -875,6 +883,22 @@ test "componentPrefix maps inductor families to L" {
     try std.testing.expectEqual(@as(u8, 'U'), componentPrefix("inductive-sensor"));
     try std.testing.expectEqual(@as(u8, 'C'), componentPrefix("cap-0402"));
     try std.testing.expectEqual(@as(u8, 'R'), componentPrefix("res-0201"));
+}
+
+test "componentPrefix maps every discrete-transistor family to Q" {
+    // One assertion per member of `transistor_family_prefixes`: the list is the
+    // only thing standing between a MOSFET/BJT and the generic 'U' IC prefix, so
+    // a dropped entry silently re-classes a part rather than failing to compile.
+    try std.testing.expectEqual(@as(u8, 'Q'), componentPrefix("ao3400a"));
+    try std.testing.expectEqual(@as(u8, 'Q'), componentPrefix("ao4407a"));
+    try std.testing.expectEqual(@as(u8, 'Q'), componentPrefix("bss138"));
+    try std.testing.expectEqual(@as(u8, 'Q'), componentPrefix("dmn2075u"));
+    try std.testing.expectEqual(@as(u8, 'Q'), componentPrefix("dmp2160u"));
+    try std.testing.expectEqual(@as(u8, 'Q'), componentPrefix("2n3904"));
+    try std.testing.expectEqual(@as(u8, 'Q'), componentPrefix("irlml6244"));
+    // A name that merely starts with a letter of one of them is still an IC.
+    try std.testing.expectEqual(@as(u8, 'U'), componentPrefix("bq25798"));
+    try std.testing.expectEqual(@as(u8, 'U'), componentPrefix("dac8551"));
 }
 
 // spec: eval/evaluator - instancePrefix honors a component's explicit (refdes "X") class over the name heuristic

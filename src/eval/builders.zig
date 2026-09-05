@@ -975,7 +975,13 @@ pub fn emitDecoupleItems(
                 }
             }
             if (!reassigned) {
-                self.warnFmt(items[idx].span, "(decouple \"{s}\" … per-pin {s} …) pin '{s}' is not on net \"{s}\" — the cap is on a stub net with no IC pad (declare the pin first, or check the pad/function name)", .{ net_name, ref_str, target_pin, net_name });
+                self.warnFmt(
+                    items[idx].span,
+                    "(decouple \"{s}\" … per-pin {s} …) pin '{s}' is not on net \"{s}\" — " ++
+                        "the cap is on a stub net with no IC pad " ++
+                        "(declare the pin first, or check the pad/function name)",
+                    .{ net_name, ref_str, target_pin, net_name },
+                );
             }
         }
         idx = pin_idx;

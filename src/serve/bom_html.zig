@@ -62,6 +62,12 @@ pub const SymbolPinCache = std.StringHashMapUnmanaged([]const SymbolPin);
 /// Walk the design and append component names whose footprint .sexp or
 /// 3D `.step` model can't be found under `lib/`. The two `checked_*` sets
 /// dedupe so each missing asset is reported once across deep hierarchies.
+/// True when either name contains the other — the fuzzy match the 3D-model scan
+/// uses to pair a `lib/models/*.step` basename with a footprint or component.
+fn eitherContains(a: []const u8, b: []const u8) bool {
+    return std.mem.indexOf(u8, a, b) != null or std.mem.indexOf(u8, b, a) != null;
+}
+
 pub fn collectMissing(
     allocator: std.mem.Allocator,
     block: *const env_mod.DesignBlock,
@@ -107,11 +113,12 @@ pub fn collectMissing(
                     while (iter.next() catch null) |entry| {
                         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".step")) continue;
                         const basename = entry.name[0 .. entry.name.len - step_ext_len];
-                        if ((inst.footprint.len > 0 and
-                            (std.mem.indexOf(u8, inst.footprint, basename) != null or
-                                std.mem.indexOf(u8, basename, inst.footprint) != null)) or
-                            (std.mem.indexOf(u8, inst.component, basename) != null or std.mem.indexOf(u8, basename, inst.component) != null))
-                        {
+                        // A STEP file's basename and the footprint/component
+                        // name it belongs to routinely differ by a suffix at
+                        // either end, so either containing the other counts.
+                        const footprint_match = inst.footprint.len > 0 and
+                            eitherContains(inst.footprint, basename);
+                        if (footprint_match or eitherContains(inst.component, basename)) {
                             found = true;
                             break;
                         }
@@ -133,22 +140,52 @@ pub fn collectMissing(
 /// page: groups instances by `(component, value, footprint, attrs)`,
 /// surfaces every `Property` key as a badge, and emits no embedded JS —
 /// the schematic page's own scripts own the click handlers.
+/// One rolled-up BOM line: the instances a fab would buy as a single part
+/// number, and the refs they were rolled up from. Declared ONCE, at file scope,
+/// because the CSV writer and the schematic-embed HTML writer both roll the same
+/// board up and a private copy each is how one surface's parts list comes to
+/// disagree with the other's.
+const BomLine = struct {
+    component: []const u8,
+    value: []const u8,
+    footprint: []const u8,
+    attrs: []const []const u8,
+    properties: []const env_mod.Property,
+    dnp: bool,
+    count: u32,
+    refs: std.ArrayList([]const u8),
+
+    /// True when `inst` belongs on this line — the identity a purchase order is
+    /// placed on. DNP is part of it: a do-not-populate part is a different line
+    /// from the populated part it shadows, however identical the rest reads.
+    fn groups(self: BomLine, inst: env_mod.Instance) bool {
+        if (self.dnp != inst.dnp) return false;
+        if (!std.mem.eql(u8, self.component, inst.component)) return false;
+        if (!std.mem.eql(u8, self.value, inst.value)) return false;
+        if (!std.mem.eql(u8, self.footprint, inst.footprint)) return false;
+        return attrsEqual(self.attrs, inst.attrs);
+    }
+
+    /// The line `inst` opens when nothing already on the BOM groups it.
+    fn first(inst: env_mod.Instance, refs: std.ArrayList([]const u8)) BomLine {
+        return .{
+            .component = inst.component,
+            .value = inst.value,
+            .footprint = inst.footprint,
+            .attrs = inst.attrs,
+            .properties = inst.properties,
+            .dnp = inst.dnp,
+            .count = 1,
+            .refs = refs,
+        };
+    }
+};
+
 pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *const env_mod.DesignBlock) BomError!void {
     const Instance = env_mod.Instance;
     var all: std.ArrayList(Instance) = .empty;
     try bomCollectInstancesHierarchical(allocator, block, "", &all);
     if (all.items.len == 0) return;
-
-    const BomLine = struct {
-        component: []const u8,
-        value: []const u8,
-        footprint: []const u8,
-        attrs: []const []const u8,
-        properties: []const env_mod.Property,
-        dnp: bool,
-        count: u32,
-        refs: std.ArrayList([]const u8),
-    };
 
     var lines: std.ArrayList(BomLine) = .empty;
     for (all.items) |inst| {
@@ -158,12 +195,7 @@ pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *
         if (env_mod.isTestPoint(inst.component)) continue;
         var found = false;
         for (lines.items) |*line| {
-            if (line.dnp == inst.dnp and
-                std.mem.eql(u8, line.component, inst.component) and
-                std.mem.eql(u8, line.value, inst.value) and
-                std.mem.eql(u8, line.footprint, inst.footprint) and
-                attrsEqual(line.attrs, inst.attrs))
-            {
+            if (line.groups(inst)) {
                 line.count += 1;
                 try line.refs.append(allocator, inst.ref_des);
                 found = true;
@@ -173,16 +205,7 @@ pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *
         if (!found) {
             var refs: std.ArrayList([]const u8) = .empty;
             try refs.append(allocator, inst.ref_des);
-            try lines.append(allocator, .{
-                .component = inst.component,
-                .value = inst.value,
-                .footprint = inst.footprint,
-                .attrs = inst.attrs,
-                .properties = inst.properties,
-                .dnp = inst.dnp,
-                .count = 1,
-                .refs = refs,
-            });
+            try lines.append(allocator, BomLine.first(inst, refs));
         }
     }
 
@@ -326,17 +349,6 @@ pub fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_m
     try bomCollectInstances(allocator, block, &all);
     if (all.items.len == 0) return;
 
-    const BomLine = struct {
-        component: []const u8,
-        value: []const u8,
-        footprint: []const u8,
-        properties: []const env_mod.Property,
-        attrs: []const []const u8,
-        dnp: bool,
-        count: u32,
-        refs: std.ArrayList([]const u8),
-    };
-
     var lines: std.ArrayList(BomLine) = .empty;
     for (all.items) |inst| {
         // Test points are probe pads, not parts a fab sources. They
@@ -345,12 +357,7 @@ pub fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_m
         if (env_mod.isTestPoint(inst.component)) continue;
         var found = false;
         for (lines.items) |*line| {
-            if (line.dnp == inst.dnp and
-                std.mem.eql(u8, line.component, inst.component) and
-                std.mem.eql(u8, line.value, inst.value) and
-                std.mem.eql(u8, line.footprint, inst.footprint) and
-                attrsEqual(line.attrs, inst.attrs))
-            {
+            if (line.groups(inst)) {
                 line.count += 1;
                 try line.refs.append(allocator, inst.ref_des);
                 found = true;
@@ -360,16 +367,7 @@ pub fn writeBomCsv(allocator: std.mem.Allocator, w: anytype, block: *const env_m
         if (!found) {
             var refs: std.ArrayList([]const u8) = .empty;
             try refs.append(allocator, inst.ref_des);
-            try lines.append(allocator, .{
-                .component = inst.component,
-                .value = inst.value,
-                .footprint = inst.footprint,
-                .properties = inst.properties,
-                .attrs = inst.attrs,
-                .dnp = inst.dnp,
-                .count = 1,
-                .refs = refs,
-            });
+            try lines.append(allocator, BomLine.first(inst, refs));
         }
     }
 
@@ -898,6 +896,55 @@ pub fn countBom(allocator: std.mem.Allocator, block: *const env_mod.DesignBlock)
         }
     }
     return counts;
+}
+
+test "BomLine.groups rolls up identical parts and never merges across DNP" {
+    // One predicate serves the CSV writer and the schematic-embed HTML writer, so
+    // a change here moves both together. Each field below is an independent
+    // reason NOT to roll two instances onto one purchase line.
+    const base = env_mod.Instance{
+        .ref_des = "R1",
+        .component = "res-0402",
+        .value = "10k",
+        .footprint = "R_0402",
+        .symbol = "R",
+        .dnp = false,
+    };
+    const line = BomLine.first(base, .empty);
+    try std.testing.expect(line.groups(base));
+
+    var other_ref = base;
+    other_ref.ref_des = "R2"; // the ONE field a roll-up is allowed to differ on
+    try std.testing.expect(line.groups(other_ref));
+
+    var dnp = base;
+    dnp.dnp = true;
+    try std.testing.expect(!line.groups(dnp));
+
+    var other_value = base;
+    other_value.value = "10k5";
+    try std.testing.expect(!line.groups(other_value));
+
+    var other_component = base;
+    other_component.component = "res-0603";
+    try std.testing.expect(!line.groups(other_component));
+
+    var other_footprint = base;
+    other_footprint.footprint = "R_0603";
+    try std.testing.expect(!line.groups(other_footprint));
+
+    const attrs = [_][]const u8{"tolerance=1%"};
+    var other_attrs = base;
+    other_attrs.attrs = &attrs;
+    try std.testing.expect(!line.groups(other_attrs));
+}
+
+test "eitherContains pairs a model basename with a longer footprint name" {
+    // The 3D-model scan must match in BOTH directions: a `lib/models` basename is
+    // as often a prefix of the footprint name as the other way round.
+    try std.testing.expect(eitherContains("C_0402_1005Metric", "C_0402"));
+    try std.testing.expect(eitherContains("C_0402", "C_0402_1005Metric"));
+    try std.testing.expect(!eitherContains("C_0402", "R_0603"));
 }
 
 test "footprintHasPads reports false when the path allocation fails" {
