@@ -4016,6 +4016,9 @@ src/route_cleanup_gate.zig::applyViaPlan | fn applyViaPlan( alloc: std.mem.Alloc
 src/route_cleanup_gate.zig::bypassRegressedNets | fn bypassRegressedNets( alloc: std.mem.Allocator, net_count: usize, before_violations: []const drc.Violation, after_violations: []const drc.Violation, ) std.mem.Allocator.Error![]const usize
 src/route_cleanup_gate.zig::gateSafe | fn gateSafe( before_violations: []const drc.Violation, before_tally: fab_readiness.Tally, after_violations: []const drc.Violation, after_tally: fab_readiness.Tally, ) bool
 src/route_cleanup_gate.zig::newlyOpenNets | fn newlyOpenNets( alloc: std.mem.Allocator, nets: []const optimizer.FlatNet, before_open: []const []const u8, after_open: []const []const u8, ) std.mem.Allocator.Error![]const usize
+src/route_copper_state.zig::appendPerimeter value
+src/route_copper_state.zig::reconcile | fn reconcile(alloc: std.mem.Allocator, placement: optimizer.Placement, result: router.RouteResult, zones: []const pour.UserZone) std.mem.Allocator.Error!router.RouteResult
+src/route_copper_state.zig::tally | fn tally(alloc: std.mem.Allocator, placement: optimizer.Placement, result: ?router.RouteResult, zones: []const pour.UserZone) std.mem.Allocator.Error!fab_readiness.Tally
 src/route_repair.zig::Baseline struct_
 src/route_repair.zig::Input struct_
 src/route_repair.zig::Outcome struct_
@@ -4027,6 +4030,9 @@ src/route_resume.zig::Point struct_
 src/route_resume.zig::apply | fn apply( alloc: std.mem.Allocator, placement: optimizer.Placement, base: []const route_policy.NetPolicy, resume_points: []const Point, ) []const route_policy.NetPolicy
 src/route_resume.zig::effort | fn effort(root: std.json.Value, default: ?route_policy.Effort) ?route_policy.Effort
 src/route_resume.zig::parse | fn parse( alloc: std.mem.Allocator, root: std.json.Value, placement: optimizer.Placement, ) std.mem.Allocator.Error![]const Point
+src/saved_route_copper.zig::arcOwnsTrack | fn arcOwnsTrack(arcs: []const router.Arc, track: router.Track) bool
+src/saved_route_copper.zig::fromResult | fn fromResult( alloc: std.mem.Allocator, r: router.RouteResult, nets: []const export_kicad.FlatNet, prior: ?SavedRoutes, ) std.mem.Allocator.Error!SavedRoutes
+src/saved_route_copper.zig::netNameAt | fn netNameAt(nets: []const export_kicad.FlatNet, idx: i32) []const u8
 src/serve.zig::Caches struct_
 src/serve.zig::JobOutcome enum_
 src/serve.zig::PcbJob struct_
@@ -4597,6 +4603,7 @@ src/serve/pcb_describe.zig::originOf | fn originOf(p: optimizer.Placement, pi: u
 src/serve/pcb_describe.zig::pcbDescribeApi | fn pcbDescribeApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
 src/serve/pcb_describe.zig::sideOf | fn sideOf(dx: f64, dy: f64, a_half: [2]f64, b_half: [2]f64) Side
 src/serve/pcb_describe.zig::writeDescribeJson | fn writeDescribeJson( w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, spec: ?render_pcb_png.SpecStatus, routed: ?RoutedSummary, name: []const u8, title: []const u8, an: Analyses, ) DescribeError!void
+src/serve/pcb_describe.zig::writeOpenNetsJson | fn writeOpenNetsJson(w: *std.Io.Writer, open_nets: []const fab_readiness.OpenNet) std.Io.Writer.Error!void
 src/serve/pcb_describe.zig::writeOpenPadJson | fn writeOpenPadJson( w: *std.Io.Writer, p: fab_readiness.OpenPad, detail: OpenPadDetail, ) std.Io.Writer.Error!void
 src/serve/pcb_fence.zig::Counts struct_
 src/serve/pcb_fence.zig::DrcDelta struct_
@@ -4678,7 +4685,7 @@ src/serve/pcb_layout_page.zig::mcpRepairLandTransit | fn mcpRepairLandTransit( a
 src/serve/pcb_layout_page.zig::mcpRestoreLayoutSnapshot | fn mcpRestoreLayoutSnapshot( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
 src/serve/pcb_layout_page.zig::mcpRoutePcb | fn mcpRoutePcb( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
 src/serve/pcb_layout_page.zig::mcpSavePcbLayout | fn mcpSavePcbLayout( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
-src/serve/pcb_layout_page.zig::mcpSavedRoutesFrom | fn mcpSavedRoutesFrom( alloc: std.mem.Allocator, r: router.RouteResult, nets: []const export_kicad.FlatNet, prior: ?SavedRoutes, ) std.mem.Allocator.Error!SavedRoutes
+src/serve/pcb_layout_page.zig::mcpSavedRoutesFrom value
 src/serve/pcb_layout_page.zig::mcpSetBoardOutline | fn mcpSetBoardOutline( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
 src/serve/pcb_layout_page.zig::mcpSetCopperZones | fn mcpSetCopperZones( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
 src/serve/pcb_layout_page.zig::mcpSetPartPoses | fn mcpSetPartPoses( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
@@ -4760,6 +4767,7 @@ src/serve/pcb_layout_page.zig::writeLayoutsFileJsonRev value
 src/serve/pcb_layout_page.zig::writePcbDerivedData | fn writePcbDerivedData(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Placement, rv: ShownView, opts: PcbDataOpts) HandlerError!void
 src/serve/pcb_layout_page.zig::writePerNetJson | fn writePerNetJson(w: *std.Io.Writer, per_net: []const router.NetRouted) std.Io.Writer.Error!void
 src/serve/pcb_layout_page.zig::writeRoutePayload | fn writeRoutePayload( w: *std.Io.Writer, prep: RoutePrep, outcome: RouteOutcome, ) std.Io.Writer.Error!void
+src/serve/pcb_layout_page.zig::writeRouteSeedStats | fn writeRouteSeedStats(w: *std.Io.Writer, stats: SubcircuitRouteSeedStats) std.Io.Writer.Error!void
 src/serve/pcb_layout_page.zig::writeSavedRoutesJson value
 src/serve/pcb_layout_sync.zig::importKicadLayoutApi value
 src/serve/pcb_page_cache.zig::Entry struct_
@@ -4890,7 +4898,6 @@ src/serve/route_plan.zig::PlannedDiagnostic struct_
 src/serve/route_plan.zig::PlannedRun struct_
 src/serve/route_plan.zig::ScopedRoute struct_
 src/serve/route_plan.zig::finishLoweredCandidate | fn finishLoweredCandidate( alloc: std.mem.Allocator, placement: optimizer.Placement, params: router.RouteParams, options: route_policy.Options, first: router.RouteResult, ) std.mem.Allocator.Error!router.RouteResult
-src/serve/route_plan.zig::finishLoweredDiagnosticCandidate | fn finishLoweredDiagnosticCandidate( alloc: std.mem.Allocator, placement: optimizer.Placement, params: router.RouteParams, options: route_policy.Options, first: PlannedDiagnostic, ) std.mem.Allocator.Error!PlannedDiagnostic
 src/serve/route_plan.zig::includeDiffPartners | fn includeDiffPartners(placement: optimizer.Placement, selected: []bool) usize
 src/serve/route_plan.zig::lower | fn lower( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, placement: optimizer.Placement, ) std.mem.Allocator.Error!Lowered
 src/serve/route_plan.zig::lowerOrEmpty | fn lowerOrEmpty( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, placement: optimizer.Placement, ) route_policy.Options
@@ -4903,7 +4910,6 @@ src/serve/route_plan.zig::routeExperiment | fn routeExperiment( alloc: std.mem.A
 src/serve/route_plan.zig::routeLowered | fn routeLowered( alloc: std.mem.Allocator, placement: optimizer.Placement, params: router.RouteParams, options: route_policy.Options, ) std.mem.Allocator.Error!router.RouteResult
 src/serve/route_plan.zig::routeLoweredCandidate | fn routeLoweredCandidate( alloc: std.mem.Allocator, placement: optimizer.Placement, params: router.RouteParams, options: route_policy.Options, ) std.mem.Allocator.Error!router.RouteResult
 src/serve/route_plan.zig::routeLoweredDiagnostic | fn routeLoweredDiagnostic( alloc: std.mem.Allocator, placement: optimizer.Placement, params: router.RouteParams, options: route_policy.Options, ) std.mem.Allocator.Error!PlannedDiagnostic
-src/serve/route_plan.zig::routeLoweredDiagnosticCandidate | fn routeLoweredDiagnosticCandidate( alloc: std.mem.Allocator, placement: optimizer.Placement, params: router.RouteParams, options: route_policy.Options, ) std.mem.Allocator.Error!PlannedDiagnostic
 src/serve/route_plan.zig::routeLoweredLive | fn routeLoweredLive( alloc: std.mem.Allocator, placement: optimizer.Placement, params: router.RouteParams, options: *route_policy.Options, live: LiveRoute, ) std.mem.Allocator.Error!PlannedRun
 src/serve/route_plan.zig::routePlanned | fn routePlanned( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, ) std.mem.Allocator.Error!router.RouteResult
 src/serve/route_plan.zig::routePlannedDiagnostic | fn routePlannedDiagnostic( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, ) std.mem.Allocator.Error!PlannedDiagnostic
@@ -4913,7 +4919,9 @@ src/serve/route_plan.zig::routePlannedZones | fn routePlannedZones( alloc: std.m
 src/serve/route_plan.zig::routePlannedZonesTimed | fn routePlannedZonesTimed( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, zones: []const route_policy.ExistingZone, timing: ?*route_timing.PhaseTimer, ) std.mem.Allocator.Error!router.RouteResult
 src/serve/route_plan.zig::trackAsExisting | fn trackAsExisting(track: router.Track) route_policy.ExistingTrack
 src/serve/route_plan.zig::viaAsExisting | fn viaAsExisting(via: router.Via) route_policy.ExistingVia
+src/serve/route_result_stats.zig::forNet | fn forNet(alloc: std.mem.Allocator, findings: []const drc.Violation, net: usize) std.mem.Allocator.Error![]const drc.Violation
 src/serve/route_result_stats.zig::writeDrc | fn writeDrc( w: *std.Io.Writer, findings: []const drc.Violation, wall_ms: i64, ) std.Io.Writer.Error!void
+src/serve/route_result_stats.zig::writeFindings | fn writeFindings(w: *std.Io.Writer, findings: []const drc.Violation, names: drc_json.Names) std.Io.Writer.Error!void
 src/serve/route_review.zig::DesignReplay struct_
 src/serve/route_review.zig::HandlerError value
 src/serve/route_review.zig::cachedDesignRouteReviewApi | fn cachedDesignRouteReviewApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void

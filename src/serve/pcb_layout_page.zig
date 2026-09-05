@@ -101,6 +101,7 @@ const route_resume = @import("../route_resume.zig").ManualCompletion;
 const subcircuit_route = @import("subcircuit_route.zig");
 const subcircuit_seed_drc = @import("../subcircuit_seed_drc.zig");
 const placement_outline = @import("placement_outline.zig");
+const route_copper_state = @import("../route_copper_state.zig");
 const route_result_stats = @import("route_result_stats.zig");
 const stuck_json = @import("stuck_json.zig");
 const pcb_part_json = @import("pcb_part_json.zig");
@@ -2665,7 +2666,7 @@ pub fn diagnoseWithSubcircuitSeeds(
     return .{ .diagnostic = try route_plan.routeLoweredDiagnostic(alloc, placement, params, seeded_options), .seeds = stats };
 }
 
-fn writeRouteSeedStats(w: *std.Io.Writer, stats: SubcircuitRouteSeedStats) std.Io.Writer.Error!void {
+pub fn writeRouteSeedStats(w: *std.Io.Writer, stats: SubcircuitRouteSeedStats) std.Io.Writer.Error!void {
     try w.print(
         ",\"subcircuit_seeds\":{{\"candidate_tracks\":{d},\"candidate_vias\":{d}," ++
             "\"accepted_nets\":{d},\"accepted_tracks\":{d},\"accepted_vias\":{d},\"rejected_nets\":{d}," ++
@@ -10711,137 +10712,17 @@ fn mcpProtectedWrite(alloc: std.mem.Allocator, project_dir: []const u8, name: []
     try writeLayoutsFile(alloc, project_dir, name, layouts, cache, (try readSidecarDoc(alloc, project_dir, name, null)).rev + 1);
 }
 
-/// Net NAME at flattened-net index `idx` (−1 / out-of-range ⇒ "" — foreign
-/// copper the sidecar still stores). Inverse of `restoreRoutes`' name→index.
-fn mcpNetNameAt(nets: []const export_kicad.FlatNet, idx: i32) []const u8 {
-    if (idx < 0) return "";
-    const u: usize = @intCast(idx);
-    return if (u < nets.len) nets[u].name else "";
+const routeArcOwnsTrack = @import("../saved_route_copper.zig").arcOwnsTrack;
+const mcpNetNameAt = @import("../saved_route_copper.zig").netNameAt;
+/// Convert physical route results into persistent, net-named copper records.
+pub const mcpSavedRoutesFrom = @import("../saved_route_copper.zig").fromResult;
+
+fn savedTrackCount(saved: ?SavedRoutes) usize {
+    return if (saved) |s| s.tracks.len else 0;
 }
 
-fn routeArcOwnsTrack(arcs: []const router.Arc, track: router.Track) bool {
-    for (arcs) |arc| {
-        if (arc.layer != track.layer or arc.net != track.net or @abs(arc.width - track.width) > 0.0001) continue;
-        if (outline_mod.arcOwnsSegment(.{ .p1 = arc.p1, .pm = arc.pm, .p2 = arc.p2 }, .{ track.x1, track.y1 }, .{ track.x2, track.y2 }, 0.0001)) return true;
-    }
-    return false;
-}
-
-fn savedTrackMetadataMatch(candidate: SavedTrack, saved: SavedTrack) bool {
-    if (candidate.l != saved.l or @abs(candidate.w - saved.w) > 1e-9) return false;
-    return std.mem.eql(u8, candidate.net, saved.net);
-}
-
-fn savedViaMetadataMatch(candidate: SavedVia, saved: SavedVia) bool {
-    if (@abs(candidate.x - saved.x) > 1e-9 or @abs(candidate.y - saved.y) > 1e-9) return false;
-    if (@abs(candidate.d - saved.d) > 1e-9 or @abs(candidate.drill - saved.drill) > 1e-9) return false;
-    return std.mem.eql(u8, candidate.net, saved.net);
-}
-
-/// A router `RouteResult` → the sidecar's `SavedRoutes` shape (net INDEX →
-/// net NAME, so the copper survives the next flatten's index shuffle). The
-/// persistence counterpart of `restoreRoutes`.
-pub fn mcpSavedRoutesFrom(
-    alloc: std.mem.Allocator,
-    r: router.RouteResult,
-    nets: []const export_kicad.FlatNet,
-    prior: ?SavedRoutes,
-) std.mem.Allocator.Error!SavedRoutes {
-    var tracks: std.ArrayList(SavedTrack) = .empty;
-    for (r.tracks) |t| {
-        if (routeArcOwnsTrack(r.arcs, t)) continue;
-        var saved = SavedTrack{
-            .x1 = t.x1,
-            .y1 = t.y1,
-            .x2 = t.x2,
-            .y2 = t.y2,
-            .l = t.layer,
-            .w = t.width,
-            .net = mcpNetNameAt(nets, t.net),
-        };
-        var matched_prior = false;
-        if (prior) |old| for (old.tracks) |candidate| {
-            if (candidate.xm != null or candidate.ym != null) continue;
-            if (!savedTrackMetadataMatch(candidate, saved)) continue;
-            const forward = @abs(candidate.x1 - saved.x1) <= 1e-9 and @abs(candidate.y1 - saved.y1) <= 1e-9 and
-                @abs(candidate.x2 - saved.x2) <= 1e-9 and @abs(candidate.y2 - saved.y2) <= 1e-9;
-            const reverse = @abs(candidate.x1 - saved.x2) <= 1e-9 and @abs(candidate.y1 - saved.y2) <= 1e-9 and
-                @abs(candidate.x2 - saved.x1) <= 1e-9 and @abs(candidate.y2 - saved.y1) <= 1e-9;
-            if (forward or reverse) {
-                saved.g = candidate.g;
-                saved.source = candidate.source;
-                saved.id = candidate.id;
-                matched_prior = true;
-                break;
-            }
-        };
-        if (!matched_prior) saved.source = route_source_autorouter;
-        try tracks.append(alloc, saved);
-    }
-    for (r.arcs) |arc| {
-        var saved = SavedTrack{
-            .x1 = arc.p1[0],
-            .y1 = arc.p1[1],
-            .xm = arc.pm[0],
-            .ym = arc.pm[1],
-            .x2 = arc.p2[0],
-            .y2 = arc.p2[1],
-            .l = arc.layer,
-            .w = arc.width,
-            .net = mcpNetNameAt(nets, arc.net),
-        };
-        var matched_prior = false;
-        if (prior) |old| for (old.tracks) |candidate| {
-            if (candidate.xm == null or candidate.ym == null or !savedTrackMetadataMatch(candidate, saved)) continue;
-            const midpoint_matches = @abs(candidate.xm.? - saved.xm.?) <= 1e-9 and @abs(candidate.ym.? - saved.ym.?) <= 1e-9;
-            const endpoint_matches = (@abs(candidate.x1 - saved.x1) <= 1e-9 and @abs(candidate.y1 - saved.y1) <= 1e-9 and
-                @abs(candidate.x2 - saved.x2) <= 1e-9 and @abs(candidate.y2 - saved.y2) <= 1e-9) or
-                (@abs(candidate.x1 - saved.x2) <= 1e-9 and @abs(candidate.y1 - saved.y2) <= 1e-9 and
-                    @abs(candidate.x2 - saved.x1) <= 1e-9 and @abs(candidate.y2 - saved.y1) <= 1e-9);
-            if (midpoint_matches and endpoint_matches) {
-                saved.g = candidate.g;
-                saved.source = candidate.source;
-                saved.id = candidate.id;
-                matched_prior = true;
-                break;
-            }
-        };
-        if (!matched_prior) saved.source = route_source_autorouter;
-        try tracks.append(alloc, saved);
-    }
-    const vias = try alloc.alloc(SavedVia, r.vias.len);
-    for (r.vias, 0..) |v, i| {
-        vias[i] = .{
-            .x = v.x,
-            .y = v.y,
-            .d = v.dia,
-            .drill = v.drill,
-            .net = mcpNetNameAt(nets, v.net),
-        };
-        var matched_prior = false;
-        if (prior) |old| for (old.vias) |candidate| {
-            if (!savedViaMetadataMatch(candidate, vias[i])) continue;
-            vias[i].g = candidate.g;
-            vias[i].f = candidate.f;
-            vias[i].source = candidate.source;
-            vias[i].s = candidate.s;
-            vias[i].id = candidate.id;
-            matched_prior = true;
-            break;
-        };
-        if (!matched_prior) vias[i].source = route_source_autorouter;
-    }
-    var rf_paths: std.ArrayList(SavedRfPath) = .empty;
-    for (r.rf_port_outcomes) |outcome| {
-        if (!outcome.success or outcome.physical.gate_removed) continue;
-        if (outcome.physical.samples.len < 2) continue;
-        try rf_paths.append(alloc, .{
-            .net = mcpNetNameAt(nets, outcome.net),
-            .layer = outcome.physical.layer,
-            .samples = outcome.physical.samples,
-        });
-    }
-    return .{ .tracks = try tracks.toOwnedSlice(alloc), .vias = vias, .rf_paths = try rf_paths.toOwnedSlice(alloc) };
+fn savedViaCount(saved: ?SavedRoutes) usize {
+    return if (saved) |s| s.vias.len else 0;
 }
 
 /// The set of net NAMES touched by any part in `moved` — the copper to
@@ -11675,6 +11556,16 @@ pub fn mcpRoutePcb(
     args_val: ?std.json.Value,
     out: *std.ArrayList(u8),
 ) HandlerError!bool {
+    return routePcbWithCancel(alloc, project_dir, args_val, out, null);
+}
+
+fn routePcbWithCancel(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    args_val: ?std.json.Value,
+    out: *std.ArrayList(u8),
+    cancel: ?*std.atomic.Value(bool),
+) HandlerError!bool {
     const started_ms = clock.milliTimestamp();
     const name = mcpArgStr(args_val, "name") orelse return mcpFail(out, alloc, mcp_err_missing_name);
     const layout_arg = mcpArgStr(args_val, "layout");
@@ -11710,7 +11601,9 @@ pub fn mcpRoutePcb(
         return mcpFail(out, alloc, "selected_only needs a nets or groups scope");
 
     const working = mcpReadWorking(alloc, project_dir, name, layout_arg);
+    const prior_routes = if (working) |wl| wl.routes else null;
     var route_options = lowered_plan.options;
+    route_options.stop.cancel = cancel;
     if (!mcpApplyRouteEffort(&route_options, args_val))
         return mcpFail(out, alloc, "effort must be \"one_shot\" or \"standard\"");
     // Hand-authored pours are retained physical copper. Every CLI route sees
@@ -11726,7 +11619,7 @@ pub fn mcpRoutePcb(
     })) orelse return false;
     if (selected_only) {
         route_options.selected_nets = rscope.mask;
-        if (working) |wl| if (wl.routes) |saved| if (restoreRoutes(alloc, saved, placement.nets)) |prior| {
+        if (prior_routes) |saved| if (restoreRoutes(alloc, saved, placement.nets)) |prior| {
             const existing = try mcpExistingCopper(alloc, prior, rscope.mask);
             route_options.existing_tracks = existing.tracks;
             route_options.existing_vias = existing.vias;
@@ -11740,21 +11633,30 @@ pub fn mcpRoutePcb(
     const seed_stats = seeded.seeds;
     var routed = seeded.result;
     routed = (try perimeter_fence.append(alloc, placement, routed)).?;
-    var fresh = try mcpSavedRoutesFrom(alloc, routed, placement.nets, if (working) |w| w.routes else null);
+    var fresh = try mcpSavedRoutesFrom(alloc, routed, placement.nets, prior_routes);
     // Autorouting replaces tracks/vias, never the user's custom polygons.
-    fresh.zones = if (working) |wl| if (wl.routes) |saved| saved.zones else &.{} else &.{};
+    fresh.zones = if (prior_routes) |saved| saved.zones else &.{};
 
     var merged: ?SavedRoutes = undefined;
     if (rscope.has_scope) {
         var keep = std.StringHashMapUnmanaged(void).empty;
         for (rscope.names) |n| try keep.put(alloc, n, {});
-        const base_after_drop = try mcpDropRoutesForNets(alloc, if (working) |wl| wl.routes else null, &keep);
+        const base_after_drop = try mcpDropRoutesForNets(alloc, prior_routes, &keep);
         const fresh_scoped = try mcpKeepRoutesForNets(alloc, fresh, &keep);
         merged = try mcpMergeRoutes(alloc, base_after_drop.routes, fresh_scoped);
     } else {
         merged = if (fresh.tracks.len == 0 and fresh.vias.len == 0 and fresh.zones.len == 0) null else fresh;
     }
     merged = routesWithPerimeter(alloc, placement, merged);
+
+    const candidate = merged;
+    const candidate_result = if (candidate) |sr| restoreRoutes(alloc, sr, placement.nets) else null;
+    const candidate_tally = try route_copper_state.tally(alloc, placement, candidate_result, solved.shown_zones.user);
+    // A cancelled candidate has not completed the validation/finishing pipeline.
+    // Keep it measurable, but preserve the working sidecar byte-for-byte.
+    if (routed.cancelled) merged = prior_routes;
+    const committed = if (merged) |sr| restoreRoutes(alloc, sr, placement.nets) else null;
+    const committed_tally = try route_copper_state.tally(alloc, placement, committed, solved.shown_zones.user);
 
     // Checkpoint routed copper before the optional full-board DRC report. DRC
     // is diagnostic here (route_pcb has never rolled copper back on a
@@ -11774,7 +11676,7 @@ pub fn mcpRoutePcb(
         .texts = if (working) |wl| wl.texts else &.{},
         .dimensions = mcpWorkingDimensions(working),
     };
-    try mcpPersistWorking(alloc, project_dir, name, entry, false);
+    if (!routed.cancelled) try mcpPersistWorking(alloc, project_dir, name, entry, false);
 
     // DRC-check exactly what was persisted unless this is a fast checkpoint.
     // Keep the direct pour-aware call visible at this mutation boundary: the
@@ -11795,7 +11697,7 @@ pub fn mcpRoutePcb(
     const w = &aw.writer;
     try w.print(mcp_ok_layout_fmt, .{serve_root.getLiveVersion(name)});
     try writeJsonStr(w, entry.name);
-    try w.print(",\"routed\":{d},\"total\":{d},", .{ routed.routed, routed.total });
+    try w.print(",\"routed\":{d},\"total\":{d},", .{ committed_tally.routed, committed_tally.total });
     try route_result_stats.writeDrc(w, route_findings, @max(0, clock.milliTimestamp() - started_ms));
     try w.print(
         ",\"drc_deferred\":{},\"trace_mm\":{d:.3},\"tracks\":{d},\"vias\":{d},\"reference_guided\":{d},\"reference_replayed\":{d}" ++
@@ -11803,8 +11705,8 @@ pub fn mcpRoutePcb(
         .{
             defer_drc,
             trace_mm,
-            if (merged) |m| m.tracks.len else 0,
-            if (merged) |m| m.vias.len else 0,
+            savedTrackCount(merged),
+            savedViaCount(merged),
             reference_guided,
             routed.reference_replayed.len,
             if (lowered_plan.applied) "true" else "false",
@@ -11819,7 +11721,13 @@ pub fn mcpRoutePcb(
     try w.writeAll(",\"scope\":");
     if (!rscope.has_scope) try w.writeAll("\"all\"") else try mcpWriteStrArray(w, rscope.names);
     try w.writeAll(",\"unrouted\":");
-    try mcpWriteStrArray(w, routed.failed);
+    try mcpWriteStrArray(w, committed_tally.open);
+    try w.print(",\"applied\":{},\"cancelled\":{},\"candidate\":{{\"routed\":{d},\"total\":{d},\"tracks\":{d},\"vias\":{d},\"validation_complete\":{},\"unrouted\":", .{
+        !routed.cancelled,          routed.cancelled,         candidate_tally.routed, candidate_tally.total,
+        savedTrackCount(candidate), savedViaCount(candidate), !routed.cancelled,
+    });
+    try mcpWriteStrArray(w, candidate_tally.open);
+    try w.writeAll("}");
     try writeRouteSeedStats(w, seed_stats);
     try w.writeAll("}");
     try out.appendSlice(alloc, aw.written());
@@ -13154,6 +13062,7 @@ pub fn mcpAddTracks(
 
     // DRC + connectivity on exactly what gets persisted, so the reported
     // numbers describe the board the caller just changed.
+    var candidate_findings: []const drc.Violation = &.{};
     var drc_count: usize = 0;
     var drc_errs: usize = 0;
     var tally = fab_readiness.Tally{};
@@ -13165,12 +13074,15 @@ pub fn mcpAddTracks(
                 .clearance = rp.clearance,
                 .zones = solved.shown_zones.user,
             });
+            candidate_findings = v;
             drc_count = v.len;
             drc_errs = drc.errorCount(v);
             // Pours count as connecting copper — see ShownCopper.zones.
             tally = try fab_readiness.routableTally(alloc, placement, .{
                 .tracks = rr.tracks,
                 .vias = rr.vias,
+                .arcs = rr.arcs,
+                .rf_paths = rr.rf_port_outcomes,
                 .zones = solved.shown_zones.user,
             });
         }
@@ -13201,6 +13113,18 @@ pub fn mcpAddTracks(
         try mcpPersistWorking(alloc, project_dir, name, entry, false);
     }
 
+    const prior = solved.restored.routes;
+    const committed_tally = if (rolled_back)
+        try route_copper_state.tally(alloc, placement, prior, solved.shown_zones.user)
+    else
+        tally;
+    const committed_findings = if (rolled_back) drc_rules.checkFilteredZones(alloc, project_dir, name, .{
+        .placement = placement,
+        .routed = prior orelse .{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0 },
+        .clearance = rp.clearance,
+        .zones = solved.shown_zones.user,
+    }) else candidate_findings;
+
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
     try w.print(mcp_ok_layout_fmt, .{serve_root.getLiveVersion(name)});
@@ -13210,9 +13134,16 @@ pub fn mcpAddTracks(
     // count — a sharp-bend or diff-skew warning is not a reason to roll back.
     try w.print(
         ",\"added_tracks\":{d},\"added_vias\":{d},\"drc\":{d},\"drc_errors\":{d},\"drc_errors_before\":{d},\"rolled_back\":{},\"routed\":{d},\"total\":{d},\"open\":",
-        .{ added.tracks.len, added.vias.len, drc_count, drc_errs, before_errs, rolled_back, tally.routed, tally.total },
+        .{ if (rolled_back) @as(usize, 0) else added.tracks.len, if (rolled_back) @as(usize, 0) else added.vias.len, committed_findings.len, drc.errorCount(committed_findings), before_errs, rolled_back, committed_tally.routed, committed_tally.total },
     );
+    try mcpWriteStrArray(w, committed_tally.open);
+    try w.print(",\"applied\":{},\"candidate\":{{\"added_tracks\":{d},\"added_vias\":{d},\"drc\":{d},\"drc_errors\":{d},\"routed\":{d},\"total\":{d},\"open\":", .{
+        !rolled_back, added.tracks.len, added.vias.len, drc_count, drc_errs, tally.routed, tally.total,
+    });
     try mcpWriteStrArray(w, tally.open);
+    try w.writeAll(",\"drc_list\":");
+    try route_result_stats.writeFindings(w, candidate_findings, .{ .nets = placement.nets, .parts = placement.parts });
+    try w.writeAll("}");
     try w.writeAll("}");
     try out.appendSlice(alloc, aw.written());
     return true;
@@ -18293,4 +18224,58 @@ test "the pcb page emits the library-card modal beside the courtyard modal" {
     // The board script's Edit-courtyard path still exists for the preview.
     const board_js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, board_js, "function openCourt") != null);
+}
+
+// spec: Web Server - cancelled CLI routing preserves the sidecar and reports retained connectivity separately from its candidate
+// spec: serve/route-analyze - diagnose_net inspects shown copper and reports the requested net's islands without a fresh route
+// spec: Web Server - rejected manual copper reports zero applied objects retained connectivity and candidate DRC witnesses
+test "routing audit mutation and inspection regressions" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    try writeFabSelectionFixture(tmp.dir);
+    const sidecar_path = try std.fmt.allocPrint(alloc, "{s}/src/fabsel.layouts.json", .{project});
+    const before = try infra_fs.cwd().readFileAlloc(alloc, sidecar_path, 1024 * 1024);
+    const args = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"name\":\"fabsel\"}", .{});
+    var cancel: std.atomic.Value(bool) = .init(true);
+    var routed: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try routePcbWithCancel(alloc, project, args, &routed, &cancel));
+    const response = (try std.json.parseFromSliceLeaky(std.json.Value, alloc, routed.items, .{})).object;
+    try std.testing.expect(response.get("cancelled").?.bool);
+    try std.testing.expect(!response.get("applied").?.bool);
+    try std.testing.expectEqual(@as(i64, 1), response.get("routed").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), response.get("total").?.integer);
+    try std.testing.expect(!response.get("candidate").?.object.get("validation_complete").?.bool);
+    try std.testing.expectEqualStrings(before, try infra_fs.cwd().readFileAlloc(alloc, sidecar_path, 1024 * 1024));
+
+    const analyze = @import("route_analyze_api.zig");
+    const saved = try analyze.analyzeNetJson(alloc, project, "fabsel", "SIG", .{ .layout = "routed" });
+    const open = try analyze.analyzeNetJson(alloc, project, "fabsel", "SIG", .{ .layout = "open" });
+    try std.testing.expect(std.mem.indexOf(u8, saved, "\"status\":\"routed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, open, "\"status\":\"failed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, open, "\"islands\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, open, "\"fresh_route\":false") != null);
+
+    const bad = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"name\":\"fabsel\",\"tracks\":[{\"net\":\"SIG\",\"layer\":\"F.Cu\",\"width\":0.2,\"points\":[[5.48,5],[10.48,5]]}]}", .{});
+    var added: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try mcpAddTracks(alloc, project, bad, &added));
+    const edit = (try std.json.parseFromSliceLeaky(std.json.Value, alloc, added.items, .{})).object;
+    try std.testing.expect(!edit.get("applied").?.bool);
+    try std.testing.expectEqual(@as(i64, 0), edit.get("added_tracks").?.integer);
+    try std.testing.expectEqual(@as(i64, 0), edit.get("drc_errors").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), edit.get("routed").?.integer);
+    const candidate = edit.get("candidate").?.object;
+    try std.testing.expect(candidate.get("drc_errors").?.integer > 0);
+    try std.testing.expect(candidate.get("drc_list").?.array.items[0].object.contains("id"));
+    try std.testing.expectEqualStrings(before, try infra_fs.cwd().readFileAlloc(alloc, sidecar_path, 1024 * 1024));
+    const scope = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"name\":\"fabsel\",\"nets\":[\"GND\"]}", .{});
+    var incremental: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try mcpRoutePcb(alloc, project, scope, &incremental));
+    const committed = (try std.json.parseFromSliceLeaky(std.json.Value, alloc, incremental.items, .{})).object;
+    try std.testing.expect(committed.get("applied").?.bool);
+    try std.testing.expectEqual(@as(i64, 2), committed.get("routed").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), committed.get("total").?.integer);
 }

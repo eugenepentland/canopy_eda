@@ -698,16 +698,15 @@ Tools include:
   per-interchangeable-class, per-IC-edge area-match, the "is the rough in the
   right general area to finish by hand" check (args: `name`). The image tool
   also accepts `crop`/`r`/`sheet`/`critique` view modes.
-  **`diagnose_net`** (args: `name`, `net`, optional `layout`/`sub`) diagnoses ONE
-  named net on the shown board — the CLI twin of `POST
-  /api/pcb-route-analyze/:name`, sharing one `analyzeNetJson` body so the two can
-  never answer about different boards. A failed net comes back
-  `{net,status:"failed",failure_mode,why,blockers[],remedies[],drc_related[]}`, a
-  routed one `{net,status:"routed",trace_mm,vias,layers[]}`. It exists because
-  the whole-board answers cannot cover one net on demand: `route_experiment`'s
-  `stuck[]` is capped at 16 and only ever describes nets that FAILED, so a net
-  the board routed — or one buried past the cap — otherwise had no answer short
-  of re-routing everything.
+  **`diagnose_net`** (args: `name`, `net`, optional `layout`/`sub`) inspects
+  ONE net on the shown saved copper. It shares `analyzeNetJson` with
+  `POST /api/pcb-route-analyze/:name`. Both report `source:"shown_copper"`
+  and `fresh_route:false`; no routing or persistence occurs. Open nets carry
+  `status:"failed"`, `failure_mode:"disconnected_copper"`, and `open_nets[]`
+  with terminal islands and gap endpoints. Gaps identify disconnected
+  terminals; they do not prove that a straight bridge is legal. Connected nets
+  report `status:"routed"`, trace length, via count and layers. Both answers
+  include `drc_list[]` with relevant violation IDs and coordinates.
   **`describe_thermal`** (args: `name`, optional numeric `ambient`, optional
   `layout` naming a saved PCB layout) is the
   read-only twin of `GET /api/thermal/:name`, returning the identical bytes
@@ -868,6 +867,23 @@ input schema as of 2026-08-04 — the handler always read it, but the schema is
 `additionalProperties:false`, so a strict CLI client refused the very argument
 the `close_open_nets` remedy string tells you to pass.)
 
+**Routing result semantics.** `route_pcb` reports `applied` and `cancelled`.
+A cancelled run leaves the working sidecar untouched; top-level connectivity
+and copper counts describe that retained board. `candidate` carries the
+attempted counts and `validation_complete:false`. Noncancelled scoped calls
+report connectivity over the merged board, including retained nets and pours.
+`add_tracks` likewise reports top-level committed measurements: a rejected edit
+has `applied:false`, zero added objects, and a `candidate` object with attempted
+counts, connectivity, and full `drc_list[]` witnesses.
+
+`route_experiment` uses the same local module routing, saved-module fallback,
+waypoint seeding and global route builder as `route_pcb`, including shown pours
+and generated perimeter copper. It diagnoses the final copper after routing.
+A module without an authored PCB plan uses standalone defaults during its local
+pass; parent hard layer and via constraints still apply. The scalar `score`
+remains a display metric; route-order search ranks geometry
+errors first, then connectivity, then geometry cost.
+
 **`route_experiment` names its own failures.** It carries `unrouted[]` (the
 oracle's still-open net names — trust these over `stuck[]`, which is
 router-derived, capped at 16, and can be empty while `routed < total`) and a
@@ -940,3 +956,8 @@ netlisp tool run_checks --project-dir projects/designs \
 netlisp tool get_pcb_layout_image --project-dir projects/designs \
   --args '{"name":"barracuda"}' --output barracuda.png
 ```
+
+PCB route guides can bind a stable module-local origin using `scope/@origin`,
+for example `(between-pins "lmx2595/@U1" "22" "lmx2595/@R_RFOUTAM" "2" "F.Cu")`.
+At board root, use `@origin`. Exact reference designators remain supported;
+ambiguous bare aliases produce an unresolved-guide warning.

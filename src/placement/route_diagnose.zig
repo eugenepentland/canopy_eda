@@ -1088,8 +1088,8 @@ fn congestionRemedies(rc: RemedyCtx, s: Allocator) Allocator.Error![]const Remed
     });
     if (rc.top_rippable) |b| try list.append(s, .{
         .kind = "demote_blocker",
-        .dsl = try std.fmt.allocPrint(s, "(pcb-plan (route (wave \"{s}-late\" (nets \"{s}\") (rest))))", .{ leaf(b.net), b.net }),
-        .rationale = try std.fmt.allocPrint(s, "push the rippable blocker {s} into a later (rest) wave so it reroutes around this net", .{b.net}),
+        .dsl = try std.fmt.allocPrint(s, "; Move the existing wave owning {s} after the wave owning {s}, preserving its selectors and policies. Do not append a duplicate wave.", .{ b.net, rc.net }),
+        .rationale = try std.fmt.allocPrint(s, "move the existing owning wave for blocker {s} later; first-wave ownership means an appended selector cannot override it", .{b.net}),
         .confidence = "med",
         .target = .dsl,
     });
@@ -1394,6 +1394,8 @@ test "an order-congested net names its rippable copper blocker with a priority r
     try testing.expect(std.mem.indexOf(u8, dsl, "SPI_SCK") != null);
     // The demote-blocker remedy names the actual rippable blocker.
     try testing.expect(std.mem.indexOf(u8, dslOfKind(remedies, "demote_blocker"), "V_6VA") != null);
+    try testing.expect(std.mem.indexOf(u8, dslOfKind(remedies, "demote_blocker"), "(rest)") == null);
+    try testing.expect(std.mem.indexOf(u8, dslOfKind(remedies, "demote_blocker"), "existing wave") != null);
 }
 
 fn remedyCtxFor(net: []const u8, top: Blocker) !RemedyCtx {

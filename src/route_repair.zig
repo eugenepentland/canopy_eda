@@ -147,14 +147,12 @@ fn routeTrial(
         moved.parts[m.part].y = m.to[1];
     }
     const exp = try route_plan.routeExperiment(alloc, in.block, moved, in.params, in.opts);
-    const violations = drc_rules.checkFiltered(
-        alloc,
-        in.project_dir,
-        in.name,
-        moved,
-        exp.result,
-        in.params.clearance,
-    );
+    const violations = drc_rules.checkFilteredZones(alloc, in.project_dir, in.name, .{
+        .placement = moved,
+        .routed = exp.result,
+        .clearance = in.params.clearance,
+        .zones = try route_plan.retainedZones(alloc, moved, .{ .existing_zones = in.opts.zones }),
+    });
     const errors = drc.errorCount(violations);
     const better = exp.result.routed > in.baseline.result.routed;
     const clean = errors <= in.baseline.drc_errors;

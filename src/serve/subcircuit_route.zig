@@ -1465,7 +1465,9 @@ pub fn routeAllClassified(
         const selected = try selectedNets(alloc, placement, sub.name, sub_base, supply, false);
         const plan_view = try modulePlanPlacement(alloc, local, sub);
         const lowered = try route_plan.lower(alloc, sub.block, plan_view);
-        const module_options = if (lowered.applied) lowered.options else null;
+        // An absent child plan is the standalone default policy, not consent
+        // to inherit the assembled board's global waypoints and wave order.
+        const module_options = lowered.options;
         // Exact bypass intent is mandatory local topology. Freeze its legal
         // surface copper before discretionary signal candidates so the final
         // ordered seed gate preserves the supply bond and defers a later
@@ -1732,6 +1734,7 @@ test "hierarchical recovery uses the opposite routable face through a surface ba
 }
 
 // spec: serve/subcircuit-route - a sub-circuit routing view keeps every board component as an obstacle, exposes only its own net terminals, and uses local bounds
+// spec: serve/subcircuit-route - a child without an authored plan uses standalone defaults instead of inheriting global waypoints
 test "isolated sub-circuit view retains foreign physical obstacles" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1787,6 +1790,14 @@ test "isolated sub-circuit view retains foreign physical obstacles" {
     const routed = try routeAll(alloc, &board, placement, .{}, .{});
     try testing.expect(routed.nets[0]);
     try testing.expect(routed.tracks.len > 0);
+    // No authored child plan: a board guide toward the external terminal must
+    // wait for the global pass, not drag this four-mm local join off its board.
+    const global_points = [_]route_policy.Waypoint{.{ .x = 80, .y = 70, .layer = 0 }};
+    const global_policy = [_]route_policy.NetPolicy{.{ .waypoints = &global_points, .max_vias = 0, .allowed_layers = 1 }};
+    const guided = try routeAll(alloc, &board, placement, .{}, .{ .net = &global_policy });
+    try testing.expect(guided.nets[0]);
+    try testing.expectEqualDeep(routed.tracks, guided.tracks);
+    try testing.expectEqual(@as(usize, 0), guided.vias.len);
 }
 
 // spec: serve/subcircuit-route - an unselected scoped net is never routed by a sub-circuit phase

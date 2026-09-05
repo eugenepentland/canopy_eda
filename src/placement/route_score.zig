@@ -1,9 +1,6 @@
-//! Deterministic routing score — the single scalar the constraint-DSL routing
-//! loop judges an accept/reject on. The loop is: an agent edits the routing
-//! DSL, the board routes, the result is inspected, and the agent iterates. To
-//! decide whether any DSL edit (or router change) helped, the loop needs ONE
-//! number it can compare before/after, and it must be a pure function of the
-//! routing result so the same routed board always scores identically.
+//! Deterministic routing display score. This weighted scalar trades completion
+//! against geometry and must not decide adoption. Compare geometry errors,
+//! then connectivity, then geometry costs when choosing a board.
 //!
 //! Every input is derivable from what the existing routing-result surfaces
 //! (`/api/pcb-describe?route=1`, the route-review replay, the
@@ -45,8 +42,7 @@
 //! that:
 //!
 //!   • `bends` at 0.05 — a corner is an impedance and etch discontinuity worth
-//!     about half a millimetre of trace. Cheap enough that it never outranks
-//!     completion, dear enough that a twenty-corner staircase loses to a
+//!     about half a millimetre of trace. A twenty-corner staircase loses to a
 //!     straight run of the same length.
 //!   • `quality_warns` at 1.0 — one warning costs 10 mm of trace or 2 vias:
 //!     loud enough to steer a tie, still 50× below a fab-blocking error, and
@@ -55,8 +51,8 @@
 //!     board's design can never move the routing verdict.
 //!
 //! Completion (1000) and the DRC-error weight (50) are deliberately unchanged:
-//! completion still dominates every geometry term combined, and one open net is
-//! still charged exactly once (through completion — `drc.errorCount` drops
+//! geometry can outweigh an additional completed net. An open net is
+//! charged exactly once (through completion — `drc.errorCount` drops
 //! `net_open` for precisely this reason).
 
 const std = @import("std");
@@ -343,19 +339,11 @@ test "each penalty dimension is monotonically non-increasing" {
     try testing.expect(score(more) < base);
 }
 
-// spec: placement/route-score - completion outranks every geometry penalty combined, so a score can never prefer a board that routes fewer nets
-test "one more routed net beats a pile of vias, copper, bends, and warnings" {
-    const fewer = score(.{ .routed = 9, .total = 10, .vias = 0, .trace_mm = 0, .drc_errors = 0 });
-    const more = score(.{
-        .routed = 10,
-        .total = 10,
-        .vias = 20,
-        .trace_mm = 200,
-        .drc_errors = 0,
-        .bends = 200,
-        .quality_warns = 20,
-    });
-    try testing.expect(more > fewer);
+// spec: placement/route-score - the display score can trade an additional completed net for geometry and is not an adoption policy
+test "display score can trade a completed net for sixteen vias on Barracuda" {
+    const fewer = score(.{ .routed = 119, .total = 130, .vias = 0, .trace_mm = 0, .drc_errors = 0 });
+    const more = score(.{ .routed = 120, .total = 130, .vias = 16, .trace_mm = 0, .drc_errors = 0 });
+    try testing.expect(more < fewer);
 }
 
 /// The v1 weights, spelled out, so the tests below can show what v2 changed

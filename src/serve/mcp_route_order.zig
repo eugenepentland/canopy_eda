@@ -322,14 +322,13 @@ const Outcome = struct {
     quality_warns: usize = 0,
 };
 
-/// Is `a` a strictly better board than `b`? Connectivity first — an ordering
-/// that closes one more net wins however ugly the copper — then the fab-blocking
-/// DRC count, then total trace as a last deterministic tiebreak (shorter copper
+/// Is `a` a strictly better board than `b`? Fewer geometry errors first,
+/// then greater connectivity, then total trace as a deterministic tiebreak (shorter copper
 /// on an otherwise identical board is the better one, and it makes the ranking
 /// total so two runs can never disagree).
 fn betterOutcome(a: Outcome, b: Outcome) bool {
-    if (a.routed != b.routed) return a.routed > b.routed;
     if (a.drc_errors != b.drc_errors) return a.drc_errors < b.drc_errors;
+    if (a.routed != b.routed) return a.routed > b.routed;
     return a.trace_mm < b.trace_mm;
 }
 
@@ -1340,8 +1339,8 @@ fn findOrderStartingWith(cands: []const Candidate, prefix: []const usize) ?[]con
     return null;
 }
 
-// spec: Web Server - route_order_search ranks trials by oracle connectivity first and DRC errors only as a tiebreak
-test "route_order_search ranks by connectivity then DRC errors" {
+// spec: Web Server - route_order_search ranks trials by geometry DRC errors first then oracle connectivity
+test "route_order_search ranks by DRC errors then connectivity" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -1349,18 +1348,18 @@ test "route_order_search ranks by connectivity then DRC errors" {
     const trials = [_]Trial{
         // 0: the baseline.
         .{ .label = "baseline", .order = &order, .out = .{ .routed = 76, .total = 90, .drc_errors = 51, .trace_mm = 100 }, .ms = 0, .baseline = true },
-        // 1: fewer DRC errors but a net short — connectivity outranks DRC.
+        // 1: the winner has fewer geometry errors despite a net short.
         .{ .label = "a", .order = &order, .out = .{ .routed = 75, .total = 90, .drc_errors = 2, .trace_mm = 100 }, .ms = 0, .baseline = false },
-        // 2: the winner — two more nets closed.
+        // 2: two more nets closed, but too many geometry errors.
         .{ .label = "b", .order = &order, .out = .{ .routed = 78, .total = 90, .drc_errors = 32, .trace_mm = 100 }, .ms = 0, .baseline = false },
-        // 3: ties the winner on connectivity, loses on DRC.
+        // 3: ties trial 2 on connectivity, loses on DRC.
         .{ .label = "c", .order = &order, .out = .{ .routed = 78, .total = 90, .drc_errors = 40, .trace_mm = 100 }, .ms = 0, .baseline = false },
         // 4: ties the baseline exactly — the baseline must keep its place, so a
         // search that found nothing recommends no edit.
         .{ .label = "d", .order = &order, .out = .{ .routed = 76, .total = 90, .drc_errors = 51, .trace_mm = 100 }, .ms = 0, .baseline = false },
     };
     const ranked = try rankTrials(arena, &trials);
-    try testing.expectEqualSlices(usize, &.{ 2, 3, 0, 4, 1 }, ranked);
+    try testing.expectEqualSlices(usize, &.{ 1, 2, 3, 0, 4 }, ranked);
 }
 
 // spec: Web Server - route_order_search recommends the smallest plan edit among orderings that measured the same board
@@ -1483,4 +1482,10 @@ test "route_order_search derives a cluster from the stuck diagnoses" {
     try testing.expect(clusterPos(placement, cluster, "UNRELATED") == null);
     // A board whose baseline route stuck nothing has no cluster to search.
     try testing.expectEqual(@as(usize, 0), (try deriveCluster(arena, placement, &.{}, max_cluster)).len);
+}
+
+// spec: Web Server - route_order_search connectivity dominates any copper cost on equally legal boards
+test "route_order_search connectivity dominates any copper cost on equally legal boards" {
+    try testing.expect(betterOutcome(.{ .routed = 120, .total = 130, .vias = 10000, .trace_mm = 100000 }, .{ .routed = 119, .total = 130 }));
+    try testing.expect(!betterOutcome(.{ .routed = 130, .total = 130, .drc_errors = 1 }, .{ .routed = 119, .total = 130 }));
 }

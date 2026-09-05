@@ -538,7 +538,7 @@ fn lowerGuides(
             .beside => |g| {
                 if (!try validGuideLayer(arena, wave.name, g.layer, ctx, warns)) continue;
                 const pi = guidePartIndex(ctx, g.ref) orelse {
-                    try warns.append(arena, try mkWarning(arena, wave.name, g.ref, "guide ref"));
+                    try warns.append(arena, try mkWarning(arena, wave.name, g.ref, "unique guide ref (use scope/@origin)"));
                     continue;
                 };
                 const rect = optimizer.worldCourtyard(&ctx.placement.parts[pi]);
@@ -869,7 +869,7 @@ fn locateGuidePin(
     warns: *std.ArrayList(Warning),
 ) Allocator.Error!?LocatedGuidePin {
     const pi = guidePartIndex(ctx, ref) orelse {
-        try warns.append(arena, try mkWarning(arena, wave, ref, "guide ref"));
+        try warns.append(arena, try mkWarning(arena, wave, ref, "unique guide ref (use scope/@origin)"));
         return null;
     };
     const part = &ctx.placement.parts[pi];
@@ -881,11 +881,27 @@ fn locateGuidePin(
     return null;
 }
 
+/// Guides identify one part. `scope/@origin` (or `@origin` at the root)
+/// survives reference renumbering; unqualified aliases must be unambiguous.
 fn guidePartIndex(ctx: Context, ref: []const u8) ?usize {
+    const at = std.mem.lastIndexOfScalar(u8, ref, '@');
+    if (at == null) for (ctx.placement.parts, 0..) |part, i| {
+        if (eqUpper(part.ref_des, ref)) return i;
+    };
+    var found: ?usize = null;
     for (ctx.placement.parts, 0..) |part, i| {
-        if (refMatches(ctx, i, part.ref_des, ref)) return i;
+        const matches = if (at) |a| blk: {
+            if (a != 0 and ref[a - 1] != '/') break :blk false;
+            if (i >= ctx.placement.instances.len) break :blk false;
+            const scope = net_name.parent(part.ref_des) orelse "";
+            const want_scope = if (a == 0) "" else ref[0 .. a - 1];
+            break :blk eqUpper(scope, want_scope) and eqUpper(ctx.placement.instances[i].origin_key, ref[a + 1 ..]);
+        } else refMatches(ctx, i, part.ref_des, ref);
+        if (!matches) continue;
+        if (found != null) return null;
+        found = i;
     }
-    return null;
+    return found;
 }
 
 fn escapePoint(part: optimizer.Part, pad: geometry.Pad, clearance: f64) [2]f64 {
@@ -2453,4 +2469,18 @@ test "net scope collects unknown tokens and resolves explicit nets" {
     const none = try resolveNetScope(arena, .{}, ctx);
     try testing.expectEqual(@as(usize, 0), none.selectors);
     try testing.expectEqual(@as(usize, 0), none.matched);
+}
+
+// spec: placement/plan-resolve - scoped stable guide origins survive ref renumbering and ambiguous bare aliases never choose the first part
+test "guide origins are scoped stable and unambiguous" {
+    var parts = [_]optimizer.Part{ hub("a/U20"), hub("b/U21"), hub("a/U1") };
+    const instances = [_]flat_netlist.FlatInstance{ inst("a/U20", "U1", ""), inst("b/U21", "U1", ""), inst("a/U1", "SECOND", "") };
+    const ctx = Context{ .placement = fixturePlacement(&parts, &instances, &.{}) };
+    try testing.expectEqual(@as(?usize, 0), guidePartIndex(ctx, "a/@U1"));
+    try testing.expectEqual(@as(?usize, 1), guidePartIndex(ctx, "b/@U1"));
+    try testing.expectEqual(@as(?usize, 2), guidePartIndex(ctx, "a/U1"));
+    try testing.expectEqual(@as(?usize, null), guidePartIndex(ctx, "U1"));
+    try testing.expectEqual(@as(?usize, null), guidePartIndex(ctx, "missing/@U1"));
+    parts[0].ref_des = "a/U99";
+    try testing.expectEqual(@as(?usize, 0), guidePartIndex(ctx, "a/@U1"));
 }

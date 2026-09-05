@@ -49,6 +49,8 @@ const drc_rules = @import("drc_rules.zig");
 const fab_readiness = @import("../fab_readiness.zig");
 const topo_lower = @import("../placement/topo_lower.zig");
 const pad_neck_shape = @import("../pad_neck_shape.zig");
+const route_copper_state = @import("../route_copper_state.zig");
+const pcb_layout_page = @import("pcb_layout_page.zig");
 const net_name = @import("../net_name.zig");
 
 /// Residual-cost tie tolerance: a candidate must beat the baseline by more
@@ -84,6 +86,7 @@ const Request = struct {
     block: *const env_mod.DesignBlock,
     placement: optimizer.Placement,
     force_topology: bool = false,
+    zones: []const pour.UserZone = &.{},
 };
 
 /// Resolve `req.spec` against `req.placement` (module-policy read →
@@ -99,6 +102,7 @@ fn resolveOptions(alloc: std.mem.Allocator, req: Request) std.mem.Allocator.Erro
         .part_role = detected.part_role,
         .modules = detected.modules,
         .net_class_specs = req.block.net_classes,
+        .zones = req.zones,
     });
     var options = route_policy.Options{
         .net = try plan_resolve.routePolicies(alloc, resolved, req.placement, true),
@@ -290,7 +294,7 @@ pub fn routeLoweredCandidate(
     armDeadline(&run_options);
     run_options = try withTimedWaypointSeeds(alloc, placement, params, run_options);
     const raw = try router.routeWithOptions(alloc, placement, params, try initialPassOptions(alloc, run_options));
-    if (raw.cancelled) return raw;
+    if (raw.cancelled) return route_copper_state.reconcile(alloc, placement, raw, try retainedZones(alloc, placement, run_options));
     return (try gate(alloc, placement, params, raw, run_options)).result;
 }
 
@@ -6821,7 +6825,11 @@ pub fn routeLoweredLive(
     // Stop wants the partial result NOW — the unreached nets are simply
     // unrouted, not failures worth explaining. Gated on the result's cancelled
     // flag (not on live-vs-blocking), so any cancellable caller benefits.
-    if (fin.run.routed.cancelled) return .{ .run = fin.run };
+    if (fin.run.routed.cancelled) {
+        var run = fin.run;
+        run.routed = try route_copper_state.reconcile(alloc, placement, run.routed, try retainedZones(alloc, placement, options.*));
+        return .{ .run = run };
+    }
     // Diagnose against the copper the router itself produced (the live grid the
     // core still holds describes THAT board), then report the gated counters —
     // so the stuck list explains the router's failures while `routed`/`failed`
@@ -6845,6 +6853,7 @@ pub fn routeLoweredLive(
 /// and whether a plan applied — so `route_experiment` can echo the unresolved
 /// wave/class/net names rather than only counting them.
 pub const Experiment = struct {
+    seeds: pcb_layout_page.SubcircuitRouteSeedStats = .{},
     result: router.RouteResult,
     stuck: []const route_diagnose.Diagnosis = &.{},
     warnings: []const plan_resolve.Warning = &.{},
@@ -6862,6 +6871,8 @@ pub const Experiment = struct {
 /// the block's authored plan on bare copper", which is what the seam did before
 /// the struct existed.
 pub const ExperimentOpts = struct {
+    /// Library root enables the same local module routing as the commit path.
+    project_dir: ?[]const u8 = null,
     /// A complete `(pcb-plan …)` spec that REPLACES the block's authored plan
     /// for this run only. Null routes the authored plan.
     plan: ?env_mod.PcbPlanSpec = null,
@@ -6888,8 +6899,8 @@ pub const ExperimentOpts = struct {
 /// `route_experiment`. With no override and no authored plan it routes with
 /// empty options (no default synthesis), exactly as `routePlannedDiagnostic`
 /// does, so the numbers match a plain `?route=1` describe. Purely request-local:
-/// no disk, no persistence. Skips the fine-grid retry for the same reason
-/// `routePlannedDiagnostic` does — the diagnostic needs one live core.
+/// no persistence. With a library root it uses the commit path's hierarchical
+/// builder, then inspects the final fenced copper after finishing all routing.
 pub fn routeExperiment(
     alloc: std.mem.Allocator,
     block: *const env_mod.DesignBlock,
@@ -6907,6 +6918,7 @@ pub fn routeExperiment(
             .block = block,
             .placement = placement,
             .force_topology = opts.topology,
+            .zones = try retainedZones(alloc, placement, .{ .existing_zones = opts.zones }),
         });
         options = r.options;
         warnings = r.warnings;
@@ -6914,8 +6926,17 @@ pub fn routeExperiment(
     }
     if (opts.effort) |e| options.effort = e;
     options.existing_zones = opts.zones;
-    const pd = try routeLoweredDiagnostic(alloc, placement, params, options);
+    var seeds: pcb_layout_page.SubcircuitRouteSeedStats = .{};
+    const fresh = if (opts.project_dir) |project_dir| blk: {
+        const seeded = try pcb_layout_page.routeWithSubcircuitSeeds(alloc, project_dir, block, placement, params, options);
+        seeds = seeded.seeds;
+        break :blk seeded.result;
+    } else try routeLowered(alloc, placement, params, options);
+    const fenced = (try route_copper_state.appendPerimeter(alloc, placement, fresh)).?;
+    const measured = try route_copper_state.reconcile(alloc, placement, fenced, try retainedZones(alloc, placement, options));
+    const pd = try diagnoseFinished(alloc, placement, params, options, measured);
     return .{
+        .seeds = seeds,
         .result = pd.result,
         .stuck = pd.stuck,
         .warnings = warnings,
@@ -6925,69 +6946,47 @@ pub fn routeExperiment(
     };
 }
 
-/// `routeLowered`'s diagnostic sibling: route with options the caller already
-/// lowered, but hold the live router state through the finish pass so the
-/// stuck-net diagnostics flood the SAME grid the copper landed on. The spelling
-/// for a surface that builds its own options — a permuted wave order
-/// (`route_order_search`), a plan override (`routeExperiment`) — and still has
-/// to report the gated, oracle-checked `routed` every other surface reports.
+/// Route through the ordinary candidate builder, then diagnose the final copper.
+/// Diagnostic work cannot spend the routing deadline or change route geometry.
 pub fn routeLoweredDiagnostic(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
     params: router.RouteParams,
     options: route_policy.Options,
 ) std.mem.Allocator.Error!PlannedDiagnostic {
-    var run_options = options;
-    armDeadline(&run_options);
-    const first = try routeLoweredDiagnosticCandidate(alloc, placement, params, run_options);
-    return finishLoweredDiagnosticCandidate(alloc, placement, params, run_options, first);
+    const result = try routeLowered(alloc, placement, params, options);
+    return diagnoseFinished(alloc, placement, params, options, result);
 }
 
-/// Route, diagnose, and gate one candidate without the field residual pass.
-/// Candidate competitions select one result before paying for that finisher.
-pub fn routeLoweredDiagnosticCandidate(
+/// Build a probe over the final copper only after all routing/finishing. This
+/// work cannot consume the routing deadline or describe an earlier candidate.
+fn diagnoseFinished(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
     params: router.RouteParams,
     options: route_policy.Options,
+    result: router.RouteResult,
 ) std.mem.Allocator.Error!PlannedDiagnostic {
-    var run_options = options;
-    armDeadline(&run_options);
-    const fin = try router.routeCoreFinished(
-        alloc,
-        placement,
-        params,
-        try initialPassOptions(alloc, run_options),
-        .off,
-    );
-    if (fin.result.cancelled) return .{ .result = fin.result };
-    const stuck: []const route_diagnose.Diagnosis = if (fin.core) |core|
-        try route_diagnose.capture(&core, fin.result, placement, alloc)
-    else
-        &.{};
-    const gated = try gate(alloc, placement, params, fin.result, run_options);
-    return .{
-        .result = gated.result,
-        .stuck = stuck,
-        .claimed_routed = gated.claimed_routed,
+    if (result.cancelled or result.failed.len == 0) return .{ .result = result };
+    var probe = options;
+    probe.stop = .{};
+    probe.timing = null;
+    probe.sink = null;
+    const none = try alloc.alloc(bool, placement.nets.len);
+    @memset(none, false);
+    probe.selected_nets = none;
+    const tracks = try alloc.alloc(route_policy.ExistingTrack, result.tracks.len);
+    for (result.tracks, tracks) |t, *out| out.* = trackAsExisting(t);
+    const vias = try alloc.alloc(route_policy.ExistingVia, result.vias.len);
+    for (result.vias, vias) |v, *out| out.* = viaAsExisting(v);
+    probe.existing_tracks = tracks;
+    probe.existing_vias = vias;
+    const outcome = try router.routeCoreStart(alloc, placement, params, probe, .off);
+    const stuck = switch (outcome) {
+        .core => |core| try route_diagnose.capture(&core, result, placement, alloc),
+        .done => &.{},
     };
-}
-
-/// Apply the selected diagnostic candidate's route-space finisher and discard
-/// diagnoses for nets that its residual pass recovered.
-pub fn finishLoweredDiagnosticCandidate(
-    alloc: std.mem.Allocator,
-    placement: optimizer.Placement,
-    params: router.RouteParams,
-    options: route_policy.Options,
-    first: PlannedDiagnostic,
-) std.mem.Allocator.Error!PlannedDiagnostic {
-    const result = try finishLoweredCandidate(alloc, placement, params, options, first.result);
-    return .{
-        .result = result,
-        .stuck = try stillFailedDiagnoses(alloc, first.stuck, result.failed),
-        .claimed_routed = first.claimed_routed,
-    };
+    return .{ .result = result, .stuck = stuck };
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -11460,4 +11459,27 @@ test "the retained-copper bundle carries the board's pours, not only its tracks 
     try testing.expectEqual(@as(usize, 1), bundle.zones.len);
     try testing.expectEqual(@as(f64, 0.2), bundle.tracks[0].width);
     try testing.expectEqual(@as(f64, 0.3), bundle.vias[0].drill);
+}
+
+// spec: serve/route-plan - cancelled candidates reconcile retained copper with the connectivity oracle without continuing search
+// spec: serve/route-plan - diagnostic routing produces the ordinary route geometry before probing the final copper
+test "routing audit cancellation oracle and diagnostic parity" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parts = twoPadParts();
+    const nets = [_]optimizer.FlatNet{.{ .name = "SIG", .pins = &fixture_pins }};
+    const placement = fixturePlacement(&parts, &nets);
+    const existing = [_]route_policy.ExistingTrack{.{ .x1 = 0, .y1 = 0, .x2 = 3, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 }};
+    var cancel: std.atomic.Value(bool) = .init(true);
+    const cancelled = try routeLowered(arena, placement, .{}, .{ .existing_tracks = &existing, .stop = .{ .cancel = &cancel } });
+    try testing.expect(cancelled.cancelled);
+    try testing.expectEqual(@as(usize, 1), cancelled.routed);
+    try testing.expectEqual(@as(usize, 1), cancelled.total);
+    try testing.expectEqual(@as(usize, 0), cancelled.failed.len);
+    const plain = try routeLowered(arena, placement, .{}, .{});
+    const diagnostic = try routeLoweredDiagnostic(arena, placement, .{}, .{});
+    try testing.expectEqualDeep(plain.tracks, diagnostic.result.tracks);
+    try testing.expectEqualDeep(plain.vias, diagnostic.result.vias);
+    try testing.expectEqual(plain.routed, diagnostic.result.routed);
 }

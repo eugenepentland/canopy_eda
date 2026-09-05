@@ -659,6 +659,8 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 
 ## serve/subcircuit-route
 
+- a child without an authored plan uses standalone defaults instead of inheriting global waypoints
+
 Public functions: routeAll, regressed
 
 The hierarchical autorouter routes each first-level sub-circuit before the
@@ -2090,8 +2092,8 @@ different.
 
 Public functions: score, completionFraction, bendCount, qualityWarnCount
 
-The single deterministic scalar the constraint-DSL routing loop judges an
-accept/reject on. A pure function of the routing-result fields the describe and
+A deterministic display score; adoption ranks geometry errors first, then
+connectivity, and uses geometry costs only to break ties. A pure function of the routing-result fields the describe and
 replay surfaces already emit — completion fraction (routed/total), via count,
 routed-copper length, bend count, self-inflicted DRC warnings, and
 error-severity DRC count — with no clock or RNG, so the same routed board always
@@ -2109,7 +2111,7 @@ stored numbers are only compared within a version.
 - each via, mm of copper, bend, quality warning, and DRC error lowers the score by its named weight
 - a board with no routable nets counts as fully complete rather than a divide-by-zero
 - more vias, longer copper, more bends, more quality warnings, or more DRC errors never raise the score
-- completion outranks every geometry penalty combined, so a score can never prefer a board that routes fewer nets
+- the display score can trade an additional completed net for geometry and is not an adoption policy
 - spending vias to shorten and straighten a route now scores as the improvement it is, where v1 rejected it
 - two vias buy back their own cost from a millimetre of copper and a dozen corners, which v1 could never repay
 - a via is priced within an order of magnitude of the maze's own via cost, so the search and the score want the same board
@@ -6145,7 +6147,10 @@ Public functions: runSyncPlan, syncKicadPcbApi
 
 ## serve/route-plan
 
-Public functions: lower, lowerOrEmpty, lowerWithWaves, routeLoweredCandidate, finishLoweredCandidate, routeLoweredDiagnosticCandidate, finishLoweredDiagnosticCandidate, routeLoweredDiagnostic, pruneTopologyArtifacts, includeDiffPartners
+- cancelled candidates reconcile retained copper with the connectivity oracle without continuing search
+- diagnostic routing produces the ordinary route geometry before probing the final copper
+
+Public functions: lower, lowerOrEmpty, lowerWithWaves, routeLoweredCandidate, finishLoweredCandidate, routeLoweredDiagnostic, pruneTopologyArtifacts, includeDiffPartners
 
 The one `(pcb-plan (route …))` lowering seam shared by every routing surface —
 the `route_pcb` CLI commit path, `POST /api/pcb-route`, the `/pcb-layout`
@@ -6282,26 +6287,17 @@ warnings, topology artifacts, and elapsed wall time.
 
 ## serve/route-analyze
 
+- diagnose_net inspects shown copper and reports the requested net's islands without a fresh route
+
 Public functions: pcbRouteAnalyzeApi, analyzeNetJson, mcpDiagnoseNet, writeAnalysis, AnalyzeOpts, AnalyzeError
 
-`POST /api/pcb-route-analyze/:name` — on-demand diagnosis of ONE named net on
-the surviving router surface (the read-only twin of the retired Route Lab
-`analyze`). It runs the SAME plan-lowered diagnostic route the /pcb-layout
-Route button runs (`route_plan.routePlannedDiagnostic`, request-local, persists
-no copper), then answers for the caller's net: a failed net returns its full
-stuck diagnosis tagged `"status":"failed"` through the shared `stuck_json`
-serialization; a routed net returns `"status":"routed"` with its trace length,
-via count, and signal layers filtered from the RouteResult; an unmatched name
-is a 404. Net names resolve through the shared exact-or-leaf case-insensitive
-`(nets …)` lookup (`plan_resolve.netIndexByName`). Read-only POST — access
-control lives in serve/auth.
-
-The same analysis is the read-only `diagnose_net` CLI tool (args `name`, `net`,
-optional `layout` / `sub`), so an agent can interrogate one net without routing
-the whole board to read a capped, failure-only `stuck[]`. Both surfaces run
-through one `analyzeNetJson` body — resolve the shown board, route it, answer —
-so the tool and the endpoint can never diagnose different boards for the same
-request.
+`POST /api/pcb-route-analyze/:name` and `diagnose_net` inspect the shown
+layout's saved copper, including pours, arcs and RF paths. A disconnected net
+returns terminal islands and shortest gap endpoints with `source:shown_copper`
+and `fresh_route:false`; these gaps are connectivity measurements, not a proof
+of routing feasibility. DRC witnesses identify either involved net and carry
+stable IDs and coordinates. A connected net reports its saved trace geometry.
+Unknown names fail before geometric checks. Inspection never routes or persists.
 
 - a failed net is answered with its stuck diagnosis tagged status failed
 - a routed net is answered with status routed and its trace length via count and layers
@@ -6312,10 +6308,10 @@ request.
 - an unresolvable design reaches diagnose_net's caller as an error line, never as a partial answer
 - the analyze failure mapping keeps the shared PCB read status codes and adds this module's own two
 - completeness-waiver: empty inputs (a missing or empty "net" field is rejected 400 by parseNet before any routing, and a net matching nothing answers 404)
-- completeness-waiver: large inputs (answering is a linear scan of the one bounded diagnostic route's tracks, vias, and failed set — a bigger board only lengthens those slices)
+- completeness-waiver: large inputs (only the requested net's connectivity graph is measured; DRC reads the shown board's finite copper slices)
 - completeness-waiver: unauthorized access (a read-only POST whose access control lives in serve/auth, not restated here)
 - completeness-waiver: i/o failure (project reads flow through solveForRequest, whose PngError maps to a 404/500 JSON error; the handler does no direct disk I/O)
-- completeness-waiver: concurrent access (each request routes into its own per-call arena and persists nothing, so there is no shared mutable state)
+- completeness-waiver: concurrent access (each request inspects immutable copper in its own per-call arena and persists nothing, so there is no shared mutable state)
 - completeness-waiver: malformed encoding (a non-object body or non-string/absent "net" field is rejected 400 before any routing runs)
 - completeness-waiver: integer overflow (net indices are slice positions and layer indices are bounded by signalLayerCount; trace length is f64 accumulation)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
@@ -7052,6 +7048,11 @@ is what makes the predicate exact rather than approximately right.
 
 ## Web Server
 
+- route_order_search connectivity dominates any copper cost on equally legal boards
+
+- cancelled CLI routing preserves the sidecar and reports retained connectivity separately from its candidate
+- rejected manual copper reports zero applied objects retained connectivity and candidate DRC witnesses
+
 - Editing an already escaped value finds its complete string and preserves adjacent fields
 
 - HTTP source saves reject missing or stale revisions and return the exact committed source revision
@@ -7336,7 +7337,7 @@ is what makes the predicate exact rather than approximately right.
 - a recorded route_order_search trial names the ordering it tried, its score, and the scope it was measured under
 - a small route_order_search cluster is searched exhaustively, the authored order first
 - a route_order_search cluster too big to enumerate is seeded from the blocker diagnoses and the pours
-- route_order_search ranks trials by oracle connectivity first and DRC errors only as a tiebreak
+- route_order_search ranks trials by geometry DRC errors first then oracle connectivity
 - route_order_search recommends the smallest plan edit among orderings that measured the same board
 - a route_order_search ordering re-deals only the cluster's own authored priority slots
 - a route_order_search whose trials all measure identically under cluster scope says so rather than reporting no effect
@@ -7992,6 +7993,8 @@ Public functions: compute, writeJson
 
 ## placement/plan-resolve
 
+- scoped stable guide origins survive ref renumbering and ambiguous bare aliases never choose the first part
+
 Public functions: resolve
 
 Turns a parsed `(pcb-plan …)` (`?PcbPlanSpec`) plus the solved design/placement
@@ -8402,3 +8405,38 @@ export never invents them.
 - completeness-waiver: malformed encoding (readiness and ladder JSON that fails to parse leaves those sections unavailable)
 - completeness-waiver: integer overflow (counts are tallied from bounded slices with no input-derived arithmetic)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
+## saved-route-copper
+
+- completeness-waiver: empty inputs (empty slices are valid; the adapter delegates terminal counting to the connectivity oracle and stores no copper)
+- completeness-waiver: large inputs (all iteration is slice-bounded and allocation failures propagate; no fixed-size output buffer)
+- completeness-waiver: malformed encoding (inputs are typed geometry, validated by callers at the parser and sidecar boundaries)
+- completeness-waiver: integer overflow (net indices are bounds-checked before conversion and geometry uses floating-point coordinates)
+- completeness-waiver: concurrent access (all state belongs to the caller allocator; no shared mutable state)
+- completeness-waiver: unauthorized access (pure in-memory adapters perform no privileged action; mutation authorization belongs to the caller)
+- completeness-waiver: i/o failure (these functions perform no disk or network I/O; allocation errors propagate)
+- completeness-waiver: panic-free (panic-budget applies repository-wide; adapter indices are bounded by their source slices)
+
+Public functions: fromResult, netNameAt, arcOwnsTrack
+
+The persistent copper adapter maps net indices to names, retains source and
+object metadata for unchanged geometry, and stores physical arcs and RF paths.
+Existing persistence round-trip tests exercise it through pcb_layout_page.
+
+## route-copper-state
+
+- completeness-waiver: empty inputs (empty slices are valid; the adapter delegates terminal counting to the connectivity oracle and stores no copper)
+- completeness-waiver: large inputs (all iteration is slice-bounded and allocation failures propagate; no fixed-size output buffer)
+- completeness-waiver: malformed encoding (inputs are typed geometry, validated by callers at the parser and sidecar boundaries)
+- completeness-waiver: integer overflow (net indices are bounds-checked before conversion and geometry uses floating-point coordinates)
+- completeness-waiver: concurrent access (all state belongs to the caller allocator; no shared mutable state)
+- completeness-waiver: unauthorized access (pure in-memory adapters perform no privileged action; mutation authorization belongs to the caller)
+- completeness-waiver: i/o failure (these functions perform no disk or network I/O; allocation errors propagate)
+- completeness-waiver: panic-free (panic-budget applies repository-wide; adapter indices are bounded by their source slices)
+
+Public functions: tally, reconcile, appendPerimeter
+
+A physical connectivity adapter over tracks, arcs, vias, RF paths and pours.
+Reconciliation only updates counters, including on cancelled candidates; it
+never searches or changes copper. The shared perimeter generator is re-exported
+for routing surfaces. Route-plan cancellation and parity tests exercise it.

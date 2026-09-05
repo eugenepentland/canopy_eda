@@ -1,7 +1,18 @@
 //! Compact DRC/timing summary shared by routing response writers.
 
 const std = @import("std");
+const drc_json = @import("drc_json.zig");
 const drc = @import("../placement/drc.zig");
+
+/// Include stable violation IDs and coordinates for a rejected manual edit.
+pub fn writeFindings(w: *std.Io.Writer, findings: []const drc.Violation, names: drc_json.Names) std.Io.Writer.Error!void {
+    try w.writeAll("[");
+    for (findings, 0..) |v, i| {
+        if (i != 0) try w.writeAll(",");
+        try drc_json.writeViolation(w, v, names);
+    }
+    try w.writeAll("]");
+}
 
 /// Write the unambiguous DRC breakdown and elapsed time portion of a routing
 /// result. `drc` remains the compatibility total; errors and warnings are
@@ -51,4 +62,11 @@ test "route response DRC summary separates actionable categories" {
             "\"diff_warnings\":1,\"artifact_warnings\":1,\"wall_ms\":42",
         aw.written(),
     );
+}
+
+/// Findings involving one selected net, without losing either party's witness.
+pub fn forNet(alloc: std.mem.Allocator, findings: []const drc.Violation, net: usize) std.mem.Allocator.Error![]const drc.Violation {
+    var out: std.ArrayList(drc.Violation) = .empty;
+    for (findings) |v| if (v.who.net_a == net or v.who.net_b == net) try out.append(alloc, v);
+    return out.toOwnedSlice(alloc);
 }

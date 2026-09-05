@@ -119,6 +119,7 @@ pub fn mcpRouteExperiment(
 
     const params = solved.placement.rules.design.routeParams();
     const exp_opts = route_plan.ExperimentOpts{
+        .project_dir = project_dir,
         .plan = plan_override,
         .effort = effort,
         .zones = solved.shown_zones.sources,
@@ -137,7 +138,12 @@ pub fn mcpRouteExperiment(
     // measurements — `bendCount` over this run's copper, `qualityWarnCount` over
     // this run's findings — so a number from this tool is directly comparable to
     // the route-review replay's, which calls the same two helpers.
-    const violations = drc_rules.checkFiltered(alloc, project_dir, name, solved.placement, exp.result, params.clearance);
+    const violations = drc_rules.checkFilteredZones(alloc, project_dir, name, .{
+        .placement = solved.placement,
+        .routed = exp.result,
+        .clearance = params.clearance,
+        .zones = solved.shown_zones.user,
+    });
     var trace_mm: f64 = 0;
     for (exp.result.tracks) |t| trace_mm += std.math.hypot(t.x2 - t.x1, t.y2 - t.y1);
     const drc_errors = drc.errorCount(violations);
@@ -157,6 +163,8 @@ pub fn mcpRouteExperiment(
     const open_nets = fab_readiness.openNetsAmong(alloc, solved.placement, .{
         .tracks = exp.result.tracks,
         .vias = exp.result.vias,
+        .arcs = exp.result.arcs,
+        .rf_paths = exp.result.rf_port_outcomes,
         .zones = solved.shown_zones.user,
     }, exp.result.failed) catch &.{};
 
@@ -206,6 +214,7 @@ pub fn mcpRouteExperiment(
     try w.print(",\"bends\":{d},\"quality_warns\":{d}", .{ bends, quality_warns });
     try w.print(",\"score\":{d:.2},\"score_v\":{d}", .{ s, route_score.formula_version });
     try writeTopology(w, exp.topology);
+    try pcb_layout_page.writeRouteSeedStats(w, exp.seeds);
     try stuck_json.writeStuckJson(w, exp.stuck);
     try writeUnroutedJson(w, exp.result.failed);
     try writeOpenNetsJson(w, open_nets);

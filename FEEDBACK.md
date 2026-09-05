@@ -687,3 +687,6 @@ matters when the person re-recording is the author of the change.
 - **friction:** `bench-route` reports aggregate local timeouts and rejected seed nets, but no per-subcircuit names, accepted local connectivity, or rejection reasons. The Barracuda/LMX2595 audit therefore required tracing three routing modules to distinguish timeout loss from board DRC rejection; its read-only `route_experiment` sibling bypasses hierarchical seeding and cannot isolate that phase.
 - **idea:** Add a read-only local-phase benchmark mode with per-subcircuit time, completed local nets, and fresh/saved seed rejection reasons so a module-versus-board discrepancy can be reproduced directly.
 - **status:** open
+
+## 2026-09-05 · codex · Autorouter audit fixes
+- **idea:** Add a benchmark mode that routes one module in its parent board and dumps the effective local and global policies before search. Barracuda trials cost about 210 seconds each; discovering that an absent child plan inherited global waypoints required source inspection and a new regression fixture. A policy comparison with standalone defaults would expose that mismatch before a whole-board run.

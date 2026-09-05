@@ -1,23 +1,6 @@
-//! Per-net on-demand route diagnosis on the surviving router surface — the
-//! read-only twin of the retired Route Lab `analyze` endpoint. A caller names
-//! ANY net; the handler runs the SAME plan-lowered diagnostic route the
-//! `/pcb-layout` Route button runs (`route_plan.routePlannedDiagnostic`,
-//! request-local, persists no copper) and answers for that one net:
-//!
-//!   - a net the router FAILED to complete → its full stuck diagnosis, tagged
-//!     `"status":"failed"` and serialized through the shared `stuck_json` shape
-//!     (byte-identical fields to the Route button's `routed.stuck[]` entries);
-//!   - a net that ROUTED → `"status":"routed"` with the trace length, via count,
-//!     and signal layers filtered out of the RouteResult for that net;
-//!   - a name matching no net → 404 JSON.
-//!
-//! Unlike `routed.stuck[]` (only nets that failed a full-board route), this lets
-//! an agent interrogate a net the board otherwise routed fine, or one buried
-//! past the diagnostic cap.
-//!
-//! The same analysis is the `diagnose_net` CLI tool. Both surfaces run through
-//! `analyzeNetJson` — one resolve-route-answer body, so the tool and the
-//! endpoint can never diagnose different boards for the same request.
+//! Inspection of one net on the shown saved copper. No fresh route is run.
+//! The HTTP and CLI surfaces share current connectivity islands, gap endpoints
+//! and exact DRC witnesses, independent of the whole-board diagnostic cap.
 
 const std = @import("std");
 const httpz = @import("httpz");
@@ -32,6 +15,10 @@ const modules_mod = @import("modules.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
 const route_plan = @import("route_plan.zig");
 const route_review = @import("route_review.zig");
+const fab_readiness = @import("../fab_readiness.zig");
+const drc_rules = @import("drc_rules.zig");
+const result_stats = @import("route_result_stats.zig");
+const pcb_describe = @import("pcb_describe.zig");
 const stuck_json = @import("stuck_json.zig");
 
 const HandlerError = route_review.HandlerError;
@@ -105,7 +92,7 @@ pub const AnalyzeOpts = struct {
 pub const AnalyzeError = error{ NetNotFound, RouteFailed } ||
     pcb_layout_page.PngError || std.mem.Allocator.Error || std.Io.Writer.Error;
 
-/// Resolve `name`'s shown board, run the plan-lowered diagnostic route over it,
+/// Resolve `name`'s shown board and inspect its saved copper,
 /// and return `net`'s analysis object as JSON bytes owned by `alloc`.
 ///
 /// This is the WHOLE body both surfaces share — the HTTP endpoint above and the
@@ -130,24 +117,42 @@ pub fn analyzeNetJson(
         .sub = opts.sub,
     }, &eval, &module_res);
 
-    // The SAME plan-lowered diagnostic route the Route button pays for once —
-    // its RouteResult decides routed-vs-failed and its captured stuck set
-    // supplies the failed net's diagnosis.
-    const route_params = solved.placement.rules.design.routeParams();
-    var route_options = route_plan.lowerOrEmpty(alloc, solved.block, solved.placement);
-    route_options.existing_zones = solved.shown_zones.sources;
-    const seeded = pcb_layout_page.diagnoseWithSubcircuitSeeds(
-        alloc,
-        project_dir,
-        solved.block,
-        solved.placement,
-        route_params,
-        route_options,
-    ) catch return error.RouteFailed;
-    const diag = seeded.diagnostic;
-
+    const net_i = plan_resolve.netIndexByName(solved.placement, want_net) orelse return error.NetNotFound;
+    const net_name = solved.placement.nets[net_i].name;
+    const result = solved.restored.routes orelse router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 0, .total = 0, .failed = &.{} };
+    const open = try fab_readiness.openNetsAmong(alloc, solved.placement, .{
+        .tracks = result.tracks,
+        .vias = result.vias,
+        .arcs = result.arcs,
+        .rf_paths = result.rf_port_outcomes,
+        .zones = solved.shown_zones.user,
+    }, &.{net_name});
+    var measured = result;
+    measured.failed = if (open.len > 0) &.{net_name} else &.{};
+    const diagnosis = route_diagnose.Diagnosis{
+        .net = net_name,
+        .failure_mode = "disconnected_copper",
+        .why = "the shown copper leaves separate terminal islands; gaps identify endpoints to join, not a proven free routing corridor",
+        .blockers = &.{},
+        .remedies = &.{},
+        .drc_related = &.{},
+    };
+    const findings = drc_rules.checkFilteredZones(alloc, project_dir, name, .{
+        .placement = solved.placement,
+        .routed = result,
+        .clearance = solved.placement.rules.design.routeParams().clearance,
+        .zones = solved.shown_zones.user,
+    });
+    const relevant = try result_stats.forNet(alloc, findings, net_i);
+    var body: std.Io.Writer.Allocating = .init(alloc);
+    _ = try writeAnalysis(&body.writer, solved.placement, .{ .result = measured, .stuck = &.{diagnosis} }, net_name);
     var aw: std.Io.Writer.Allocating = .init(alloc);
-    if (!try writeAnalysis(&aw.writer, solved.placement, diag, want_net)) return error.NetNotFound;
+    try aw.writer.writeAll(body.written()[0 .. body.written().len - 1]);
+    try aw.writer.writeAll(",\"source\":\"shown_copper\",\"fresh_route\":false");
+    try pcb_describe.writeOpenNetsJson(&aw.writer, open);
+    try aw.writer.writeAll(",\"drc_list\":");
+    try result_stats.writeFindings(&aw.writer, relevant, .{ .nets = solved.placement.nets, .parts = solved.placement.parts });
+    try aw.writer.writeAll("}");
     return aw.written();
 }
 

@@ -1010,7 +1010,7 @@ fn writePadsJson(w: *std.Io.Writer, alloc: std.mem.Allocator, p: optimizer.Place
 /// coordinate and copper island, plus the shortest pad-to-pad hops that would
 /// close it. Omitted entirely when nothing is open, so a finished board's facts
 /// stay lean. This is what an agent aims `add_tracks` at.
-fn writeOpenNetsJson(w: *std.Io.Writer, open_nets: []const fab_readiness.OpenNet) std.Io.Writer.Error!void {
+pub fn writeOpenNetsJson(w: *std.Io.Writer, open_nets: []const fab_readiness.OpenNet) std.Io.Writer.Error!void {
     if (open_nets.len == 0) return;
     try w.writeAll(",\"open_nets\":[");
     for (open_nets, 0..) |n, i| {
