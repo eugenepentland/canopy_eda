@@ -401,7 +401,7 @@ pub const special_form_docs = blk: {
     };
     t[@backingInt(SpecialForm.assert_)] = .{
         .syntax = "(assert cond \"message\")",
-        .summary = "Record a pass/fail entry. Failures surface in the review report, never aborts the build.",
+        .summary = "Record a pass/fail entry. Evaluation never stops; build and export-kicad print every failure with its span, write nothing and exit 1, check reports it, review surfaces still render.",
     };
     t[@backingInt(SpecialForm.assert_range)] = .{
         .syntax = "(assert-range value lo hi \"label\")",

@@ -864,6 +864,18 @@ test "the reference links only to documents that exist" {
     try std.testing.expect(std.mem.indexOf(u8, doc, "sexpr-language") == null);
 }
 
+// spec: docgen - The assert form's registry summary states that build and export-kicad fail on a failed assertion
+
+test "assert summary states the build-fails rule" {
+    const alloc = std.testing.allocator;
+    const doc = try renderLanguageReference(alloc);
+    defer alloc.free(doc);
+    // The registry summary is what `netlisp reference` and the generated
+    // table print; it once promised the opposite of what `build` does.
+    try std.testing.expect(std.mem.indexOf(u8, doc, "never aborts the build") == null);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "write nothing and exit 1") != null);
+}
+
 // spec: docgen - The section-classifier reference states that an explicit (category …) is the source of truth
 test "classifier section names (category …) as authoritative" {
     const alloc = std.testing.allocator;

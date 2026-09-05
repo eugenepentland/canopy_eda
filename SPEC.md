@@ -4706,6 +4706,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - The generated reference has a Requirement checks section rendered from the checker's check_docs table
 - Every document the generated reference links to exists in docs/
 - The section-classifier reference states that an explicit (category …) is the source of truth
+- The assert form's registry summary states that build and export-kicad fail on a failed assertion
 - Every isForm head atom under src/eval is reachable from a form registry or listed as a deliberate exception
 - The generated reference renders one sub-form section per compound-form registry
 
