@@ -110,6 +110,84 @@ jobs:
       - name: Record the binary's checksum
         run: sha256sum zig-out/bin/netlisp
 
+  # Does this tree still COMPILE for macOS? Nothing here runs: a Linux runner
+  # cannot execute a Mach-O binary, so `zig build -Dtarget=<triple>` is
+  # compile-only by construction (build.zig's cross-compilation region skips
+  # the gates that would have to execute the artifact and builds guardian-check
+  # for the host instead). That is the whole claim this job makes, and it is
+  # the claim the README's platform statement rests on — the netlisp source,
+  # its vendored httpz (kqueue backend) and the wasm DRC all build for
+  # aarch64/x86_64 macOS. Behaviour on macOS remains untested: no test suite,
+  # no server, no examples gate runs here.
+  cross-macos:
+    name: Cross-compile for macOS (no tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # fetch-depth: 0 for the same reason as `build`: Guardian's process
+      # gates read git metadata, and this job still runs the full host gate.
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Restore-only, against the `build` job's own cache keys: this job adds
+      # no new cache entries and never competes to save one. A miss just means
+      # install-zig.sh downloads the archive, which it would do anyway.
+      - name: Restore the pinned Zig toolchain
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.local/share/netlisp/zig
+          key: zig-toolchain-${{ runner.os }}-build-${{ hashFiles('.zigversion') }}
+
+      - name: Restore Zig's global package cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/zig
+          key: zig-global-${{ runner.os }}-build-${{ hashFiles('.zigversion', 'build.zig.zon') }}
+          restore-keys: |
+            zig-global-${{ runner.os }}-build-
+
+      - name: Install the pinned Zig toolchain
+        run: |
+          set -euo pipefail
+          scripts/install-zig.sh
+          dirname "$(scripts/install-zig.sh --print)" >>"$GITHUB_PATH"
+
+      - name: Report the toolchain and the runner
+        run: |
+          set -euo pipefail
+          pinned="$(tr -d '[:space:]' <.zigversion)"
+          echo "zig      $(zig version)  (pinned: $pinned)"
+          echo "cpus     $(nproc)  $(lscpu | sed -n 's/^Model name: *//p' | head -n 1)"
+          test "$(zig version)" = "$pinned"
+
+      # `file` on the installed artifact after each target, because a cross
+      # build that skipped the compile would otherwise look exactly like one
+      # that only skipped the host-run gates. It must say Mach-O, and it must
+      # say the right architecture.
+      - name: Compile for aarch64-macos (Apple silicon)
+        run: |
+          set -euo pipefail
+          zig build --seed=1 -Dtarget=aarch64-macos
+          file zig-out/bin/netlisp | tee /dev/stderr | grep -q 'Mach-O.*arm64'
+
+      - name: Compile for x86_64-macos (Intel)
+        run: |
+          set -euo pipefail
+          zig build --seed=1 -Dtarget=x86_64-macos
+          file zig-out/bin/netlisp | tee /dev/stderr | grep -q 'Mach-O.*x86_64'
+
   smoke:
     name: Smoke (stdlib-smoke fixture)
     needs: build

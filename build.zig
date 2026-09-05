@@ -25,6 +25,51 @@ pub fn build(b: *std.Build) void {
     // ~2s. See the cast-safety campaign (numeric.checkedInt / int_from_float).
     const optimize = b.standardOptimizeOption(.{});
 
+    // ───────────────────────────── CROSS-COMPILATION ─────────────────────
+    // `-Dtarget=<triple>` builds the `netlisp` executable for another
+    // platform. Everything ELSE this build graph does runs on the machine
+    // doing the building: Guardian's 88 checks read this tree, the
+    // generated-docs check and the examples gate execute the freshly compiled
+    // artifact, and the tree-policy scripts spawn host `node`/`python3`. A
+    // Zig Run step cannot execute a foreign binary at all ("the host system
+    // ... is unable to execute binaries from the target"), so before this
+    // block a plain `zig build -Dtarget=aarch64-macos` died in `run exe
+    // guardian-check` and `run exe netlisp` even though every Zig module in
+    // the tree compiled cleanly for macOS.
+    //
+    // A cross build is therefore COMPILE-ONLY, and that is all it claims to
+    // be: `guardian-check` is built for the HOST so the policy gate still
+    // runs, and the steps that would have to *execute the cross artifact*
+    // (`gen-language-docs --check`, `check_examples.sh`, the ward hosting
+    // test, the ward client tests) are left out with one line saying so. CI's
+    // `cross-macos` job is exactly `zig build --seed=1 -Dtarget=<triple>`.
+    //
+    // "Cross" means a foreign OS or CPU, not merely a spelled-out `-Dtarget`:
+    // `-Dtarget=x86_64-linux` on an x86_64 Linux host runs its own binaries
+    // fine and keeps the full gate. The wasm DRC below is unaffected either
+    // way — it pins its own wasm32-freestanding target and never runs.
+    const host = b.graph.host;
+    const cross = target.result.os.tag != host.result.os.tag or
+        target.result.cpu.arch != host.result.cpu.arch;
+    // Say so, once, in the build output. A `std.debug.print` here would NOT
+    // do: Zig 0.17 evaluates `build()` in a separate configure phase whose
+    // result is cached, so the line appears on the first configure and never
+    // again — the silent second run is exactly the failure mode. An `echo`
+    // Run step marked `has_side_effects` is re-run on every build, and its
+    // stdout reaches the terminal the same way `check_examples.sh`'s does.
+    if (cross) {
+        const notice = b.addSystemCommand(&.{ "echo", b.fmt(
+            "netlisp: cross build for {s}-{s} — COMPILE ONLY. Guardian still runs (host-built), " ++
+                "but the gates that execute the built binary (gen-language-docs --check, " ++
+                "check_examples.sh, the ward hosting/client tests) are skipped; `zig build test` " ++
+                "cannot run a foreign test binary either.",
+            .{ @tagName(target.result.cpu.arch), @tagName(target.result.os.tag) },
+        ) });
+        notice.has_side_effects = true;
+        b.getInstallStep().dependOn(&notice.step);
+    }
+    // ─────────────────────────── end cross-compilation ───────────────────
+
     // The full unit-test binary (`zig build test`) gets its OWN optimize mode,
     // independent of `-Doptimize`, via `-Dtest-opt` (default Debug). Zig
     // 0.17.0-dev.1683 makes the representative self-hosted Debug optimizer
@@ -117,8 +162,12 @@ pub fn build(b: *std.Build) void {
     //     the build unless the checkout is exactly the pinned tag.
     //   * `GUARDIAN_PREBUILT=off` forces the compile back on.
     const guardian = @import("guardian");
+    // `.target = host` under `cross`: guardian-check is a tool this build
+    // RUNS over the tree, not code it ships, so it must be a host binary — see
+    // the cross-compilation region above. Native builds are unaffected
+    // (`target` is the host there, so the dependency's cache key is unchanged).
     const guardian_dep = b.dependency("guardian", .{
-        .target = target,
+        .target = if (cross) host else target,
         .optimize = .safe,
     });
     const check_exe = guardian_dep.artifact("guardian-check");
@@ -233,14 +282,18 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     // A real listener catches route-registration and Ward HTTP protocol drift
     // that request-double tests cannot see. Uses isolated temporary state.
-    const ward_hosting_test = b.addSystemCommand(&.{"python3"});
-    ward_hosting_test.addFileArg(b.path("scripts/test_ward_hosting.py"));
-    ward_hosting_test.addArtifactArg(exe);
-    test_step.dependOn(&ward_hosting_test.step);
-    const ward_client_tests = b.addTest(.{ .root_module = ward_mod });
-    const ward_client_run = b.addRunArtifact(ward_client_tests);
-    test_step.dependOn(&ward_client_run.step);
-    addTreePolicyChecks(b, test_step, exe);
+    // Both of these EXECUTE a `target` binary, so a cross build leaves them
+    // out (see the cross-compilation region above).
+    if (!cross) {
+        const ward_hosting_test = b.addSystemCommand(&.{"python3"});
+        ward_hosting_test.addFileArg(b.path("scripts/test_ward_hosting.py"));
+        ward_hosting_test.addArtifactArg(exe);
+        test_step.dependOn(&ward_hosting_test.step);
+        const ward_client_tests = b.addTest(.{ .root_module = ward_mod });
+        const ward_client_run = b.addRunArtifact(ward_client_tests);
+        test_step.dependOn(&ward_client_run.step);
+    }
+    addTreePolicyChecks(b, test_step, exe, cross);
     // SHARDED. `test` compiles one test binary per shard in src/test_shards.zig
     // and runs them concurrently — the build system executes independent steps
     // in parallel (default `-j` = core count), so the suite's 78s serial test
@@ -374,12 +427,16 @@ pub fn build(b: *std.Build) void {
     const docs_step = b.step("docs", "Regenerate docs/language-forms.md from the form dispatch tables");
     docs_step.dependOn(&docs_gen_run.step);
 
-    const docs_check_run = b.addRunArtifact(exe);
-    docs_check_run.addArgs(&.{ "gen-language-docs", "--check" });
-    docs_check_run.setCwd(b.path("."));
-    docs_check_run.has_side_effects = true;
-    test_step.dependOn(&docs_check_run.step);
-    b.getInstallStep().dependOn(&docs_check_run.step);
+    // It runs the freshly built `netlisp`, so a cross build cannot perform it
+    // (see the cross-compilation region above); the host jobs are the gate.
+    if (!cross) {
+        const docs_check_run = b.addRunArtifact(exe);
+        docs_check_run.addArgs(&.{ "gen-language-docs", "--check" });
+        docs_check_run.setCwd(b.path("."));
+        docs_check_run.has_side_effects = true;
+        test_step.dependOn(&docs_check_run.step);
+        b.getInstallStep().dependOn(&docs_check_run.step);
+    }
 
     // spec-init: generate starter SPEC.md
     const spec_init_run = b.addRunArtifact(check_exe);
@@ -463,11 +520,16 @@ fn addTestShard(
 
 /// The checks that guard what no Zig test can see: which browser assets have a
 /// gate and whether they parse, whether the JavaScript unit tests still pass,
-/// and whether every closed audit finding still names a live regression test.
+/// whether every closed audit finding still names a live regression test, and
+/// whether the shell/Python release, deploy and test-selection machinery still
+/// behaves (those seams are shell, so the Zig suite cannot reach them).
 ///
-/// All of these are ALSO declared as `[[external]]` gates in guardian.toml, and
-/// that declaration is not what runs them. Measured 2026-08-29: an external
-/// whose command exits nonzero does not block — `guardian-check all` reports
+/// The node/python asset gates below are ALSO declared as `[[external]]` gates
+/// in guardian.toml (the maintainer shell/Python seams at the end of the list
+/// are not, following `test_production_toolchain_pin.sh`: build.zig is their
+/// only home), and that declaration is not what runs them. Measured 2026-08-29:
+/// an external whose command exits nonzero does not block — `guardian-check
+/// all` reports
 /// "0 blocking" with the audit-ledger checker failing under it, and so does
 /// `zig build test`. Every `[[external]]` in this tree is advisory today,
 /// including the twenty-one `node --check` asset gates, which is how a
@@ -476,7 +538,7 @@ fn addTestShard(
 /// the guardian.toml entries stay, because they still declare these files to
 /// the green-run digest and because they are the right home once that path is
 /// fixed. See AUDIT-LEDGER.toml DRIFT-INFRA-004.
-fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step, exe: *std.Build.Step.Compile) void {
+fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step, exe: *std.Build.Step.Compile, cross: bool) void {
     // Every check below spawns `node` or `python3`. Order them behind the
     // host-prerequisite probe so a machine without them reports what to
     // install instead of a bare "unable to spawn" from whichever gate lost the
@@ -510,6 +572,32 @@ fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step, exe: *std.Buil
         &.{ "node", "scripts/test_pcb_region.js" },
         &.{ "node", "scripts/gerber_measure_snap_test.mjs" },
         &.{ "node", "scripts/perf_host_idle.test.js" },
+
+        // ── Maintainer shell/Python seams ────────────────────────────────
+        // The release, deploy and test-selection machinery is shell and
+        // Python, so no Zig test can reach it — and until this block, nothing
+        // else did either. `scripts/test_deploy_debounce.sh` is the proof: it
+        // sat at 39 of 73 checks FAILING for weeks (the compiler-pin check
+        // added to deploy-prod.sh aborted every case before it reached the
+        // queue) and no build, gate or CI job was in a position to notice.
+        // Each of these runs entirely inside a throwaway `mktemp -d` git repo
+        // against COPIES of the tracked scripts, with `zig`/`node`/the deploy
+        // tail stubbed, so none of them can reach this repository, the real
+        // systemd units, the owner's design library, or production. Runtimes
+        // on the reference box: 35 s, 3.5 s, 0.15 s, 0.2 s — they run
+        // concurrently with the eight test shards, whose wall is longer.
+        &.{"scripts/test_deploy_debounce.sh"},
+        &.{"scripts/test_prepare_release_fail_fast.sh"},
+        &.{"scripts/test_worktree_cache_prune.sh"},
+        &.{ "python3", "scripts/test_affected_test.py" },
+        // NOT wired, deliberately: `scripts/test_shard_balance.py` is not a
+        // test despite the name — it is the generator that REWRITES
+        // src/test_shards.zig. Its `measure` subcommand needs a compiled
+        // unfiltered test binary and re-runs the whole suite one test at a
+        // time (minutes), and `generate` needs a timings file that is not
+        // tracked, so there is nothing hermetic and sub-30s to hang here. The
+        // manifest it produces is already gated: src/test_root.zig proves the
+        // shard list partitions the tree.
     };
     for (checks) |argv| {
         const run = b.addSystemCommand(argv);
@@ -534,6 +622,11 @@ fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step, exe: *std.Buil
     // artifact's path is passed as an argument. `addArtifactArg` depends on
     // the COMPILE step, never on the install step, so `test` still writes
     // nothing to zig-out/ (asserted by assertDoesNotInstall).
+    //
+    // It EXECUTES that artifact, so a cross build cannot run it at all — see
+    // the cross-compilation region in `build`. Everything above this point is
+    // a host program reading the tree and stays wired either way.
+    if (cross) return;
     const examples = b.addSystemCommand(&.{ "scripts/check_examples.sh", "--netlisp" });
     examples.addArtifactArg(exe);
     examples.setCwd(b.path("."));
