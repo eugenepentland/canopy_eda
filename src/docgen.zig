@@ -74,6 +74,8 @@ fn renderTo(writer: anytype) !void {
         try writer.writeAll(" |\n");
     }
 
+    try renderStructuralForms(writer);
+
     try writer.writeAll(
         \\
         \\## Builtin operators
@@ -152,6 +154,48 @@ fn renderTo(writer: anytype) !void {
     try renderClassifierKeywords(writer);
 
     try renderReferenceAppendices(writer);
+}
+
+/// Render the "Structural control flow" section from
+/// `forms.structural_form_docs`: the special forms that are ALSO design-scope
+/// statements, with the same D/S/s scope column the design-scope table uses.
+fn renderStructuralForms(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Structural control flow
+        \\
+        \\The special forms above that are also design-scope STATEMENTS: their
+        \\body holds whatever the enclosing scope accepts, so a whole
+        \\sub-circuit can be conditional or repeated. The scope column reads
+        \\as it does for design-scope forms: **D** = design-block top level,
+        \\**S** = section, **s** = sub-section. A body form illegal in the
+        \\enclosing scope is reported at its own source location, exactly as a
+        \\hand-written sibling would be.
+        \\
+        \\Identity: the OUTERMOST structural form owns one source-resident
+        \\`(id …)` anchor, minted by the build when missing. Every child it
+        \\emits derives its id from that anchor, the child's own stable origin
+        \\key, and the accumulated key path of the enclosing branches and
+        \\iterations — so nesting composes and a condition flip cannot alias a
+        \\then-child with an else-child. An `(ids ("origin@key" hex8)…)`
+        \\sidecar on the anchor form pins migrated identities.
+        \\
+        \\| Form | Scope | Identity |
+        \\| --- | --- | --- |
+        \\
+    );
+    for (forms.structural_form_docs) |row| {
+        const doc = forms.special_form_docs[@backingInt(row.form)];
+        try writer.writeAll("| `");
+        try writeCell(writer, doc.syntax);
+        try writer.writeAll("` | ");
+        if (row.scope.design_block) try writer.writeAll("D") else try writer.writeAll("·");
+        if (row.scope.section) try writer.writeAll("S") else try writer.writeAll("·");
+        if (row.scope.sub_section) try writer.writeAll("s") else try writer.writeAll("·");
+        try writer.writeAll(" | ");
+        try writeCell(writer, row.identity);
+        try writer.writeAll(" |\n");
+    }
 }
 
 /// Render the "Design-scope forms" section from `forms.scope_form_docs`, the

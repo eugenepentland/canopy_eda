@@ -726,3 +726,9 @@ real time and none is specific to that board.
   `.gitignore` now excludes them under `examples/*/`.
 - **`export-schematic-png` refuses more than 8 hubs**, and test points and
   mounting holes count as hubs, so a 20-part board already needs `--ref`.
+
+## 2026-09-05 · claude · structural control flow in every design scope
+- **blocker:** `zig build test-affected` died with `error: writing dependencies.zig contents: NoSpaceLeft` — the root volume was at 100% (0 bytes free) with 211 worktrees under `.claude/worktrees/`, several holding 12–18 GB generated `.zig-cache` trees from sessions a day or more old. This is the same failure as the 2026-08-25 entry above, recurring at a much larger scale now that waves of parallel agents each create a worktree. Deleting four stale caches (`twin-parity`, `rf-taper-complete`, `autoroute-taper-polygon`, `autoroute-rf-gap`) freed 100 GB and the suite then passed; cost was 3 diagnostic calls plus one full re-run.
+- **idea:** Make the cleanup mechanical rather than per-agent judgement — e.g. `scripts/worktree_gc.sh` (or a `zig build worktree-gc` step) that deletes `.zig-cache`/`zig-out` under any worktree whose branch is merged into `main` or whose tree has been untouched for N hours, and a preflight in the worktree-creation docs that fails loudly with the offending sizes. Every agent that hits this currently re-derives the same `du -sh .claude/worktrees/*/.zig-cache` investigation, and the alternative — guessing which worktree is safe to prune — is exactly the risk the docs should remove.
+- **workaround:** `du -sh .claude/worktrees/*/.zig-cache | sort -h | tail`, cross-check `ls -dlt .claude/worktrees/*/` for age, and delete only `.zig-cache` (rebuildable) from worktrees older than the current wave — never the worktree itself.
+- **status:** mitigated

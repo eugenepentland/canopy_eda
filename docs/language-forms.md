@@ -19,7 +19,9 @@ Arguments are passed un-evaluated; each form decides what to evaluate.
 | `(let name expr)` | 2 | Bind `name` to the evaluated value of `expr` in the current scope. |
 | `(repeat name start end body… [(id hex8)] [(ids ("origin@index" hex8)…)])` | 4+ | Evaluate `body` once per integer from `start` through `end`, inclusive, with `name` bound in a fresh lexical scope for each iteration. The optional IDs sidecar pins migrated child identities; otherwise they derive from origin key + index. |
 | `(for name (item…) body… [(id hex8)] [(ids ("origin@ordinal" hex8)…)])` | 3+ | Evaluate `body` once per listed item — strings, numbers, or expressions — with `name` bound in a fresh lexical scope for each. The list sibling of `repeat`, so a channel letter can drive `(fmt …)` names; child identities derive from origin key + 0-based ordinal unless the IDs sidecar pins them. |
-| `(if cond then else)` | 3 | Short-circuit conditional. Only the matching branch is evaluated. |
+| `(if cond then else)` | 3 | Short-circuit conditional. Only the matching branch is evaluated. In design scope each branch is a single form and the whole conditional is sugar for `when`/`unless`. |
+| `(when cond form… [(id hex8)] [(ids ("origin@branch" hex8)…)])` | 2+ | Evaluate `form…` only when `cond` is true. In design scope the body may hold any form the enclosing scope accepts, so a whole sub-circuit can be made conditional. |
+| `(unless cond form… [(id hex8)] [(ids ("origin@branch" hex8)…)])` | 2+ | `when`'s negation — evaluate `form…` only when `cond` is false. |
 | `(import name…)` | 1+ | Load library components or modules by name. Searches `lib/components/` then `lib/modules/`. |
 | `(defmodule name (param \| (param default)…) ["docstring"] body…)` | 2+ | Define a parameterised module that closes over the surrounding env. A `(param default)` pair makes the argument optional — its default evaluates at call time when omitted, so a fully-defaulted module also renders standalone. |
 | `(design-block "name" form…)` | 1+ | The root container — every `.sexp` design file evaluates to one. |
@@ -29,6 +31,32 @@ Arguments are passed un-evaluated; each form decides what to evaluate.
 | `(fmt "template" args…)` | 1+ | Format a string. See the “String formatting directives” table for the `~X` specifiers. |
 | `(id <hex8>)` | — | Stable 8-char identifier auto-inserted by the build. Evaluator short-circuits to `.nil`. |
 | `(implements component [(policy canonical\|recommended\|example)] [(role name)])` | 1+ | Declare that the enclosing module implements a primary component. Canonical implementations prohibit direct board instantiation; recommended implementations warn; examples are discovery-only. |
+
+## Structural control flow
+
+The special forms above that are also design-scope STATEMENTS: their
+body holds whatever the enclosing scope accepts, so a whole
+sub-circuit can be conditional or repeated. The scope column reads
+as it does for design-scope forms: **D** = design-block top level,
+**S** = section, **s** = sub-section. A body form illegal in the
+enclosing scope is reported at its own source location, exactly as a
+hand-written sibling would be.
+
+Identity: the OUTERMOST structural form owns one source-resident
+`(id …)` anchor, minted by the build when missing. Every child it
+emits derives its id from that anchor, the child's own stable origin
+key, and the accumulated key path of the enclosing branches and
+iterations — so nesting composes and a condition flip cannot alias a
+then-child with an else-child. An `(ids ("origin@key" hex8)…)`
+sidecar on the anchor form pins migrated identities.
+
+| Form | Scope | Identity |
+| --- | --- | --- |
+| `(when cond form… [(id hex8)] [(ids ("origin@branch" hex8)…)])` | DSs | Children key off the anchor plus branch key `@t`. |
+| `(unless cond form… [(id hex8)] [(ids ("origin@branch" hex8)…)])` | DSs | Children key off the anchor plus branch key `@t`. |
+| `(if cond then else)` | DSs | Then-children key `@t`, else-children `@f`, so a condition flip cannot alias them. |
+| `(for name (item…) body… [(id hex8)] [(ids ("origin@ordinal" hex8)…)])` | DSs | Children key off the anchor plus the item's 0-based ordinal. |
+| `(repeat name start end body… [(id hex8)] [(ids ("origin@index" hex8)…)])` | DSs | Children key off the anchor plus the loop index. |
 
 ## Builtin operators
 

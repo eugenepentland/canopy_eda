@@ -22,6 +22,7 @@ const validate = @import("validate.zig");
 const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
 const special_forms = @import("special_forms.zig");
+const scope_control = @import("scope_control.zig");
 const rails_mod = @import("rails.zig");
 const net_envelopes = @import("net_envelopes.zig");
 const physical_checks = @import("../req_physical_checks.zig");
@@ -354,6 +355,40 @@ const BlockBuildState = struct {
     kicad_pcb_path: *?[]const u8,
     net_form_sources: *std.StringHashMapUnmanaged(u32),
     has_explicit_layout: bool = false,
+    /// Structural control-flow state for THIS materialization: how many
+    /// `(when …)`/`(if …)`/`(for …)` forms are open, the accumulated
+    /// child-identity key path, and the outermost form's `(id …)` anchor.
+    /// Scoped to the block by living here — a sub-block's module body opens
+    /// its own nest and cannot inherit the caller's key path.
+    structural: scope_control.State = .{},
+};
+
+/// The block-wide accumulators a `(section …)` — and everything nested inside
+/// one — writes into, plus the structural state every scope of this
+/// materialization shares. One bundle instead of five parallel parameters,
+/// which is also what lets the section dispatchers stay under their parameter
+/// cap while carrying control-flow state.
+const BlockContext = struct {
+    tp: test_point_mod.EvalContext,
+    net_ties: *std.ArrayList(NetTie),
+    sections: *std.ArrayList(env_mod.Section),
+    sub_blocks: *std.ArrayList(SubBlock),
+    structural: *scope_control.State,
+
+    fn of(build: *BlockBuildState) BlockContext {
+        return .{
+            .tp = .{
+                .instances = build.instances,
+                .pin_nets = build.all_pin_nets,
+                .notes = build.notes,
+                .test_points = build.test_points,
+            },
+            .net_ties = build.net_ties,
+            .sections = build.sections,
+            .sub_blocks = build.sub_blocks,
+            .structural = &build.structural,
+        };
+    }
 };
 
 fn evalBlockBodyForms(
@@ -365,133 +400,29 @@ fn evalBlockBodyForms(
     for (body_forms) |form| try evalBlockBodyForm(self, form, env, build);
 }
 
-/// Expand a design-scope `(repeat name start end body…)`. Each body form runs
-/// through `evalBlockBodyForm`, so an expanded instance/sub-block/net is
-/// indistinguishable from the same form written out by hand. The repeat owns
-/// one source-resident ID anchor; generated children derive from that anchor,
-/// their normal `origin_key`, and the lexical index, avoiding impossible
-/// per-iteration `(id …)` insertions at one shared source offset. A repeat-level
-/// `(ids ("origin@index" token) …)` sidecar overrides individual derivations so
-/// an unrolled design can migrate without changing its established PCB UUIDs.
-fn evalBlockRepeat(
-    self: *Evaluator,
-    form_children: []const Node,
-    env: *Env,
+/// The design-block scope as structural control flow sees it: its own child
+/// dispatcher plus the accumulators a stamped child lands in. Sections built
+/// inside a body retain value copies of their member instances, so they are
+/// handed over too and re-synced after every stamp.
+const BlockScopeSink = struct {
     build: *BlockBuildState,
-) EvalError!void {
-    const spec = try special_forms.parseRepeat(self, form_children[1..], env);
-    const loop = try beginBlockLoop(self, form_children);
-    var it = spec.iterator();
-    while (it.next()) |index| {
-        var loop_env = Env.init(self.allocator, env);
-        defer loop_env.deinit();
-        try loop_env.put(spec.name, .{ .number = @floatFromInt(index) });
-        try evalBlockLoopIteration(self, spec.body, &loop_env, build, loop, index);
-    }
-}
 
-/// Expand a design-scope `(for name (item…) body…)`. Same machinery as
-/// `evalBlockRepeat` — one source-resident anchor, children derived from it
-/// plus their `origin_key` — with the lexical index being the item's 0-based
-/// ordinal rather than a loop counter, so `(ids ("C_A@0" token) …)` migrates a
-/// hand-unrolled block exactly as it does for `repeat`.
-fn evalBlockFor(
-    self: *Evaluator,
-    form_children: []const Node,
-    env: *Env,
-    build: *BlockBuildState,
-) EvalError!void {
-    const spec = try special_forms.parseFor(self, form_children[1..]);
-    const loop = try beginBlockLoop(self, form_children);
-    for (spec.items, 0..) |item, ordinal| {
-        const value = try self.evalNode(item, env);
-        var loop_env = Env.init(self.allocator, env);
-        defer loop_env.deinit();
-        try loop_env.put(spec.name, value);
-        try evalBlockLoopIteration(self, spec.body, &loop_env, build, loop, @intCast(ordinal));
+    pub fn emit(self: BlockScopeSink, ev: *Evaluator, form: Node, env: *Env) EvalError!void {
+        return evalBlockBodyForm(ev, form, env, self.build);
     }
-}
 
-/// The identity anchor a design-scope loop form owns: one source-resident
-/// `(id …)` plus its optional `(ids …)` migration sidecar.
-const BlockLoopIdentity = struct {
-    anchor: []const u8,
-    sidecar: ids.ChildIdSidecar,
+    pub fn targets(self: BlockScopeSink) scope_control.Targets {
+        return .{
+            .instances = self.build.instances,
+            .sub_blocks = self.build.sub_blocks,
+            .sections = self.build.sections,
+        };
+    }
+
+    pub fn state(self: BlockScopeSink) *scope_control.State {
+        return &self.build.structural;
+    }
 };
-
-fn beginBlockLoop(self: *Evaluator, form_children: []const Node) EvalError!BlockLoopIdentity {
-    return .{
-        .anchor = try ids.getOrCreateFormId(self, form_children),
-        .sidecar = ids.parseChildIdSidecar(self, form_children),
-    };
-}
-
-/// Materialize one loop iteration's body and stamp every child it produced
-/// with an identity derived from the loop's anchor and this lexical index.
-fn evalBlockLoopIteration(
-    self: *Evaluator,
-    body: []const Node,
-    loop_env: *Env,
-    build: *BlockBuildState,
-    loop: BlockLoopIdentity,
-    index: i64,
-) EvalError!void {
-    const first_instance = build.instances.items.len;
-    const first_sub_block = build.sub_blocks.items.len;
-    const first_section = build.sections.items.len;
-    // Child forms share one source location across every iteration. Drop
-    // their normal pending writes and retain only the loop form's anchor.
-    const pending_id_len = self.pending_ids.items.len;
-    const pending_child_id_len = self.pending_child_ids.items.len;
-    evalBlockBodyForms(self, body, loop_env, build) catch |err| {
-        self.pending_ids.items.len = pending_id_len;
-        self.pending_child_ids.items.len = pending_child_id_len;
-        return err;
-    };
-    self.pending_ids.items.len = pending_id_len;
-    self.pending_child_ids.items.len = pending_child_id_len;
-
-    const new_instances = build.instances.items[first_instance..];
-    for (new_instances) |*inst| {
-        const origin = if (inst.origin_key.len > 0) inst.origin_key else inst.ref_des;
-        inst.id = try repeatChildId(self, loop.anchor, &loop.sidecar, origin, index);
-    }
-    for (build.sub_blocks.items[first_sub_block..]) |*sb| {
-        const subblock_uuid = try repeatChildId(self, loop.anchor, &loop.sidecar, sb.name, index);
-        try ids.reassignSubBlockIdsV4(self, sb.block, subblock_uuid);
-    }
-    // Sections retain value copies of their member instances. Mirror the
-    // freshly-derived IDs into those copies so every renderer/export path
-    // observes the same identity as the top-level instance slice.
-    syncRepeatedSectionIds(build.sections.items[first_section..], new_instances);
-}
-
-fn repeatChildId(
-    self: *Evaluator,
-    repeat_id: []const u8,
-    sidecar: *const ids.ChildIdSidecar,
-    origin_key: []const u8,
-    index: i64,
-) EvalError![]const u8 {
-    const indexed_key = std.fmt.allocPrint(self.allocator, "{s}@{d}", .{ origin_key, index }) catch
-        return EvalError.OutOfMemory;
-    if (sidecar.map.get(indexed_key)) |migration_id| return migration_id;
-    return ids.deriveChildId(self, repeat_id, indexed_key, 0);
-}
-
-fn syncRepeatedSectionIds(sections: []env_mod.Section, instances: []const Instance) void {
-    for (sections) |*section| {
-        for (@as([]Instance, @constCast(section.instances))) |*copy| {
-            for (instances) |inst| {
-                if (std.mem.eql(u8, copy.ref_des, inst.ref_des)) {
-                    copy.id = inst.id;
-                    break;
-                }
-            }
-        }
-        syncRepeatedSectionIds(@constCast(section.sub_sections), instances);
-    }
-}
 
 fn evalBlockBodyForm(
     self: *Evaluator,
@@ -507,21 +438,20 @@ fn evalBlockBodyForm(
     // evaluate `(let …)`/`(assert …)`/`(import …)`/`(id …)` for their
     // binding/effect, then continue. (A `(design-block …)` body never holds
     // these; in the wrapped form they precede the inner block.)
-    if (forms_mod.SpecialForm.fromAtom(form_name)) |special| switch (special) {
-        .let, .assert_, .assert_range, .import, .id_, .implements => {
-            _ = try self.evalNode(form, env);
-            return;
-        },
-        .repeat => {
-            try evalBlockRepeat(self, form_children, env, build);
-            return;
-        },
-        .for_ => {
-            try evalBlockFor(self, form_children, env, build);
-            return;
-        },
-        else => {},
-    };
+    if (forms_mod.SpecialForm.fromAtom(form_name)) |special| {
+        // Structural control flow (`when`/`unless`/`if`/`for`/`repeat`)
+        // materializes its body through this very dispatcher, so a generated
+        // form is indistinguishable from the same form written out by hand.
+        if (scope_control.kindOf(special)) |kind|
+            return scope_control.evalForm(self, kind, form_children, env, BlockScopeSink{ .build = build });
+        switch (special) {
+            .let, .assert_, .assert_range, .import, .id_, .implements => {
+                _ = try self.evalNode(form, env);
+                return;
+            },
+            else => {},
+        }
+    }
 
     const sf = ScopeForm.fromAtom(form_name) orelse {
         if (!isInertFormHead(form_name))
@@ -557,12 +487,7 @@ fn evalBlockBodyForm(
             try evalSubBlockBridges(self, form_children, sb.name, build.net_ties);
             try build.sub_blocks.append(self.allocator, sb);
         },
-        .section => try evalSection(self, form_children, env, .{
-            .instances = build.instances,
-            .pin_nets = build.all_pin_nets,
-            .notes = build.notes,
-            .test_points = build.test_points,
-        }, build.net_ties, build.sections, build.sub_blocks),
+        .section => try evalSection(self, form_children, env, BlockContext.of(build)),
         .net => {
             try evalNetForm(self, form_children, env, build.net_ties);
             validate.trackNetFormSource(self, form_children, env, build.net_form_sources);
@@ -1198,19 +1123,54 @@ fn parseDiagramHidden(self: *Evaluator, children: []const Node) bool {
     return false;
 }
 
+/// The per-section accumulators a section child form writes into. Bundling
+/// them lets one dispatcher (`evalSectionChild`) serve both a hand-written
+/// child and one materialized by structural control flow, without growing
+/// `evalSection`'s parameter list.
+const SectionCtx = struct {
+    name: []const u8,
+    block: BlockContext,
+    shared: SectionScope,
+    instances: *std.ArrayList(Instance),
+    pin_groups: *std.ArrayList(env_mod.PinGroup),
+    sub_sections: *std.ArrayList(env_mod.Section),
+    hosts: *std.ArrayList([]const u8),
+    block_role: *env_mod.BlockRole,
+    diagram_hidden: *bool,
+    category: *[]const u8,
+};
+
+/// The section scope as structural control flow sees it: its own child
+/// dispatcher plus the accumulators a stamped child lands in. Section-local
+/// instance copies are mirrored so their ids track the block-wide slice.
+const SectionSink = struct {
+    ctx: *SectionCtx,
+
+    pub fn emit(self: SectionSink, ev: *Evaluator, form: Node, env: *Env) EvalError!void {
+        return evalSectionChild(ev, form, env, self.ctx);
+    }
+
+    pub fn targets(self: SectionSink) scope_control.Targets {
+        return .{
+            .instances = self.ctx.block.tp.instances,
+            .sub_blocks = self.ctx.block.sub_blocks,
+            .sections = self.ctx.sub_sections,
+            .mirrors = .{ self.ctx.instances, null },
+        };
+    }
+
+    pub fn state(self: SectionSink) *scope_control.State {
+        return self.ctx.block.structural;
+    }
+};
+
 /// Evaluate a section form and its children.
 fn evalSection(
     self: *Evaluator,
     form_children: []const Node,
     env: *Env,
-    test_point_ctx: test_point_mod.EvalContext,
-    net_ties: *std.ArrayList(NetTie),
-    sections: *std.ArrayList(env_mod.Section),
-    sub_blocks: *std.ArrayList(SubBlock),
+    block: BlockContext,
 ) EvalError!void {
-    const instances = test_point_ctx.instances;
-    const all_pin_nets = test_point_ctx.pin_nets;
-    const notes = test_point_ctx.notes;
     if (form_children.len < 2) return;
     const sec_name_val = try self.evalNode(form_children[1], env);
     const sec_name = sec_name_val.asString() orelse return;
@@ -1235,110 +1195,26 @@ fn evalSection(
             child_start = 3;
         }
     }
-    const scope = SectionScope{
-        .description = &sec_description,
-        .notes = &sec_notes,
-        .ports = &sec_ports,
-        .protocols = &sec_protocols,
-        .calcs = &sec_calcs,
+    var ctx = SectionCtx{
+        .name = sec_name,
+        .block = block,
+        .shared = .{
+            .description = &sec_description,
+            .notes = &sec_notes,
+            .ports = &sec_ports,
+            .protocols = &sec_protocols,
+            .calcs = &sec_calcs,
+        },
+        .instances = &sec_instances,
+        .pin_groups = &sec_pin_groups,
+        .sub_sections = &sec_sub_sections,
+        .hosts = &sec_hosts,
+        .block_role = &block_role,
+        .diagram_hidden = &diagram_hidden,
+        .category = &sec_category,
     };
 
-    for (form_children[child_start..]) |sf| {
-        const sf_children = sf.asList() orelse continue;
-        if (sf_children.len == 0) continue;
-        const sf_name = sf_children[0].asAtom() orelse continue;
-        const sft = ScopeForm.fromAtom(sf_name) orelse {
-            if (!isInertFormHead(sf_name))
-                self.warnFmt(sf.span, "unknown sub-form ({s} …) in (section …)", .{sf_name});
-            continue;
-        };
-
-        if (try processSharedSectionForm(self, sft, sf_children, env, scope)) continue;
-
-        switch (sft) {
-            .role => block_role = parseSectionRole(self, sf_children),
-            .diagram => diagram_hidden = parseDiagramHidden(self, sf_children),
-            .hosts => {
-                for (sf_children[1..]) |h| {
-                    if (h.asString()) |sub_name| try sec_hosts.append(self.allocator, sub_name);
-                }
-            },
-            .category => {
-                if (sf_children.len >= 2) sec_category = sf_children[1].asText() orelse "";
-            },
-            .bus_port => try builders.expandSectionBusPort(self, sf_children, env, &sec_ports),
-            .diff_port => try builders.expandSectionDiffPort(self, sf_children, env, &sec_ports),
-            .instance => {
-                const result = try instance_mod.buildInstance(self, sf_children, env);
-                try ids.noteAuthoredRefDes(self, result.instance.ref_des, sf_children[0].span);
-                try instances.append(self.allocator, result.instance);
-                try sec_instances.append(self.allocator, result.instance);
-                for (result.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
-                for (result.inline_notes) |note| try notes.append(self.allocator, note);
-                try appendAutoAliases(self, result.instance, result.pin_nets, net_ties);
-            },
-            .pins => try evalPinsForm(self, sf_children, sec_name, env, instances, all_pin_nets, net_ties, &sec_pin_groups),
-            .decouple => {
-                const pre_count = instances.items.len;
-                try evalDecoupleForm(self, sf_children, env, instances, all_pin_nets);
-                for (instances.items[pre_count..]) |new_inst| try sec_instances.append(self.allocator, new_inst);
-            },
-            .series => {
-                const pre_s = instances.items.len;
-                try instance_mod.evalSeriesForm(self, sf_children, env, instances, all_pin_nets, notes);
-                for (instances.items[pre_s..]) |new_inst| try sec_instances.append(self.allocator, new_inst);
-            },
-            .fanout => {
-                const pre_f = instances.items.len;
-                try instance_mod.evalFanoutForm(self, sf_children, env, instances, all_pin_nets);
-                for (instances.items[pre_f..]) |new_inst| try sec_instances.append(self.allocator, new_inst);
-            },
-            .net => try evalNetForm(self, sf_children, env, net_ties),
-            .bus_net => try evalBusNetForm(self, sf_children, env, net_ties),
-            .section => try evalSubSection(self, sf_children, env, test_point_ctx, net_ties, &sec_instances, &sec_sub_sections, sub_blocks),
-            .test_point => if (try test_point_mod.evalForm(self, sf_children, env, test_point_ctx)) |inst|
-                try sec_instances.append(self.allocator, inst),
-            .sub_block => {
-                const sb = try builders.buildSubBlock(self, sf_children, env);
-                try evalSubBlockBridges(self, sf_children, sb.name, net_ties);
-                try sec_hosts.append(self.allocator, sb.name);
-                try sub_blocks.append(self.allocator, sb);
-            },
-            .pullup, .pulldown, .divider, .led => {
-                const first = instances.items.len;
-                try evalMicroForm(self, sft, sf_children, env, instances, all_pin_nets);
-                for (instances.items[first..]) |new_inst| try sec_instances.append(self.allocator, new_inst);
-            },
-            // Shared-form variants are consumed above by
-            // `processSharedSectionForm`; top-level-only forms are
-            // ignored inside a section body (with a lint warning so the
-            // silent skip is visible).
-            .description, .note, .port, .protocol, .calc => {},
-            .group,
-            .function,
-            .verifies,
-            .decouple_defaults,
-            .kicad_pcb,
-            .stub,
-            .layout,
-            .board,
-            .board_role,
-            .power_plane,
-            .revision,
-            .rough,
-            .stackup,
-            .pdn,
-            .net_envelope,
-            .fabrication_layer,
-            .net_class,
-            .pll_loop,
-            .frequency_plan,
-            .design_rules,
-            .pcb_plan,
-            .module_policy,
-            => self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name}),
-        }
-    }
+    for (form_children[child_start..]) |sf| try evalSectionChild(self, sf, env, &ctx);
 
     const final_instances = sec_instances.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
     const final_pin_groups = sec_pin_groups.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
@@ -1350,7 +1226,7 @@ fn evalSection(
     else
         env_mod.SectionStatus.implemented;
 
-    try sections.append(self.allocator, .{
+    try block.sections.append(self.allocator, .{
         .name = sec_name,
         .description = sec_description,
         .notes = sec_notes.toOwnedSlice(self.allocator) catch &.{},
@@ -1366,6 +1242,122 @@ fn evalSection(
         .category = sec_category,
         .hosts = sec_hosts.toOwnedSlice(self.allocator) catch &.{},
     });
+}
+
+/// Materialize one child form of a `(section …)`. Structural control flow
+/// (`when`/`unless`/`if`/`for`/`repeat`) recurses through here, so a form
+/// inside a branch is accepted — or rejected, at its own source location —
+/// by exactly the grammar a hand-written sibling would meet.
+fn evalSectionChild(
+    self: *Evaluator,
+    sf: Node,
+    env: *Env,
+    ctx: *SectionCtx,
+) EvalError!void {
+    const instances = ctx.block.tp.instances;
+    const all_pin_nets = ctx.block.tp.pin_nets;
+    const notes = ctx.block.tp.notes;
+    const net_ties = ctx.block.net_ties;
+    const sf_children = sf.asList() orelse return;
+    if (sf_children.len == 0) return;
+    const sf_name = sf_children[0].asAtom() orelse return;
+
+    if (forms_mod.SpecialForm.fromAtom(sf_name)) |special| {
+        if (scope_control.kindOf(special)) |kind|
+            return scope_control.evalForm(self, kind, sf_children, env, SectionSink{ .ctx = ctx });
+    }
+
+    const sft = ScopeForm.fromAtom(sf_name) orelse {
+        if (!isInertFormHead(sf_name))
+            self.warnFmt(sf.span, "unknown sub-form ({s} …) in (section …)", .{sf_name});
+        return;
+    };
+
+    if (try processSharedSectionForm(self, sft, sf_children, env, ctx.shared)) return;
+
+    switch (sft) {
+        .role => ctx.block_role.* = parseSectionRole(self, sf_children),
+        .diagram => ctx.diagram_hidden.* = parseDiagramHidden(self, sf_children),
+        .hosts => {
+            for (sf_children[1..]) |h| {
+                if (h.asString()) |sub_name| try ctx.hosts.append(self.allocator, sub_name);
+            }
+        },
+        .category => {
+            if (sf_children.len >= 2) ctx.category.* = sf_children[1].asText() orelse "";
+        },
+        .bus_port => try builders.expandSectionBusPort(self, sf_children, env, ctx.shared.ports),
+        .diff_port => try builders.expandSectionDiffPort(self, sf_children, env, ctx.shared.ports),
+        .instance => {
+            const result = try instance_mod.buildInstance(self, sf_children, env);
+            try ids.noteAuthoredRefDes(self, result.instance.ref_des, sf_children[0].span);
+            try instances.append(self.allocator, result.instance);
+            try ctx.instances.append(self.allocator, result.instance);
+            for (result.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
+            for (result.inline_notes) |note| try notes.append(self.allocator, note);
+            try appendAutoAliases(self, result.instance, result.pin_nets, net_ties);
+        },
+        .pins => try evalPinsForm(self, sf_children, ctx.name, env, instances, all_pin_nets, net_ties, ctx.pin_groups),
+        .decouple => {
+            const pre_count = instances.items.len;
+            try evalDecoupleForm(self, sf_children, env, instances, all_pin_nets);
+            for (instances.items[pre_count..]) |new_inst| try ctx.instances.append(self.allocator, new_inst);
+        },
+        .series => {
+            const pre_s = instances.items.len;
+            try instance_mod.evalSeriesForm(self, sf_children, env, instances, all_pin_nets, notes);
+            for (instances.items[pre_s..]) |new_inst| try ctx.instances.append(self.allocator, new_inst);
+        },
+        .fanout => {
+            const pre_f = instances.items.len;
+            try instance_mod.evalFanoutForm(self, sf_children, env, instances, all_pin_nets);
+            for (instances.items[pre_f..]) |new_inst| try ctx.instances.append(self.allocator, new_inst);
+        },
+        .net => try evalNetForm(self, sf_children, env, net_ties),
+        .bus_net => try evalBusNetForm(self, sf_children, env, net_ties),
+        .section => try evalSubSection(self, sf_children, env, ctx.block, ctx.instances, ctx.sub_sections),
+        .test_point => if (try test_point_mod.evalForm(self, sf_children, env, ctx.block.tp)) |inst|
+            try ctx.instances.append(self.allocator, inst),
+        .sub_block => {
+            const sb = try builders.buildSubBlock(self, sf_children, env);
+            try evalSubBlockBridges(self, sf_children, sb.name, net_ties);
+            try ctx.hosts.append(self.allocator, sb.name);
+            try ctx.block.sub_blocks.append(self.allocator, sb);
+        },
+        .pullup, .pulldown, .divider, .led => {
+            const first = instances.items.len;
+            try evalMicroForm(self, sft, sf_children, env, instances, all_pin_nets);
+            for (instances.items[first..]) |new_inst| try ctx.instances.append(self.allocator, new_inst);
+        },
+        // Shared-form variants are consumed above by
+        // `processSharedSectionForm`; top-level-only forms are
+        // ignored inside a section body (with a lint warning so the
+        // silent skip is visible).
+        .description, .note, .port, .protocol, .calc => {},
+        .group,
+        .function,
+        .verifies,
+        .decouple_defaults,
+        .kicad_pcb,
+        .stub,
+        .layout,
+        .board,
+        .board_role,
+        .power_plane,
+        .revision,
+        .rough,
+        .stackup,
+        .pdn,
+        .net_envelope,
+        .fabrication_layer,
+        .net_class,
+        .pll_loop,
+        .frequency_plan,
+        .design_rules,
+        .pcb_plan,
+        .module_policy,
+        => self.warnFmt(sf.span, "({s} …) is top-level-only — ignored inside (section …)", .{sf_name}),
+    }
 }
 
 /// Evaluate a (pins ...) form within a section.
@@ -1412,20 +1404,53 @@ fn evalPinsForm(
 }
 
 /// Evaluate a decouple form inside a section.
+/// The per-sub-section accumulators a nested child form writes into. Same
+/// role `SectionCtx` plays one level up: one dispatcher shared by authored
+/// children and by structural control flow.
+const SubSectionCtx = struct {
+    name: []const u8,
+    block: BlockContext,
+    shared: SectionScope,
+    /// The PARENT section's instance list — a nested instance counts toward
+    /// both levels, exactly as a hand-written one does.
+    sec_instances: *std.ArrayList(Instance),
+    instances: *std.ArrayList(Instance),
+    pin_groups: *std.ArrayList(env_mod.PinGroup),
+    hosts: *std.ArrayList([]const u8),
+};
+
+/// The nested-section scope as structural control flow sees it. A nested
+/// instance counts toward both the parent section and the sub-section, so
+/// both copy lists are mirrored.
+const SubSectionSink = struct {
+    ctx: *SubSectionCtx,
+
+    pub fn emit(self: SubSectionSink, ev: *Evaluator, form: Node, env: *Env) EvalError!void {
+        return evalSubSectionChild(ev, form, env, self.ctx);
+    }
+
+    pub fn targets(self: SubSectionSink) scope_control.Targets {
+        return .{
+            .instances = self.ctx.block.tp.instances,
+            .sub_blocks = self.ctx.block.sub_blocks,
+            .mirrors = .{ self.ctx.sec_instances, self.ctx.instances },
+        };
+    }
+
+    pub fn state(self: SubSectionSink) *scope_control.State {
+        return self.ctx.block.structural;
+    }
+};
+
 /// Evaluate a nested sub-section within a section.
 fn evalSubSection(
     self: *Evaluator,
     sf_children: []const Node,
     env: *Env,
-    test_point_ctx: test_point_mod.EvalContext,
-    net_ties: *std.ArrayList(NetTie),
+    block: BlockContext,
     sec_instances: *std.ArrayList(Instance),
     sec_sub_sections: *std.ArrayList(env_mod.Section),
-    sub_blocks: *std.ArrayList(SubBlock),
 ) EvalError!void {
-    const instances = test_point_ctx.instances;
-    const all_pin_nets = test_point_ctx.pin_nets;
-    const notes = test_point_ctx.notes;
     if (sf_children.len < 2) return;
     const sub_name_val = try self.evalNode(sf_children[1], env);
     const sub_name = sub_name_val.asString() orelse return;
@@ -1438,130 +1463,24 @@ fn evalSubSection(
     var sub_calcs: std.ArrayList(env_mod.CalcBlock) = .empty;
     var sub_hosts: std.ArrayList([]const u8) = .empty;
 
-    const sub_scope = SectionScope{
-        .description = &sub_description,
-        .notes = &sub_notes,
-        .ports = &sub_ports,
-        .protocols = &sub_protocols,
-        .calcs = &sub_calcs,
+    var ctx = SubSectionCtx{
+        .name = sub_name,
+        .block = block,
+        .shared = .{
+            .description = &sub_description,
+            .notes = &sub_notes,
+            .ports = &sub_ports,
+            .protocols = &sub_protocols,
+            .calcs = &sub_calcs,
+        },
+        .sec_instances = sec_instances,
+        .instances = &sub_instances,
+        .pin_groups = &sub_pin_groups,
+        .hosts = &sub_hosts,
     };
 
-    for (sf_children[2..]) |ssf| {
-        const ssf_children = ssf.asList() orelse continue;
-        if (ssf_children.len == 0) continue;
-        const ssf_name = ssf_children[0].asAtom() orelse continue;
-        const sft = ScopeForm.fromAtom(ssf_name) orelse {
-            if (!isInertFormHead(ssf_name))
-                self.warnFmt(ssf.span, "unknown sub-form ({s} …) in nested (section …)", .{ssf_name});
-            continue;
-        };
+    for (sf_children[2..]) |ssf| try evalSubSectionChild(self, ssf, env, &ctx);
 
-        if (try processSharedSectionForm(self, sft, ssf_children, env, sub_scope)) continue;
-
-        switch (sft) {
-            .bus_port => try builders.expandSectionBusPort(self, ssf_children, env, &sub_ports),
-            .diff_port => try builders.expandSectionDiffPort(self, ssf_children, env, &sub_ports),
-            .instance => {
-                const result = try instance_mod.buildInstance(self, ssf_children, env);
-                try ids.noteAuthoredRefDes(self, result.instance.ref_des, ssf_children[0].span);
-                try instances.append(self.allocator, result.instance);
-                try sec_instances.append(self.allocator, result.instance);
-                try sub_instances.append(self.allocator, result.instance);
-                for (result.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
-                for (result.inline_notes) |note| try notes.append(self.allocator, note);
-                // Same as the top-level section instance handler: a nested
-                // instance whose pin net differs from its pinout function name
-                // must emit the auto-alias tie, or a net referenced elsewhere
-                // by function name won't merge (wrong net membership).
-                try appendAutoAliases(self, result.instance, result.pin_nets, net_ties);
-            },
-            .pins => {
-                if (ssf_children.len < 2) continue;
-                const pins_ref_val = try self.evalNode(ssf_children[1], env);
-                const pins_ref = pins_ref_val.asString() orelse continue;
-                // Sibling `(group "label")` parsing — mirrors `evalPinsForm`.
-                // The nested copy used to drop it silently (and `group` isn't
-                // warned because `isKnownPinsChild` whitelists it), so a nested
-                // pin group's label just vanished.
-                var group_label2: []const u8 = "";
-                for (ssf_children[2..]) |ch| {
-                    if (!ch.isForm("group")) continue;
-                    const gc = ch.asList() orelse continue;
-                    if (gc.len < 2) continue;
-                    const gv = try self.evalNode(gc[1], env);
-                    group_label2 = gv.asString() orelse (gc[1].asAtom() orelse "");
-                }
-                const pin_func_map2 = builders.findPinFuncMap(self, instances.items, pins_ref);
-                var pg_pins2: std.ArrayList(env_mod.PartPin) = .empty;
-                for (ssf_children[2..]) |pin_form| {
-                    if (pin_form.isForm("group")) continue;
-                    if (!builders.isKnownPinsChild(pin_form)) {
-                        builders.warnUnknownPinsChild(self, pin_form);
-                        continue;
-                    }
-                    try builders.processPinForm(self, pin_form, pins_ref, pin_func_map2, env, all_pin_nets, &pg_pins2, net_ties);
-                }
-                const pg_slice2 = pg_pins2.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
-                if (group_label2.len > 0) {
-                    for (pg_slice2) |*pp| pp.group = group_label2;
-                }
-                try sub_pin_groups.append(self.allocator, .{ .ref_des = pins_ref, .pins = pg_slice2, .group = group_label2 });
-                try builders.addPartToInstance(self, instances.items, pins_ref, sub_name, pg_slice2);
-            },
-            .decouple => {
-                const pre_count = instances.items.len;
-                try evalDecoupleForm(self, ssf_children, env, instances, all_pin_nets);
-                for (instances.items[pre_count..]) |new_inst| {
-                    try sec_instances.append(self.allocator, new_inst);
-                    try sub_instances.append(self.allocator, new_inst);
-                }
-            },
-            .series => {
-                const pre_s = instances.items.len;
-                try instance_mod.evalSeriesForm(self, ssf_children, env, instances, all_pin_nets, notes);
-                for (instances.items[pre_s..]) |new_inst| {
-                    try sec_instances.append(self.allocator, new_inst);
-                    try sub_instances.append(self.allocator, new_inst);
-                }
-            },
-            .fanout => {
-                const pre_f = instances.items.len;
-                try instance_mod.evalFanoutForm(self, ssf_children, env, instances, all_pin_nets);
-                for (instances.items[pre_f..]) |new_inst| {
-                    try sec_instances.append(self.allocator, new_inst);
-                    try sub_instances.append(self.allocator, new_inst);
-                }
-            },
-            .net => try evalNetForm(self, ssf_children, env, net_ties),
-            .bus_net => try evalBusNetForm(self, ssf_children, env, net_ties),
-            .test_point => if (try test_point_mod.evalForm(self, ssf_children, env, test_point_ctx)) |inst| {
-                try sec_instances.append(self.allocator, inst);
-                try sub_instances.append(self.allocator, inst);
-            },
-            .sub_block => {
-                const sb = try builders.buildSubBlock(self, ssf_children, env);
-                try evalSubBlockBridges(self, ssf_children, sb.name, net_ties);
-                try sub_hosts.append(self.allocator, sb.name);
-                try sub_blocks.append(self.allocator, sb);
-            },
-            .pullup, .pulldown, .divider, .led => {
-                const first = instances.items.len;
-                try evalMicroForm(self, sft, ssf_children, env, instances, all_pin_nets);
-                for (instances.items[first..]) |new_inst| {
-                    try sec_instances.append(self.allocator, new_inst);
-                    try sub_instances.append(self.allocator, new_inst);
-                }
-            },
-            // Sub-sections don't recurse, don't carry top-level-only
-            // forms, and don't have `role`/`diagram`. Shared-form
-            // variants went through `processSharedSectionForm` above;
-            // anything else is ignored with a lint warning.
-            .description, .note, .port, .protocol, .calc => {},
-            else => {
-                self.warnFmt(ssf.span, "({s} …) is not valid inside a nested (section …) — ignored", .{ssf_name});
-            },
-        }
-    }
     const final_sub_instances = sub_instances.toOwnedSlice(self.allocator) catch &.{};
     const final_sub_pin_groups = sub_pin_groups.toOwnedSlice(self.allocator) catch &.{};
 
@@ -1582,6 +1501,139 @@ fn evalSubSection(
         .status = status,
         .hosts = sub_hosts.toOwnedSlice(self.allocator) catch &.{},
     });
+}
+
+/// Materialize one child form of a nested `(section …)`.
+fn evalSubSectionChild(
+    self: *Evaluator,
+    ssf: Node,
+    env: *Env,
+    ctx: *SubSectionCtx,
+) EvalError!void {
+    const instances = ctx.block.tp.instances;
+    const all_pin_nets = ctx.block.tp.pin_nets;
+    const notes = ctx.block.tp.notes;
+    const net_ties = ctx.block.net_ties;
+    const ssf_children = ssf.asList() orelse return;
+    if (ssf_children.len == 0) return;
+    const ssf_name = ssf_children[0].asAtom() orelse return;
+
+    if (forms_mod.SpecialForm.fromAtom(ssf_name)) |special| {
+        if (scope_control.kindOf(special)) |kind|
+            return scope_control.evalForm(self, kind, ssf_children, env, SubSectionSink{ .ctx = ctx });
+    }
+
+    const sft = ScopeForm.fromAtom(ssf_name) orelse {
+        if (!isInertFormHead(ssf_name))
+            self.warnFmt(ssf.span, "unknown sub-form ({s} …) in nested (section …)", .{ssf_name});
+        return;
+    };
+
+    if (try processSharedSectionForm(self, sft, ssf_children, env, ctx.shared)) return;
+
+    switch (sft) {
+        .bus_port => try builders.expandSectionBusPort(self, ssf_children, env, ctx.shared.ports),
+        .diff_port => try builders.expandSectionDiffPort(self, ssf_children, env, ctx.shared.ports),
+        .instance => {
+            const result = try instance_mod.buildInstance(self, ssf_children, env);
+            try ids.noteAuthoredRefDes(self, result.instance.ref_des, ssf_children[0].span);
+            try instances.append(self.allocator, result.instance);
+            try ctx.sec_instances.append(self.allocator, result.instance);
+            try ctx.instances.append(self.allocator, result.instance);
+            for (result.pin_nets) |pn| try all_pin_nets.append(self.allocator, pn);
+            for (result.inline_notes) |note| try notes.append(self.allocator, note);
+            // Same as the top-level section instance handler: a nested
+            // instance whose pin net differs from its pinout function name
+            // must emit the auto-alias tie, or a net referenced elsewhere
+            // by function name won't merge (wrong net membership).
+            try appendAutoAliases(self, result.instance, result.pin_nets, net_ties);
+        },
+        .pins => {
+            if (ssf_children.len < 2) return;
+            const pins_ref_val = try self.evalNode(ssf_children[1], env);
+            const pins_ref = pins_ref_val.asString() orelse return;
+            // Sibling `(group "label")` parsing — mirrors `evalPinsForm`.
+            // The nested copy used to drop it silently (and `group` isn't
+            // warned because `isKnownPinsChild` whitelists it), so a nested
+            // pin group's label just vanished.
+            var group_label2: []const u8 = "";
+            for (ssf_children[2..]) |ch| {
+                if (!ch.isForm("group")) continue;
+                const gc = ch.asList() orelse continue;
+                if (gc.len < 2) continue;
+                const gv = try self.evalNode(gc[1], env);
+                group_label2 = gv.asString() orelse (gc[1].asAtom() orelse "");
+            }
+            const pin_func_map2 = builders.findPinFuncMap(self, instances.items, pins_ref);
+            var pg_pins2: std.ArrayList(env_mod.PartPin) = .empty;
+            for (ssf_children[2..]) |pin_form| {
+                if (pin_form.isForm("group")) continue;
+                if (!builders.isKnownPinsChild(pin_form)) {
+                    builders.warnUnknownPinsChild(self, pin_form);
+                    continue;
+                }
+                try builders.processPinForm(self, pin_form, pins_ref, pin_func_map2, env, all_pin_nets, &pg_pins2, net_ties);
+            }
+            const pg_slice2 = pg_pins2.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
+            if (group_label2.len > 0) {
+                for (pg_slice2) |*pp| pp.group = group_label2;
+            }
+            try ctx.pin_groups.append(self.allocator, .{ .ref_des = pins_ref, .pins = pg_slice2, .group = group_label2 });
+            try builders.addPartToInstance(self, instances.items, pins_ref, ctx.name, pg_slice2);
+        },
+        .decouple => {
+            const pre_count = instances.items.len;
+            try evalDecoupleForm(self, ssf_children, env, instances, all_pin_nets);
+            for (instances.items[pre_count..]) |new_inst| {
+                try ctx.sec_instances.append(self.allocator, new_inst);
+                try ctx.instances.append(self.allocator, new_inst);
+            }
+        },
+        .series => {
+            const pre_s = instances.items.len;
+            try instance_mod.evalSeriesForm(self, ssf_children, env, instances, all_pin_nets, notes);
+            for (instances.items[pre_s..]) |new_inst| {
+                try ctx.sec_instances.append(self.allocator, new_inst);
+                try ctx.instances.append(self.allocator, new_inst);
+            }
+        },
+        .fanout => {
+            const pre_f = instances.items.len;
+            try instance_mod.evalFanoutForm(self, ssf_children, env, instances, all_pin_nets);
+            for (instances.items[pre_f..]) |new_inst| {
+                try ctx.sec_instances.append(self.allocator, new_inst);
+                try ctx.instances.append(self.allocator, new_inst);
+            }
+        },
+        .net => try evalNetForm(self, ssf_children, env, net_ties),
+        .bus_net => try evalBusNetForm(self, ssf_children, env, net_ties),
+        .test_point => if (try test_point_mod.evalForm(self, ssf_children, env, ctx.block.tp)) |inst| {
+            try ctx.sec_instances.append(self.allocator, inst);
+            try ctx.instances.append(self.allocator, inst);
+        },
+        .sub_block => {
+            const sb = try builders.buildSubBlock(self, ssf_children, env);
+            try evalSubBlockBridges(self, ssf_children, sb.name, net_ties);
+            try ctx.hosts.append(self.allocator, sb.name);
+            try ctx.block.sub_blocks.append(self.allocator, sb);
+        },
+        .pullup, .pulldown, .divider, .led => {
+            const first = instances.items.len;
+            try evalMicroForm(self, sft, ssf_children, env, instances, all_pin_nets);
+            for (instances.items[first..]) |new_inst| {
+                try ctx.sec_instances.append(self.allocator, new_inst);
+                try ctx.instances.append(self.allocator, new_inst);
+            }
+        },
+        // Sub-sections don't recurse, don't carry top-level-only
+        // forms, and don't have `role`/`diagram`. Shared-form
+        // variants went through `processSharedSectionForm` above;
+        // anything else is ignored with a lint warning.
+        .description, .note, .port, .protocol, .calc => {},
+        else => {
+            self.warnFmt(ssf.span, "({s} …) is not valid inside a nested (section …) — ignored", .{ssf_name});
+        },
+    }
 }
 
 fn evalMicroForm(
