@@ -130,7 +130,7 @@ Two overrides, for a machine that has a local guardian checkout:
   build guardian-selfcheck` runs the guard alone; `GUARDIAN_PREBUILT=off`
   forces the from-source compile back on.
 - `zig build --system <dir>`, where `<dir>` holds a link named for the pin
-  (`ln -s ~/ai/canopy/guardian-zig <dir>/guardian-0.2.0-<hash>`), builds against
+  (`ln -s /path/to/guardian-zig <dir>/guardian-0.2.0-<hash>`), builds against
   a **local, possibly dirty** guardian tree: `--system` matches packages by
   directory name and verifies no hash. Because the dependency root is then a
   real checkout, its `zig-out/bin/guardian-check` is picked up automatically and

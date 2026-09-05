@@ -2,8 +2,9 @@
 # (full `all` suite + whole-tree mutation ratchet) once a day around 03:00.
 #
 # Install / enable (user-level, same as the .service — see that file's header):
-#   systemctl --user daemon-reload
-#   systemctl --user enable --now netlisp-guardian-nightly.timer
+#   .githooks/install.sh --guardian-nightly
+# (that renders netlisp-guardian-nightly.service.in for this checkout, copies
+# this timer beside it, reloads systemd and enables the timer)
 # Check schedule:  systemctl --user list-timers netlisp-guardian-nightly.timer
 # The mutation-score ratchet the service maintains lives in .guardian/mutation.txt.
 

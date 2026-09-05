@@ -56,7 +56,7 @@
         //
         // where <dir> holds one entry per fetched package named exactly as its
         // hash, e.g.
-        // `ln -s ~/ai/canopy/guardian-zig <dir>/guardian-0.2.1-<hash>`.
+        // `ln -s /path/to/guardian-zig <dir>/guardian-0.2.1-<hash>`.
         // `--system` resolves packages by directory name only — no hash
         // verification — so the link may point at a dirty working tree.
         // Guardian is the only URL dep here; everything else is vendored or a

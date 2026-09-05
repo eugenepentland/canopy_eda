@@ -331,3 +331,14 @@ zig build run -- convert-symbol <file.kicad_sym> [--filter <name>]
 zig build run -- convert-package <sym.kicad_sym> <fp.kicad_mod> [--name <name>]
 zig build run -- convert-pinout <file.kicad_sym>
 ```
+
+## Deployment and release tooling (maintainer-only)
+
+`.githooks/install.sh` with no arguments is the one setup command a contributor
+runs: it points `core.hooksPath` at the tracked hooks and nothing else. The
+deploy worker, the release gate, the systemd unit templates under `.githooks/`
+and `systemd/`, the design-checkpoint timer and the push-side performance gate
+are the maintainer's production machinery for the single-user box that serves
+the live viewer — see [.githooks/README.md](../.githooks/README.md), which
+lists exactly which files those are. Building, testing and running netlisp
+needs none of them.

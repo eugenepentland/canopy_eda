@@ -9,7 +9,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
 
 REPO="$TMP/repo"
-mkdir -p "$REPO/.githooks" "$REPO/bin"
+mkdir -p "$REPO/.githooks" "$REPO/bin" "$REPO/designs/src"
 cp "$ROOT/.githooks/prepare-release.sh" "$REPO/.githooks/prepare-release.sh"
 # prepare-release reads the required version from .zigversion, and so does the
 # fake compiler below — one source of truth, so a pin bump needs no edit here.
@@ -51,7 +51,20 @@ case " $* " in
   *) exit 0 ;;
 esac
 ZIG
-chmod +x "$REPO/bin/zig" "$REPO/.githooks/prepare-release.sh"
+# The gate also runs three Node jobs against the candidate: the quiet-host
+# probe, the Barracuda editor zoom budget and the editor-invariant probe. All
+# three drive a real browser over the owner's design library, which no fixture
+# can stand up — and none of them is what this test is about (the failed-test
+# cancellation and the publish path are). Stub `node` the same way `zig` is
+# stubbed, and hand the gate a designs directory shaped like the one it looks
+# for, so the success half runs anywhere instead of only on the owner's box.
+cat >"$REPO/bin/node" <<'NODE'
+#!/usr/bin/env bash
+# Fake node: every release-gate job succeeds, printing what it stood in for.
+printf 'stub node: %s\n' "$*"
+exit 0
+NODE
+chmod +x "$REPO/bin/zig" "$REPO/bin/node" "$REPO/.githooks/prepare-release.sh"
 
 git -C "$REPO" init -q
 git -C "$REPO" config user.name test
@@ -109,14 +122,28 @@ fi
 
 # The same grouped-job launcher must leave the green path unchanged: both jobs
 # finish and the gate publishes the exact-commit executable.
-NETLISP_GATE_SERIALIZE=0 ZIG="$REPO/bin/zig" \
+set +e
+PATH="$REPO/bin:$PATH" NETLISP_GATE_SERIALIZE=0 ZIG="$REPO/bin/zig" \
+  NETLISP_PERF_PROJECT_DIR="$REPO/designs" NETLISP_PERF_HOST_WAIT=0 \
   STRIP=/bin/true READELF=/bin/true \
   "$REPO/.githooks/prepare-release.sh" >"$TMP/success-output" 2>&1
+success_status=$?
+set -e
 head_hash="$(git -C "$REPO" rev-parse HEAD)"
-if [ ! -x "$candidate_root/$head_hash/install/bin/netlisp" ]; then
-  echo "FAIL: the successful path did not publish an executable candidate" >&2
+if [ "$success_status" -ne 0 ] || [ ! -x "$candidate_root/$head_hash/install/bin/netlisp" ]; then
+  echo "FAIL: the successful path did not publish an executable candidate (exit $success_status)" >&2
   cat "$TMP/success-output" >&2
   exit 1
 fi
+# A candidate is only adoptable if it records that every gate passed; publishing
+# one whose `verified` file is missing a job is how a half-checked binary would
+# reach prod.
+for job in guardian test build pcb_editor_perf pcb_editor_invariants; do
+  if ! grep -qx "$job=passed" "$candidate_root/$head_hash/verified"; then
+    echo "FAIL: the published candidate does not record $job=passed" >&2
+    cat "$candidate_root/$head_hash/verified" >&2
+    exit 1
+  fi
+done
 
 echo "prepare-release fail-fast cancellation and success path OK (${elapsed}s failure)"
