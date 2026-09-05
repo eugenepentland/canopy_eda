@@ -26,6 +26,7 @@ const membership = @import("diagram/membership.zig");
 const component_classification = @import("component_classification.zig");
 const canonical_module_check = @import("canonical_module_check.zig");
 const lib_limits = @import("lib_limits.zig");
+const stdlib = @import("stdlib.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
 const Net = env_mod.Net;
@@ -2771,7 +2772,18 @@ fn partPowerPins(
     return result;
 }
 
-/// Read `<project_dir>/lib/pinouts/<lookup>.sexp` and report whether any pin's
+/// The bytes of `lib/pinouts/<name>.sexp`, resolved through the library search
+/// order — the project's own file, then the shared `--lib-dir` root, then the
+/// bundled standard library. Null when no library carries the part, which is
+/// the ordinary answer for every passive and is why both readers here treat it
+/// as "no pinout" rather than as a failure.
+fn readPinoutSource(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?[]u8 {
+    const sub_path = std.fmt.allocPrint(allocator, "lib/pinouts/{s}.sexp", .{name}) catch return null;
+    defer allocator.free(sub_path);
+    return stdlib.read(allocator, project_dir, sub_path, lib_limits.max_lib_file_bytes);
+}
+
+/// Read `<lookup>`'s pinout and report whether any pin's
 /// function name reads as a supply / as a ground. Only the function name (the
 /// third element of each `(pin <id> "<fn>" …)`) is inspected — the pad id is
 /// deliberately not read at all, since this answers "does the part have a supply
@@ -2780,8 +2792,7 @@ fn partPowerPins(
 /// do in `loadPinoutMap`. Null on any read/parse failure so the caller falls
 /// back to the strict "expect both" default.
 fn loadPinoutFunctionFlags(allocator: std.mem.Allocator, project_dir: []const u8, lookup: []const u8) ?PartPowerPins {
-    const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ project_dir, lookup }) catch return null;
-    const content = infra_fs.cwd().readFileAlloc(allocator, path, lib_limits.max_lib_file_bytes) catch return null;
+    const content = readPinoutSource(allocator, project_dir, lookup) orelse return null;
     const nodes = parser_mod.parse(allocator, content) catch return null;
     if (nodes.len == 0) return null;
     const top = nodes[0].asList() orelse return null;
@@ -3126,8 +3137,8 @@ pub const PinoutEntry = struct {
 /// past, which silently dropped every numeric pin: 243 of the 265 pinout files
 /// in projects/designs use bare-integer pads, so `checkPinFunctions` and
 /// `eval/pin_enrichment.enrichPinFunctions` were structural no-ops for them.
-pub fn loadPinoutMap(allocator: std.mem.Allocator, path: []const u8) ?std.StringHashMapUnmanaged(PinoutEntry) {
-    const content = infra_fs.cwd().readFileAlloc(allocator, path, lib_limits.max_lib_file_bytes) catch return null;
+pub fn loadPinoutMap(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?std.StringHashMapUnmanaged(PinoutEntry) {
+    const content = readPinoutSource(allocator, project_dir, name) orelse return null;
     const nodes = parser_mod.parse(allocator, content) catch return null;
     if (nodes.len == 0) return null;
     const top = nodes[0].asList() orelse return null;
@@ -3219,13 +3230,7 @@ fn checkBlockPinFunctions(
             const symbol = ref_to_lookup.get(pin.ref_des) orelse continue;
 
             const gop = pinout_cache.getOrPut(allocator, symbol) catch continue;
-            if (!gop.found_existing) {
-                const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ project_dir, symbol }) catch {
-                    gop.value_ptr.* = null;
-                    continue;
-                };
-                gop.value_ptr.* = loadPinoutMap(allocator, path);
-            }
+            if (!gop.found_existing) gop.value_ptr.* = loadPinoutMap(allocator, project_dir, symbol);
             const pinout_map = gop.value_ptr.* orelse continue;
 
             const entry = pinout_map.get(pin.pin) orelse continue;

@@ -163,6 +163,17 @@ Bring library components and modules into scope. Each name resolves as `lib/comp
         tpsm84338 lt3045)
 ```
 
+Each name is searched in the project's own `lib/` first, then in a shared
+library root if one is configured (`--lib-dir <d>` / `NETLISP_LIB_DIR`), and
+finally in the standard library compiled into the `netlisp` binary. So the
+standard passive families — `cap-`/`res-`/`ind-0201|0402|0603|0805`,
+`ind-1616`, `ind-2016`, `ferrite-0402`, `led-0402` — resolve in a project that
+carries no `lib/` at all, and a project that *does* carry its own
+`lib/components/cap-0402.sexp` shadows the bundled one for that name only. The
+same order applies to footprints, pinouts and parts tables. See
+[the standard library](standard-library.md) for what is bundled and how to
+extend or replace it.
+
 ### `(defmodule name (params…) "doc?" body…)`
 
 Define a parameterised module. Its body evaluates with the given parameters bound; calling `(name args…)` later evaluates the body in that scope. Modules close over the environment in which they were defined.

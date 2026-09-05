@@ -4613,6 +4613,8 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 ## eval/modules
 
 - a component's (thermal …) form is cached on the component and a component-family declares one for its whole package
+- a design in a project with no lib/ of its own resolves every passive from the bundled standard library, footprint included
+- a project's own lib/components file overrides the bundled family of the same name
 - Module calls bind purely positional arguments in declaration order
 - Module calls accept named (param expr) arguments in any order
 - Module calls mix leading positional with trailing named arguments
@@ -4710,7 +4712,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - componentPrefix maps passive families to their ref-des letters
 - instancePrefix honors a component's explicit (refdes "X") class over the name heuristic
 - Passives prelude resolves the standard cap/res/ind/ferrite/led families when their files exist
-- Passives prelude silently skips library entries whose files are missing instead of failing the build
+- Passives prelude never fails a build, and resolves every standard family from the bundled standard library when the project carries none
 - Explicit import after prelude pre-loads is a no-op (resolveImport short-circuits on cached components)
 - parseId extracts 8-char ID from form children
 - parseId returns null when no ID present
@@ -6921,6 +6923,34 @@ Public functions: designSourcePath, designSourcePathUnique, designSiblingPath
 - Module release sidecars resolve beside the selected module source even when an orphan artifact with the same basename exists under src
 - A src index revalidation triggered by another request leaves a traced lookup's consumed-input closure unchanged
 
+## stdlib
+
+The standard library `stdlib/**/*.sexp` that `build.zig` compiles into the
+binary, and the single point at which a `lib/<sub>/<name>.sexp` sub-path is
+resolved. A project's own `lib/` always wins; then the `--lib-dir` /
+`NETLISP_LIB_DIR` root; then a `NETLISP_STDLIB_DIR` directory laid out like
+`stdlib/`; then the embedded table. The bundle exists so a project directory
+with no `lib/` of its own still evaluates — every family the passives prelude
+auto-imports is carried, with the land pattern each one names. A file served
+from the table reports a synthetic `netlisp:stdlib/…` path that `readPath`
+reads back, so a caller keeping a read-set of resolved paths stays complete.
+
+- Every passive family the evaluator auto-imports is carried by the bundled standard library
+- Every footprint a bundled component names resolves inside the bundle
+- A project's own lib/ file overrides the bundled one of the same name
+- A bundled path reads back through readPath so a recorded read-set stays complete
+- NETLISP_STDLIB_DIR replaces the embedded table without disturbing the project's own lib/
+- The bundle lists its own contents so library search and describe can see it
+
+- completeness-waiver: empty inputs (an empty sub-path matches no table row and no file, so it resolves to null on the same path a missing name takes; a zero-byte library file is under every cap and its emptiness is the parser's contract)
+- completeness-waiver: large inputs (each entry point takes the caller's `max_bytes` from `lib_limits` and refuses an oversized file — table row or disk file alike — by returning null, which is the swallow every reader already implements)
+- completeness-waiver: unauthorized access (the three roots are operator-supplied local directories and the bundle is compiled in; permissions on them belong to the filesystem, and the traversal contract on the names spliced into a sub-path belongs to `paths` and each handler's own validation)
+- completeness-waiver: I/O failure (a read error on any disk root is indistinguishable here from absence by design — resolution simply continues to the next root and ultimately to the bundle, which cannot fail to read)
+- completeness-waiver: concurrent access (the two override roots are written once by `main.zig` before any command dispatches and are read-only thereafter; the embedded table is immutable static storage, so every reader is thread-safe without a lock)
+- completeness-waiver: malformed encoding (nothing here parses — bytes are handed back verbatim and a malformed library file is diagnosed by the sexpr parser at the reader that asked for it)
+- completeness-waiver: integer overflow (the only arithmetic is slicing a matched prefix off a path whose length was just compared, and a byte-length comparison against `max_bytes`; no counter accumulates)
+- completeness-waiver: panic-free (every fallible step — the allocations for a path or a byte copy — is a `catch`/`orelse` returning null, so an exhausted allocator degrades to an unresolved file rather than a panic)
+
 ## lib_limits
 
 The read caps on netlisp's own `lib/` source files, owned in one place so a cap
@@ -7854,6 +7884,7 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 - synthesized footprint fallback geometry is a non-waivable release identity failure
 - 0R0 is a zero-ohm jumper that requires authored current and maximum-resistance evidence, never tolerance
 - HTTP and MCP readiness expose the same revision lock independent of canonical project-root spelling
+- a project with no lib/modules directory has an empty canonical-module policy rather than an unverifiable one
 - strict canonical-module policy is incomplete, and therefore release-blocking, when any module source is malformed
 - SI-prefixed passive ratings are parsed with case-insensitive unit names, including the common `mOhm` spelling
 - selected layout evidence rejects every malformed or silently defaulted manufacturing record before release

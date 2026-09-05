@@ -113,6 +113,22 @@ fn gitAutocommitEnabledFromRaw(raw: []const u8) bool {
     return !std.mem.eql(u8, std.mem.trim(u8, raw, whitespace), "0");
 }
 
+/// Extra library root (`NETLISP_LIB_DIR`) searched after the project's own
+/// `lib/` and before the bundled standard library — a shared/company library
+/// laid out like a project (it CONTAINS `lib/components`, `lib/footprints`, …).
+/// Null when unset. The `--lib-dir` flag overrides it; see `src/stdlib.zig`.
+pub fn libDir(allocator: std.mem.Allocator) ?[]u8 {
+    return nonEmpty(lookup(allocator, "NETLISP_LIB_DIR"));
+}
+
+/// Replacement for the standard library compiled into this binary
+/// (`NETLISP_STDLIB_DIR`), laid out like the repository's `stdlib/` (it
+/// contains `components/`, `footprints/`, `pinouts/`, … directly). Null when
+/// unset — the embedded table is then the last resort. See `src/stdlib.zig`.
+pub fn stdlibDir(allocator: std.mem.Allocator) ?[]u8 {
+    return nonEmpty(lookup(allocator, "NETLISP_STDLIB_DIR"));
+}
+
 /// Ward verify endpoint (`WARD_VERIFY_URL`, e.g. http://127.0.0.1:9000/verify)
 /// the session middleware asks about each `ward_session` cookie. Null when
 /// unset — the serve layer then fails every session-gated request closed.

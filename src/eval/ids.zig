@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
+const stdlib = @import("../stdlib.zig");
 const lib_limits = @import("../lib_limits.zig");
 const log = @import("../infra/log.zig");
 const ast = @import("../sexpr/ast.zig");
@@ -703,7 +704,14 @@ pub fn componentSourceOffset(node: Node) u32 {
 pub fn getSymbolPins(self: *Evaluator, lookup_name: []const u8) ?*const std.StringHashMapUnmanaged([]const u8) {
     if (self.symbol_pin_cache.getPtr(lookup_name)) |cached| return cached;
 
-    const pinout_path = std.fmt.allocPrint(self.allocator, "{s}/lib/pinouts/{s}.sexp", .{ self.project_dir, lookup_name }) catch return null;
+    const sub_path = std.fmt.allocPrint(self.allocator, "lib/pinouts/{s}.sexp", .{lookup_name}) catch return null;
+    defer self.allocator.free(sub_path);
+    // Resolve through the library search order (project, shared lib root, then
+    // the bundled standard library) so a part the project does not carry still
+    // gets its pin names. Null here is the ordinary "this part has no pinout"
+    // — every passive — which is why it is a resolver miss and not a read
+    // failure the loader has to classify.
+    const pinout_path = stdlib.resolvePath(self.allocator, self.project_dir, sub_path) orelse return null;
     const loaded = loadPinoutFile(self, pinout_path) orelse return null;
     self.symbol_pin_cache.put(self.allocator, lookup_name, loaded.pins) catch return null;
     self.symbol_alt_cache.put(self.allocator, lookup_name, loaded.alts) catch return null;
@@ -721,6 +729,12 @@ pub const LoadedPinout = struct {
 
 /// Load pin names + alternate functions from a pinout file. Missing file returns null.
 pub fn loadPinoutFile(self: *Evaluator, path: []const u8) ?LoadedPinout {
+    // A bundled pinout has no file to open — it was compiled in — so it is
+    // served from the table before the filesystem is consulted at all.
+    if (stdlib.isBundledPath(path)) {
+        const bytes = stdlib.readPath(self.allocator, path, lib_limits.max_lib_file_bytes) orelse return null;
+        return parsePinout(self, bytes);
+    }
     const content = infra_fs.cwd().readFileAlloc(self.allocator, path, lib_limits.max_lib_file_bytes) catch |err| {
         // `getSymbolPins` probes this for every component, and most components
         // (all passives) simply have no pinout — `FileNotFound` is the normal
@@ -731,6 +745,13 @@ pub fn loadPinoutFile(self: *Evaluator, path: []const u8) ?LoadedPinout {
             log.warn("pinout '{s}' not loaded ({s}) — this part's pins fall back to pad numbers", .{ path, @errorName(err) });
         return null;
     };
+    return parsePinout(self, content);
+}
+
+/// Parse `(pinout "name" (pin …)…)` bytes into the two indexed maps. Split out
+/// of `loadPinoutFile` because the bytes now arrive from either the filesystem
+/// or the bundled standard library, and only the READ differs between them.
+fn parsePinout(self: *Evaluator, content: []const u8) ?LoadedPinout {
     const nodes = parser_mod.parse(self.allocator, content) catch return null;
     if (nodes.len == 0) return null;
     const top = nodes[0].asList() orelse return null;

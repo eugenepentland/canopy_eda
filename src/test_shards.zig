@@ -268,6 +268,7 @@ pub const shards: []const []const []const u8 = &.{
         "kicad_pcb.import_layout.test.",
         "kicad_pcb.reference_guides.test.",
         "lib_limits.test.",
+        "stdlib.test.",
         "net_name.test.",
         "numeric.test.",
         "shape_sketch.test.",

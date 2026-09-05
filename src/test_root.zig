@@ -191,6 +191,7 @@ test {
     _ = @import("poly_scanline.zig");
     _ = @import("parts.zig");
     _ = @import("paths.zig");
+    _ = @import("stdlib.zig");
     _ = @import("pdf.zig");
     _ = @import("pdf_afm.zig");
     _ = @import("pdf_verify.zig");

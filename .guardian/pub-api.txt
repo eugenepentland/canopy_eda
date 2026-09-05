@@ -284,6 +284,8 @@ src/config.zig::digikeyClientSecret | fn digikeyClientSecret(allocator: std.mem.
 src/config.zig::digikeyMaxInFlight | fn digikeyMaxInFlight(allocator: std.mem.Allocator) u32
 src/config.zig::digikeyMinIntervalMs | fn digikeyMinIntervalMs(allocator: std.mem.Allocator) u64
 src/config.zig::gitAutocommitEnabled | fn gitAutocommitEnabled(allocator: std.mem.Allocator) bool
+src/config.zig::libDir | fn libDir(allocator: std.mem.Allocator) ?[]u8
+src/config.zig::stdlibDir | fn stdlibDir(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::wardAuthServerUrl | fn wardAuthServerUrl(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::wardCacheTtlSecs | fn wardCacheTtlSecs(allocator: std.mem.Allocator, default: i64) i64
 src/config.zig::wardIntrospectUrl | fn wardIntrospectUrl(allocator: std.mem.Allocator) ?[]u8
@@ -484,7 +486,7 @@ src/erc.zig::PinoutEntry struct_
 src/erc.zig::Severity value
 src/erc.zig::Violation struct_
 src/erc.zig::ViolationKind enum_
-src/erc.zig::loadPinoutMap | fn loadPinoutMap(allocator: std.mem.Allocator, path: []const u8) ?std.StringHashMapUnmanaged(PinoutEntry)
+src/erc.zig::loadPinoutMap | fn loadPinoutMap(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?std.StringHashMapUnmanaged(PinoutEntry)
 src/erc.zig::runErc | fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8) std.mem.Allocator.Error![]const Violation
 src/erc.zig::writeViolationsJson | fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
 src/escape.zig::decodeXmlAlloc | fn decodeXmlAlloc(gpa: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8
@@ -5274,6 +5276,26 @@ src/spurious.zig::productBranches | fn productBranches(m: f64, n: f64, rf: Band,
 src/spurious.zig::requiredRf | fn requiredRf(lo_hz: f64, band: Band, side: Sideband) Band
 src/spurious.zig::signedProduct | fn signedProduct(m: f64, n: f64, rf: Band, lo_hz: f64) Band
 src/spurious.zig::width | fn width(self: Band) f64
+src/stdlib.zig::Found struct_
+src/stdlib.zig::StemIterator struct_
+src/stdlib.zig::bundled | fn bundled(sub_path: []const u8) ?[]const u8
+src/stdlib.zig::bundledPath | fn bundledPath(allocator: std.mem.Allocator, sub_path: []const u8) std.mem.Allocator.Error![]u8
+src/stdlib.zig::bundled_prefix value
+src/stdlib.zig::displayPath | fn displayPath(path: []const u8) []const u8
+src/stdlib.zig::exists | fn exists(allocator: std.mem.Allocator, project_dir: []const u8, sub_path: []const u8) bool
+src/stdlib.zig::isBundledPath | fn isBundledPath(path: []const u8) bool
+src/stdlib.zig::libRoot | fn libRoot() ?[]const u8
+src/stdlib.zig::listDirs | fn listDirs( allocator: std.mem.Allocator, project_dir: []const u8, sub: []const u8, out: *std.ArrayList([]const u8), ) std.mem.Allocator.Error!void
+src/stdlib.zig::max_stems_prefix value
+src/stdlib.zig::next | fn next(self: *StemIterator) ?[]const u8
+src/stdlib.zig::open | fn open( allocator: std.mem.Allocator, project_dir: []const u8, sub_path: []const u8, max_bytes: usize, ) ?Found
+src/stdlib.zig::read | fn read( allocator: std.mem.Allocator, project_dir: []const u8, sub_path: []const u8, max_bytes: usize, ) ?[]u8
+src/stdlib.zig::readPath | fn readPath(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ?[]u8
+src/stdlib.zig::resolvePath | fn resolvePath( allocator: std.mem.Allocator, project_dir: []const u8, sub_path: []const u8, ) ?[]u8
+src/stdlib.zig::setRoots | fn setRoots(lib: ?[]const u8, stdlib: ?[]const u8) void
+src/stdlib.zig::standard | fn standard(allocator: std.mem.Allocator, sub_path: []const u8, max_bytes: usize) ?Found
+src/stdlib.zig::stems | fn stems(prefix: []const u8) StemIterator
+src/stdlib.zig::stemsIn | fn stemsIn(buf: []u8, sub: []const u8) StemIterator
 src/subcircuit_seed_drc.zig::reject | fn reject(alloc: std.mem.Allocator, input: anytype) std.mem.Allocator.Error!void
 src/subcircuit_silkscreen.zig::Annotation struct_
 src/subcircuit_silkscreen.zig::FabricationIdObstacles struct_

@@ -8,6 +8,7 @@
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const lib_limits = @import("lib_limits.zig");
+const stdlib = @import("stdlib.zig");
 const log = @import("infra/log.zig");
 const env_mod = @import("eval/env.zig");
 const json_writer = @import("json_writer.zig");
@@ -142,19 +143,23 @@ const JsonHub = struct {
 /// Populated lazily in renderSceneGraph; lives for the lifetime of a single render.
 const PinoutAltMap = std.StringHashMapUnmanaged(std.StringHashMapUnmanaged([]const []const u8));
 
+/// Project-relative sub-path of one pinout; resolved through `stdlib` (project
+/// `lib/`, the shared lib root, then the bundled standard library).
+const pinout_path_fmt = "lib/pinouts/{s}.sexp";
+
 fn loadPinoutAlts(allocator: Allocator, map: *PinoutAltMap, project_dir: []const u8, symbol: []const u8) std.mem.Allocator.Error!void {
     if (project_dir.len == 0 or symbol.len == 0) return;
     if (map.contains(symbol)) return;
-    const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ project_dir, symbol }) catch return;
-    const content = infra_fs.cwd().readFileAlloc(allocator, path, lib_limits.max_lib_file_bytes) catch |err| {
-        // A component with no pinout file is ordinary (every passive), so
-        // `FileNotFound` stays silent. Every other failure means a pinout that
-        // EXISTS is being dropped from the scene graph while `render_html.zig`
-        // and `erc.zig` — reading the same file at the same class cap — still
-        // see it, which is the divergence this cap already caused once. Report
-        // it; the degrade itself is unchanged.
-        if (err != error.FileNotFound)
-            log.warn("scene graph: pinout '{s}' not loaded ({s}) — pin alternates fall back to net names", .{ path, @errorName(err) });
+    const sub_path = std.fmt.allocPrint(allocator, pinout_path_fmt, .{symbol}) catch return;
+    const path = stdlib.resolvePath(allocator, project_dir, sub_path) orelse return;
+    const content = stdlib.readPath(allocator, path, lib_limits.max_lib_file_bytes) orelse {
+        // A component with no pinout file is ordinary (every passive), and it
+        // is now the resolver above that returns early for it — so reaching
+        // here means a pinout that EXISTS is being dropped from the scene
+        // graph while `render_html.zig` and `erc.zig` — reading the same file
+        // at the same class cap — still see it, which is the divergence this
+        // cap already caused once. Report it; the degrade itself is unchanged.
+        log.warn("scene graph: pinout '{s}' not loaded — pin alternates fall back to net names", .{path});
         return;
     };
     const parser_m = @import("sexpr/parser.zig");
@@ -200,14 +205,18 @@ fn loadPinoutAlts(allocator: Allocator, map: *PinoutAltMap, project_dir: []const
 /// ICs, but flat `(pin …)` instances carry none, so we supplement from the
 /// pinout file — the same source the HTML schematic uses (which is why it
 /// already read "GP11" where the scene graph read the net "LED2_DRV").
-fn loadPinoutNames(allocator: Allocator, path: []const u8) ?std.StringHashMapUnmanaged([]const u8) {
-    const content = infra_fs.cwd().readFileAlloc(allocator, path, lib_limits.max_lib_file_bytes) catch |err| {
-        // `hubPinNameMap` probes three candidate names per hub, so most calls
-        // here legitimately miss — `FileNotFound` must stay quiet or every hub
-        // would log twice. A pinout that exists and still fails to load is the
-        // silent case worth naming: the hub falls back to labelling pins by net.
-        if (err != error.FileNotFound)
-            log.warn("scene graph: pinout '{s}' not loaded ({s}) — hub pins fall back to net names", .{ path, @errorName(err) });
+fn loadPinoutNames(allocator: Allocator, project_dir: []const u8, part: []const u8) ?std.StringHashMapUnmanaged([]const u8) {
+    const sub_path = std.fmt.allocPrint(allocator, pinout_path_fmt, .{part}) catch return null;
+    defer allocator.free(sub_path);
+    // `hubPinNameMap` probes three candidate names per hub, so most calls here
+    // legitimately miss — an absent pinout must stay quiet or every hub would
+    // log twice, and it is the resolver, not a read error, that reports it.
+    const path = stdlib.resolvePath(allocator, project_dir, sub_path) orelse return null;
+    defer allocator.free(path);
+    const content = stdlib.readPath(allocator, path, lib_limits.max_lib_file_bytes) orelse {
+        // A pinout that resolved and still fails to load is the silent case
+        // worth naming: the hub falls back to labelling pins by net.
+        log.warn("scene graph: pinout '{s}' not loaded — hub pins fall back to net names", .{path});
         return null;
     };
     const parser_m = @import("sexpr/parser.zig");
@@ -243,9 +252,7 @@ fn hubPinNameMap(
 
     for ([_][]const u8{ hub.pinout, hub.symbol, hub.component }) |cand| {
         if (cand.len == 0) continue;
-        const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ ctx.project_dir, cand }) catch continue;
-        defer allocator.free(path);
-        var pinmap = loadPinoutNames(allocator, path) orelse continue;
+        var pinmap = loadPinoutNames(allocator, ctx.project_dir, cand) orelse continue;
         var it = pinmap.iterator();
         while (it.next()) |kv| {
             if (!names.contains(kv.key_ptr.*)) names.put(allocator, kv.key_ptr.*, kv.value_ptr.*) catch break;
@@ -2390,7 +2397,6 @@ test "the scene-graph pinout readers load a pinout past the retired 256 KiB cap"
 
     // Reader 2 — the hub pin-name supplement, which spelled the same cap as
     // `1 << 18` and so diverged even from its own file's other reader.
-    const path = try std.fmt.allocPrint(alloc, "{s}/lib/pinouts/big.sexp", .{project_dir});
-    const names = loadPinoutNames(alloc, path) orelse return error.TestUnexpectedResult;
+    const names = loadPinoutNames(alloc, project_dir, "big") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("LASTFN", names.get("LAST") orelse return error.TestUnexpectedResult);
 }

@@ -100,6 +100,7 @@ Read the relevant file before working in that area — they are the canonical, c
 - `docs/build-and-run.md` — full build / run / deploy reference incl. design-build, push, prod compiler rules, ID-persistence rules
 - `docs/build-system.md` — build graph internals
 - `docs/sexpr-language.md` — design language spec — read before editing .sexp designs
+- `docs/standard-library.md` — the component library bundled into the binary: what ships, the project/`--lib-dir`/stdlib resolution order, how to extend it
 - `docs/webserver-api.md` — web server API reference — read before touching server endpoints
 - `docs/ward-auth.md` — ward auth setup
 - `docs/testing-guide.md` — full testing guide: filters, test-compile, test-affected, mutation tiers

@@ -12,6 +12,10 @@ const json_writer = @import("../json_writer.zig");
 const escape = @import("../escape.zig");
 const numeric = @import("../numeric.zig");
 const lib_limits = @import("../lib_limits.zig");
+const stdlib = @import("../stdlib.zig");
+
+/// Project-relative sub-path of one footprint; resolved through `stdlib`.
+const footprint_path_fmt = "lib/footprints/{s}.sexp";
 const log = @import("../infra/log.zig");
 const na = @import("../eval/net_analysis.zig");
 const net_name = @import("../net_name.zig");
@@ -81,11 +85,11 @@ pub fn collectMissing(
         // Check footprint
         if (inst.footprint.len > 0 and !checked_fp.contains(inst.footprint)) {
             try checked_fp.put(inst.footprint, {});
-            const fp_path = try std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, inst.footprint });
-            defer allocator.free(fp_path);
-            infra_fs.cwd().access(fp_path, .{}) catch {
+            const fp_sub = try std.fmt.allocPrint(allocator, footprint_path_fmt, .{inst.footprint});
+            defer allocator.free(fp_sub);
+            if (!stdlib.exists(allocator, project_dir, fp_sub)) {
                 try missing_fp.append(allocator, inst.footprint);
-            };
+            }
         }
         // Check 3D model
         if (inst.component.len > 0 and !checked_model.contains(inst.component)) {
@@ -593,9 +597,9 @@ pub fn augmentUnconnectedPins(allocator: std.mem.Allocator, block: *env_mod.Desi
 /// no physical pads (decorative or reference-only entries).
 pub fn footprintHasPads(allocator: std.mem.Allocator, project_dir: []const u8, footprint: []const u8) bool {
     if (footprint.len == 0) return false;
-    const fp_path = std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, footprint }) catch return false;
-    defer allocator.free(fp_path);
-    const content = infra_fs.cwd().readFileAlloc(allocator, fp_path, lib_limits.max_footprint_bytes) catch return false;
+    const fp_sub = std.fmt.allocPrint(allocator, footprint_path_fmt, .{footprint}) catch return false;
+    defer allocator.free(fp_sub);
+    const content = stdlib.read(allocator, project_dir, fp_sub, lib_limits.max_footprint_bytes) orelse return false;
     defer allocator.free(content);
     return std.mem.indexOf(u8, content, "(pad ") != null;
 }

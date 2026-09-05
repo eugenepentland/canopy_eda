@@ -10,6 +10,7 @@ const json_writer = @import("../json_writer.zig");
 const httpz = @import("httpz");
 const infra_fs = @import("../infra/fs.zig");
 const lib_limits = @import("../lib_limits.zig");
+const stdlib = @import("../stdlib.zig");
 const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
@@ -218,17 +219,17 @@ pub fn pinoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handle
         return;
     }
 
-    const path = try std.fmt.allocPrint(ctx.allocator, "{s}/lib/pinouts/{s}.sexp", .{ ctx.project_dir, name });
-    defer ctx.allocator.free(path);
+    const sub_path = try std.fmt.allocPrint(ctx.allocator, "lib/pinouts/{s}.sexp", .{name});
+    defer ctx.allocator.free(sub_path);
 
-    const content = infra_fs.cwd().readFileAlloc(ctx.allocator, path, lib_limits.max_lib_file_bytes) catch |err| {
-        // The status stays 404 on every failure: the viewer treats "no pinout"
-        // as a soft absence and must not begin 5xx-ing over a library file it
-        // could not read. But a pinout that EXISTS and merely failed to load is
-        // not "not found", and answering 404 makes it indistinguishable from a
-        // part that never had one — so name it on stderr.
-        if (err != error.FileNotFound)
-            log.warn("pinout api: '{s}' not readable ({s}) — answering 404", .{ path, @errorName(err) });
+    // The status stays 404 on every failure: the viewer treats "no pinout" as a
+    // soft absence and must not begin 5xx-ing over a library file it could not
+    // read. A pinout that EXISTS and merely failed to load is not "not found",
+    // and answering 404 makes it indistinguishable from a part that never had
+    // one — so that case is named on stderr before the 404 goes out.
+    const content = stdlib.read(ctx.allocator, ctx.project_dir, sub_path, lib_limits.max_lib_file_bytes) orelse {
+        if (stdlib.exists(ctx.allocator, ctx.project_dir, sub_path))
+            log.warn("pinout api: '{s}' resolved but is not readable — answering 404", .{sub_path});
         res.status = http_not_found;
         res.content_type = .JSON;
         res.body = "{\"error\":\"pinout not found\"}";
@@ -316,9 +317,9 @@ fn writeComponentLibInfo(
     project_dir: []const u8,
     name: []const u8,
 ) !void {
-    const path = try std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, name });
-    defer allocator.free(path);
-    const content = infra_fs.cwd().readFileAlloc(allocator, path, 1024 * 512) catch {
+    const sub_path = try std.fmt.allocPrint(allocator, "lib/components/{s}.sexp", .{name});
+    defer allocator.free(sub_path);
+    const content = stdlib.read(allocator, project_dir, sub_path, lib_limits.max_lib_file_bytes) orelse {
         try w.writeAll(empty_datasheets_reqs);
         return;
     };
