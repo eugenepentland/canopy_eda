@@ -545,13 +545,15 @@ pub const scope_form_docs = blk: {
         .summary = "Functional subsystem card. Inside `(section …)` nests one level into a sub-section.",
     } };
     t[@backingInt(ScopeForm.decouple)] = .{ .scope = all, .doc = .{
-        .syntax = "(decouple \"NET\" [(comp \"val\")] COUNT per-pin [REF|auto] PIN…) | " ++
-            "(decouple \"NET\" (per-pin (comp \"val\") FN…)… (bulk (comp \"val\") COUNT)… (bypass …)…)",
-        .summary = "Emit COUNT decoupling caps per listed host pin. Component and REF may come from " ++
-            "(decouple-defaults …); a trailing `auto` expands to the pins already declared on the net. " ++
-            "The compact rail form takes sub-forms instead: `(per-pin …)` bypasses each named pin " ++
-            "function (inferring the host), `(bulk COMPONENT COUNT)` adds shared rail capacitance, and " ++
-            "`(bypass …)` takes the positional item list.",
+        .syntax = "(decouple \"NET\" (per-pin (comp \"val\") FN…)… (bulk (comp \"val\") COUNT)… (bypass …)…) | " ++
+            "(decouple \"NET\" [(comp \"val\")] COUNT per-pin [REF|auto] PIN…)",
+        .summary = "Emit decoupling caps for a rail. The sub-form spelling is the documented one: " ++
+            "`(per-pin …)` bypasses each named pin function (inferring the host), " ++
+            "`(bulk COMPONENT COUNT)` adds shared rail capacitance, and `(bypass …)` takes a positional " ++
+            "item list. The positional shorthand — COUNT per-pin REF PIN… — is the retired second " ++
+            "grammar on the same head: still accepted, and reported as a `deprecated_form` info. " ++
+            "Component and REF may come from (decouple-defaults …); a trailing `auto` expands to the " ++
+            "pins already declared on the net.",
     } };
     t[@backingInt(ScopeForm.series)] = .{ .scope = all, .doc = .{
         .syntax = "(series …)",
@@ -568,9 +570,12 @@ pub const scope_form_docs = blk: {
     t[@backingInt(ScopeForm.bus_net)] = .{ .scope = all, .doc = .{
         .syntax = "(bus-net \"PREFIX\" lo hi \"SUB\") | (bus-net \"PREFIX\" lo hi (suffix \"S\") (over \"SUB\" (port-base \"P\" N))) | " ++
             "(bus-net \"PREFIX\" lo hi [(suffixes S…)] (over \"SUB\"…) (ports P…))",
-        .summary = "Tie a lane range to a sub-block bus, including an optional parent suffix and offset child-port family. " ++
-            "The strided form distributes the channel range sub-major across every `(over …)` sub-block " ++
-            "and `(ports …)` port family, emitting one tie per `(suffixes …)` entry.",
+        .summary = "Tie a lane range to a sub-block bus. The basic 1:1 form — `(bus-net \"PREFIX\" lo hi \"SUB\")` " ++
+            "— is the documented one. The mapped form adds a parent suffix and an offset child-port " ++
+            "family; the strided form distributes the channel range sub-major across every `(over …)` " ++
+            "sub-block and `(ports …)` port family, emitting one tie per `(suffixes …)` entry. Both of " ++
+            "those are retired extra grammars on one head: still accepted, and each reported as a " ++
+            "`deprecated_form` info recommending the basic form or explicit (net …) / (bridge …) ties.",
     } };
     t[@backingInt(ScopeForm.connect)] = .{ .scope = all, .doc = .{
         .syntax = "(connect END END… [(name \"NET\")] [(class \"net-class\")])",
@@ -670,15 +675,24 @@ pub const scope_form_docs = blk: {
     } };
     t[@backingInt(ScopeForm.test_point)] = .{ .scope = all, .doc = .{
         .syntax = "(test-point \"REF\" \"NET\" [(virtual)] [(purpose \"text\")] [(required-for tag…)])",
-        .summary = "Place a physical measurement / bring-up pad. Add `(virtual)` for a schematic-only marker.",
+        .summary = "Place a physical measurement / bring-up pad, or — with `(virtual)` — a schematic-only " ++
+            "marker with no pad. The physical case emits exactly what " ++
+            "`(instance \"TP\" testpoint (pin 1 \"NET\"))` does, so it is reported as a " ++
+            "`deprecated_form` info recommending the instance spelling; `(virtual)` has no other " ++
+            "spelling and is not deprecated.",
     } };
     t[@backingInt(ScopeForm.decouple_defaults)] = .{ .scope = tl, .doc = .{
         .syntax = "(decouple-defaults (ic \"REF\") (bypass (comp)))",
-        .summary = "Set per-design decouple defaults: a fallback IC ref and bypass cap so (decouple …) can omit both.",
+        .summary = "Set per-design decouple defaults: a fallback IC ref and bypass cap so (decouple …) can " ++
+            "omit both. Retired: it makes every (decouple …) that relies on it unreadable on its own, " ++
+            "so it is reported as a `deprecated_form` info. Still accepted — spell the host and the " ++
+            "part at each site instead.",
     } };
     t[@backingInt(ScopeForm.kicad_pcb)] = .{ .scope = tl, .doc = .{
         .syntax = "(kicad-pcb \"absolute/path/to/board.kicad_pcb\")",
-        .summary = "Declare the PCB file the file-based KiCad sync writes board updates to.",
+        .summary = "Declare the PCB file the file-based KiCad sync writes board updates to. Optional: a " ++
+            "`kicad-projects.sexp` at the project root maps design names to board paths and takes " ++
+            "precedence, so a machine-local path need not live in the source at all.",
     } };
     t[@backingInt(ScopeForm.stub)] = .{ .scope = tl, .doc = .{
         .syntax = "(stub \"name\" [(role …)] [(mpn …)] [(category key)] [(size W H)] [(channels N)] [(ref \"REF\")] (signal \"name\" class \"net\")…)",
@@ -841,13 +855,15 @@ pub const scope_form_docs = blk: {
             "DC budget but distinct AC domains.",
     } };
     t[@backingInt(ScopeForm.module_policy)] = .{ .scope = tl, .doc = .{
-        .syntax = "(module-policy (net-class \"NET\" ground|power|input_rail|switch_node|clock|rf|feedback|analog|control|signal)…)",
+        .syntax = "(module-policy (placement-class \"NET\" ground|power|input_rail|switch_node|clock|rf|feedback|analog|control|signal)…)",
         .summary = "Pin the PCB-layout criticality class of named nets, overriding the name heuristic " ++
             "the placer, the routing order and the `layout_class_inferred` ERC info use " ++
-            "(`module_policy.classifyNetName`). One (net-class …) child per net; the net is the " ++
+            "(`module_policy.classifyNetName`). One (placement-class …) child per net; the net is the " ++
             "FLATTENED name (\"sub-block/NET\" for a module-internal net) or a bare leaf that " ++
             "matches every module-local net of that name. A pinned net is no longer reported as " ++
-            "inferred. Unknown class atoms and malformed children are warned and dropped.",
+            "inferred. Unknown class atoms and malformed children are warned and dropped. " ++
+            "`(net-class …)` is the retired spelling of the same child — still accepted, and reported " ++
+            "as a `deprecated_form` info — because the TOP-LEVEL (net-class …) means routing geometry.",
     } };
     t[@backingInt(ScopeForm.requirement)] = .{ .scope = all, .doc = .{
         .syntax = "(requirement \"text\" (on \"REF\") (check …) [(ref \"file.pdf\" (page N))] [(id \"…\")])",
@@ -1669,6 +1685,25 @@ pub const port_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
         .syntax = "(side left|right|top|bottom)",
         .summary = "Where this port's net enters or leaves the module — the PCB rough placer's explicit " ++
             "flow hint, overriding the direction heuristic.",
+    },
+    .{
+        .name = "role",
+        .syntax = "(role WORD)",
+        .summary = "What the port does in its interface (the section-port diagram reads it). The bare " ++
+            "`role WORD` keyword pair is the retired spelling: still accepted, and reported as a " ++
+            "`deprecated_form` info naming this one.",
+    },
+    .{
+        .name = "protocol",
+        .syntax = "(protocol WORD)",
+        .summary = "The bus or signalling standard this port speaks. Same retired bare `protocol WORD` " ++
+            "keyword-pair alias as `(role …)`.",
+    },
+    .{
+        .name = "class",
+        .syntax = "(class WORD)",
+        .summary = "A free classification key for the port. Same retired bare `class WORD` keyword-pair " ++
+            "alias as `(role …)`.",
     },
 });
 

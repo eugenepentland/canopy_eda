@@ -24,6 +24,7 @@ const collect = @import("diagram/collect.zig");
 const lod = @import("diagram/lod.zig");
 const membership = @import("diagram/membership.zig");
 const component_classification = @import("component_classification.zig");
+const block_types = @import("render_block_types.zig");
 const canonical_module_check = @import("canonical_module_check.zig");
 const erc_interface = @import("erc_interface.zig");
 const attrs_mod = @import("eval/attrs.zig");
@@ -86,6 +87,8 @@ pub const ViolationKind = enum {
     direct_component_implementation,
     module_metadata_incomplete,
     layout_class_inferred,
+    section_category_inferred,
+    deprecated_form,
     components_not_grouped,
     verification_orphaned,
     diff_pair_half_connected,
@@ -149,6 +152,8 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
         });
     }
     try checkLayoutClasses(allocator, block, &violations);
+    try checkSectionCategories(allocator, block, &violations);
+    try checkDeprecatedForms(allocator, block, &violations);
     try checkComponentGrouping(allocator, block, &violations);
     try checkOrphanedVerifications(allocator, block, &violations);
     if (project_dir.len > 0) try checkPinFunctions(allocator, block, project_dir, &violations);
@@ -242,6 +247,87 @@ fn checkLayoutClasses(
             .severity = .info,
             .message = msg,
             .net = net.name,
+        });
+    }
+}
+
+/// Surface every section whose diagram category was GUESSED from a keyword in
+/// its name, so the author can pin the decision with `(category …)` instead of
+/// having to keep a magic word in the title. The twin of `checkLayoutClasses`:
+/// `info` only, one row per section, silent as soon as the section declares a
+/// recognised `(category …)`. Sections that fall through to the ref-des /
+/// `.peripheral` default are silent too — there is no keyword to lose there.
+fn checkSectionCategories(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayList(Violation),
+) !void {
+    // Deduped by section NAME: the fix is one `(category …)` edit at the
+    // section's source, so a module used twice must not report twice.
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(allocator);
+    try collectSectionCategories(allocator, block, &seen, violations);
+}
+
+fn collectSectionCategories(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    seen: *std.StringHashMapUnmanaged(void),
+    violations: *std.ArrayList(Violation),
+) std.mem.Allocator.Error!void {
+    try collectSectionCategoryRows(allocator, block.sections, seen, violations);
+    for (block.sub_blocks) |sb| try collectSectionCategories(allocator, sb.block, seen, violations);
+}
+
+fn collectSectionCategoryRows(
+    allocator: std.mem.Allocator,
+    sections: []const env_mod.Section,
+    seen: *std.StringHashMapUnmanaged(void),
+    violations: *std.ArrayList(Violation),
+) std.mem.Allocator.Error!void {
+    for (sections) |sec| {
+        try collectSectionCategoryRows(allocator, sec.sub_sections, seen, violations);
+        if (block_types.category_keys.get(sec.category) != null) continue;
+        const guessed = block_types.nameKeywordCategory(sec.name) orelse continue;
+        const gop = try seen.getOrPut(allocator, sec.name);
+        if (gop.found_existing) continue;
+        const msg = std.fmt.allocPrint(
+            allocator,
+            "Section \"{s}\" is categorised {s} for the system overview because its NAME contains a " ++
+                "classifier keyword — pin the decision with (category {s}) so a rename cannot move it",
+            .{ sec.name, @tagName(guessed), @tagName(guessed) },
+        ) catch return;
+        try violations.append(allocator, .{
+            .kind = .section_category_inferred,
+            .severity = .info,
+            .message = msg,
+        });
+    }
+}
+
+/// Report the superseded spellings the evaluator met, each with the
+/// `file:line:col` of the form and the spelling that replaces it.
+///
+/// These are deliberately **info**, never evaluator warnings: the release
+/// profile promotes evaluator warnings to errors, and every deprecated
+/// spelling here keeps working. Only the block the evaluator handed the whole
+/// design's range (the root) is read — nested blocks carry overlapping
+/// sub-ranges, so recursing would double-count.
+fn checkDeprecatedForms(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayList(Violation),
+) !void {
+    for (block.deprecations) |dep| {
+        const msg = std.fmt.allocPrint(
+            allocator,
+            "{s}:{d}:{d}: {s}",
+            .{ dep.file, dep.line, dep.col, dep.message },
+        ) catch return;
+        try violations.append(allocator, .{
+            .kind = .deprecated_form,
+            .severity = .info,
+            .message = msg,
         });
     }
 }
@@ -5002,6 +5088,94 @@ test "missing requirements recurses sub-blocks and dedups by component" {
         violations.deinit(std.testing.allocator);
     }
     try std.testing.expectEqual(@as(usize, 1), violations.items.len);
+}
+
+// spec: erc - reports a section whose diagram category came from a name keyword, and stays silent once (category ...) pins it
+test "section category inferred fires only on a name-keyword guess" {
+    const sections = [_]env_mod.Section{
+        // Name keyword "Buck" decides this one — reportable.
+        .{ .name = "3V3 Buck" },
+        // Pinned: the explicit key wins, whatever the name says.
+        .{ .name = "5V Regulator", .category = "connector" },
+        // No keyword matches; the fallback has no magic word to lose.
+        .{ .name = "Widget Farm" },
+    };
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .sections = &sections,
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkSectionCategories(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), violations.items.len);
+    try std.testing.expectEqual(ViolationKind.section_category_inferred, violations.items[0].kind);
+    try std.testing.expectEqual(Severity.info, violations.items[0].severity);
+    try std.testing.expect(std.mem.indexOf(u8, violations.items[0].message, "(category power)") != null);
+}
+
+// spec: erc - one section name reports its inferred category once however many sub-blocks carry it
+test "section category inferred dedupes a module used twice" {
+    const sections = [_]env_mod.Section{.{ .name = "3V3 Buck" }};
+    var sub_a: DesignBlock = .{ .name = "p1", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{}, .sections = &sections };
+    var sub_b: DesignBlock = .{ .name = "p2", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{}, .sections = &sections };
+    const sbs = [_]env_mod.SubBlock{ .{ .name = "p1", .block = &sub_a }, .{ .name = "p2", .block = &sub_b } };
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &sbs,
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkSectionCategories(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), violations.items.len);
+}
+
+// spec: erc - a deprecated spelling is an info finding carrying file:line:col and its replacement, never an error or a warning
+test "deprecated form findings are info rows with a source position" {
+    const deps = [_]env_mod.DeprecatedForm{
+        .{ .file = "lib/modules/x.sexp", .line = 12, .col = 3, .message = "old spelling — write (new)" },
+    };
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .deprecations = &deps,
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkDeprecatedForms(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), violations.items.len);
+    try std.testing.expectEqual(ViolationKind.deprecated_form, violations.items[0].kind);
+    // Info, not warning: the release profile promotes warnings to errors and
+    // every deprecated spelling in this wave still works.
+    try std.testing.expectEqual(Severity.info, violations.items[0].severity);
+    try std.testing.expectEqualStrings(
+        "lib/modules/x.sexp:12:3: old spelling — write (new)",
+        violations.items[0].message,
+    );
 }
 
 // spec: erc - surfaces layout-critical net classes as info rows, staying silent on ground/power/plain-signal nets

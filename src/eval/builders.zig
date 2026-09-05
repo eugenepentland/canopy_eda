@@ -12,6 +12,7 @@ const ast = @import("../sexpr/ast.zig");
 const numeric = @import("../numeric.zig");
 const parser_mod = @import("../sexpr/parser.zig");
 const env_mod = @import("env.zig");
+const deprecations = @import("deprecations.zig");
 const evaluator_mod = @import("evaluator.zig");
 const Evaluator = evaluator_mod.Evaluator;
 const EvalError = evaluator_mod.EvalError;
@@ -48,9 +49,76 @@ fn formHeadName(node: Node) []const u8 {
     return l[0].asAtom() orelse "?";
 }
 
+/// Which `(port …)` metadata sub-form a node is, if any.
+const PortMetadataKey = enum { role, protocol, class };
+
+/// One parsed `(role R)` / `(protocol P)` / `(class C)` metadata sub-form.
+const PortMetadata = struct { key: PortMetadataKey, value: []const u8 };
+
+/// What a bare word in a design-block `(port …)` body means.
+const PortOptionKeyword = enum { optional, metadata, signal_type, unknown };
+
+/// Classify a bare word in a `(port …)` body, so the parser's option branch is
+/// one switch over a named vocabulary rather than a keyword ladder.
+fn portOptionKeyword(word: []const u8) PortOptionKeyword {
+    if (std.mem.eql(u8, word, "optional")) return .optional;
+    if (portMetadataKeyword(word) != null) return .metadata;
+    if (isSignalTypeKeyword(word)) return .signal_type;
+    return .unknown;
+}
+
+/// The metadata key a word names, or null when it names none. One table, so
+/// the sub-form spelling and its retired keyword-pair alias cannot drift.
+fn portMetadataKeyword(word: []const u8) ?PortMetadataKey {
+    return port_metadata_keywords.get(word);
+}
+
+const port_metadata_keywords = std.StaticStringMap(PortMetadataKey).initComptime(.{
+    .{ "role", .role },
+    .{ "protocol", .protocol },
+    .{ "class", .class },
+});
+
+/// Recognise the documented `(role …)` / `(protocol …)` / `(class …)` metadata
+/// sub-forms of a `(port …)` body. Shared by both port parsers — the
+/// design-block form and the section form — so the two spellings cannot drift.
+/// Returns null for anything else, including a malformed one-element list, so
+/// the caller's unknown-sub-form warning still fires on it.
+fn portMetadataSubForm(node: Node) ?PortMetadata {
+    const l = node.asList() orelse return null;
+    if (l.len < 2) return null;
+    const key = portMetadataKeyword(l[0].asAtom() orelse return null) orelse return null;
+    return .{ .key = key, .value = l[1].asText() orelse "" };
+}
+
+/// Read the `(port …)` metadata declaration at `i.*` — the `(role R)` sub-form
+/// or its retired bare `role R` keyword pair. The keyword pair advances `i`
+/// past its value token and records a `deprecated_form` info naming the
+/// sub-form that replaces it. Null when the node is neither.
+fn portMetadataAt(self: *Evaluator, args: []const Node, i: *usize) ?PortMetadata {
+    const arg = args[i.*];
+    if (portMetadataSubForm(arg)) |m| return m;
+    const atom = arg.asAtom() orelse return null;
+    const key = portMetadataKeyword(atom) orelse return null;
+    deprecations.note(
+        self,
+        arg.span,
+        "bare `{s} VALUE` in (port …) is the old metadata spelling — write ({s} VALUE)",
+        .{ atom, atom },
+    );
+    i.* += 1;
+    const value = if (i.* < args.len) args[i.*].asText() orelse "" else "";
+    return .{ .key = key, .value = value };
+}
+
 /// Parse (port "NET" in/out/io ...) section port declaration.
+///
+/// Metadata is written as sub-forms — `(role R)`, `(protocol P)`, `(class C)`,
+/// `(nominal V)`. The original spellings (a bare `role R` keyword pair, a bare
+/// trailing number for the nominal voltage) are permanent aliases that record a
+/// `deprecated_form` info naming the sub-form that replaces them.
 pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod.Env) EvalError!?env_mod.SectionPort {
-    // (port "NET" in/out/io [signal-type] [voltage] [role R] [protocol P])
+    // (port "NET" in/out/io [signal-type] [(nominal V)] [(role R)] [(protocol P)] [(class C)])
     if (sf_children.len < 3) return null;
     var port_name: []const u8 = "";
     var direction: env_mod.PortDirection = .in;
@@ -76,20 +144,21 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
             elec = decl;
             continue;
         }
-        if (arg.asAtom()) |atom| {
-            if (std.mem.eql(u8, atom, "role")) {
-                si += 1;
-                if (si < sf_children.len) role = sf_children[si].asText() orelse "";
-                continue;
-            } else if (std.mem.eql(u8, atom, "protocol")) {
-                si += 1;
-                if (si < sf_children.len) protocol = sf_children[si].asText() orelse "";
-                continue;
-            } else if (std.mem.eql(u8, atom, "class")) {
-                si += 1;
-                if (si < sf_children.len) class_key = sf_children[si].asText() orelse "";
-                continue;
+        // Metadata: the `(role R)` sub-form or its retired bare keyword pair.
+        if (portMetadataAt(self, sf_children, &si)) |m| {
+            switch (m.key) {
+                .role => role = m.value,
+                .protocol => protocol = m.value,
+                .class => class_key = m.value,
             }
+            continue;
+        }
+        if (arg.isForm("nominal")) {
+            const nc = arg.asList().?;
+            if (nc.len >= 2) voltage = nc[1].asNumber() orelse voltage;
+            continue;
+        }
+        if (arg.asAtom()) |atom| {
             // Direction keywords
             if (std.mem.eql(u8, atom, "in")) {
                 direction = .in;
@@ -148,6 +217,12 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
                 try group_list.append(self.allocator, s);
             }
         } else if (arg.asNumber()) |n| {
+            deprecations.note(
+                self,
+                arg.span,
+                "a bare trailing number in (port …) is the old nominal-voltage spelling — write (nominal {d})",
+                .{n},
+            );
             voltage = n;
         } else if (arg.asList() != null) {
             self.warnFmt(arg.span, "unknown sub-form ({s} …) in (port …)", .{formHeadName(arg)});
@@ -1290,23 +1365,36 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
             } else {
                 self.warnFmt(arg.span, "(side …) in (port \"{s}\" …) expects left|right|top|bottom", .{name});
             }
-        } else if (arg.asAtom()) |kw| {
-            if (std.mem.eql(u8, kw, "optional")) {
-                is_optional = true;
-            } else if (std.mem.eql(u8, kw, "role") or std.mem.eql(u8, kw, "protocol") or std.mem.eql(u8, kw, "class")) {
-                // Metadata keywords mirror the section-port form; consume their
-                // following value token (parsePort doesn't store them on Port).
+        } else if (portMetadataSubForm(arg) != null) {
+            // `(role …)` / `(protocol …)` / `(class …)` mirror the section-port
+            // form. A design-block Port carries no metadata fields, so the
+            // sub-form is accepted and dropped exactly as the keyword pair was.
+        } else if (arg.asAtom()) |kw| switch (portOptionKeyword(kw)) {
+            .optional => is_optional = true,
+            // Metadata keywords mirror the section-port form; consume their
+            // following value token (parsePort doesn't store them on Port).
+            .metadata => {
+                deprecations.note(
+                    self,
+                    arg.span,
+                    "bare `{s} VALUE` in (port \"{s}\" …) is the old metadata spelling — write ({s} VALUE)",
+                    .{ kw, name, kw },
+                );
                 skip_kw_value = true;
-            } else if (isSignalTypeKeyword(kw)) {
-                // Signal-type words (power/clock/rf/…): kept as the port's kind
-                // so the placer can read flow context off power/rf ports.
-                kind = kw;
-            } else {
-                self.warnFmt(arg.span, "unknown port option '{s}' in (port …)", .{kw});
-            }
+            },
+            // Signal-type words (power/clock/rf/…): kept as the port's kind
+            // so the placer can read flow context off power/rf ports.
+            .signal_type => kind = kw,
+            .unknown => self.warnFmt(arg.span, "unknown port option '{s}' in (port …)", .{kw}),
         } else if (arg.asNumber()) |n| {
             // Bare trailing number is the nominal voltage, matching
             // parseSectionPort; an explicit (nominal …) form still wins.
+            deprecations.note(
+                self,
+                arg.span,
+                "a bare trailing number in (port \"{s}\" …) is the old nominal-voltage spelling — write (nominal {d})",
+                .{ name, n },
+            );
             if (nominal == null) nominal = n;
         } else if (arg.asList() != null) {
             // None of the known sub-forms (rated/nominal/current/efficiency/
@@ -1659,6 +1747,61 @@ test "parseSectionPort reads the class keyword value" {
     const nodes = try parser_mod.parse(alloc, "(port \"NET\" in class \"diff\")");
     const port = (try parseSectionPort(&eval, nodes[0].asList().?, &env)).?;
     try testing.expectEqualStrings("diff", port.class);
+}
+
+// spec: eval/design_block - a section port reads role protocol class and nominal as sub-forms with the bare spellings kept as deprecated aliases
+test "parseSectionPort reads the metadata sub-forms and deprecates the bare pairs" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    // The documented spelling: parenthesised, self-delimiting, and silent.
+    const sub = try parser_mod.parse(
+        alloc,
+        "(port \"NET\" in (role \"sense\") (protocol \"SPI\") (class \"diff\") (nominal 1.8))",
+    );
+    const port = (try parseSectionPort(&eval, sub[0].asList().?, &env)).?;
+    try testing.expectEqualStrings("sense", port.role);
+    try testing.expectEqualStrings("SPI", port.protocol);
+    try testing.expectEqualStrings("diff", port.class);
+    try testing.expectEqual(@as(f64, 1.8), port.voltage.?);
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+    try testing.expectEqual(@as(usize, 0), eval.deprecations.items.items.len);
+
+    // The retired spelling parses to exactly the same port and records infos,
+    // never warnings — the release profile promotes warnings to errors.
+    const bare = try parser_mod.parse(alloc, "(port \"NET\" in role \"sense\" 1.8)");
+    const bare_port = (try parseSectionPort(&eval, bare[0].asList().?, &env)).?;
+    try testing.expectEqualStrings("sense", bare_port.role);
+    try testing.expectEqual(@as(f64, 1.8), bare_port.voltage.?);
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+    try testing.expectEqual(@as(usize, 2), eval.deprecations.items.items.len);
+    try testing.expect(std.mem.indexOf(u8, eval.deprecations.items.items[0].message, "(role VALUE)") != null);
+    try testing.expect(std.mem.indexOf(u8, eval.deprecations.items.items[1].message, "(nominal 1.8)") != null);
+}
+
+// spec: eval/design_block - a design-block port accepts the metadata sub-forms without warning and deprecates the bare keyword pair
+test "buildPort accepts the metadata sub-forms" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    const sub = try parser_mod.parse(alloc, "(port \"V_3V3\" out power (role \"rail\") (protocol \"none\") (class \"quiet\"))");
+    const port = try buildPort(&eval, sub[0].asList().?[1..], &env);
+    try testing.expectEqualStrings("V_3V3", port.name);
+    // Accepted and dropped, exactly as the keyword pair always was — and not
+    // mistaken for an unknown sub-form.
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+    try testing.expectEqual(@as(usize, 0), eval.deprecations.items.items.len);
+
+    const bare = try parser_mod.parse(alloc, "(port \"V_3V3\" out power role \"rail\")");
+    _ = try buildPort(&eval, bare[0].asList().?[1..], &env);
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+    try testing.expectEqual(@as(usize, 1), eval.deprecations.items.items.len);
 }
 
 /// Register a minimal component family so `(name "val")` evaluates to a

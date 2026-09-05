@@ -88,6 +88,7 @@ test {
     _ = @import("eval/env.zig");
     _ = @import("eval/evaluator.zig");
     _ = @import("eval/fmt.zig");
+    _ = @import("eval/deprecations.zig");
     _ = @import("eval/forms.zig");
     _ = @import("eval/ids.zig");
     _ = @import("eval/instance.zig");
@@ -100,6 +101,7 @@ test {
     _ = @import("eval/pin_enrichment.zig");
     _ = @import("eval/power_budget.zig");
     _ = @import("eval/power_sequencing.zig");
+    _ = @import("eval/project_boards.zig");
     _ = @import("eval/net_envelopes.zig");
     _ = @import("eval/net_envelope_rules.zig");
     _ = @import("eval/rails.zig");

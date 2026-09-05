@@ -4670,6 +4670,8 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - SectionIterator walks every ## heading of the rendered reference in order
 - The generated reference names every category key so (category …) docs follow the classifier map
 - The generated reference has a Requirement checks section rendered from the checker's check_docs table
+- Every document the generated reference links to exists in docs/
+- The section-classifier reference states that an explicit (category …) is the source of truth
 - Every isForm head atom under src/eval is reachable from a form registry or listed as a deliberate exception
 - The generated reference renders one sub-form section per compound-form registry
 
@@ -4700,6 +4702,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - strap-ok, nc-ok and a (near …) own pad are held to the same pad set as (pin …)
 - a part with neither a pinout nor a footprint has an unknown pad set and every pad token passes
 - a footprint's pad ids check the pads of a part that has no pinout file
+- the inert (row N) / (col N) grid hints on an instance and inside (part …) report themselves as doing nothing
 - completeness-waiver: empty inputs (an instance with no net arguments retains the established component-only behavior)
 - completeness-waiver: large inputs (positional pad numbering is a bounded linear walk over the parsed instance children)
 - completeness-waiver: unauthorized access (pure in-process AST lowering with no request, identity, or authorization surface)
@@ -5663,6 +5666,9 @@ Public functions: renderSchematic
 - a floating net within two edits of a well-connected net suggests that net
 - a parts row that fails an authored typed attribute is reported instead of substituted in silence
 - a net pinned by (module-policy (net-class …)) is not reported as an inferred layout class
+- reports a section whose diagram category came from a name keyword, and stays silent once (category ...) pins it
+- one section name reports its inferred category once however many sub-blocks carry it
+- a deprecated spelling is an info finding carrying file:line:col and its replacement, never an error or a warning
 - a declared differential pair with exactly one wired lane is reported as half-connected, naming the wired lane and the open one
 - a declared differential pair wired on both lanes, or on neither, is not reported
 - a sub-block's differential pair tied on only one lane by the parent is reported as half-connected
@@ -5815,6 +5821,7 @@ Public functions: analyze
 - shorthand-generated ref-des never collide with each other or with authored ones
 - each sub-block is its own ref-des namespace so two modules may both name R1
 - module-policy form pins the placement class of named nets on the design block
+- placement-class is the documented module-policy child and net-class is a deprecated alias for it
 - design-rules captures an optional ground-via maximum distance for SMD ground-pad plane stitching
 - design-rules captures an optional finished via-wall plating thickness for power-capacity analysis
 
@@ -5852,6 +5859,8 @@ Public functions: analyze
 - a section-scope diff-port expands two section ports typed differential
 - a diff-port missing its direction is an arity error naming the form
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
+- a section port reads role protocol class and nominal as sub-forms with the bare spellings kept as deprecated aliases
+- a design-block port accepts the metadata sub-forms without warning and deprecates the bare keyword pair
 - kicad-pcb form captures the literal path on the design block
 - stackup form captures layer count and plane assignments on the design block
 - net-envelope form publishes an authored voltage envelope on the design block
@@ -5920,6 +5929,36 @@ Public functions: analyze
 - a bus-port index range whose lane span would overflow the i64 subtraction is diagnosed and expands nothing
 - a zero-based bus-port range still expands and the lane cap admits a span of exactly 4095
 - a frequency-plan declaration is collected during the block body and evaluated after it, publishing its typed report on the evaluator beside the loop-filter ones
+- Project board map keys on the design source file stem
+- a project kicad-projects.sexp entry overrides the design's own kicad-pcb path and supplies one when the source declares none
+
+## eval/deprecations
+
+Public functions: note
+
+- Deprecation records dedupe by source position so a reused module reports once
+- completeness-waiver: empty inputs (a record with an empty file or message still lands and prints; only the dedupe key needs to be well-formed, and it always is because the span supplies it)
+- completeness-waiver: large inputs (the log holds one entry per distinct source position of a deprecated form, so it is bounded by the size of the design's own source)
+- completeness-waiver: unauthorized access (an in-process log over already-parsed source the evaluator was handed; it grants no file, network, or user capability)
+- completeness-waiver: i/o failure (recording performs no I/O — the caller has already read the source, and rendering the log is ERC's job)
+- completeness-waiver: concurrent access (each evaluator owns its own log for the duration of one single-threaded build; nothing is shared between builds)
+- completeness-waiver: malformed encoding (messages are compile-time format strings filled with slices out of the source the parser already accepted)
+- completeness-waiver: integer overflow (the only arithmetic is the list append the allocator bounds; line and column come from spans the tokenizer already produced)
+- completeness-waiver: panic-free (both allocations are `catch return` — a failed record drops the finding, never the build, which is the whole point of keeping deprecations out of the warning list)
+
+## eval/project_boards
+
+Public functions: lookup
+
+- Project board map resolves a design name to its KiCad board path
+- Project board map skips malformed entries instead of failing the build
+- completeness-waiver: empty inputs (an empty design name resolves to no override, and an absent or empty mapping file leaves every design on whatever its own source declares)
+- completeness-waiver: large inputs (the file holds one short line per design and is read through the evaluator's capped, cached file loader, so a design with fifty sub-blocks parses it once)
+- completeness-waiver: unauthorized access (a project-local file the same process already reads designs from; it names a board path and grants nothing on its own — the KiCad sync route keeps its own authorization)
+- completeness-waiver: i/o failure (a missing or unreadable file resolves to no override rather than failing a build, because a file of machine-local paths must never break a machine that has none)
+- completeness-waiver: concurrent access (read-only, and read through the evaluator's per-build file cache; nothing here writes)
+- completeness-waiver: integer overflow (no arithmetic — the grammar is a linear scan over parsed nodes comparing two strings)
+- completeness-waiver: panic-free (every shape mismatch is an `orelse return null`; a short form, an unquoted name and a foreign head are each skipped rather than indexed into)
 
 ## eval/test_point
 
@@ -5933,6 +5972,7 @@ Public functions: parse
 - Parses (virtual) as an explicit marker-only test point
 - Materializes a physical testpoint instance and pin-1 net by default
 - Keeps (virtual) test points marker-only with no physical instance or pad net
+- The (virtual) marker keeps its own meaning and is not reported as a deprecated spelling
 - Materializes test points inside sections and preserves section membership
 - Materializes test points inside nested sections and preserves nested membership
 

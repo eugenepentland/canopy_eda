@@ -2490,6 +2490,17 @@ pub const BlockOrigin = enum { design_root, embedded };
 /// (instances + nets + ports), the section/sub-block tree, and the design
 /// metadata (verifications, rails, functions) the review and diagram layers
 /// consume.
+/// One use of a superseded spelling, already resolved to a source position so
+/// nothing downstream needs the AST. `file` is the file the form actually
+/// lives in (a module body reports against the module, like `EvalWarning`),
+/// and `message` names both what is deprecated and the recommended spelling.
+pub const DeprecatedForm = struct {
+    file: []const u8,
+    line: u32,
+    col: u32,
+    message: []const u8,
+};
+
 pub const DesignBlock = struct {
     name: []const u8,
     instances: []const Instance,
@@ -2562,6 +2573,14 @@ pub const DesignBlock = struct {
     /// when the design has no PCB target — the file-based KiCad sync
     /// endpoint refuses to write without it.
     kicad_pcb_path: ?[]const u8 = null,
+    /// Retired-but-accepted spellings the evaluator met while building this
+    /// block, in source order. Populated by `materializeBlock` from the
+    /// evaluator's running list, so the ROOT block's slice covers the whole
+    /// design (module bodies included) and each nested block owns the subset
+    /// raised inside it. ERC turns them into `deprecated_form` **info**
+    /// findings — never evaluator warnings, because the release profile
+    /// promotes those to errors and every old spelling still works.
+    deprecations: []const DeprecatedForm = &.{},
     /// Placeholder parts declared via top-level `(stub …)` forms — sketched
     /// components with a bounding box and named signals but no real library
     /// footprint yet. They render as diagram nodes and export as pad-less KiCad

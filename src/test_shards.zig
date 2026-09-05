@@ -434,6 +434,8 @@ pub const shards: []const []const []const u8 = &.{
         "eval.sidecars.test.",
         "eval.power_budget.test.",
         "eval.test_point.test.",
+        "eval.deprecations.test.",
+        "eval.project_boards.test.",
         "eval.thermal.test.",
         "export_fab.test.",
         "export_gerber.test.",

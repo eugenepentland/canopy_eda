@@ -256,8 +256,36 @@ zig build run -- export-kicad --project-dir projects/designs --output-dir <dir> 
 # netlisp's own netlist + file-based sync stay the board authority.
 zig build run -- export-kicad-sch --project-dir projects/designs <design> [--output <root.kicad_sch>] [--output-dir <dir>] [--flat] [--no-vendor-symbols]
 
+# WHERE THE BOARD PATH COMES FROM. Both the board sync and the schematic push
+# below write into the KiCad project directory named by the design's board
+# path. That path resolves in two places, project-level first:
+#
+#   1. <project-dir>/kicad-projects.sexp — a flat list of one entry per design,
+#      `(kicad-pcb "<design-name>" "<absolute path to .kicad_pcb>")`. The design
+#      name is the SOURCE FILE STEM, the same token `netlisp designs` prints and
+#      every command takes, so `src/boards/barracuda/barracuda.sexp` keys on
+#      "barracuda".
+#   2. The design's own top-level `(kicad-pcb "<path>")` form.
+#
+# An entry in the file WINS over the in-source form, and supplies the target
+# when the source declares none — which is the point: a machine path
+# (/mnt/nas/kicad/…) is a property of this checkout, not of the schematic, so it
+# can live outside the design and the source form can be dropped entirely. The
+# in-source form keeps working unchanged and is still fine for a board whose
+# path is stable everywhere the design is opened.
+#
+# The file is optional and fail-open: absent, unreadable, or holding a malformed
+# entry, every design keeps whatever its own source declares. A file of
+# machine-local paths must never be able to fail a build on a machine that does
+# not have one. Keep it out of version control (or commit it deliberately, if
+# every checkout really does share the paths).
+#
+#   ;; projects/designs/kicad-projects.sexp
+#   (kicad-pcb "barracuda" "/mnt/nas/kicad/barracuda/barracuda.kicad_pcb")
+#   (kicad-pcb "rds3"      "/mnt/nas/kicad/rds3/rds3.kicad_pcb")
+
 # Push that same schematic INTO the LIVE KiCad project directory the design's
-# (kicad-pcb "<path>") form names, so the KiCad project carries board AND
+# board path names, so the KiCad project carries board AND
 # schematic instead of the empty eeschema stub KiCad ships every new project
 # with. The sheets are named after the KiCad PROJECT, not the netlisp design:
 # `Cyclops Digital.kicad_pcb` gives `Cyclops Digital.kicad_sch` (what KiCad

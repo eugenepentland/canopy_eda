@@ -20,6 +20,7 @@ const frequency_plan = @import("../frequency_plan.zig");
 const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
 const interfaces = @import("interfaces.zig");
+const deprecations_mod = @import("deprecations.zig");
 const forms = @import("forms.zig");
 const footprint_pads = @import("footprint_pads.zig");
 const value_kind = @import("value_kind.zig");
@@ -227,6 +228,12 @@ pub const Evaluator = struct {
     /// them as `file:line:col: warning: …` and the server can read the list
     /// off the evaluator after a build.
     warnings: std.ArrayList(EvalWarning) = .empty,
+    /// Superseded spellings met during evaluation (see `eval/deprecations.zig`).
+    /// Deliberately NOT `warnings`: the release profile turns evaluator
+    /// warnings into errors, and every deprecated spelling here still works.
+    /// `materializeBlock` hands each design-block its own slice; ERC renders
+    /// them as `deprecated_form` info findings.
+    deprecations: deprecations_mod.Log = .{},
     /// Module call stack, pushed by `callModule` around each body
     /// evaluation. While non-empty, `setError` appends one
     /// `  in module 'x' (called at L:C)` context line per frame
@@ -412,6 +419,7 @@ pub const Evaluator = struct {
         for (self.frequency_plan_reports.items) |report| report.deinit(self.allocator);
         self.frequency_plan_reports.deinit(self.allocator);
         self.warnings.deinit(self.allocator);
+        self.deprecations.deinit(self.allocator);
         self.module_stack.deinit(self.allocator);
         self.imports_in_progress.deinit(self.allocator);
         self.authored_refs.deinit(self.allocator);

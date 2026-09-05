@@ -778,3 +778,26 @@ real time and none is specific to that board.
   warning, and the form looks like it works. Either evaluate the two bounds
   (`net-envelope`'s `(rated …)` now does) or warn when they are not literals.
   Fixing it changes derived rails corpus-wide, so it wants its own change.
+
+- **A `(decouple …)` can write source the next build refuses to read.** With
+  `(decouple-defaults (ic "U1"))` set, a positional
+  `(decouple "V_3V3" (cap-0402 "100nF") 1 per-pin R1 1)` whose host ref is NOT
+  the default IC has its `R1` reinterpreted as a *pin*, so one form emits two
+  differently-keyed children and `netlisp build` pins an
+  `(ids ("100nF@R1#0" …) ("100nF@1#0" …))` sidecar onto it. The **second**
+  build then fails on the file the first one wrote:
+  `src/x.sexp:6:70: error: unknown name 'ids' — did you mean 'ind'?`. Verified
+  on `main` (3b35239b) with a four-line design; not introduced by any recent
+  change. Two seams: the `per-pin REF` token should not silently become a pin
+  when a default IC is set (spell out which it is, or diagnose the ambiguity),
+  and an `(ids …)` anchor on a `(decouple …)` form must be inert on re-read the
+  way it is on `(repeat …)`. Cost here was ~20 minutes of chasing a probe
+  design that had built clean once.
+- **Parallel worktrees can fill the disk and the failure does not say so.** With
+  eleven agent worktrees each holding a 3–18 GB `.zig-cache`, `/` hit 100% and
+  `zig build test` failed with `error: writing dependencies.zig contents:
+  NoSpaceLeft` — which reads like a codegen bug, not a full disk. `du -sh
+  .claude/worktrees/*/.zig-cache` found it in one command. Worth either a
+  preflight free-space check in `build.zig` that names the real cause, or a
+  documented `zig build clean-worktree-caches` so an agent has a sanctioned way
+  to reclaim space without touching another agent's tree.

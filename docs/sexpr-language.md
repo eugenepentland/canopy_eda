@@ -36,9 +36,13 @@ conventions and idiomatic usage only.
 ```
 
 Test points (`(instance "TP_X" testpoint (pin 1 "NET"))`) are first-class
-inside `(defmodule …)` sub-blocks: they take a renumber-safe `TP` ref-des and
-are exempt from the `IC has no ground` ERC. A bare `(test-point "TP" "NET")`
-stays a schematic-only marker (no exported pad).
+inside `(block …)` sub-blocks: they take a renumber-safe `TP` ref-des and
+are exempt from the `IC has no ground` ERC. That instance spelling is the
+recommended one. A bare `(test-point "TP" "NET")` places **the same physical
+pad** — it is a second spelling for the same part, plus its `(purpose …)` /
+`(required-for …)` metadata, and it carries a `deprecated_form` info saying
+so. Only `(test-point "TP" "NET" (virtual))` is the schematic-only marker with
+no exported pad, and that form has no alias and is not deprecated.
 
 ### Pin function names, and `rewrite-pins-by-name`
 
@@ -167,13 +171,19 @@ Both feed the schematic header's system-overview SVG: the renderer in
 matching on the **name** to pick the section's column + color, then prints
 the **subtitle** as the chip caption.
 
-- **Name** — 1–4 words, capitalized, functional role first. Pick at least
-  one keyword the classifier recognizes so the chip lands in the right
-  column instead of falling through to the generic peripheral bucket. The
-  authoritative keyword→category table is auto-generated into
-  [docs/language-forms.md § Section-name classifier keywords](docs/language-forms.md)
-  from the same `name_rules` table `classifyByName` walks (don't copy it
-  here — it would drift).
+- **Name** — 1–4 words, capitalized, functional role first. Name it for the
+  reader, not for the classifier: **pin the column with `(category <key>)`**
+  in the section body and the name is free to say whatever is clearest.
+  `(category …)` is the source of truth — `classifySection` consults it
+  first, and only a section without one falls back to case-insensitive
+  keyword matching on the name. That fallback is a guess, so it announces
+  itself: a section categorised by a name keyword gets a
+  `section_category_inferred` **info** from `netlisp check` naming the
+  category it landed in and the `(category …)` line that would pin it. The
+  valid keys and the fallback keyword→category table are both auto-generated
+  into [docs/language-forms.md § Section-name classifier keywords](docs/language-forms.md)
+  from the same tables the classifier walks (don't copy them here — they
+  would drift).
 - **Subtitle** — one-line technical summary: part number, key spec
   (voltage / frequency / current), and any "chip details sealed in
   `<module>` module" pointer for sub-blocks. This is the caption that
@@ -201,10 +211,35 @@ the **subtitle** as the chip caption.
   (pin 4 9 16 21 "VBUS"))
 ```
 
+### `(block …)`: one word for a design and for a module
+
+`(block …)` is the primary spelling for both halves of the definition
+vocabulary, and which half it is comes from the name:
+
+```scheme
+;; A quoted name is an eager design root — a whole board or a whole file.
+(block "Barracuda Signal Generator"
+  (instance "U1" …)
+  …)
+
+;; A bare atom plus a parameter list is a parameterized, embeddable
+;; definition, instantiated with (sub-block "pwr" (tpsm84338 …)).
+(block tpsm84338 (rfbt rfbb rled)
+  …)
+```
+
+`(design-block "name" …)` and `(defmodule name (params…) …)` are **permanent
+aliases**, routed to the same two handlers. They are not deprecated, they emit
+no info, and the corpus is full of them — a design written either way is
+identical in every output. Prefer `(block …)` in new work because the two
+things really are one thing (a module with no parameters and a design differ
+only in whether anything instantiates them), and keep the older spelling where
+a file already uses it consistently.
+
 ### Parameterized modules
 
 ```scheme
-(defmodule tpsm84338 (rfbt rfbb rled)
+(block tpsm84338 (rfbt rfbb rled)          ;; ≡ (defmodule tpsm84338 …)
   (let vout (* 0.6 (+ 1.0 (/ rfbt rfbb))))
   (assert-range vout 0.6 16.0 "VOUT")
   (design-block (fmt "~V Buck" vout)
@@ -219,8 +254,31 @@ the **subtitle** as the chip caption.
 ;; A (param default) pair makes the argument optional — the default
 ;; evaluates at call time (later defaults may reference earlier params).
 ;; A fully-defaulted module renders standalone everywhere a design does.
-(defmodule tpsm84338 ((rfbt 220k) (rfbb 47k) (rled 1k)) …)
+(block tpsm84338 ((rfbt 220k) (rfbb 47k) (rled 1k)) …)
 ```
+
+**A parameter may be a component, not just a number.** Module arguments are
+ordinary values, and a component family call like `(cap-0402 "100nF")` is one
+of them — so a module can take *the part itself* as a parameter and place it
+with `(instance "C1" bypass …)`. That is how one filter module serves a board
+that wants an 0402 100 nF bypass and another that wants an 0603 1 µF:
+
+```scheme
+(block filt ((bypass (cap-0402 "100nF")))     ;; default part, overridable
+  (design-block "Filter"
+    (instance "C1" bypass (pin 1 "OUT") (pin 2 "GND"))
+    (instance "R1" (res-0402 "10k") (pin 1 "IN") (pin 2 "OUT"))
+    (port "IN" in) (port "OUT" out) (port "GND" bidi)))
+
+(sub-block "a" (filt))                        ;; a/C… is cap-0402 100nF
+(sub-block "b" (filt (bypass (cap-0603 "1uF")))) ;; b/C… is cap-0603 1uF
+```
+
+Both the footprint and the value follow the argument — the emitted design
+carries `"cap-0402" "100nF"` for the first and `"cap-0603" "1uF"` for the
+second — so this is a real part substitution, not a value override. The
+default in the parameter list evaluates at call time like any other, so the
+module still renders standalone with no arguments.
 
 **Modules are first-class on every read surface.** A `lib/modules/` name
 works wherever a design name does: `GET /` lists modules with their
@@ -661,11 +719,32 @@ own pill in the review UI and as their own status in `netlisp check`; run with
 
 ### Decoupling shorthand
 
+`(decouple "NET" …)` has two grammars on one head. The **sub-form** one is the
+documented spelling:
+
+```scheme
+(decouple "VDD3V3"
+  (per-pin (cap-0402 "100nF") VDD_1 VDD_2 VDD_3)   ;; one bypass per named pin function
+  (bulk (cap-0805 "10uF") 2))                      ;; shared rail reservoir
+```
+
+The **positional** one — `(decouple "VDD" (comp "val") COUNT per-pin REF
+PIN…)` — is the older shape and still works everywhere; it records a
+`deprecated_form` info naming the sub-form spelling. Both emit the same parts
+with the same structural ids, so rewriting one does not re-stamp a board.
+
 `(decouple "VDD" 1 per-pin auto)` expands to every pin already declared on the
 net using the `(decouple-defaults (ic …))` ref (the `(pins …)` declarations
 must appear first); a literal `REF PIN…` list spells the pins out instead. The
 `(decouple-defaults … (bypass …))` component (not the ic) cascades into
 sub-block modules that don't set their own.
+
+`(decouple-defaults …)` itself is deprecated (info, still working). The
+defaults it supplies are exactly what makes a `(decouple …)` line unreadable
+on its own — you cannot tell from `(decouple "VDD" 1 per-pin J14 K14)` which
+part is placed or which IC hosts it without scrolling back to the defaults
+form, and with a default IC set, a leading `REF` token is silently reinterpreted
+as a *pin*. Spell the host and the part at each site instead.
 
 ### Per-pin decoupling binding: `(decouples "IC" PIN)`
 
@@ -979,7 +1058,7 @@ schematic.
   `/schematics/<name>`, eyeball the Layout tab at full zoom-out, and treat a
   stale or scattered diagram as part of the change still to finish.
 
-### Placement class pins: `(module-policy …)`
+### Placement class pins: `(module-policy (placement-class …))`
 
 The placer, the routing order and the `layout_class_inferred` ERC info all
 classify nets by name (`input_rail`, `switch_node`, `clock`, `rf`, `feedback`,
@@ -988,10 +1067,19 @@ when you want the decision recorded so the info stops appearing, pin it:
 
 ```lisp
 (module-policy
-  (net-class "V_24V_CLEAN" power)      ;; a clean post-LDO rail, not an input rail
-  (net-class "REF_ADF" clock)
-  (net-class "BOOST25_SW" switch_node)) ;; a bare leaf reaches the module-local net
+  (placement-class "V_24V_CLEAN" power)      ;; a clean post-LDO rail, not an input rail
+  (placement-class "REF_ADF" clock)
+  (placement-class "BOOST25_SW" switch_node)) ;; a bare leaf reaches the module-local net
 ```
+
+**`placement-class`, not `net-class`.** The two words meant different things:
+this one is *placement criticality* — how tightly the placer packs a net's
+loop and how early the router claims its path — while the **top-level**
+`(net-class …)` form is *routing geometry*: trace width, clearance, via size,
+impedance. They never interacted, and sharing the word made every reading of
+either one a guess. `(module-policy (net-class …))` is a permanent alias that
+still works; it reports a `deprecated_form` info naming this spelling, and
+nothing about the design changes when you leave it alone.
 
 Design-block scope only. The net is the flattened name, or a bare leaf that
 matches every module-local net of that name. A pinned class is final — the
@@ -1270,6 +1358,31 @@ The two schemes coexist per-design. Switching an existing design to
 `(hierarchical-ids)` changes its child ids (different derivation), so it is a
 one-time board re-stamp — adopt deliberately, not casually.
 
+### KiCad board target: `(kicad-pcb …)` and `kicad-projects.sexp`
+
+`(kicad-pcb "/abs/path/board.kicad_pcb")` names the board file the file-based
+KiCad sync writes to. It is the one form in the language whose value is a
+property of the **machine**, not of the circuit — so it also resolves from
+outside the source:
+
+```lisp
+;; projects/designs/kicad-projects.sexp — one entry per design, the design name
+;; being the SOURCE FILE STEM (`netlisp designs` prints exactly these tokens).
+(kicad-pcb "barracuda" "/mnt/nas/kicad/barracuda/barracuda.kicad_pcb")
+(kicad-pcb "rds3"      "/mnt/nas/kicad/rds3/rds3.kicad_pcb")
+```
+
+An entry there **overrides** the design's own `(kicad-pcb …)` form and
+**supplies** the target when the design declares none, so a shared design file
+need carry no absolute path at all. The in-source form still works and is the
+right choice when the path is genuinely the same everywhere the design is
+opened.
+
+The file is optional and fail-open: absent, unreadable, or with a malformed
+entry, every design falls back to whatever its own source declares — a file of
+machine-local paths must never fail a build on a machine that has none. Full
+resolution rules: [docs/build-and-run.md](build-and-run.md).
+
 ### Board keepout regions
 
 `(board … (keepout "NAME" …))` reserves a rectangle of board. It is the
@@ -1315,11 +1428,15 @@ obstructions.
   a silently dropped authored region reads on every surface exactly like a
   board that never reserved the space.
 
-The motivating case is the Barracuda RF board, whose bottom frontend face
-carries a conduction plate. Its outline is 81.0 × 24.8 mm, and the plate
-occupies `x = 174.0 … 189.0`, `y = 89.6 … 98.5` in that board's layout frame
-(outline `x 126.5 … 207.5`, `y 89.6 … 114.4`) — board-local `x = 47.5`,
-`y = 0`, `w = 15.0`, `h = 8.9`:
+The motivating case — **illustrative, not a transcript of the corpus** — is
+the Barracuda RF board's bottom frontend reserve. That board still records the
+region as a prose comment marked "NOT machine-checked" and declares no
+`(keepout …)` form; adopting one is a board edit nobody has made. The worked
+example below is what adopting it *would* look like, and it is the right shape
+to copy. Its outline is 81.0 × 24.8 mm, and the reserved rectangle occupies
+`x = 174.0 … 189.0`, `y = 89.6 … 98.5` in that board's layout frame (outline
+`x 126.5 … 207.5`, `y 89.6 … 114.4`) — board-local `x = 47.5`, `y = 0`,
+`w = 15.0`, `h = 8.9`:
 
 ```scheme
 (board
@@ -1342,6 +1459,33 @@ occupies `x = 174.0 … 189.0`, `y = 89.6 … 98.5` in that board's layout frame
 ;; Long form when net differs from name:
 (port "VOUT" vout-str  out  (rated 0.6 16.0))
 ```
+
+Everything after the direction is an option, in any order. Two of them are
+bare words with no parentheses and stay that way: `optional`, and a
+signal-type word (`power`, `clock`, `rf`, `data`, `differential`, `signal`).
+Everything else is a sub-form — see
+[language-forms.md § Port sub-forms](language-forms.md) for the full table:
+
+```scheme
+(port "SPI_SCK" out clock
+  (role "bus-clock")            ;; what this port does in its interface
+  (protocol "SPI")              ;; the standard it speaks
+  (class "fast")                ;; a free classification key
+  (nominal 3.3))                ;; nominal voltage
+```
+
+Two older spellings still work and always will, each recording a
+`deprecated_form` info that names its replacement:
+
+| Old | Write instead |
+| --- | --- |
+| `role R` / `protocol P` / `class C` — a bare keyword that swallows the next token | `(role R)` / `(protocol P)` / `(class C)` |
+| a bare trailing number | `(nominal V)` |
+
+The keyword pairs read as two unrelated options to anyone scanning the line,
+and a bare number is indistinguishable from a positional argument the form
+does not have. Both forms parse identically to the sub-forms; rewriting one is
+a pure spelling change.
 
 ### Differential port pairs: `(diff-port …)`
 
@@ -1805,6 +1949,30 @@ is a sub-block port, the second is named in the board's `(pcb-plan …)` wave
 lists — and the six nets between them become
 `n~mixer-IF~lpf4-INPUT`, `n~lpf4-OUTPUT~lpf_if_1-RF_IN`, and so on.
 
+### Bus ties: `(bus-net …)`
+
+`(bus-net "PREFIX" LO HI "SUB")` is the documented form: it expands to one
+`(net "PREFIX<i>" "SUB/PREFIX<i>")` tie per index in the inclusive range, so
+`(bus-net "FLASH_IO" 0 7 "flash")` replaces eight verbatim lines and nothing
+else.
+
+Two further grammars hang off the same head and each record a
+`deprecated_form` info:
+
+```scheme
+;; Strided: distribute a channel range sub-major across (over …) x (ports …).
+(bus-net "ADF_CH" 1 10 (suffixes P N) (over "adc1" "adc2") (ports AINA AINB))
+
+;; Mapped: one sub-block, a parent suffix, and an offset child-port family.
+(bus-net "DUT_A" 0 2 (suffix "_MCU") (over "shift" (port-base "B" 1)))
+```
+
+Both still work. Neither reads as the same operation the basic form performs —
+the index means a different thing in each — so what a `(bus-net …)` line does
+cannot be known from its head. Prefer the basic form per sub-block, or spell
+the ties out with `(net …)` / `(bridge …)`, generating them with `(for …)`
+when there are many.
+
 ### The four unrelated `(group …)` forms
 
 `group` is overloaded across four grammars that share nothing but the word:
@@ -1945,3 +2113,16 @@ evaluated netlists and connector pad tables. Error-severity findings clear the
 Two differing net **names** across the joint are never a mismatch. Pairing
 `V_12V` with `V_12V_RF` is exactly what the canonical/alias layer is for; a
 check that flagged it would fire on every real contract.
+
+Where each is documented, all of it generated from the evaluator's own
+tables:
+
+| Where | Generated reference |
+| --- | --- |
+| Design-block scope | [language-forms.md § Design-scope forms](language-forms.md), row `(group …)` |
+| `(diagram-layout …)` | [language-forms.md § Design-scope forms](language-forms.md), inside the `(diagram-layout …)` row's syntax |
+| `(pins "REF" …)` | [language-forms.md § Instance sub-forms](language-forms.md), in the `(pins "REF" …)` children table at the end of that section |
+| `(rough …)` | [language-forms.md § Design-scope forms](language-forms.md), inside the `(rough …)` row's syntax |
+
+When in doubt, check the arity — a parenthesised member list means the
+design-scope form.

@@ -562,6 +562,9 @@ src/eval/connect.zig::anon_prefix value
 src/eval/connect.zig::collect | fn collect( self: *Evaluator, queue: *std.ArrayList(Pending), kind: Kind, form_children: []const Node, env: *Env, span: ast.Span, ) EvalError!void
 src/eval/connect.zig::isAnonymous | fn isAnonymous(name: []const u8) bool
 src/eval/connect.zig::resolveAll | fn resolveAll(self: *Evaluator, ctx: Context) EvalError!void
+src/eval/deprecations.zig::Log struct_
+src/eval/deprecations.zig::deinit | fn deinit(self: *Log, allocator: std.mem.Allocator) void
+src/eval/deprecations.zig::note | fn note(self: *Evaluator, span: ast.Span, comptime fmt: []const u8, args: anytype) void
 src/eval/design_block.zig::emit | fn emit(self: BlockScopeSink, ev: *Evaluator, form: Node, env: *Env) EvalError!void
 src/eval/design_block.zig::emit | fn emit(self: SectionSink, ev: *Evaluator, form: Node, env: *Env) EvalError!void
 src/eval/design_block.zig::emit | fn emit(self: SubSectionSink, ev: *Evaluator, form: Node, env: *Env) EvalError!void
@@ -599,6 +602,7 @@ src/eval/env.zig::DatasheetReview struct_
 src/eval/env.zig::DatasheetReviewNa struct_
 src/eval/env.zig::DatasheetReviewStatus enum_
 src/eval/env.zig::DecoupleBind struct_
+src/eval/env.zig::DeprecatedForm struct_
 src/eval/env.zig::DesignBlock struct_
 src/eval/env.zig::DesignRule struct_
 src/eval/env.zig::DesignRulesSpec struct_
@@ -927,6 +931,8 @@ src/eval/power_budget.zig::resolveRailVoltage | fn resolveRailVoltage(allocator:
 src/eval/power_sequencing.zig::SequenceRow struct_
 src/eval/power_sequencing.zig::SequenceStatus enum_
 src/eval/power_sequencing.zig::analyze | fn analyze( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const SequenceRow
+src/eval/project_boards.zig::file_name value
+src/eval/project_boards.zig::lookup | fn lookup(nodes: []const Node, design_name: []const u8) ?[]const u8
 src/eval/rails.zig::analog_supply value
 src/eval/rails.zig::build | fn build( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error![]const PowerRail
 src/eval/rails.zig::diagram_supply_prefixes value
@@ -3911,6 +3917,7 @@ src/render_block_types.zig::classifyByName | fn classifyByName(name: []const u8,
 src/render_block_types.zig::classifyCategoryKey | fn classifyCategoryKey(category: []const u8, name: []const u8) Category
 src/render_block_types.zig::classifySection | fn classifySection(sec: env_mod.Section) Category
 src/render_block_types.zig::containsCI | fn containsCI(haystack: []const u8, needle: []const u8) bool
+src/render_block_types.zig::nameKeywordCategory | fn nameKeywordCategory(name: []const u8) ?Category
 src/render_block_types.zig::name_rules value
 src/render_block_types.zig::toLower | fn toLower(c: u8) u8
 src/render_html.zig::CheckResultMap value

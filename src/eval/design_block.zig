@@ -12,6 +12,7 @@ const net_names = @import("../net_name.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
 const log = @import("../infra/log.zig");
 const env_mod = @import("env.zig");
+const deprecations = @import("deprecations.zig");
 const evaluator_mod = @import("evaluator.zig");
 const Evaluator = evaluator_mod.Evaluator;
 const EvalError = evaluator_mod.EvalError;
@@ -40,6 +41,7 @@ const board_keepout_mod = @import("board_keepout.zig");
 const net_analysis = @import("net_analysis.zig");
 const section_maturity = @import("section_maturity.zig");
 const stackup_presets = @import("stackup_presets.zig");
+const project_boards = @import("project_boards.zig");
 const outline_mod = @import("../placement/outline.zig");
 const pll_loop = @import("../pll_loop.zig");
 const frequency_plan = @import("../frequency_plan.zig");
@@ -252,11 +254,18 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .net_form_sources = &net_form_sources,
         .authored_rules = &design_rules_authored,
     };
+    // Snapshot where this block's deprecation records start: the evaluator's
+    // list is global for the whole eval, so the range appended while THIS body
+    // evaluates is exactly this block's (and, for the root, the whole design's).
+    const deprecations_start = self.deprecations.items.items.len;
     try evalBlockBodyForms(self, body_forms, env, &build);
     // Every `(port-group …)` in this body now exists, so a sub-block's
     // `(bridge-interface …)` can be resolved against either end.
     try interfaces.resolveBridges(self, iface_bridges.items, port_groups.items, &net_ties);
     try applyPowerPlanePolicy(self, board_spec, &stackup_spec);
+    // A project-level `kicad-projects.sexp` entry supplies or overrides the
+    // board target, so the machine path need not live in the design source.
+    if (projectBoardOverride(self)) |mapped| kicad_pcb_path = mapped;
     // Every instance now exists, so a `(decouples "IC" FUNC)` / `(near "REF"
     // FUNC)` can finally be read against the pinout of the part it names — in
     // either declaration order.
@@ -301,6 +310,11 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .authored_rules = design_rules_authored.toOwnedSlice(self.allocator) catch &.{},
         .test_points = test_points.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .kicad_pcb_path = kicad_pcb_path,
+        // Copied, not aliased: later appends can reallocate the evaluator's list.
+        .deprecations = self.allocator.dupe(
+            env_mod.DeprecatedForm,
+            self.deprecations.items.items[deprecations_start..],
+        ) catch &.{},
         .parts = parts.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .layout = layout_spec,
         .board = board_spec,
@@ -878,6 +892,14 @@ fn evalBusNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_
         }
     }
     if (mapped_sub != null and mapped_port_base != null) {
+        deprecations.note(
+            self,
+            form_children[0].span,
+            "the mapped (bus-net \"{s}\" LO HI (suffix …) (over \"SUB\" (port-base …))) grammar is a third " ++
+                "shape on one head — write the basic (bus-net \"PREFIX\" LO HI \"SUB\") or spell the ties out " ++
+                "with (net …) / (bridge …), generating them with (for …) if there are many",
+            .{prefix},
+        );
         var k = start;
         while (k <= end) : (k += 1) {
             const parent = std.fmt.allocPrint(self.allocator, "{s}{d}{s}", .{ prefix, k, mapped_suffix }) catch
@@ -902,6 +924,14 @@ fn evalBusNetForm(self: *Evaluator, form_children: []const Node, env: *Env, net_
     }
 
     if (over != null and ports != null) {
+        deprecations.note(
+            self,
+            form_children[0].span,
+            "the strided (bus-net \"{s}\" LO HI [(suffixes …)] (over …) (ports …)) grammar is a second shape " ++
+                "on one head — write the basic (bus-net \"PREFIX\" LO HI \"SUB\") per sub-block, or spell the " ++
+                "ties out with (net …) / (bridge …), generating them with (for …) if there are many",
+            .{prefix},
+        );
         try evalStridedBusNet(self, net_ties, prefix, start, end, over.?, ports.?, suffixes);
         return;
     }
@@ -1034,6 +1064,13 @@ fn numberAsUsize(v: env_mod.Value) ?usize {
 /// unless it equals the default ref, is taken as a pin and the ref defaults
 /// in). Both sub-forms are optional and either may appear alone.
 fn parseDecoupleDefaults(self: *Evaluator, form_children: []const Node, env: *Env) EvalError!void {
+    deprecations.note(
+        self,
+        form_children[0].span,
+        "(decouple-defaults …) hides the host ref and the bypass part from every (decouple …) that " ++
+            "relies on it — spell them at each site instead: (decouple \"NET\" (per-pin (comp \"val\") PIN…))",
+        .{},
+    );
     for (form_children[1..]) |child| {
         const cc = child.asList() orelse continue;
         if (cc.len < 2) continue;
@@ -1114,6 +1151,13 @@ fn evalDecoupleForm(
                 }
             }
         } else {
+            deprecations.note(
+                self,
+                form_children[0].span,
+                "the positional (decouple \"{s}\" (comp …) COUNT per-pin REF PIN…) shorthand is superseded by " ++
+                    "the sub-form spelling — write (decouple \"{s}\" (per-pin (comp …) PIN…) [(bulk (comp …) COUNT)])",
+                .{ net_name, net_name },
+            );
             try builders.emitDecoupleItems(self, form_children[2..], net_name, env, instances, all_pin_nets, form_id, &sidecar);
         }
     }
@@ -4488,6 +4532,60 @@ test "design-block captures (kicad-pcb path)" {
     try testing.expectEqualStrings("/mnt/nas/test.kicad_pcb", block.kicad_pcb_path.?);
 }
 
+// spec: eval/design_block - a project kicad-projects.sexp entry overrides the design's own kicad-pcb path and supplies one when the source declares none
+test "project board map overrides and supplies the kicad-pcb path" {
+    const a = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "kicad-projects.sexp",
+        .data =
+        \\(kicad-pcb "declared" "/mapped/declared.kicad_pcb")
+        \\(kicad-pcb "silent" "/mapped/silent.kicad_pcb")
+        ,
+    });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+
+    // A design that DOES declare a path: the project entry wins, because the
+    // machine path is a property of this checkout, not of the schematic.
+    const declared = try evalWithProject(a, root, "src/declared.sexp",
+        \\(design-block "d" (kicad-pcb "/in-source/declared.kicad_pcb"))
+    );
+    try testing.expectEqualStrings("/mapped/declared.kicad_pcb", declared.kicad_pcb_path.?);
+
+    // A design that declares NONE still gets a target — which is what lets the
+    // source form be dropped entirely.
+    const silent = try evalWithProject(a, root, "src/silent.sexp",
+        \\(design-block "d")
+    );
+    try testing.expectEqualStrings("/mapped/silent.kicad_pcb", silent.kicad_pcb_path.?);
+
+    // A design the map does not name keeps exactly what its source says.
+    const unmapped = try evalWithProject(a, root, "src/unmapped.sexp",
+        \\(design-block "d" (kicad-pcb "/in-source/unmapped.kicad_pcb"))
+    );
+    try testing.expectEqualStrings("/in-source/unmapped.kicad_pcb", unmapped.kicad_pcb_path.?);
+}
+
+/// Evaluate one design-block source as if it were `design_file` inside
+/// `project_dir`, so the project-level board map is consulted the way a real
+/// build consults it.
+fn evalWithProject(
+    a: std.mem.Allocator,
+    project_dir: []const u8,
+    design_file: []const u8,
+    src: []const u8,
+) !*const DesignBlock {
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, project_dir);
+    defer eval.deinit();
+    eval.current_file = design_file;
+    var env = env_mod.Env.init(a, null);
+    defer env.deinit();
+    return (try evalDesignBlock(&eval, form_children[1..], &env)).design_block;
+}
+
 // spec: eval/design_block - a frequency-plan declaration is collected during the block body and evaluated after it, publishing its typed report on the evaluator beside the loop-filter ones
 test "design-block collects and evaluates (frequency-plan …)" {
     const a = std.heap.page_allocator;
@@ -4580,26 +4678,71 @@ test "stackup captures soldermask and copper etch profile" {
     try testing.expectApproxEqAbs(@as(f64, 0.01524), mask.copper_thickness, 1e-12);
 }
 
-/// `(module-policy (net-class "NET" class)…)`: pin the placement criticality
-/// class of named nets over `module_policy.classifyNetName`'s guess. Each child
-/// must be `(net-class "NET" class)` with a class from the module-policy
+/// The board path `<project-dir>/kicad-projects.sexp` maps this design to, if
+/// any. The design name is the SOURCE FILE STEM — the same token `netlisp
+/// designs` prints and every CLI command takes — so `src/barracuda/barracuda.sexp`
+/// and `src/labstation.sexp` both key on their own basename.
+fn projectBoardOverride(self: *Evaluator) ?[]const u8 {
+    if (self.project_dir.len == 0) return null;
+    const name = designNameFromFile(self.current_file) orelse return null;
+    const path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.project_dir, project_boards.file_name }) catch return null;
+    const nodes = builders.loadFile(self, path) orelse return null;
+    return project_boards.lookup(nodes, name);
+}
+
+/// The design-name stem of a source path: the basename with its `.sexp`
+/// extension removed. Null for a path that is not a `.sexp` file.
+fn designNameFromFile(path: []const u8) ?[]const u8 {
+    if (path.len == 0) return null;
+    const base = std.fs.path.basename(path);
+    if (!std.mem.endsWith(u8, base, ".sexp")) return null;
+    const stem = base[0 .. base.len - ".sexp".len];
+    return if (stem.len == 0) null else stem;
+}
+
+// spec: eval/design_block - Project board map keys on the design source file stem
+test "design name comes from the source file stem" {
+    try testing.expectEqualStrings("barracuda", designNameFromFile("projects/designs/src/boards/barracuda/barracuda.sexp").?);
+    try testing.expectEqualStrings("labstation", designNameFromFile("labstation.sexp").?);
+    try testing.expect(designNameFromFile("") == null);
+    try testing.expect(designNameFromFile("lib/modules/adp7118-ldo.txt") == null);
+}
+
+/// `(module-policy (placement-class "NET" class)…)`: pin the placement
+/// criticality class of named nets over `module_policy.classifyNetName`'s
+/// guess. Each child must be `(placement-class "NET" class)` — or its
+/// permanent `(net-class …)` alias — with a class from the module-policy
 /// vocabulary; anything else is warned and dropped, never silently accepted.
+///
+/// `placement-class` is the documented spelling because the TOP-LEVEL
+/// `(net-class …)` form means routing GEOMETRY (widths, clearance, impedance)
+/// and the two shared a word. The alias keeps working and records a
+/// `deprecated_form` info instead of a warning.
 fn parseModulePolicy(self: *Evaluator, c: []const Node, out: *std.ArrayList(env_mod.NetClassPin)) EvalError!void {
     for (c[1..]) |child| {
         const cl = child.asList() orelse {
-            self.warnFmt(child.span, "(module-policy …) accepts only (net-class \"NET\" class) children", .{});
+            self.warnFmt(child.span, "(module-policy …) accepts only (placement-class \"NET\" class) children", .{});
             continue;
         };
-        if (cl.len < 3 or !std.mem.eql(u8, cl[0].asAtom() orelse "", "net-class")) {
-            self.warnFmt(child.span, "(module-policy …) accepts only (net-class \"NET\" class) children", .{});
+        const head = if (cl.len >= 3) cl[0].asAtom() orelse "" else "";
+        const is_legacy = std.mem.eql(u8, head, "net-class");
+        if (!is_legacy and !std.mem.eql(u8, head, "placement-class")) {
+            self.warnFmt(child.span, "(module-policy …) accepts only (placement-class \"NET\" class) children", .{});
             continue;
         }
+        if (is_legacy) deprecations.note(
+            self,
+            child.span,
+            "(module-policy (net-class …)) is the old spelling for a placement criticality class — " ++
+                "write (module-policy (placement-class …)); the top-level (net-class …) means routing geometry",
+            .{},
+        );
         const net = cl[1].asText() orelse {
-            self.warnFmt(cl[1].span, "(module-policy (net-class …)) net must be a name", .{});
+            self.warnFmt(cl[1].span, "(module-policy ({s} …)) net must be a name", .{head});
             continue;
         };
         const class = cl[2].asAtom() orelse cl[2].asString() orelse {
-            self.warnFmt(cl[2].span, "(module-policy (net-class …)) class must be an atom", .{});
+            self.warnFmt(cl[2].span, "(module-policy ({s} …)) class must be an atom", .{head});
             continue;
         };
         if (!isPlanRouteClass(class)) {
@@ -4640,6 +4783,43 @@ test "design-block captures (module-policy (net-class …)) pins" {
     try testing.expectEqualStrings("clock", block.net_class_pins[1].class);
     // The unknown class and the malformed child each warned rather than landing.
     try testing.expect(eval.warnings.items.len >= 2);
+}
+
+// spec: eval/design_block - placement-class is the documented module-policy child and net-class is a deprecated alias for it
+test "module-policy accepts placement-class and deprecates net-class" {
+    const a = std.heap.page_allocator;
+    const src =
+        \\(design-block "test"
+        \\  (instance "R1" fakeres (pin 1 "SW") (pin 2 "REF"))
+        \\  (module-policy (placement-class "SW" switch_node) (net-class "REF" clock)))
+    ;
+    const nodes = try sexpr_parser.parse(a, src);
+    const form_children = nodes[0].asList() orelse return error.TestUnexpectedResult;
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    try eval.component_cache.put(a, "fakeres", .{
+        .name = "fakeres",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    var scope = env_mod.Env.init(a, null);
+    defer scope.deinit();
+    const block = (try evalDesignBlock(&eval, form_children[1..], &scope)).design_block;
+
+    // Both spellings pin, in authored order — the alias is not second-class.
+    try testing.expectEqual(@as(usize, 2), block.net_class_pins.len);
+    try testing.expectEqualStrings("SW", block.net_class_pins[0].net);
+    try testing.expectEqualStrings("switch_node", block.net_class_pins[0].class);
+    try testing.expectEqualStrings("REF", block.net_class_pins[1].net);
+    try testing.expectEqualStrings("clock", block.net_class_pins[1].class);
+
+    // Exactly the alias is deprecated, and it is NOT an evaluator warning:
+    // the release profile turns those into errors and this spelling still works.
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+    try testing.expectEqual(@as(usize, 1), block.deprecations.len);
+    try testing.expect(std.mem.indexOf(u8, block.deprecations[0].message, "placement-class") != null);
 }
 
 // spec: eval/design_block - net-envelope form publishes an authored voltage envelope on the design block
