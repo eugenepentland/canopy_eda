@@ -237,20 +237,8 @@ pub fn build(
         .contradictions = &contradictions,
     });
 
-    // Library-declared node potentials fill what nothing above bounds. They
-    // never widen or narrow an existing entry: a datasheet default must not
-    // rewrite a fact the design states outright.
-    for (input.rules) |seed| {
-        if (!(seed.max >= seed.min)) continue;
-        const root = rootOf(&aliases, &parent, seed.net);
-        if (by_root.contains(root) or na.isRatingZeroVolts(root)) continue;
-        try by_root.put(allocator, root, .{
-            .min = seed.min,
-            .max = seed.max,
-            .origin = .derived,
-            .provenance = .{ .rule = seed.rule },
-        });
-    }
+    // Library-declared node potentials fill what nothing above bounds.
+    try applyRuleSeeds(allocator, input.rules, &aliases, &parent, &by_root);
 
     // Series-domain derivation runs LAST, over everything already known —
     // seeds and authored declarations alike — and only ever fills nets that
@@ -261,6 +249,13 @@ pub fn build(
         .pin_limits = input.pin_limits,
     }, &parent, &by_root);
     defer domains.deinit(allocator);
+
+    // Last resort, after every topological route has been tried: a node whose
+    // only connection to anything bounded is ONE device pin, and whose library
+    // states that pin's absolute maximum. Deliberately last, so a node the
+    // topology can bound is bounded by what it actually carries rather than by
+    // a datasheet ceiling.
+    try boundByPinLimits(allocator, input.pin_limits, nets.items, &parent, &by_root);
 
     // Emit one entry per flat net whose class carries a potential. Nets with no
     // seed anywhere in their class are simply absent — an absent envelope is
@@ -285,6 +280,80 @@ pub fn build(
         .envelopes = try out.toOwnedSlice(allocator),
         .contradictions = try contradictions.toOwnedSlice(allocator),
     };
+}
+
+/// Fold library-declared node potentials (a feedback reference, a SET
+/// resistor's programmed output) into the envelope set. They never widen or
+/// narrow an existing entry: a datasheet default must not rewrite a fact the
+/// design states outright, so only a still-unknown root is filled.
+fn applyRuleSeeds(
+    allocator: std.mem.Allocator,
+    seeds: []const rules_mod.Seed,
+    aliases: *const flat_netlist.CanonicalNetMap,
+    parent: *std.StringHashMapUnmanaged([]const u8),
+    by_root: *std.StringHashMapUnmanaged(Span),
+) std.mem.Allocator.Error!void {
+    for (seeds) |seed| {
+        if (!(seed.max >= seed.min)) continue;
+        const root = rootOf(aliases, parent, seed.net);
+        if (by_root.contains(root) or na.isRatingZeroVolts(root)) continue;
+        try by_root.put(allocator, root, .{
+            .min = seed.min,
+            .max = seed.max,
+            .origin = .derived,
+            .provenance = .{ .rule = seed.rule },
+        });
+    }
+}
+
+/// Bound a still-unknown net by the declared absolute maximum of the one device
+/// pin sitting on it — an IC's internal-regulator or bias node behind its
+/// bypass capacitor, which no series conductor reaches and which was therefore
+/// the single biggest class of hand-authored `(net-envelope …)` on Barracuda
+/// (39 of the 53 the walk still could not name).
+///
+/// The ceiling is `min(pin maximum, the widest potential the part itself
+/// touches)`: a die node cannot exceed the pin's rating, and it cannot exceed
+/// the supplies the part is fed from either. A part that touches NO bounded net
+/// bounds nothing — the same refusal an unbounded driver already gets — and the
+/// floor is 0 V, since a bypassed bias node is at ground before the part runs.
+///
+/// This is a RATING, not an observed operating level, exactly as a board author
+/// writing "the datasheet publishes no operating level for this pin, so the
+/// ceiling is the pin's own maximum" would have written by hand.
+fn boundByPinLimits(
+    allocator: std.mem.Allocator,
+    pin_limits: []const rules_mod.PinLimit,
+    nets: []const flat_netlist.FlatNet,
+    parent: *std.StringHashMapUnmanaged([]const u8),
+    by_root: *std.StringHashMapUnmanaged(Span),
+) std.mem.Allocator.Error!void {
+    for (pin_limits) |limit| {
+        const root = na.findRoot(parent, limit.net);
+        if (seedSpanOf(by_root, root) != null) continue;
+        var ceiling: ?f64 = null;
+        for (nets) |net| {
+            var owns = false;
+            for (net.pins) |pin| {
+                if (std.mem.eql(u8, pin.ref_des, limit.ref_des)) {
+                    owns = true;
+                    break;
+                }
+            }
+            if (!owns) continue;
+            const span = seedSpanOf(by_root, na.findRoot(parent, net.name)) orelse continue;
+            ceiling = if (ceiling) |c| @max(c, span.max) else span.max;
+        }
+        const supply = ceiling orelse continue;
+        const high = @min(limit.max_voltage, supply);
+        if (!(high > 0)) continue;
+        try by_root.put(allocator, root, .{
+            .min = 0,
+            .max = high,
+            .origin = .derived,
+            .provenance = .{ .rule = "pin maximum" },
+        });
+    }
 }
 
 fn lessThanEnvelope(_: void, a: NetEnvelope, b: NetEnvelope) bool {
@@ -1259,6 +1328,36 @@ test "a library rule seed fills only what nothing else proves" {
     try testing.expectEqualStrings("feedback reference U1.FB = 0.6 V", fb.provenance.rule);
     const rail = envelopeFor(result, "V5") orelse return error.TestExpectedEnvelope;
     try testing.expectEqual(@as(f64, 5.25), rail.max);
+}
+
+// spec: eval/net-envelopes - A bypassed bias node no conductor reaches is bounded by its pin's declared maximum
+test "a pin maximum bounds a cap-terminated bias node the topology cannot reach" {
+    var scratch = arena();
+    defer scratch.deinit();
+    const alloc = scratch.allocator();
+    // The shape 38 of Barracuda's hand-authored envelopes have: an IC's
+    // internal-regulator output behind its own bypass capacitor. No series
+    // conductor touches it, so no domain reaches it — only the library does.
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "lmx2595", .value = "", .footprint = "", .symbol = "" },
+        passive("C1", "cap-0402", "1uF"),
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "V_3V3", .pins = &[_]env_mod.PinRef{.{ .ref_des = "U1", .pin = "5" }} },
+        .{ .name = "VREGIN", .pins = &[_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "8" }, .{ .ref_des = "C1", .pin = "1" } } },
+        .{ .name = "GND", .pins = &[_]env_mod.PinRef{.{ .ref_des = "C1", .pin = "2" }} },
+    };
+    const ports = [_]env_mod.Port{.{ .name = "V_3V3", .net = "V_3V3", .direction = "in", .kind = "power", .rated_min = 3.135, .rated_max = 3.465 }};
+    const outer = flatBlock(&instances, &nets, &ports);
+    try testing.expectEqual(@as(?NetEnvelope, null), envelopeFor(try build(alloc, &outer, .{}), "VREGIN"));
+    // The pin's own maximum is 3.6 V, but the part is fed from a 3.465 V rail
+    // and a die node cannot exceed the supply either — the tighter wins.
+    const limits = [_]rules_mod.PinLimit{.{ .ref_des = "U1", .net = "VREGIN", .max_voltage = 3.6 }};
+    const result = try build(alloc, &outer, .{ .pin_limits = &limits });
+    const node = envelopeFor(result, "VREGIN") orelse return error.TestExpectedEnvelope;
+    try testing.expectEqual(@as(f64, 0), node.min);
+    try testing.expectEqual(@as(f64, 3.465), node.max);
+    try testing.expectEqualStrings("pin maximum", node.provenance.rule);
 }
 
 // spec: eval/net-envelopes - A device pin's declared max-voltage bounds the domain it drives more tightly than the part's supplies

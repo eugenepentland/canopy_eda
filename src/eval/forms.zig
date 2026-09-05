@@ -768,9 +768,13 @@ pub const scope_form_docs = blk: {
             "resistor likewise carries a known envelope onto the correlated node beyond it (an RC " ++
             "filter's tap, a termination or pull-up's far side, a bias tee fed through its choke), and " ++
             "a node joined to known nets only through series resistors and device pins is bounded by " ++
-            "the supplies those devices reach — both derived, never authored. This form is " ++
-            "for the nets no topology walk can bound — an enable a 3.3 V GPIO drives, a divider tap " ++
-            "sitting between two declared rails, a bus a transceiver holds. The net is named the way a " ++
+            "the supplies those devices reach, capped by any `(electrical … (max-voltage V))` the pin " ++
+            "declares. A divider tap between two bounded nets is solved by the leg ratio; a regulator's " ++
+            "FB pin sits at its `(feedback-divider … (reference-v V))`; a SET pin sits at " ++
+            "I_SET x R_SET from `(set-resistor-output …)`; and a bypassed bias node no conductor reaches " ++
+            "falls back to its pin's declared maximum — all derived, never authored. This form is " ++
+            "for the nets no walk can bound — an enable a 3.3 V GPIO drives, a bus a transceiver " ++
+            "holds, a pin whose datasheet corners are tighter than the rule. The net is named the way a " ++
             "rail is: the FLATTENED name, so a board-level declaration reaches the module-local net " ++
             "bridged onto it and a module-internal node is nameable as \"sub-block/NET\". The optional " ++
             "trailing string records why. A declaration that fails to COVER the envelope the design " ++

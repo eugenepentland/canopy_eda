@@ -5697,6 +5697,7 @@ Public functions: build, ferriteBridges, lookup, lookupIn
 - A resistor ladder with more than one unknown node is refused rather than approximated by a two-leg ratio
 - A library-declared node potential fills a net the topology cannot bound and never overwrites one it can
 - A device pin's declared max-voltage bounds the domain it drives more tightly than the part's supplies
+- A bypassed bias node no conductor reaches is bounded by its pin's declared maximum
 - A DNP series resistor is absent copper and derives nothing
 - An inductor between two unknown nets is a switching coil and merges nothing
 - A module's own net-envelope declaration applies to the flattened sub-block/NET name

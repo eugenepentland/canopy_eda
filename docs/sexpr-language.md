@@ -365,7 +365,13 @@ pass, because nothing was measured; author the rating
 (`(cap-0402 "1uF" x7r "10%" "16V")`) and it decides. A net whose envelope the
 tool cannot derive is **unproven** too, naming the net: give the rail a
 `(port … (nominal …))` upstream, or state it outright with
-`(net-envelope "VBUS" (rated 0 5.5) "USB VBUS")`.
+`(net-envelope "VBUS" (rated 0 5.5) "USB VBUS")`. Before reaching for that,
+check what the library already says: a `(feedback-divider … (reference-v V))`
+requirement bounds its FB pin at the reference, a `(set-resistor-output …)` one
+bounds its SET pin at I_SET x R_SET, a divider tap between two bounded nets is
+solved by the leg ratio, and an `(electrical "PIN" … (max-voltage V))`
+declaration bounds the bypassed bias node behind that pin. `netlisp net
+<design> <net>` shows which rule answered, under `envelope.origin`.
 
 ### Module-owned envelopes
 
