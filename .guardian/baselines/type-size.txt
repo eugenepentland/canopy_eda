@@ -21,7 +21,7 @@
 16 src/eval/env.zig|Port
 10 src/eval/env.zig|PowerRail
 14 src/eval/env.zig|Section
-10 src/eval/env.zig|SectionPort
+11 src/eval/env.zig|SectionPort
 8 src/eval/env.zig|StackupSpec
 8 src/eval/env.zig|Value
 14 src/eval/evaluator.zig|ComponentData

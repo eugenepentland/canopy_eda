@@ -543,7 +543,7 @@ src/eval/builders.zig::loadDesignFile | fn loadDesignFile(self: *Evaluator, path
 src/eval/builders.zig::loadFile | fn loadFile(self: *Evaluator, path: []const u8) ?[]const Node
 src/eval/builders.zig::loadSidecars | fn loadSidecars( self: *Evaluator, design_path: []const u8, buf: *[sidecars.kinds.len]sidecars.Loaded, ) []const sidecars.Loaded
 src/eval/builders.zig::parseSectionCalc | fn parseSectionCalc(self: *Evaluator, sf_children: []const Node, env: *env_mod.Env) EvalError!?env_mod.CalcBlock
-src/eval/builders.zig::parseSectionPort | fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod.Env) EvalError!?env_mod.SectionPort
+src/eval/builders.zig::parseSectionPort | fn parseSectionPort(self: *Evaluator, sf_children: []const Node, env: *env_mod.Env) EvalError!?env_mod.SectionPort
 src/eval/builders.zig::processPinForm | fn processPinForm( self: *Evaluator, pin_form: Node, pins_ref: []const u8, pin_func_map: ?*const std.StringHashMapUnmanaged([]const u8), env: *env_mod.Env, all_pin_nets: *std.ArrayList(PinNetDecl), pg_pins: *std.ArrayList(env_mod.PartPin), net_ties: *std.ArrayList(NetTie), ) EvalError!void
 src/eval/builders.zig::resolveDecoupleTargets | fn resolveDecoupleTargets(self: *Evaluator, instances: []Instance) void
 src/eval/builders.zig::resolveNearTargets | fn resolveNearTargets(self: *Evaluator, instances: []Instance) void
@@ -679,6 +679,7 @@ src/eval/env.zig::PowerRail struct_
 src/eval/env.zig::Property struct_
 src/eval/env.zig::Provenance struct_
 src/eval/env.zig::RatedVoltage struct_
+src/eval/env.zig::RatedWindow struct_
 src/eval/env.zig::Requirement struct_
 src/eval/env.zig::Revision struct_
 src/eval/env.zig::RevisionChange struct_

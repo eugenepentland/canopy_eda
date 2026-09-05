@@ -49,6 +49,56 @@ fn formHeadName(node: Node) []const u8 {
     return l[0].asAtom() orelse "?";
 }
 
+/// One side of a port's `(rated LO HI)` window, EVALUATED — so a parameterized
+/// regulator module can publish its own output envelope as arithmetic over its
+/// parameters (`(rated (* vout 0.95) (* vout 1.05))`) instead of every board
+/// restating the two numbers at each instantiation. This is the rule the
+/// sibling `(nominal …)` on the same form and module-scope
+/// `(net-envelope … (rated …))` already follow; a bare literal evaluates to
+/// itself, so nothing that parsed before parses differently now.
+fn ratedBound(self: *Evaluator, node: Node, env: *Env, port_name: []const u8, which: []const u8) EvalError!f64 {
+    const value = try self.evalNode(node, env);
+    return value.asNumber() orelse {
+        // Not a warning-and-drop: a rated window the release rating checks
+        // silently never saw is exactly the failure this form exists to
+        // prevent, so an unevaluable bound must stop the build and say which
+        // port it is on.
+        self.setErrorFmt(
+            node.span,
+            "(port \"{s}\" … (rated LO HI)) {s} bound must evaluate to a number",
+            .{ port_name, which },
+        );
+        return EvalError.TypeError;
+    };
+}
+
+/// Parse and evaluate a `(rated LO HI)` sub-form of a `(port …)` — shared by
+/// the design-block port builder and the section-port parser so both kinds of
+/// port read the form by one rule (and so `(diff-port …)`, `(bus-port …)` and
+/// `(port-group …)`, which replay the modifier nodes through those two
+/// parsers, inherit it for free).
+///
+/// `port_name` only names the port in diagnostics, so a caller that learns the
+/// name positionally may defer the call until after its own scan.
+fn parseRatedWindow(self: *Evaluator, arg: Node, env: *Env, port_name: []const u8) EvalError!?env_mod.RatedWindow {
+    const children = arg.asList() orelse return null;
+    if (children.len < 3) {
+        self.warnFmt(arg.span, "(rated …) in (port \"{s}\" …) needs two bounds — (rated LO HI)", .{port_name});
+        return null;
+    }
+    const lo = try ratedBound(self, children[1], env, port_name, "LO");
+    const hi = try ratedBound(self, children[2], env, port_name, "HI");
+    if (hi < lo) {
+        self.setErrorFmt(
+            arg.span,
+            "(port \"{s}\" … (rated {d} {d})) is inverted — the LO bound must not exceed the HI bound",
+            .{ port_name, lo, hi },
+        );
+        return EvalError.InvalidForm;
+    }
+    return .{ .min = lo, .max = hi };
+}
+
 /// Which `(port …)` metadata sub-form a node is, if any.
 const PortMetadataKey = enum { role, protocol, class };
 
@@ -111,14 +161,35 @@ fn portMetadataAt(self: *Evaluator, args: []const Node, i: *usize) ?PortMetadata
     return .{ .key = key, .value = value };
 }
 
+/// Direction words a section `(port …)` accepts. `bidi` is the documented
+/// synonym for `io`, listed here so section ports read the same vocabulary the
+/// design-block port form does.
+const section_port_directions = std.StaticStringMap(env_mod.PortDirection).initComptime(.{
+    .{ "in", .in },
+    .{ "out", .out },
+    .{ "io", .io },
+    .{ "bidi", .io },
+});
+
+/// Signal-type words a section `(port …)` accepts, for the block diagram's
+/// edge classification.
+const section_port_signal_types = std.StaticStringMap(env_mod.SignalType).initComptime(.{
+    .{ "power", .power },
+    .{ "signal", .signal },
+    .{ "clock", .clock },
+    .{ "data", .data },
+    .{ "differential", .differential },
+    .{ "rf", .rf },
+});
+
 /// Parse (port "NET" in/out/io ...) section port declaration.
 ///
 /// Metadata is written as sub-forms — `(role R)`, `(protocol P)`, `(class C)`,
 /// `(nominal V)`. The original spellings (a bare `role R` keyword pair, a bare
 /// trailing number for the nominal voltage) are permanent aliases that record a
 /// `deprecated_form` info naming the sub-form that replaces them.
-pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod.Env) EvalError!?env_mod.SectionPort {
-    // (port "NET" in/out/io [signal-type] [(nominal V)] [(role R)] [(protocol P)] [(class C)])
+pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, env: *env_mod.Env) EvalError!?env_mod.SectionPort {
+    // (port "NET" in/out/io [signal-type] [(nominal V)] [(rated LO HI)] [(role R)] [(protocol P)] [(class C)])
     if (sf_children.len < 3) return null;
     var port_name: []const u8 = "";
     var direction: env_mod.PortDirection = .in;
@@ -129,6 +200,10 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
     var class_key: []const u8 = "";
     var group_list: std.ArrayList([]const u8) = .empty;
     var is_optional: bool = false;
+    // The `(rated …)` node is held back rather than parsed in place: the port's
+    // name is read positionally by this same loop, and a diagnostic that cannot
+    // name its port is the silent failure over again.
+    var rated_node: ?Node = null;
 
     var elec: ?env_mod.ElectricalDecl = null;
     var si: usize = 1;
@@ -155,52 +230,23 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
         }
         if (arg.isForm("nominal")) {
             const nc = arg.asList().?;
-            if (nc.len >= 2) voltage = nc[1].asNumber() orelse voltage;
+            // Evaluated for the same reason the design-block port form
+            // evaluates it: a section inside a parameterized module states its
+            // voltage as an expression over the module's own arguments.
+            if (nc.len >= 2) voltage = (try self.evalNode(nc[1], env)).asNumber() orelse nc[1].asNumber() orelse voltage;
+            continue;
+        }
+        if (arg.isForm("rated")) {
+            rated_node = arg;
             continue;
         }
         if (arg.asAtom()) |atom| {
-            // Direction keywords
-            if (std.mem.eql(u8, atom, "in")) {
-                direction = .in;
+            if (section_port_directions.get(atom)) |d| {
+                direction = d;
                 continue;
             }
-            if (std.mem.eql(u8, atom, "out")) {
-                direction = .out;
-                continue;
-            }
-            if (std.mem.eql(u8, atom, "io")) {
-                direction = .io;
-                continue;
-            }
-            // `bidi` is the documented synonym for `io` (bidirectional) — accept
-            // it here too so section ports match the design-block port form.
-            if (std.mem.eql(u8, atom, "bidi")) {
-                direction = .io;
-                continue;
-            }
-            // Signal type keywords
-            if (std.mem.eql(u8, atom, "power")) {
-                sig_type = .power;
-                continue;
-            }
-            if (std.mem.eql(u8, atom, "signal")) {
-                sig_type = .signal;
-                continue;
-            }
-            if (std.mem.eql(u8, atom, "clock")) {
-                sig_type = .clock;
-                continue;
-            }
-            if (std.mem.eql(u8, atom, "data")) {
-                sig_type = .data;
-                continue;
-            }
-            if (std.mem.eql(u8, atom, "differential")) {
-                sig_type = .differential;
-                continue;
-            }
-            if (std.mem.eql(u8, atom, "rf")) {
-                sig_type = .rf;
+            if (section_port_signal_types.get(atom)) |t| {
+                sig_type = t;
                 continue;
             }
             if (std.mem.eql(u8, atom, "optional")) {
@@ -235,6 +281,7 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
         .direction = direction,
         .signal_type = sig_type,
         .voltage = voltage,
+        .rated = if (rated_node) |node| try parseRatedWindow(self, node, env, port_name) else null,
         .group = group_list.toOwnedSlice(self.allocator) catch &.{},
         .role = role,
         .protocol = protocol,
@@ -1318,10 +1365,14 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
             continue;
         }
         if (arg.isForm("rated")) {
-            const rated_children = arg.asList().?;
-            if (rated_children.len >= 3) {
-                rated_min = rated_children[1].asNumber();
-                rated_max = rated_children[2].asNumber();
+            // Both bounds are EVALUATED (see `parseRatedWindow`). Reading them
+            // with `asNumber()` used to drop a computed window on the floor —
+            // a parameterized LDO's `(rated (* vout 0.95) (* vout 1.05))`
+            // published nothing at all, and its rail derived as the single
+            // point `vout`.
+            if (try parseRatedWindow(self, arg, env, name)) |window| {
+                rated_min = window.min;
+                rated_max = window.max;
             }
         } else if (arg.isForm("nominal")) {
             const nom_children = arg.asList().?;
@@ -2210,4 +2261,127 @@ test "diff-port without a direction is an arity error" {
     try testing.expectError(EvalError.ArityError, expandTopLevelDiffPort(&eval, nodes[0].asList().?, &env, &ports));
     const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
     try testing.expect(std.mem.indexOf(u8, diag.message, "(diff-port …)") != null);
+}
+
+// spec: eval/design_block - a design-block port's rated bounds are evaluated so a parameterized module can publish its own window
+test "buildPort evaluates both (rated …) bounds" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    // The shape lib/modules/bcuda-lt3045-ldo.sexp writes: the regulator's own
+    // output window as +/-5 % of the vout its caller configured.
+    try env.put("vout", .{ .number = 5.11 });
+
+    const nodes = try parser_mod.parse(alloc, "(port \"VOUT\" out power (nominal vout) (rated (* vout 0.95) (* vout 1.05)))");
+    const port = try buildPort(&eval, nodes[0].asList().?[1..], &env);
+
+    try testing.expectApproxEqAbs(@as(f64, 5.11), port.nominal.?, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 4.8545), port.rated_min.?, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5.3655), port.rated_max.?, 1e-9);
+}
+
+// spec: eval/design_block - literal rated bounds on a port keep parsing exactly as they did
+test "buildPort reads literal (rated …) bounds unchanged" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(alloc, "(port \"VIN\" in (rated 1.8 20.0))");
+    const port = try buildPort(&eval, nodes[0].asList().?[1..], &env);
+    try testing.expectEqual(@as(f64, 1.8), port.rated_min.?);
+    try testing.expectEqual(@as(f64, 20.0), port.rated_max.?);
+}
+
+// spec: eval/design_block - a section port's rated bounds are evaluated and recorded on the section port
+test "parseSectionPort evaluates (rated …) bounds" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try env.put("vbank", .{ .number = 3.3 });
+
+    const nodes = try parser_mod.parse(alloc, "(port \"VDD_BANK_A\" in power (nominal vbank) (rated 1.8 vbank))");
+    const port = (try parseSectionPort(&eval, nodes[0].asList().?, &env)) orelse return error.TestExpectedPort;
+
+    try testing.expectApproxEqAbs(@as(f64, 3.3), port.voltage.?, 1e-9);
+    try testing.expectEqual(@as(f64, 1.8), port.rated.?.min);
+    try testing.expectApproxEqAbs(@as(f64, 3.3), port.rated.?.max, 1e-9);
+    // Recorded, not derived from: a section port restates a boundary, it does
+    // not source the rail.
+    try testing.expectEqual(env_mod.SignalType.power, port.signal_type);
+}
+
+// spec: eval/design_block - a diff-port replays evaluated rated bounds onto both lanes
+test "diff-port replays evaluated (rated …) bounds onto both lanes" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try env.put("fs", .{ .number = 2.5 });
+
+    const nodes = try parser_mod.parse(alloc, "(diff-port \"AINA_EXT\" in (rated (- 0 fs) fs))");
+    var ports: std.ArrayList(Port) = .empty;
+    try expandTopLevelDiffPort(&eval, nodes[0].asList().?, &env, &ports);
+
+    try testing.expectEqual(@as(usize, 2), ports.items.len);
+    for (ports.items) |p| {
+        try testing.expectEqual(@as(f64, -2.5), p.rated_min.?);
+        try testing.expectEqual(@as(f64, 2.5), p.rated_max.?);
+    }
+}
+
+// spec: eval/design_block - a port-group replays evaluated rated bounds onto every expanded lane
+test "port-group replays evaluated (rated …) bounds onto every lane" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try env.put("vio", .{ .number = 3.3 });
+
+    const nodes = try parser_mod.parse(alloc, "(bus-port \"D\" 0 1 in (rated 0 (* vio 1.1)))");
+    var ports: std.ArrayList(Port) = .empty;
+    try expandTopLevelBusPort(&eval, nodes[0].asList().?, &env, &ports);
+
+    try testing.expectEqual(@as(usize, 2), ports.items.len);
+    for (ports.items) |p| {
+        try testing.expectEqual(@as(f64, 0), p.rated_min.?);
+        try testing.expectApproxEqAbs(@as(f64, 3.63), p.rated_max.?, 1e-9);
+    }
+}
+
+// spec: eval/design_block - a rated bound that does not evaluate to a number is an error naming the port
+test "a non-numeric (rated …) bound is an error naming the port" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(alloc, "(port \"VOUT\" out (rated 0 \"twenty\"))");
+    try testing.expectError(EvalError.TypeError, buildPort(&eval, nodes[0].asList().?[1..], &env));
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "VOUT") != null);
+    try testing.expect(std.mem.indexOf(u8, diag.message, "HI") != null);
+}
+
+// spec: eval/design_block - an inverted rated window on a port is an error naming the port
+test "an inverted (rated …) window is an error naming the port" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(alloc, "(port \"EN\" in (rated 5.5 0.0))");
+    try testing.expectError(EvalError.InvalidForm, buildPort(&eval, nodes[0].asList().?[1..], &env));
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "EN") != null);
+    try testing.expect(std.mem.indexOf(u8, diag.message, "inverted") != null);
 }
