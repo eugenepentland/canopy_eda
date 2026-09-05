@@ -158,6 +158,7 @@ pub const shards: []const []const []const u8 = &.{
         "render_order.test.",
         "render_svg.section_inset.test.",
         "req_checks_cases.test.",
+        "req_design_rules.test.",
         "req_physical_checks_cases.test.",
         "serve.diag_format.test.",
         "serve.gzip_cache.test.",
@@ -255,6 +256,7 @@ pub const shards: []const []const []const u8 = &.{
     // shard 3
     &.{
         "bench_route.test.",
+        "eval.authored_rules.test.",
         "eval.check_grammar.test.",
         "eval.evaluator.test.",
         "eval.forms.test.",

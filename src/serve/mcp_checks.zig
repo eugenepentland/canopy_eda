@@ -86,6 +86,24 @@ pub fn writePreflightFindingJson(w: anytype, finding: preflight.Finding) !void {
         try json_writer.writeString(w, finding.requirement.id);
         try w.writeAll(",\"requirement_text\":");
         try json_writer.writeString(w, finding.requirement.text);
+        // Which authority wrote the rule. Emitted alongside every requirement
+        // finding — not only design ones — so a consumer never has to infer
+        // "library" from the ABSENCE of a field.
+        try w.print(",\"requirement_source\":\"{s}\"", .{@tagName(finding.requirement.source)});
+    }
+    if (finding.requirement.target.len > 0) {
+        // What a design rule judged: the matched net, the glob that matched
+        // nothing, or the `(on "REF")` target.
+        try w.writeAll(",\"requirement_target\":");
+        try json_writer.writeString(w, finding.requirement.target);
+        if (finding.requirement.block_path.len > 0) {
+            try w.writeAll(",\"requirement_block\":");
+            try json_writer.writeString(w, finding.requirement.block_path);
+        }
+        if (finding.requirement.scope.len > 0) {
+            try w.writeAll(",\"requirement_scope\":");
+            try json_writer.writeString(w, finding.requirement.scope);
+        }
     }
     if (finding.requirement.datasheet.len > 0) {
         try w.writeAll(",\"datasheet\":");

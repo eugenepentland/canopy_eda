@@ -500,7 +500,11 @@ fn writeComponentJson(allocator: std.mem.Allocator, w: anytype, input: Component
 
 fn writeRequirementJson(allocator: std.mem.Allocator, w: anytype, cl: []const ast.Node) !void {
     const text = if (cl.len >= 2) (cl[1].asString() orelse cl[1].asAtom() orelse "") else "";
-    try w.writeAll("{\"id\":");
+    // This tool reads `lib/components/<name>.sexp`, so every rule it lists is a
+    // LIBRARY rule by construction. Saying so explicitly is what lets a caller
+    // merge this list with the design-owned rules `run_checks` reports (which
+    // carry `"requirement_source":"design"`) without guessing.
+    try w.writeAll("{\"source\":\"library\",\"id\":");
     var id_buf: [8]u8 = undefined;
     try json_writer.writeString(w, requirementId(cl, &id_buf));
     try w.writeAll(",\"text\":");

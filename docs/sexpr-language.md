@@ -332,6 +332,110 @@ extra categories, a missing `(thermal …)` on a dissipating class, and a
 least one cited `(requirement …)` on every active part and surfaces the
 evaluator's own warnings (an unknown sub-form is an error).
 
+### Design-owned rules
+
+Everything above is a rule a **component library** hands the design: the
+datasheet says the part needs it, so every board placing the part inherits it.
+The rules a board's own author writes down had nowhere to live — they ended up
+as `(note …)` prose nothing checks, or as a `(requirement …)` bolted onto a
+library file that other designs then inherited by accident.
+
+Two forms fix that, accepted at **design-block, section, sub-section and module
+scope** (a `(defmodule …)` body is a block, so a module can carry rules about
+itself and every instantiation is judged separately):
+
+```lisp
+(requirement "text" (on "REF") (check …) [(ref "file.pdf" (page N))] [(id "…")])
+(net-rule    "text" (nets GLOB…) predicate… [(id "…")])
+```
+
+They are **gated exactly like library requirements** — same `Status` set, same
+`requirementSeverity` mapping, same `netlisp check` findings, same review
+table, same `run_checks` output — and carry `source: design` so a reviewer can
+tell "you used the part wrong" from "you broke your own contract". The release
+profile's demand for at least one cited requirement on every active part is
+satisfied by an `(on "REF")` rule naming that part, and the `.checks.sexp`
+sign-off mechanism reaches them through a `design-rule` target:
+
+```lisp
+(verifies (req design-rule "deadbeef") "5 V comes in from the bench supply")
+```
+
+**Ids.** An explicit `(id "…")` wins; otherwise the id is the CRC32 of the
+rule's own text, the identical derivation `Requirement.id` uses for library
+rules. Editing anything except that sentence — retargeting the rule, adding a
+predicate, moving it into a section — leaves the id, and therefore every
+sign-off, attached.
+
+#### `(requirement … (on "REF") (check …))`
+
+`(on "REF")` names an instance of the **containing block**, and the check is
+evaluated against that block — the same contract a library requirement on the
+same part gets, so `(pin "VIN")` resolves through that instance's pinout and
+against that block's nets. `"sub/REF"` reaches a part inside a sub-block and is
+judged **in the sub-block's block**, not the parent's. Every `(check …)`
+primitive works unchanged:
+
+```lisp
+;; Barracuda: the LO synthesizer's charge-pump rail is the board's own rule,
+;; not the LMX2820's — the datasheet allows 3.3 V, the board committed to a
+;; quiet 3.3 V LDO and the rest of the loop analysis assumes it.
+(requirement "VCC_CP runs from the quiet LDO, never the switcher"
+  (on "U_LO")
+  (check (tied-to-net (pin "VCC_CP") (net "V_3V3_ANA"))))
+
+;; Reuse a library primitive on a part whose library file carries no rule:
+(requirement "U1 keeps a local 1 uF bypass at VIN"
+  (ref "bench-notes.pdf" (page 2) (quote "1 uF at every LDO input"))
+  (on "U1")
+  (check (decoupling (pin "VIN") (pin "GND") (min-uf 0.9))))
+```
+
+A target naming no instance **fails** naming itself — a renamed part must not
+quietly retire the rule about it. Because a sub-block's parts are renumbered
+into the board's global ref-des space, `"sub/REF"` also matches the part's
+authored source name, so a module's author can write the `U9` they see in
+their own file.
+
+#### `(net-rule … (nets GLOB…) predicate…)`
+
+A rule about **nets** rather than parts: no pinout, no `(on …)`, nothing to
+place. Globs match flattened net names — `V_*`, `*_RF`, `sub/*`, or an exact
+name — case-insensitively, where `*` matches any run of characters. A glob is
+matched against the net's name as the rule's own block sees it **and** against
+its full flattened name, so a module author writes `(nets "VOUT")` and the
+board that instantiates it writes `(nets "buck/*")` for the same copper.
+Per-pin bypass stubs (`VDD.U1.5`) are excluded, so `V_*` does not report one
+result per decoupling capacitor.
+
+The predicates are generated into the **"Net-rule predicates"** table of
+`docs/language-forms.md`: `(min-bulk-uf F)`, `(declared-envelope)`,
+`(in-net-class)` and `(max-fanout N)`. A rule may carry several; the net must
+satisfy every one.
+
+```lisp
+;; Barracuda-style rail rule: every board rail carries a reservoir, has a
+;; provable DC envelope for the release rating checks, and is claimed by a
+;; net class so the router does not fall back to the board default width.
+(net-rule "Every board rail is reservoired, bounded and classed"
+  (nets "V_*")
+  (min-bulk-uf 4.7)
+  (declared-envelope)
+  (in-net-class))
+```
+
+**Results.** A net rule produces **one result per matched net**, plus the
+rule's rolled-up verdict (the worst of them). Both halves are load-bearing:
+the per-net results are what `netlisp check` emits as findings, because a
+failure has to name the net; the rollup is the rule's single identity, which is
+what a `(verifies …)` addresses and what the review document shows one row
+for. A glob matching **zero** nets is a **failed** result naming the glob —
+never a silent pass, because the overwhelmingly likely cause is a net that was
+renamed or never existed, which is exactly what the rule was written to catch.
+`(declared-envelope)` on a net with no derivable envelope is **unproven**
+rather than failed, matching how the library rating checks treat the same
+missing evidence.
+
 ### Physical requirement checks: `cap-rating`, `max-distance`, `sequence`
 
 Most of the library's `(requirement "…")` prose is reviewer-judged. Three

@@ -4599,6 +4599,45 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - Stores and retrieves values by name in an environment
 - Resolves names through a parent environment chain
 
+## eval/authored_rules
+
+Design-owned rules — the `(requirement … (on "REF") (check …))` and
+`(net-rule …)` forms a design-block, a section, a nested sub-section or a
+module body may author about itself. This section covers their grammar; the
+evaluation lives in `req_design_rules`.
+
+- net-rule glob matching accepts prefix, suffix, hierarchy and exact selectors
+- every net-rule predicate keyword parses to its NetPredicate variant and rejects out-of-range arguments
+- every predicate_docs row's syntax leads with the keyword parsePredicate dispatches on
+- completeness-waiver: empty inputs (a rule missing its text, its (on …) target, its selector or every predicate is warned and dropped rather than accepted as a vacuous pass)
+- completeness-waiver: i/o failure (no file or network access; the AST is already in memory)
+- completeness-waiver: large inputs (glob matching is a memory-free two-pointer walk with no recursion, so a pathological pattern costs time, not stack)
+- completeness-waiver: unauthorized access (a pure function of the design source the caller already read)
+- completeness-waiver: concurrent access (pure parse over an already-read AST; no shared state)
+- completeness-waiver: malformed encoding (the sexpr parser owns byte-level rejection; a malformed rule form warns and is dropped)
+- completeness-waiver: integer overflow (the one float→int narrowing, `(max-fanout N)`, goes through numeric.checkedInt)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
+## req_design_rules
+
+Evaluation of design-owned rules against the built design, into the same
+requirement-result pipeline library requirements flow through.
+
+- a design-owned net rule reports one result per matched net and fails a glob that matched nothing
+- a design-owned (on "sub/REF") rule resolves the instance in that sub-block and judges the check against that block's nets
+- a design rule targeting a sub-block instance is judged in that sub-block's own block
+- a design rule's id is the CRC32 of its text unless an explicit (id …) pins it, so unrelated edits keep sign-offs attached
+- a design rule authored inside a section is judged against the containing block and records the section path
+- every predicate a net rule carries folds into one message per matched net
+- completeness-waiver: empty inputs (a design with no authored rules yields no outcomes; a glob matching no net is reported as a failure naming the glob)
+- completeness-waiver: i/o failure (no file or network access; the evaluated block and its flatten are already in memory)
+- completeness-waiver: large inputs (the flatten and its indices are built once per run and freed with the run's arena)
+- completeness-waiver: unauthorized access (a pure read of a design the caller already evaluated)
+- completeness-waiver: concurrent access (a pure read of one already-materialized design block; no shared state)
+- completeness-waiver: malformed encoding (operates on the evaluated block, never on bytes)
+- completeness-waiver: integer overflow (fanout and capacitance comparisons stay in usize/f64; no narrowing)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
 ## eval/check_grammar
 
 - every check_docs row's syntax leads with the kebab-case keyword parseCheck dispatches on
@@ -5842,6 +5881,7 @@ red at all, and the other three channels are what carry the hot end.
 Public functions: renderToMarkdown
 
 - emits markdown header for design name
+- the markdown review lists design-owned rules in their own section, per target, distinct from the per-IC library requirements
 - the markdown Thermal section carries the verdict sentence, the ambient range, one row per screened part, and the coverage line
 - the markdown Thermal section carries the cooling-scenario table with one row per scenario, and prints the missing-layout reason when there is no ladder
 
@@ -6021,6 +6061,7 @@ Public functions: evalCapRating, evalMaxDistance, evalSequence, resolveDistanceR
 
 - an append allocation failure releases the already-owned finding message
 - authoring warns for pending requirements while strict preflight fails them
+- design-owned rules are gated exactly like library requirements and satisfy the release profile's cited-requirement demand
 - the release profile fails profile gaps and unknown sub-forms that preflight only warns about
 - complete reviews require every category or a reasoned N/A
 - digest identity uses canonical lowercase SHA-256 text

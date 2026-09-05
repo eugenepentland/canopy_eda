@@ -37,6 +37,7 @@ const stackup_presets = @import("stackup_presets.zig");
 const outline_mod = @import("../placement/outline.zig");
 const pll_loop = @import("../pll_loop.zig");
 const frequency_plan = @import("../frequency_plan.zig");
+const authored_rules = @import("authored_rules.zig");
 const ScopeForm = forms_mod.ScopeForm;
 
 const Node = ast.Node;
@@ -149,6 +150,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
     var pcb_plan_spec: ?env_mod.PcbPlanSpec = null;
     var kicad_pcb_path: ?[]const u8 = null;
     var net_form_sources: std.StringHashMapUnmanaged(u32) = .empty;
+    var design_rules_authored: std.ArrayList(env_mod.DesignRule) = .empty;
 
     // Pre-scan: register all explicit ref-des to avoid auto-counter collisions,
     // and all existing id/ids tokens so generateId never re-mints one.
@@ -214,6 +216,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .pcb_plan_spec = &pcb_plan_spec,
         .kicad_pcb_path = &kicad_pcb_path,
         .net_form_sources = &net_form_sources,
+        .authored_rules = &design_rules_authored,
     };
     try evalBlockBodyForms(self, body_forms, env, &build);
     try applyPowerPlanePolicy(self, board_spec, &stackup_spec);
@@ -244,6 +247,7 @@ pub fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const 
         .functions = functions.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .net_ties = block_ties,
         .verifications = verifications.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
+        .authored_rules = design_rules_authored.toOwnedSlice(self.allocator) catch &.{},
         .test_points = test_points.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
         .kicad_pcb_path = kicad_pcb_path,
         .parts = parts.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory,
@@ -353,6 +357,10 @@ const BlockBuildState = struct {
     pcb_plan_spec: *?env_mod.PcbPlanSpec,
     kicad_pcb_path: *?[]const u8,
     net_form_sources: *std.StringHashMapUnmanaged(u32),
+    /// Design-owned `(requirement …)` / `(net-rule …)` rules, collected from
+    /// this block's own body AND from every `(section …)` inside it — the
+    /// rules are judged against the block, so one list is the whole story.
+    authored_rules: *std.ArrayList(env_mod.DesignRule),
     has_explicit_layout: bool = false,
 };
 
@@ -562,7 +570,11 @@ fn evalBlockBodyForm(
             .pin_nets = build.all_pin_nets,
             .notes = build.notes,
             .test_points = build.test_points,
-        }, build.net_ties, build.sections, build.sub_blocks),
+        }, .{
+            .net_ties = build.net_ties,
+            .sub_blocks = build.sub_blocks,
+            .rules = build.authored_rules,
+        }, build.sections),
         .net => {
             try evalNetForm(self, form_children, env, build.net_ties);
             validate.trackNetFormSource(self, form_children, env, build.net_form_sources);
@@ -641,6 +653,13 @@ fn evalBlockBodyForm(
         .design_rules => build.design_rules_spec.* = parseDesignRules(self, form_children),
         .pcb_plan => build.pcb_plan_spec.* = try takeFirstPcbPlan(self, form_children, form.span, build.pcb_plan_spec.*),
         .module_policy => try parseModulePolicy(self, form_children, build.net_class_pins),
+        // Design-owned rules. A `""` scope records "authored at design-block
+        // top level"; the same two forms inside a (section …) record that
+        // section's path instead — see `processSharedSectionForm`.
+        .requirement => if (try authored_rules.parseRequirement(self, form_children, env, "")) |rule|
+            build.authored_rules.append(self.allocator, rule) catch return EvalError.OutOfMemory,
+        .net_rule => if (try authored_rules.parseNetRule(self, form_children, env, "")) |rule|
+            build.authored_rules.append(self.allocator, rule) catch return EvalError.OutOfMemory,
         // Section-only forms are ignored at the top level — a
         // design-block body shouldn't carry status/description/pins
         // directly. The exhaustive switch is the contract; the warning
@@ -1101,6 +1120,17 @@ fn inferCompactDecoupleHost(
     };
 }
 
+/// The BLOCK-level accumulators a `(section …)` body appends to, alongside its
+/// own per-section lists: cross-block net ties, sub-blocks it hosts, and the
+/// block's design-owned rules. Bundled because a section and a nested
+/// sub-section write into exactly the same three, and threading them
+/// individually pushed both walkers past their parameter-count ceiling.
+const BlockSinks = struct {
+    net_ties: *std.ArrayList(NetTie),
+    sub_blocks: *std.ArrayList(SubBlock),
+    rules: *std.ArrayList(env_mod.DesignRule),
+};
+
 /// Mutable bag of pointers to the per-section accumulators that
 /// `processSharedSectionForm` writes into. Bundling them lets both
 /// `evalSection` and `evalSubSection` reuse the exact same handler for
@@ -1112,6 +1142,14 @@ const SectionScope = struct {
     ports: *std.ArrayList(env_mod.SectionPort),
     protocols: *std.ArrayList([]const u8),
     calcs: *std.ArrayList(env_mod.CalcBlock),
+    /// The BLOCK's design-owned rule list. A `(requirement …)`/`(net-rule …)`
+    /// written inside a section is still judged against the containing block —
+    /// a section is a presentation grouping, not a net namespace — so it lands
+    /// here and only records `path` for display.
+    rules: *std.ArrayList(env_mod.DesignRule),
+    /// Authored section path: `"Power"` in a section, `"Power/LDO"` in a
+    /// nested sub-section.
+    path: []const u8,
 };
 
 /// Process a form whose handling is identical between a section and a
@@ -1177,6 +1215,16 @@ fn processSharedSectionForm(
             }
             return true;
         },
+        .requirement => {
+            if (try authored_rules.parseRequirement(self, sf_children, env, scope.path)) |rule|
+                try scope.rules.append(self.allocator, rule);
+            return true;
+        },
+        .net_rule => {
+            if (try authored_rules.parseNetRule(self, sf_children, env, scope.path)) |rule|
+                try scope.rules.append(self.allocator, rule);
+            return true;
+        },
         else => return false,
     }
 }
@@ -1204,10 +1252,11 @@ fn evalSection(
     form_children: []const Node,
     env: *Env,
     test_point_ctx: test_point_mod.EvalContext,
-    net_ties: *std.ArrayList(NetTie),
+    sinks: BlockSinks,
     sections: *std.ArrayList(env_mod.Section),
-    sub_blocks: *std.ArrayList(SubBlock),
 ) EvalError!void {
+    const net_ties = sinks.net_ties;
+    const sub_blocks = sinks.sub_blocks;
     const instances = test_point_ctx.instances;
     const all_pin_nets = test_point_ctx.pin_nets;
     const notes = test_point_ctx.notes;
@@ -1241,6 +1290,8 @@ fn evalSection(
         .ports = &sec_ports,
         .protocols = &sec_protocols,
         .calcs = &sec_calcs,
+        .rules = sinks.rules,
+        .path = sec_name,
     };
 
     for (form_children[child_start..]) |sf| {
@@ -1295,7 +1346,7 @@ fn evalSection(
             },
             .net => try evalNetForm(self, sf_children, env, net_ties),
             .bus_net => try evalBusNetForm(self, sf_children, env, net_ties),
-            .section => try evalSubSection(self, sf_children, env, test_point_ctx, net_ties, &sec_instances, &sec_sub_sections, sub_blocks),
+            .section => try evalSubSection(self, sf_children, env, test_point_ctx, sinks, &sec_instances, &sec_sub_sections, sec_name),
             .test_point => if (try test_point_mod.evalForm(self, sf_children, env, test_point_ctx)) |inst|
                 try sec_instances.append(self.allocator, inst),
             .sub_block => {
@@ -1313,7 +1364,7 @@ fn evalSection(
             // `processSharedSectionForm`; top-level-only forms are
             // ignored inside a section body (with a lint warning so the
             // silent skip is visible).
-            .description, .note, .port, .protocol, .calc => {},
+            .description, .note, .port, .protocol, .calc, .requirement, .net_rule => {},
             .group,
             .function,
             .verifies,
@@ -1418,11 +1469,13 @@ fn evalSubSection(
     sf_children: []const Node,
     env: *Env,
     test_point_ctx: test_point_mod.EvalContext,
-    net_ties: *std.ArrayList(NetTie),
+    sinks: BlockSinks,
     sec_instances: *std.ArrayList(Instance),
     sec_sub_sections: *std.ArrayList(env_mod.Section),
-    sub_blocks: *std.ArrayList(SubBlock),
+    parent_path: []const u8,
 ) EvalError!void {
+    const net_ties = sinks.net_ties;
+    const sub_blocks = sinks.sub_blocks;
     const instances = test_point_ctx.instances;
     const all_pin_nets = test_point_ctx.pin_nets;
     const notes = test_point_ctx.notes;
@@ -1444,6 +1497,8 @@ fn evalSubSection(
         .ports = &sub_ports,
         .protocols = &sub_protocols,
         .calcs = &sub_calcs,
+        .rules = sinks.rules,
+        .path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ parent_path, sub_name }) catch sub_name,
     };
 
     for (sf_children[2..]) |ssf| {
@@ -1556,7 +1611,7 @@ fn evalSubSection(
             // forms, and don't have `role`/`diagram`. Shared-form
             // variants went through `processSharedSectionForm` above;
             // anything else is ignored with a lint warning.
-            .description, .note, .port, .protocol, .calc => {},
+            .description, .note, .port, .protocol, .calc, .requirement, .net_rule => {},
             else => {
                 self.warnFmt(ssf.span, "({s} …) is not valid inside a nested (section …) — ignored", .{ssf_name});
             },
@@ -1779,15 +1834,29 @@ fn buildNets(self: *Evaluator, all_pin_nets: *std.ArrayList(PinNetDecl), net_tie
 ///     which survives ref-des renumbering and sub-block renames. Sets
 ///     `Verification.target_id` and leaves `ref_des` empty.
 /// The target of a `(verifies (req <target> …) …)` form: exactly one field is
-/// non-empty. `(id <hex>)` selects by stable instance id; anything else is a
-/// ref-des string.
-const VerifyTarget = struct { ref_des: []const u8 = "", target_id: []const u8 = "" };
+/// set. `(id <hex>)` selects by stable instance id, the bare atom `design-rule`
+/// selects a design-owned rule (which belongs to a block, not a placement), and
+/// anything else is a ref-des string.
+const VerifyTarget = struct {
+    ref_des: []const u8 = "",
+    target_id: []const u8 = "",
+    design_rule: bool = false,
+};
+
+/// Bare atom that aims a `(verifies (req … <id>) …)` at a design-owned rule
+/// rather than at a placed part.
+const design_rule_target = "design-rule";
 
 /// Parse the `<target>` node of a `(req <target> REQID)` clause. Returns null
 /// when the node is a malformed `(id …)` form or a non-string ref-des. Uses the
 /// same atom-or-string id tokenisation as `ids.parseId` (all-digit hex ids must
 /// be quoted in source).
 fn parseVerifyTarget(self: *Evaluator, node: Node, env: *Env) ?VerifyTarget {
+    // Checked before evaluation: `design-rule` is a keyword here, not a
+    // variable to look up, and evaluating it would fail as an unbound name.
+    if (node.asAtom()) |atom| {
+        if (std.mem.eql(u8, atom, design_rule_target)) return .{ .design_rule = true };
+    }
     if (node.asList()) |id_form| {
         if (id_form.len < 2) return null;
         const id_head = id_form[0].asAtom() orelse return null;
@@ -1853,6 +1922,7 @@ fn parseVerifies(self: *Evaluator, form_children: []const Node, env: *Env) ?env_
     return .{
         .ref_des = ref_des,
         .target_id = target_id,
+        .design_rule = target.design_rule,
         .req_id = req_id,
         .rationale = rationale,
         .signed_by = signed_by,

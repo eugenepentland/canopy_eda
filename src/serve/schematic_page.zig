@@ -16,6 +16,7 @@ const bom = @import("../bom.zig");
 const render_html = @import("../render_html.zig");
 const review = @import("../review.zig");
 const req_checks = @import("../req_checks.zig");
+const req_design_rules = @import("../req_design_rules.zig");
 const assets_css = @import("assets_css.zig");
 const diag_format = @import("diag_format.zig");
 const page_cache = @import("page_cache.zig");
@@ -193,13 +194,14 @@ fn renderEvaluatedPage(
     var check_results = req_checks.runChecks(allocator, eval, block) catch
         std.StringHashMapUnmanaged([]req_checks.Result).empty;
     req_checks.applyVerifications(&check_results, block, block.instances);
+    const design_rules = req_design_rules.runVerified(allocator, eval, block);
     const review_doc: ?review.ReviewDoc = review.buildReview(
         allocator,
         page_input.name,
         block,
         eval.assertions.items,
         violations,
-        &check_results,
+        .{ .checks = &check_results, .design_rules = design_rules },
     ) catch null;
     return render_html.renderToHtml(
         allocator,

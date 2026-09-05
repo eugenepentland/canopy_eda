@@ -8,6 +8,7 @@ const clock = @import("infra/clock.zig");
 const env_mod = @import("eval/env.zig");
 const erc_mod = @import("erc.zig");
 const req_checks = @import("req_checks.zig");
+const req_design_rules = @import("req_design_rules.zig");
 const coverage = @import("coverage.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
@@ -241,13 +242,31 @@ pub const ReviewDoc = struct {
     /// review JSON / HTML so power-chain ICs (charger, buck, LDO, ADCs in
     /// modules, …) get the same coverage as top-level parts.
     subblock_requirements: []const ComponentRequirementEntry = &.{},
+    /// Rules the DESIGN owns — `(requirement … (on "REF") (check …))` and
+    /// `(net-rule …)` — with the verdict each reached. Rendered as their own
+    /// table so a reviewer can see at a glance which obligations this board
+    /// set for itself versus which it inherited from a component library.
+    design_rules: []const req_design_rules.Outcome = &.{},
+};
+
+/// The already-evaluated check evidence a review document renders. Bundled
+/// because the two halves are produced together by `preflight`/`buildReviewFor`
+/// and are meaningless apart: a requirement table with no outcomes shows every
+/// rule as pending.
+pub const Evidence = struct {
+    /// Library requirement outcomes, verifies-overlaid, keyed by ref-des —
+    /// `req_checks.runChecks` + `applyVerifications`. Null renders every
+    /// library requirement as `na`.
+    checks: ?*const std.StringHashMapUnmanaged([]req_checks.Result) = null,
+    /// Design-owned rule outcomes from `req_design_rules.run` +
+    /// `applyVerifications`. Empty renders no design-rule table.
+    design_rules: []const req_design_rules.Outcome = &.{},
 };
 
 /// Build a review document for a design block. `assertions` comes from the
 /// evaluator's `assertions` list (pass an empty slice when not available).
-/// `check_results` is the (already verifies-overlaid) map from
-/// `req_checks.runChecks` + `applyVerifications`; pass `null` to skip status
-/// info (every requirement will surface as `na`).
+/// `evidence` carries the already-run check outcomes (see `Evidence`); pass
+/// `.{}` to skip status info — every requirement then surfaces as `na`.
 /// All allocations use the supplied allocator; the returned struct references
 /// those allocations plus string slices owned by the block.
 pub fn buildReview(
@@ -256,8 +275,9 @@ pub fn buildReview(
     block: *const DesignBlock,
     assertions: []const AssertionResult,
     violations: []const erc_mod.Violation,
-    check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result),
+    evidence: Evidence,
 ) ReviewError!ReviewDoc {
+    const check_results = evidence.checks;
     const sections = try buildSectionReports(allocator, block, violations, check_results);
     const sub_reqs = try collectSubblockRequirements(allocator, block, check_results);
     const rails = try power_budget.analyze(allocator, block);
@@ -294,6 +314,7 @@ pub fn buildReview(
         .assertions = asserts,
         .unresolved = unresolved,
         .subblock_requirements = sub_reqs,
+        .design_rules = evidence.design_rules,
     };
 }
 

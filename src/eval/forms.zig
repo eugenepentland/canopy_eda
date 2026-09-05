@@ -165,6 +165,9 @@ pub const ScopeForm = enum {
     design_rules,
     pcb_plan,
     module_policy,
+    // Design-owned rules — accepted at every scope
+    requirement,
+    net_rule,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -221,6 +224,8 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "frequency-plan", .frequency_plan },
     .{ "design-rules", .design_rules },
     .{ "pcb-plan", .pcb_plan },
+    .{ "requirement", .requirement },
+    .{ "net-rule", .net_rule },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -758,6 +763,20 @@ pub const scope_form_docs = blk: {
             "FLATTENED name (\"sub-block/NET\" for a module-internal net) or a bare leaf that " ++
             "matches every module-local net of that name. A pinned net is no longer reported as " ++
             "inferred. Unknown class atoms and malformed children are warned and dropped.",
+    } };
+    t[@backingInt(ScopeForm.requirement)] = .{ .scope = all, .doc = .{
+        .syntax = "(requirement \"text\" (on \"REF\") (check …) [(ref \"file.pdf\" (page N))] [(id \"…\")])",
+        .summary = "A rule the DESIGN owns, aimed with (on \"REF\") at one of its own placed parts " ++
+            "(or \"sub/REF\" for one inside a sub-block, judged in that sub-block). Every `(check …)` " ++
+            "primitive works unchanged. Gated exactly like the library requirement it mirrors and " ++
+            "signed off with (verifies (req design-rule <id>) …). See \u{201C}Design-owned rules\u{201D}.",
+    } };
+    t[@backingInt(ScopeForm.net_rule)] = .{ .scope = all, .doc = .{
+        .syntax = "(net-rule \"text\" (nets GLOB…) predicate… [(id \"…\")])",
+        .summary = "A design-owned rule about NETS rather than parts: every net a glob matches must " ++
+            "satisfy every predicate. Globs match flattened net names (`V_*`, `*_RF`, `sub/*`, an exact " ++
+            "name) and a glob matching nothing FAILS naming the glob. The predicates are the " ++
+            "\u{201C}Net-rule predicates\u{201D} table.",
     } };
     t[@backingInt(ScopeForm.net_envelope)] = .{ .scope = tl, .doc = .{
         .syntax = "(net-envelope \"NET\" (rated LO HI) [\"why\"])",

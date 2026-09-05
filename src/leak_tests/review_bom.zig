@@ -289,7 +289,7 @@ test "leak: review_json.renderToJson (arena-contract; buf.items return)" {
     const top = block("doc-fixture", &insts, &.{});
 
     const violations = [_]erc_mod.Violation{};
-    const doc = try review.buildReview(alloc, "doc-fixture", &top, &.{}, &violations, null);
+    const doc = try review.buildReview(alloc, "doc-fixture", &top, &.{}, &violations, .{});
 
     const json = try review_json.renderToJson(alloc, doc);
     try std.testing.expect(json.len > 0);

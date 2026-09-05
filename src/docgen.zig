@@ -27,6 +27,7 @@ const fmt_mod = @import("eval/fmt.zig");
 const tokenizer_mod = @import("sexpr/tokenizer.zig");
 const block_types = @import("render_block_types.zig");
 const check_grammar = @import("eval/check_grammar.zig");
+const authored_rules = @import("eval/authored_rules.zig");
 const thermal = @import("eval/thermal.zig");
 const numeric = @import("numeric.zig");
 const preflight = @import("preflight.zig");
@@ -211,6 +212,7 @@ fn renderReferenceAppendices(writer: anytype) !void {
     try renderComponentFields(writer);
     try renderThermalForms(writer);
     try renderRequirementChecks(writer);
+    try renderNetRulePredicates(writer);
     try renderDatasheetReview(writer);
 }
 
@@ -414,6 +416,37 @@ fn renderRequirementChecks(writer: anytype) !void {
         \\
     );
     for (check_grammar.check_docs) |d| {
+        try writer.writeAll("| `");
+        try writeCell(writer, d.syntax);
+        try writer.writeAll("` | ");
+        try writeCell(writer, d.summary);
+        try writer.writeAll(" |\n");
+    }
+}
+
+/// Render the "Net-rule predicates" section from
+/// `eval/authored_rules.predicate_docs` — the same table `parsePredicate`
+/// dispatches on, so a design-owned net rule's vocabulary cannot drift from
+/// the reference the way a hand-written list would.
+fn renderNetRulePredicates(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Net-rule predicates
+        \\
+        \\Assertions a design-owned `(net-rule "text" (nets GLOB…) …)` makes
+        \\about each net its globs match. Unlike a `(check …)`, which is aimed
+        \\at one placement of a part, these are properties of the net itself,
+        \\so they need no pinout and no `(on …)` target. A rule may carry
+        \\several: the net must satisfy every one of them. See
+        \\“Design-owned rules” in the language guide for the
+        \\glob syntax, the scopes the form is accepted at, and how the results
+        \\reach `netlisp check`.
+        \\
+        \\| Predicate | Asserts (per matched net) |
+        \\| --- | --- |
+        \\
+    );
+    for (authored_rules.predicate_docs) |d| {
         try writer.writeAll("| `");
         try writeCell(writer, d.syntax);
         try writer.writeAll("` | ");

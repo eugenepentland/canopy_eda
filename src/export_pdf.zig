@@ -1876,7 +1876,7 @@ fn hostingSection(hosts: []const []const u8, notes: []const env_mod.SectionNote)
 
 /// Compose the fixture design with a pinned generation stamp.
 fn composeFixture(a: Allocator, block: *const DesignBlock) ![]u8 {
-    const doc = try review.buildReview(a, "acme", block, &.{}, &.{}, null);
+    const doc = try review.buildReview(a, "acme", block, &.{}, &.{}, .{});
     return compose(a, block, "projects/designs", "acme", doc, .{
         .generated_at = "2026-07-30T00:00:00Z",
         .build_id = "deadbee",
@@ -2279,7 +2279,7 @@ test "an empty design composes a valid cover-plus-appendix document" {
         .groups = &.{},
         .sub_blocks = &.{},
     };
-    const doc = try review.buildReview(a, "bare", &block, &.{}, &.{}, null);
+    const doc = try review.buildReview(a, "bare", &block, &.{}, &.{}, .{});
     const bytes = try compose(a, &block, "projects/designs", "bare", doc, .{ .generated_at = "T" });
     try pdf.validate(bytes);
     // Cover + the two appendix pages, with the design name standing in for an
@@ -2412,7 +2412,7 @@ test "a module instantiated twice draws one page captioned with its repeat count
     var block = fixtureBlock();
     block.sub_blocks = &subs;
 
-    const doc = try review.buildReview(a, "dup", &block, &.{}, &.{}, null);
+    const doc = try review.buildReview(a, "dup", &block, &.{}, &.{}, .{});
     const bytes = try compose(a, &block, "projects/designs", "dup", doc, .{ .generated_at = "T" });
     try pdf.validate(bytes);
     const strings = try extractTj(a, bytes);
@@ -2714,7 +2714,7 @@ test "the theme option reaches the translated schematic colours" {
     defer arena.deinit();
     const a = arena.allocator();
     const block = fixtureBlock();
-    const doc = try review.buildReview(a, "acme", &block, &.{}, &.{}, null);
+    const doc = try review.buildReview(a, "acme", &block, &.{}, &.{}, .{});
     const dark = try compose(a, &block, "projects/designs", "acme", doc, .{ .generated_at = "T" });
     const light = try compose(a, &block, "projects/designs", "acme", doc, .{
         .generated_at = "T",
@@ -2733,7 +2733,7 @@ test "the dark page background is painted once per page and never in print" {
     defer arena.deinit();
     const a = arena.allocator();
     const block = fixtureBlock();
-    const doc = try review.buildReview(a, "acme", &block, &.{}, &.{}, null);
+    const doc = try review.buildReview(a, "acme", &block, &.{}, &.{}, .{});
     const dark = try compose(a, &block, "projects/designs", "acme", doc, .{ .generated_at = "T" });
     const light = try compose(a, &block, "projects/designs", "acme", doc, .{
         .generated_at = "T",
@@ -2788,7 +2788,7 @@ test "the thermal screen draws on the power sheet with its verdict and row" {
         .groups = &.{},
         .sub_blocks = &.{},
     };
-    const doc = try review.buildReview(a, "hot", &block, &.{}, &.{}, null);
+    const doc = try review.buildReview(a, "hot", &block, &.{}, &.{}, .{});
     const bytes = try compose(a, &block, "projects/designs", "hot", doc, .{ .generated_at = "T" });
     try pdf.validate(bytes);
 
