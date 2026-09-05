@@ -695,3 +695,34 @@ matters when the person re-recording is the author of the change.
 - **friction:** Request-double auth tests passed while the real HTTP listener lacked the restored OAuth metadata route; unknown URLs return 404 before `Server.dispatch`. A live outage test also exposed the old Ward client's SO_RCVTIMEO/EAGAIN crash under pinned Zig 0.17. Both issues required real HTTP probes beyond middleware tests.
 - **idea:** Keep `scripts/test_ward_hosting.py` on the `zig build test` dependency chain: it exercises registered routes, authenticated/unauthenticated requests, roles, and a stalled Ward verifier using temporary project state. This catches protocol and routing regressions before deployment without a real account or production restart.
 - **status:** resolved in this change.
+
+## 2026-09-05 — examples/blinky-breakout authoring (open-source P1 wave)
+
+Writing the first public example from a cold start surfaced these; each cost
+real time and none is specific to that board.
+
+- **Silently wrong netlist from `(pin 1A "NET")`**: `1A` tokenizes as the
+  number 1 with SI unit `A`, so pad 1 is connected instead of pinout function
+  `"1A"`, with no warning. Warn when a numeric pin token also names a pinout
+  function on that part.
+- **docs/sexp-language.md is stale**: `(section … (status …))` is not a form
+  (status is inferred; the build warns "unknown sub-form"); design/section
+  `(note …)` evaluates only its first argument, so the documented
+  `(note "R4" (fmt …))` does nothing; a `(fmt …)` section subtitle is not
+  evaluated either.
+- **`fmt` errors carry no span**: an unknown directive fails the build with a
+  bare `Build error: error.FormatError`, no file or line.
+- **Assertion semantics differ by layer**: `netlisp build` exits 1 on a failed
+  assertion and emits nothing, while the language doc says assertions never
+  abort the build. Say which layer does what.
+- **`assert-range` rounds its bounds in the message**: `0.002 .. 0.010` prints
+  as `(range 0.0-0.0)`.
+- **`set_part_poses` schema says x/y is the part centre**; it is the footprint
+  origin (visible on any footprint whose pads are not centred).
+- **`repair_land_transit` can make DRC worse**: 5 `land_transit` warnings
+  became 13 `dangling_copper` on a 20-part board.
+- **Runtime state lands in the project dir**: `serve` writes `logs/`, the
+  layout tools write `history/`, which dirties a tracked example project;
+  `.gitignore` now excludes them under `examples/*/`.
+- **`export-schematic-png` refuses more than 8 hubs**, and test points and
+  mounting holes count as hubs, so a 20-part board already needs `--ref`.
