@@ -7311,6 +7311,7 @@ Public functions: read, fetch
 - restore_layout_snapshot restores protected PCB layout history after snapshotting the current sidecar and bumping its revision
 - stitch_ground_pads applies the autorouter's final ground-reference pass transactionally to a saved layout
 - attach_datasheet links a stored PDF into the library component, refuses a filename absent from lib/datasheets, and reports an already-linked stem instead of duplicating it
+- The pose tools describe x/y as the footprint origin, the point the placement transform actually adds pad offsets to
 
 Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesignSummaries, renderSceneGraph, requireString, optionalString, optionalU64, optionalBool, missingArg
 
