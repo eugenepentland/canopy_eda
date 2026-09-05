@@ -16,6 +16,10 @@ const autocommit = @import("autocommit.zig");
 const footprint_preview = @import("footprint_preview.zig");
 const upload = @import("upload.zig");
 const lib_limits = @import("../lib_limits.zig");
+const stdlib = @import("../stdlib.zig");
+
+/// Project-relative sub-path of one component file; resolved through `stdlib`.
+const component_path_fmt = "lib/components/{s}.sexp";
 const datasheet_ref = @import("datasheet_ref.zig");
 const urlcodec = @import("urlcodec.zig");
 
@@ -186,11 +190,57 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
         }
     } else |_| {}
 
+    try appendBundledRows(allocator, &buf, &referenced_pinouts, &referenced_footprints);
+
     std.sort.heap(RowWithMtime, buf.items, {}, RowWithMtime.newerFirst);
 
     var rows: std.ArrayList(LibraryRow) = .empty;
     for (buf.items) |wm| try rows.append(allocator, wm.row);
     return rows.toOwnedSlice(allocator);
+}
+
+/// Add the standard library's parts to the page, minus anything the project's
+/// own directories already contributed under the same name — the same
+/// project-wins rule resolution uses, so what the page lists is what a design
+/// would get. Bundled rows carry `mtime = 0`: they are compiled in and cannot
+/// change, so they sort below everything the project has actually edited.
+fn appendBundledRows(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayList(RowWithMtime),
+    referenced_pinouts: *std.StringHashMapUnmanaged(void),
+    referenced_footprints: *std.StringHashMapUnmanaged(void),
+) HandlerError!void {
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(allocator);
+    for (buf.items) |wm| try seen.put(allocator, wm.row.name, {});
+
+    var comps = stdlib.stems("lib/components/");
+    while (comps.next()) |name| {
+        if (seen.contains(name)) continue;
+        const sub_path = try std.fmt.allocPrint(allocator, component_path_fmt, .{name});
+        defer allocator.free(sub_path);
+        const content = stdlib.bundled(sub_path) orelse continue;
+        if (extractField(content, footprint_label)) |fp| try referenced_footprints.put(allocator, fp, {});
+        if (extractField(content, "pinout")) |po| try referenced_pinouts.put(allocator, po, {});
+        try buf.append(allocator, .{ .mtime = 0, .row = .{
+            .name = name,
+            .kind = if (std.mem.indexOf(u8, content, "(component-family ") != null) .family else .component,
+            .search_text = try std.fmt.allocPrint(allocator, "{s} {s}", .{ name, extractField(content, "description") orelse "" }),
+            .description = extractField(content, "description"),
+            .footprint = extractField(content, footprint_label),
+            .pinout = extractField(content, "pinout"),
+        } });
+    }
+
+    var fps = stdlib.stems("lib/footprints/");
+    while (fps.next()) |name| {
+        if (seen.contains(name) or referenced_footprints.contains(name)) continue;
+        try buf.append(allocator, .{ .mtime = 0, .row = .{
+            .name = name,
+            .kind = .footprint,
+            .search_text = try std.fmt.allocPrint(allocator, "{s} footprint", .{name}),
+        } });
+    }
 }
 
 /// True when the footprint resolves to a STEP model: the model-config map
@@ -217,8 +267,8 @@ fn rowForName(allocator: std.mem.Allocator, project_dir: []const u8, name: []con
     const model_cfg = export_kicad.loadModelConfig(allocator, project_dir);
 
     // Component / family first.
-    const comp_path = std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, name }) catch return null;
-    if (infra_fs.cwd().readFileAlloc(allocator, comp_path, lib_limits.max_lib_file_bytes)) |content| {
+    const comp_sub = std.fmt.allocPrint(allocator, component_path_fmt, .{name}) catch return null;
+    if (stdlib.read(allocator, project_dir, comp_sub, lib_limits.max_lib_file_bytes)) |content| {
         const description = extractField(content, "description");
         const footprint = extractField(content, footprint_label);
         const pinout = extractField(content, "pinout");
@@ -239,11 +289,11 @@ fn rowForName(allocator: std.mem.Allocator, project_dir: []const u8, name: []con
             .requirements = extractRequirements(allocator, content) catch return null,
             .datasheets = datasheets,
         };
-    } else |_| {}
+    }
 
     // Standalone footprint.
-    const fp_path = std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, name }) catch return null;
-    infra_fs.cwd().access(fp_path, .{}) catch return null;
+    const fp_sub = std.fmt.allocPrint(allocator, "lib/footprints/{s}.sexp", .{name}) catch return null;
+    if (!stdlib.exists(allocator, project_dir, fp_sub)) return null;
     return .{
         .name = name,
         .kind = .footprint,
@@ -469,8 +519,8 @@ pub fn uploadModelApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) H
 /// `lib/components/<name>.sexp` exists and declares `(footprint X)`, return X;
 /// otherwise `name` is itself a footprint (the drop landed on a footprint card).
 fn resolveFootprintName(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) []const u8 {
-    const path = std.fmt.allocPrint(allocator, "{s}/lib/components/{s}.sexp", .{ project_dir, name }) catch return name;
-    const content = infra_fs.cwd().readFileAlloc(allocator, path, lib_limits.max_lib_file_bytes) catch return name;
+    const sub_path = std.fmt.allocPrint(allocator, component_path_fmt, .{name}) catch return name;
+    const content = stdlib.read(allocator, project_dir, sub_path, lib_limits.max_lib_file_bytes) orelse return name;
     return extractField(content, footprint_label) orelse name;
 }
 

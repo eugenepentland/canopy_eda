@@ -10,7 +10,7 @@ pub const required_zig_version = "0.17.0-dev.1683+5ceec001b";
 pub fn build(b: *std.Build) void {
     if (!std.mem.eql(u8, builtin.zig_version_string, required_zig_version)) {
         std.debug.panic(
-            "netlisp requires Zig {s}; found {s}. See README.md for the pinned toolchain and archive checksum.",
+            "netlisp requires Zig {s}; found {s}. See ZIG_TOOLCHAIN.md (scripts/install-zig.sh installs it).",
             .{ required_zig_version, builtin.zig_version_string },
         );
     }
@@ -64,14 +64,6 @@ pub fn build(b: *std.Build) void {
     });
 
     const zt_dep = b.dependency("zt", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    // Ward auth library — session-cookie + OAuth-bearer verification against
-    // wardd (ward.eugenepentland.dev). Pure-Zig module; sqlite/OpenSSL link
-    // only into the wardd binary, never into consumers.
-    const ward_dep = b.dependency("ward", .{
         .target = target,
         .optimize = optimize,
     });
@@ -199,18 +191,27 @@ pub fn build(b: *std.Build) void {
     exe_mod.strip = optimize == .safe;
     exe_mod.addImport("httpz", httpz.module("httpz"));
     exe_mod.addImport("zt", zt_dep.module("zt"));
-    exe_mod.addImport("ward", ward_dep.module("ward"));
     // Embed the compiled drc.wasm so static_assets.zig can @embedFile it.
     exe_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
+
+    // Codegen backend for the `netlisp` executable. The pinned official Zig
+    // ships LLVM, but every optimized build here goes through the self-hosted
+    // x86-64 backend by default: LLVM turns a seconds-long ReleaseSafe compile
+    // into a multi-minute one, which is why releases (and any local
+    // `-Doptimize=safe`) are self-hosted. `-Dllvm` opts a build back into LLVM
+    // when the faster *runtime* is worth the slow compile — it is not used by
+    // any gate, release, or deploy path. Debug leaves the choice to the
+    // compiler default (also self-hosted on this target).
+    const use_llvm = b.option(
+        bool,
+        "llvm",
+        "Emit the netlisp executable through LLVM instead of the self-hosted backend (much slower compile)",
+    ) orelse false;
 
     const exe = b.addExecutable(.{
         .name = "netlisp",
         .root_module = exe_mod,
-        // The sole production ReleaseSafe artifact uses Zig's self-hosted
-        // x86-64 backend even though the pinned official compiler also ships
-        // LLVM. Debug keeps the compiler default; repository policy reserves
-        // `.safe` for prepare-release.sh.
-        .use_llvm = if (optimize == .safe) false else null,
+        .use_llvm = if (use_llvm) true else if (optimize == .debug) null else false,
     });
     exe.step.dependOn(template_predecessor);
     b.installArtifact(exe);
@@ -248,7 +249,6 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.addImport("httpz", httpz.module("httpz"));
     test_mod.addImport("zt", zt_dep.module("zt"));
-    test_mod.addImport("ward", ward_dep.module("ward"));
     test_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
     addDeployUnitImports(b, test_mod);
 
@@ -316,9 +316,25 @@ pub fn build(b: *std.Build) void {
     });
     fast_test_mod.addImport("httpz", httpz.module("httpz"));
     fast_test_mod.addImport("zt", zt_dep.module("zt"));
-    fast_test_mod.addImport("ward", ward_dep.module("ward"));
     fast_test_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
     addDeployUnitImports(b, fast_test_mod);
+
+    // ─────────────────────────────────────────────────────────────────────
+    // BUNDLED STANDARD LIBRARY — self-contained region, see `stdlibEmbed`.
+    //
+    // `stdlib/**/*.sexp` is compiled INTO every artifact as the module
+    // `stdlib_embed`, so a `netlisp` binary carries the component families,
+    // footprints and pinouts a first design needs and a project directory
+    // with no `lib/` of its own still evaluates. Every module that can reach
+    // `src/stdlib.zig` needs the import — the exe, both test binaries, the
+    // slim layout bench, and the wasm DRC (which pulls in
+    // placement/geometry.zig). See docs/standard-library.md.
+    // ─────────────────────────────────────────────────────────────────────
+    const stdlib_embed = stdlibEmbed(b);
+    for ([_]*std.Build.Module{ exe_mod, test_mod, fast_test_mod, bench_mod, wasm_mod }) |mod| {
+        mod.addAnonymousImport("stdlib_embed", .{ .root_source_file = stdlib_embed });
+    }
+    // ───────────────────────── end bundled standard library ──────────────
 
     //
     // Hoisted to a named const because the runner is told the same list twice:
@@ -364,6 +380,11 @@ pub fn build(b: *std.Build) void {
 
     b.getInstallStep().dependOn(template_predecessor);
     test_step.dependOn(template_predecessor);
+
+    // A plain `zig build` runs Guardian's external gates, which spawn `node`
+    // and `python3` themselves — so the host probe guards the default step
+    // too, not just `test`'s tree-policy checks.
+    b.getInstallStep().dependOn(addHostPrereqCheck(b));
 
     // Order the compile-only probe behind template codegen AND its auto-fmt.
     // Behind codegen because the probe compiles src/test_root.zig, which imports the
@@ -496,6 +517,11 @@ fn addTestShard(
 /// the green-run digest and because they are the right home once that path is
 /// fixed. See AUDIT-LEDGER.toml DRIFT-INFRA-004.
 fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step) void {
+    // Every check below spawns `node` or `python3`. Order them behind the
+    // host-prerequisite probe so a machine without them reports what to
+    // install instead of a bare "unable to spawn" from whichever gate lost the
+    // race.
+    const prereqs = addHostPrereqCheck(b);
     const checks = [_][]const []const u8{
         // `--syntax` parses every first-party asset with Node here, because
         // the `node --check` externals that were supposed to do it do not run.
@@ -508,6 +534,12 @@ fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step) void {
         // gates here were decorative. Nothing in this tree could have noticed,
         // because a gate that never fires looks exactly like one that cannot.
         &.{"scripts/check_external_gates_armed.sh"},
+        // One compiler, from PATH, pinned by `.zigversion` — asserted against
+        // the release/deploy scripts, build.zig's backend default and the
+        // systemd unit. It used to be a manual-only script that nothing ran
+        // (AUDIT-LEDGER.toml), which is how the private-compiler pin it
+        // guarded went unnoticed; it has a home now.
+        &.{"scripts/test_production_toolchain_pin.sh"},
         // JavaScript unit-test runners. Each was declared as an
         // external and therefore ran nowhere — which put shape_sketch.test.js
         // back in exactly the state DRIFT-INFRA-003 described, "a unit test
@@ -526,8 +558,24 @@ fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step) void {
         // by output hash — and a skipped policy check is the failure mode
         // these exist to prevent.
         run.has_side_effects = true;
+        run.step.dependOn(prereqs);
         test_step.dependOn(&run.step);
     }
+}
+
+/// The `node` / `python3` probe a newcomer's first build hits before anything
+/// else spawns them. Guardian's `[[external]]` gates alone shell out to `node`
+/// 47 times and to `python3` four times on a plain `zig build`, and a missing
+/// interpreter surfaces there as an unattributed external-gate failure. This
+/// says "install Node 20+ / Python 3.11+" in one line instead. Returns the run
+/// step so callers can order real work behind it.
+fn addHostPrereqCheck(b: *std.Build) *std.Build.Step {
+    const run = b.addSystemCommand(&.{"scripts/check_host_prereqs.sh"});
+    run.setCwd(b.path("."));
+    // It probes the machine, not the tree: nothing here is cacheable by output
+    // hash, and a skipped probe is exactly the confusing failure it prevents.
+    run.has_side_effects = true;
+    return &run.step;
 }
 
 /// Developer-only changed-file selector. The script starts a nested filtered
@@ -577,4 +625,78 @@ fn assertDoesNotInstall(step: *std.Build.Step, name: []const u8) void {
             else => assertDoesNotInstall(dep, name),
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// BUNDLED STANDARD LIBRARY — self-contained region.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Compile `stdlib/**/*.sexp` into the binary as the `stdlib_embed` module.
+///
+/// The repository's `stdlib/` mirrors a project's `lib/` one level up
+/// (`stdlib/components/…` ↔ `<project>/lib/components/…`), so this generates
+/// a path→bytes table keyed on the PROJECT-relative sub-path — the same key
+/// `src/stdlib.zig` is asked for after a project's own `lib/` misses.
+///
+/// Embedding rather than installing a directory is what makes the single
+/// binary self-contained: `zig build run`, an installed `netlisp` executed
+/// from any working directory, and the unit tests all see the same table with
+/// no path discovery and no install step to forget. A user who wants to swap
+/// the bundled set for their own points `NETLISP_STDLIB_DIR` at a directory
+/// laid out like `stdlib/`; that is checked before the table.
+///
+/// The files are COPIED into the generated module's directory and reached with
+/// `@embedFile`, because `@embedFile` cannot escape a module root — reading
+/// their bytes here at configure time instead would work but would put the
+/// whole library through the build script on every `zig build`. The copies are
+/// `LazyPath`s onto the real files, so editing a `.sexp` re-runs the step.
+fn stdlibEmbed(b: *std.Build) std.Build.LazyPath {
+    const io = b.graph.io;
+    var dir = b.root.root_dir.handle.openDir(io, "stdlib", .{ .iterate = true }) catch |err|
+        std.debug.panic("build.zig: cannot open stdlib/: {t}", .{err});
+    defer dir.close(io);
+
+    var rel_paths: std.ArrayList([]const u8) = .empty;
+    var walker = dir.walk(b.allocator) catch @panic("OOM");
+    defer walker.deinit();
+    while (walker.next(io) catch |err|
+        std.debug.panic("build.zig: cannot walk stdlib/: {t}", .{err})) |entry|
+    {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.path, ".sexp")) continue;
+        rel_paths.append(b.allocator, b.dupe(entry.path)) catch @panic("OOM");
+    }
+    // Directory order is undefined; sort so the generated table — and every
+    // cache key derived from it — is a function of the tree alone.
+    std.mem.sort([]const u8, rel_paths.items, {}, lessThanStdlibPath);
+
+    const wf = b.addWriteFiles();
+    var src: std.ArrayList(u8) = .empty;
+    src.appendSlice(b.allocator,
+        \\//! Generated by build.zig from stdlib/ — do not edit.
+        \\//! One row per bundled library file, keyed on the project-relative
+        \\//! sub-path `src/stdlib.zig` resolves. Sorted by that key.
+        \\
+        \\pub const Entry = struct {
+        \\    /// e.g. "lib/components/cap-0402.sexp"
+        \\    path: []const u8,
+        \\    bytes: []const u8,
+        \\};
+        \\
+        \\pub const entries = [_]Entry{
+        \\
+    ) catch @panic("OOM");
+    for (rel_paths.items) |rel| {
+        _ = wf.addCopyFile(b.path(b.fmt("stdlib/{s}", .{rel})), rel);
+        src.appendSlice(b.allocator, b.fmt(
+            "    .{{ .path = \"lib/{s}\", .bytes = @embedFile(\"{s}\") }},\n",
+            .{ rel, rel },
+        )) catch @panic("OOM");
+    }
+    src.appendSlice(b.allocator, "};\n") catch @panic("OOM");
+    return wf.add("stdlib_embed.zig", src.items);
+}
+
+fn lessThanStdlibPath(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
 }

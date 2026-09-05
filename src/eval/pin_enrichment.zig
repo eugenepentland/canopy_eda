@@ -122,13 +122,7 @@ fn resolveUniqueAlt(
 ) Allocator.Error!?[]const u8 {
     const symbol = ref_to_symbol.get(pin.ref_des) orelse return null;
     const gop = try pinout_cache.getOrPut(allocator, symbol);
-    if (!gop.found_existing) {
-        const path = std.fmt.allocPrint(allocator, "{s}/lib/pinouts/{s}.sexp", .{ project_dir, symbol }) catch {
-            gop.value_ptr.* = null;
-            return null;
-        };
-        gop.value_ptr.* = erc.loadPinoutMap(allocator, path);
-    }
+    if (!gop.found_existing) gop.value_ptr.* = erc.loadPinoutMap(allocator, project_dir, symbol);
     const map = gop.value_ptr.* orelse return null;
     const entry = map.get(pin.pin) orelse return null;
     if (entry.alts.len != 1) return null;

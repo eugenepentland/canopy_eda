@@ -191,6 +191,7 @@ test {
     _ = @import("poly_scanline.zig");
     _ = @import("parts.zig");
     _ = @import("paths.zig");
+    _ = @import("stdlib.zig");
     _ = @import("pdf.zig");
     _ = @import("pdf_afm.zig");
     _ = @import("pdf_verify.zig");
@@ -406,6 +407,7 @@ test {
     _ = @import("serve/assembly_page_cache.zig");
     _ = @import("serve/api.zig");
     _ = @import("serve/pcb_step_export.zig");
+    _ = @import("serve/auth.zig");
     _ = @import("serve/auth_store.zig");
     _ = @import("serve/autocommit.zig");
     _ = @import("serve/board_backup.zig");
@@ -528,7 +530,6 @@ test {
     _ = @import("serve/vfs.zig");
     _ = @import("serve/warmup.zig");
     _ = @import("serve/warm_sched.zig");
-    _ = @import("serve/ward_auth.zig");
     _ = @import("sexpr/ast.zig");
     _ = @import("sexpr/paren_span.zig");
     _ = @import("sexpr/parser.zig");
@@ -882,11 +883,15 @@ test "release preparation starts test and build jobs before waiting" {
     try std.testing.expect(test_start < build_start);
     try std.testing.expect(build_start < first_wait);
     try std.testing.expect(std.mem.indexOf(u8, source, "-Doptimize=safe") != null);
+    // Default-off `-Dllvm`: every optimized build, the release included, is
+    // emitted by the self-hosted backend unless a human asks for LLVM.
     try std.testing.expect(std.mem.indexOf(
         u8,
         build_source,
-        ".use_llvm = if (optimize == .safe) false else null,",
+        ".use_llvm = if (use_llvm) true else if (optimize == .debug) null else false,",
     ) != null);
+    // Nothing in the release path opts into LLVM.
+    try std.testing.expect(std.mem.indexOf(u8, source, "-Dllvm") == null);
 }
 
 // spec: Web Server - Release preparation waits for a stable quiet-host window before PCB-editor timing, retries timing-budget misses after contention clears, and never retries renderer or infrastructure failures
@@ -997,23 +1002,38 @@ test "release preparation fingerprints the compiler binary" {
     try std.testing.expect(std.mem.indexOf(u8, source, "-zig-$ZIG_SHA256") != null);
 }
 
-// spec: Development pipeline - Rejects production preparation and deployment unless the compiler binary matches the pinned SHA-256
+// spec: Development pipeline - Rejects production preparation and deployment unless the PATH compiler reports the version pinned in .zigversion
 
-test "release and deploy require one exact production compiler binary" {
-    const expected = "8f4af9650b5358abcdd8a283976d30b5dcdca2b400e44af25953b2e34101e7d4";
+test "release and deploy require the pinned toolchain from PATH" {
+    const pinned = try readRepoFile(std.testing.allocator, ".zigversion");
+    defer std.testing.allocator.free(pinned);
     const prepare = try readRepoFile(std.testing.allocator, ".githooks/prepare-release.sh");
     defer std.testing.allocator.free(prepare);
     const deploy = try readRepoFile(std.testing.allocator, ".githooks/deploy-prod.sh");
     defer std.testing.allocator.free(deploy);
 
     for ([_][]const u8{ prepare, deploy }) |source| {
-        try std.testing.expect(std.mem.indexOf(u8, source, expected) != null);
+        // One compiler, one pin: PATH by default, `.zigversion` as the only
+        // source of the required version, and a loud stop when they disagree.
+        try std.testing.expect(std.mem.indexOf(u8, source, "ZIG=\"${ZIG:-zig}\"") != null);
         try std.testing.expect(std.mem.indexOf(
             u8,
             source,
-            "if [ \"$ZIG_SHA256\" != \"$REQUIRED_ZIG_SHA256\" ]; then",
+            "REQUIRED_ZIG=\"$(tr -d '[:space:]' <\"$TOP/.zigversion\")\"",
         ) != null);
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            source,
+            "if [ \"$ZIG_VERSION\" != \"$REQUIRED_ZIG\" ]; then",
+        ) != null);
+        // No private compiler may come back: neither a hardcoded version
+        // string nor a home-directory toolchain path belongs in these scripts.
+        try std.testing.expect(std.mem.indexOf(u8, source, std.mem.trim(u8, pinned, " \t\r\n")) == null);
+        try std.testing.expect(std.mem.indexOf(u8, source, "zig-toolchains") == null);
+        try std.testing.expect(std.mem.indexOf(u8, source, "REQUIRED_ZIG_SHA256") == null);
     }
+    // The candidate still records WHICH binary emitted it, so a same-version
+    // rebuild by another compiler is never adopted as this one's artifact.
     try std.testing.expect(std.mem.indexOf(
         u8,
         deploy,

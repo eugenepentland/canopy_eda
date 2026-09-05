@@ -9,7 +9,7 @@
 //! forgotten internal scratch makes the leak detector panic at test end
 //! (idiom 1, OWNED-RETURN), and any internal double-free / escape shows up
 //! immediately. (The OAuth/PKCE helpers this file also covered went away with
-//! the homegrown OAuth server in the ward migration.)
+//! the homegrown OAuth server; netlisp has no accounts to keep.)
 
 const std = @import("std");
 const auth_store = @import("../serve/auth_store.zig");

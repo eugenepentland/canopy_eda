@@ -10,6 +10,3 @@ branch URLs. Each nested `build.zig.zon` also pins the exact compiler minimum.
 | `httpz/deps/metrics` | `21fe85eaa1761a870753a4d0b9e3f289986ac1a3` | Exact revision selected by httpz. |
 | `httpz/deps/websocket` | `3318a78a2c3d3b972c394717c43a354d0feb8b91` (`dev`) | Exact revision selected by httpz. |
 | `zt` | `a8b94373999c2483efa5f646438263785f70743d` (`main`) | Template compiler/runtime ported to the pinned snapshot. |
-
-Ward owns and documents its separate vendored authentication/cryptography
-stack (`passcay` and `zbor`) in the Ward repository.

@@ -56,6 +56,7 @@ const vendor = @import("kicad_sch/vendor.zig");
 const verify = @import("kicad_sch/verify.zig");
 const sym_library = @import("kicad_sym/library.zig");
 const lib_limits = @import("lib_limits.zig");
+const stdlib = @import("stdlib.zig");
 const net_name = @import("net_name.zig");
 
 const DesignBlock = env_mod.DesignBlock;
@@ -64,7 +65,9 @@ const FlatInstance = export_kicad.FlatInstance;
 const FlatNet = export_kicad.FlatNet;
 const Shape = shape_mod.Shape;
 
-const footprint_path_template = "{s}/lib/footprints/{s}.sexp";
+/// Project-relative sub-path of one footprint; resolved through `stdlib`
+/// (project `lib/`, the shared lib root, then the bundled standard library).
+const footprint_path_template = "lib/footprints/{s}.sexp";
 const unnamed_component = "unnamed-part";
 const sheet_suffix = ".kicad_sch";
 
@@ -416,15 +419,15 @@ const Builder = struct {
         for (self.instances) |inst| {
             if (inst.footprint.len == 0 or self.fp.contains(inst.footprint)) continue;
             var info = FpInfo{ .kicad_name = inst.footprint, .pads = &.{} };
-            const path = try std.fmt.allocPrint(self.a, footprint_path_template, .{ self.project_dir, inst.footprint });
-            if (infra_fs.cwd().readFileAlloc(self.a, path, lib_limits.max_footprint_bytes)) |src| {
+            const sub_path = try std.fmt.allocPrint(self.a, footprint_path_template, .{inst.footprint});
+            if (stdlib.read(self.a, self.project_dir, sub_path, lib_limits.max_footprint_bytes)) |src| {
                 if (netlist.extractFootprintName(self.a, src)) |name| {
                     info.kicad_name = name;
                 } else |_| {}
                 if (netlist.extractPadNames(self.a, src)) |pads| {
                     info.pads = pads;
                 } else |_| {}
-            } else |_| {}
+            }
             try self.fp.put(self.a, inst.footprint, info);
         }
     }

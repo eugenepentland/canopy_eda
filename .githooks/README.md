@@ -90,20 +90,20 @@ Run this from a clean, committed feature worktree before merging:
 It generates and checks the committed templates, runs the whole-tree Guardian
 gate once, then starts the self-hosted Debug unit suite and the repository's
 sole netlisp self-hosted ReleaseSafe build together with separate local Zig caches.
-The official pinned compiler contains LLVM, but `build.zig` forces this one
-executable through the self-hosted backend. All development builds, tests,
-tools, dev servers, and benchmarks stay Debug;
-ReleaseSafe is created only here at the deployment boundary and only that
-executable is stripped. Both jobs must pass. Success atomically publishes an
+It uses the one pinned compiler from `PATH` (`$ZIG` overrides it). That
+compiler ships LLVM, but `build.zig` defaults `-Dllvm` off, so this artifact —
+like every other optimized build here — is emitted by the self-hosted backend
+in well under a minute. Only this executable is stripped. Both jobs must pass. Success atomically publishes an
 exact-commit candidate under `.git/release-candidates/<commit>/`, including the
 binary checksum, exact Zig version, compiler-binary SHA-256, runtime build ID,
-artifact policy, timings, and full job logs. Tree adoption requires both the
-same source tree and compiler SHA-256, so two private compilers reporting the
-same pinned version cannot reuse each other's artifacts. Every build uses the
+artifact policy, timings, and full job logs. That compiler SHA-256 is a
+fingerprint, not a second pin: tree adoption requires both the same source tree
+and the same compiler binary, so two builds of the same Zig version cannot
+reuse each other's artifacts. Every build uses the
 repository's fixed `--seed=1`, keeping unchanged test runs cacheable on Zig
-0.17. The script rejects any compiler whose version or binary SHA-256 differs
-from the exact production toolchain pinned in `ZIG_TOOLCHAIN.md`. Failure
-publishes nothing and keeps the failed logs under `.git/release-failures/`.
+0.17. The script rejects any compiler whose `zig version` differs from
+`.zigversion` (see `ZIG_TOOLCHAIN.md`). Failure publishes nothing and keeps the
+failed logs under `.git/release-failures/`.
 
 Each parallel job owns a separate process group. If the Debug suite fails,
 `prepare-release` immediately terminates the complete ReleaseSafe group instead
@@ -141,9 +141,9 @@ or candidate validation never restarts prod**, so the service keeps running its
 previous binary.
 
 After installing the verified candidate it restarts the unit and probes the live server
-(`HEALTH_URLS`, default: `/.well-known/oauth-protected-resource` must return
-200 and `/` must return 302, the ward login redirect) for up to
-`HEALTH_TIMEOUT` seconds:
+(`HEALTH_URLS`, default: `/healthz` must return 200 — the unauthenticated
+liveness probe, which reads no design and so answers a cold process as fast as
+a warm one) for up to `HEALTH_TIMEOUT` seconds:
 
 - **Healthy** → the binary is copied to `.git/deploy-lastgood-netlisp`, its ID
   to `.git/deploy-lastgood-id`, and the deployed commit to

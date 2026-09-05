@@ -580,11 +580,13 @@ status = "fixed"
 file = ["src/serve/auth.zig", "src/serve.zig"]
 fixed_in = "pre-2026-08-29"
 test = [
-  "auth-request: a non-loopback peer does not receive the dev bypass",
-  "auth-request: dev mode disabled forbids the loopback bypass",
-  "auth-request: ipv6 loopback bypasses and a non-loopback ipv6 peer does not",
+  "auth-request: a non-loopback peer is refused",
+  "auth-request: every proxy header defeats the loopback admission",
+  "auth-request: ipv6 loopback is admitted and a non-loopback ipv6 peer is not",
 ]
-note = "Locality is now derived from the TCP peer address and gated on an explicit dev mode. The three tests cover both halves: peer-derived, and disable-able."
+note = """Locality is derived from the TCP peer address, never from a request header, and a request a reverse proxy relayed is refused however loopback its peer looks.
+
+RE-POINTED 2026-09-05 when the ward dependency was removed. The fix itself is unchanged — the same `peerIsLoopback` / `viaProxy` pair, now in `src/serve/auth.zig` — but the three tests that guarded it were written against the `NETLISP_DEV` opt-in, which no longer exists: a loopback request is admin by default in the local-first model, and the server binds 127.0.0.1 rather than 0.0.0.0 (the other half of this finding's summary). The three replacements assert the surviving halves: a public peer is refused, EVERY proxy header defeats the loopback admission, and the ipv6 pair splits ::1 from a public v6 address. The `--allow-remote` switch is the deliberate, explicit way to admit a proxied request, and it is covered by its own tests rather than by this finding."""
 
 [[finding]]
 id = "JUL-C2"

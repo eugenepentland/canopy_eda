@@ -131,7 +131,7 @@ Load / star / Delete. The existing rows and the star are never touched.
 - malformed encoding: an unparseable snapshot is skipped and the boards around it still recover
 - completeness-waiver: large inputs (every read is capped — a snapshot body at sidecar_max_bytes, one git capture at git_output_cap under a timeout, the revision walk at max_git_revisions, and the rows one block gains at the caller's limit)
 - completeness-waiver: i/o failure (each archive read is independently fallible and degrades to "recover nothing from this one"; the sidecar write is atomic tmp-rename and reports false rather than raising)
-- completeness-waiver: unauthorized access (a local CLI over caller-supplied paths; the archives are read-only and server-side access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a local CLI over caller-supplied paths; the archives are read-only and server-side access control lives in serve/auth)
 - completeness-waiver: concurrent access (a single-threaded CLI; the sidecar write is the same atomic whole-file replace every layout save performs, and it bumps the rev so an open editor tab 409s rather than clobbering)
 - completeness-waiver: integer overflow (the only arithmetic is bounded row counting; the git revision walk and the per-block row count are both hard-capped)
 - completeness-waiver: panic-free (every fallible step degrades to "recover nothing" — a missing archive, an unreadable snapshot, absent git, and a failed write all return a report instead of raising)
@@ -195,7 +195,7 @@ write.
 - the import keeps the design's other saved layouts, taking only the star from them
 - the report renders as one stable json object
 - completeness-waiver: large inputs (linear scans over the parsed snapshot's typed slices; a bigger board only lengthens the report lists, never the shape)
-- completeness-waiver: unauthorized access (a local CLI over caller-supplied paths; the board is opened read-only and server-side access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a local CLI over caller-supplied paths; the board is opened read-only and server-side access control lives in serve/auth)
 - completeness-waiver: i/o failure (build is pure over parsed inputs; the CLI routes board-file read errors through the fatal helper and the sidecar write returns false instead of raising)
 - completeness-waiver: concurrent access (a single-threaded CLI; the sidecar write is the same whole-file replace every layout save performs — last writer wins)
 - completeness-waiver: malformed encoding (consumes the typed snapshot from kicad_pcb/snapshot; malformed-board rejection is upstream in the sexpr parser and board reader)
@@ -233,7 +233,7 @@ candidate for deployment.
 - Verifies the self-hosted production ELF has no debug or symbol-table sections before publication
 - Records the source tree hash alongside every candidate it publishes
 - Binds release candidates and caches to the exact compiler binary, not only its reported version
-- Rejects production preparation and deployment unless the compiler binary matches the pinned SHA-256
+- Rejects production preparation and deployment unless the PATH compiler reports the version pinned in .zigversion
 - Carries an exact runtime build ID and artifact policy with every release candidate
 - Adopts an already-verified candidate for an identical tree instead of rebuilding
 - Adopts only a candidate carrying its verification marker and a passing checksum, and otherwise falls back to the full build
@@ -1291,7 +1291,7 @@ no assignment authored, and the refusal is reported rather than silent.
 - detecting the same board twice yields the identical fans in the identical order
 - completeness-waiver: empty inputs (a request naming fewer than two nets, or nets with no shared hub, returns an empty plan with a reason — unit-tested)
 - completeness-waiver: large inputs (the cut scan is a fixed 20-step sweep and the assignment is O(nets x lanes); a bigger board only lengthens the obstacle scan, which is one linear pass over parts)
-- completeness-waiver: unauthorized access (a pure in-memory computation with no I/O or auth surface — access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a pure in-memory computation with no I/O or auth surface — access control lives in serve/auth)
 - completeness-waiver: i/o failure (no disk, socket, or syscall — placement geometry arrives as typed slices from the caller)
 - completeness-waiver: concurrent access (a stateless pure function over immutable inputs into per-call arena-owned slices — concurrent assignments are independent)
 - completeness-waiver: malformed encoding (inputs are typed Zig structs, not parsed bytes; an out-of-range net index or unknown pad name is skipped, never a hard error)
@@ -1340,7 +1340,7 @@ result never depends on lane order.
 - a net routes through its OWN reserved lane freely, so a reservation costs its owner nothing
 - completeness-waiver: empty inputs (an empty lane list early-outs before any grid is touched — unit-tested)
 - completeness-waiver: large inputs (cost is lanes x lanes x nodes-per-lane, and a lane is a few millimetres of an escape corridor; the whole board is never scanned)
-- completeness-waiver: unauthorized access (a pure in-memory stamp over caller-owned slices — access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a pure in-memory stamp over caller-owned slices — access control lives in serve/auth)
 - completeness-waiver: i/o failure (no disk, socket, or syscall — lanes and grids arrive as typed slices)
 - completeness-waiver: concurrent access (a pure function of its inputs writing only the caller's own per-run grids)
 - completeness-waiver: malformed encoding (inputs are typed Zig structs, not parsed bytes; an out-of-range layer is skipped, never a hard error)
@@ -1389,7 +1389,7 @@ unusable costs a net a detour, never the net.
 - a net a copper plane carries is never relaxed and is diagnosed as plane-carried
 - completeness-waiver: empty inputs (no waves, or a wave whose nets have fewer than two distinct terminal cells, returns an empty plan and a no_terminals diagnosis — unit-tested)
 - completeness-waiver: large inputs (the frame budget is fixed and the lattice is deliberately coarse at twice the router's pitch; a bigger board lengthens one linear pass per frame, it never changes the shape of the result)
-- completeness-waiver: unauthorized access (a pure in-memory computation with no I/O or auth surface — access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a pure in-memory computation with no I/O or auth surface — access control lives in serve/auth)
 - completeness-waiver: i/o failure (no disk, socket, or syscall — placement geometry and net inputs arrive as typed slices from the caller)
 - completeness-waiver: concurrent access (a stateless pure function over immutable inputs into per-call allocator-owned slices — concurrent plans are independent)
 - completeness-waiver: malformed encoding (inputs are typed Zig structs, not parsed bytes; an out-of-range net index or unknown pad name is skipped, never a hard error)
@@ -2249,7 +2249,7 @@ arc-blind consumers use the sagitta-bounded chord tessellation.
 - detect reports a constrained net's under-radius corners without moving any copper
 - completeness-waiver: empty inputs (no routed tracks or no constrained net returns the input unchanged with changed=false — the pass-through test's case)
 - completeness-waiver: large inputs (linear over the routed segment count; chains and chord counts are bounded per corner at 64)
-- completeness-waiver: unauthorized access (a pure geometry pass inside the router; endpoint access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a pure geometry pass inside the router; endpoint access control lives in serve/auth)
 - completeness-waiver: i/o failure (no disk or socket — inputs are in-memory routed copper and resolved net rules)
 - completeness-waiver: concurrent access (a stateless pure function over immutable inputs into per-call arena-owned slices)
 - completeness-waiver: malformed encoding (inputs are typed router structs; degenerate/collinear geometry degrades to chords, never errors)
@@ -2493,7 +2493,7 @@ ring of identical violations.
 - in legal mode a fence site outside the board outline or inside its copper-edge clearance is skipped as an outline gap
 - completeness-waiver: empty inputs (a default-constructed rule declares no fence and every helper answers 0 — the no-pitch-no-max-freq test's case)
 - completeness-waiver: large inputs (layer count is capped at 32; each resolver is constant-time arithmetic over one rule; each guide field is capped at 8M nodes per net and row, coarsening its cell rather than growing without bound)
-- completeness-waiver: unauthorized access (pure millimetre arithmetic with no endpoint; server-side access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (pure millimetre arithmetic with no endpoint; server-side access control lives in serve/auth)
 - completeness-waiver: i/o failure (no disk or socket — the inputs are an in-memory NetRule and the resolved board DesignRules)
 - completeness-waiver: concurrent access (stateless pure functions over by-value inputs, holding no allocator and no mutable state)
 - completeness-waiver: malformed encoding (inputs are typed structs; DSL text rejection lives in eval/design_block, which warns and drops a bad value)
@@ -2556,7 +2556,7 @@ ladder then routes the net exactly as it did before.
 - the axis-only elbow pair offers both L corners and degenerates on an already-axis-aligned pair
 - completeness-waiver: empty inputs (a zero-length pair has no heading: judged compliant, and its elbows collapse onto the shared point)
 - completeness-waiver: large inputs (both functions are O(1) closed-form arithmetic over two points)
-- completeness-waiver: unauthorized access (pure geometry inside the router; endpoint access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (pure geometry inside the router; endpoint access control lives in serve/auth)
 - completeness-waiver: i/o failure (no disk or socket — inputs are two coordinate pairs)
 - completeness-waiver: concurrent access (stateless pure functions over immutable inputs, returning by value)
 - completeness-waiver: malformed encoding (inputs are f64 coordinate pairs; degenerate geometry is handled explicitly, never errors)
@@ -2665,7 +2665,7 @@ obstacle — 2.9×, and refused now.
 - an accepted axis-only route is measured for the off-axis copper its join seams can still emit
 - completeness-waiver: empty inputs (a net with no declared max-freq, an empty pair table and a route that laid no copper are each the ordinary decline path, asserted above)
 - completeness-waiver: large inputs (the attempt adds no unbounded work — it runs the router's own terminal tree under its existing per-leg expansion budget, and the axis scan is one pass over the copper that one net just laid)
-- completeness-waiver: unauthorized access (pure routing geometry inside the placement engine; endpoint access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (pure routing geometry inside the placement engine; endpoint access control lives in serve/auth)
 - completeness-waiver: i/o failure (no disk or socket — inputs are the live route context and one net's terminals)
 - completeness-waiver: concurrent access (one net's turn at a single-threaded route context; the flag is set and cleared inside one attempt and never outlives it)
 - completeness-waiver: malformed encoding (inputs are typed placement/router structs, never parsed bytes — there is no encoding to malform)
@@ -2723,7 +2723,7 @@ being joined are neighbourly hops to begin with.
 - a net's terminals are connected closest pair first and then nearest to the tree, so the route grows as a chain of neighbourly hops
 - completeness-waiver: empty inputs (coincident terminals are no run at all: `runAxis` returns null and the escape join answers)
 - completeness-waiver: large inputs (a join is O(1) arithmetic over two pad boxes plus at most three clearance probes; a source is priced against the net's own land list, and the connection order is the O(terminals squared) walk a net's handful of pads has always paid)
-- completeness-waiver: unauthorized access (pure geometry inside the router; endpoint access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (pure geometry inside the router; endpoint access control lives in serve/auth)
 - completeness-waiver: i/o failure (no disk or socket — inputs are two pad terminals and the caller's probe)
 - completeness-waiver: concurrent access (stateless pure functions over immutable inputs, returning by value)
 - completeness-waiver: malformed encoding (inputs are typed pad terminals; degenerate geometry is refused, never errors)
@@ -2836,7 +2836,7 @@ refused outright: it is invisible at fab resolution and spends two vertices.
 - re-emitting a simplified chain of fewer than two points draws no copper instead of panicking
 - completeness-waiver: empty inputs (a net with no fresh tracks or one straight run returns null — the already-straight test's case)
 - completeness-waiver: large inputs (linear over the net's segment count; corner-cutting is bounded to a few forward sweeps over a short routed chain)
-- completeness-waiver: unauthorized access (a pure geometry pass inside the router; endpoint access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a pure geometry pass inside the router; endpoint access control lives in serve/auth)
 - completeness-waiver: i/o failure (no disk or socket — inputs are in-memory routed copper, resolved net rules, and a clearance probe)
 - completeness-waiver: concurrent access (a pure function over immutable inputs into per-call arena-owned slices; the caller serialises copper mutation)
 - completeness-waiver: malformed encoding (inputs are typed router structs; degenerate/collinear geometry is dropped, never errors)
@@ -2891,7 +2891,7 @@ just taken off.
 - copper lying wholly on one pad's land is dropped rather than trimmed, since the land already joins whatever it touches
 - completeness-waiver: empty inputs (a chain with no pad end, or one already inside the stub, returns null and the copper is echoed verbatim)
 - completeness-waiver: large inputs (linear in the net's segment count; each end walks its own chain once)
-- completeness-waiver: unauthorized access (a pure geometry pass inside the router; endpoint access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a pure geometry pass inside the router; endpoint access control lives in serve/auth)
 - completeness-waiver: i/o failure (no disk or socket — inputs are in-memory routed copper and pad outlines)
 - completeness-waiver: concurrent access (a pure function over immutable inputs into per-call arena-owned slices; the caller serialises copper mutation)
 - completeness-waiver: malformed encoding (inputs are typed router structs; degenerate geometry is dropped, never errors)
@@ -3036,7 +3036,7 @@ inherited a lap can still be improved.
 - an authored (max-freq …) escape reserve outranks this pass, so no widened fan can re-aim an RF net's straight exit
 - completeness-waiver: empty inputs (a chain with no pad end, or one already compliant, returns null and the copper is echoed verbatim)
 - completeness-waiver: large inputs (linear in the net's segment count; each end walks its own chain once, over a fan of at most eight headings)
-- completeness-waiver: unauthorized access (a pure geometry pass inside the router; endpoint access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a pure geometry pass inside the router; endpoint access control lives in serve/auth)
 - completeness-waiver: i/o failure (no disk or socket — inputs are in-memory routed copper and pad outlines)
 - completeness-waiver: concurrent access (a pure function over immutable inputs into per-call arena-owned slices; the caller serialises copper mutation)
 - completeness-waiver: malformed encoding (inputs are typed router structs; degenerate geometry is dropped, never errors)
@@ -3091,7 +3091,7 @@ is not entered on a ray and has no flank corridor of its own.
 - a rewrite is refused only when it dirties a land that was clean, so inherited overlap never freezes an improvement
 - completeness-waiver: empty inputs (a polyline of fewer than two points, or one that never reaches the land, has no run to judge and returns null)
 - completeness-waiver: large inputs (linear in the polyline's segment count; each segment is clipped against one land box once)
-- completeness-waiver: unauthorized access (a pure geometry predicate inside the router and the DRC; endpoint access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a pure geometry predicate inside the router and the DRC; endpoint access control lives in serve/auth)
 - completeness-waiver: i/o failure (no disk or socket — inputs are in-memory copper and pad outlines)
 - completeness-waiver: concurrent access (a pure function over immutable inputs into per-call arena-owned slices)
 - completeness-waiver: malformed encoding (inputs are typed coordinate pairs; degenerate geometry is dropped, never errors)
@@ -3141,7 +3141,7 @@ are out of scope.
 - an authored exact bypass rail is in scope, and its net transaction rolls back a drop that leaves one of its bonds no longer closing
 - completeness-waiver: empty inputs (a board with no via, or none standing on a land, moves nothing and returns)
 - completeness-waiver: large inputs (linear in vias times the net's own copper; each net's chains are extracted once per layer)
-- completeness-waiver: unauthorized access (a pure geometry pass inside the router; endpoint access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a pure geometry pass inside the router; endpoint access control lives in serve/auth)
 - completeness-waiver: i/o failure (no disk or socket — inputs are in-memory routed copper and pad outlines)
 - completeness-waiver: concurrent access (arena-owned per-call slices over caller-owned copper; the caller serialises copper mutation)
 - completeness-waiver: malformed encoding (inputs are typed router structs; degenerate geometry is dropped, never errors)
@@ -3783,7 +3783,7 @@ no surface can disagree about where the board ships bare.
 - a pad-dam terminal keeps its authored fillet when the dam boundary lands between short route chords
 - overlapping round caps from short route chords are replaced by one authored-radius terminal fillet
 - an authored mask-relief overrides the fenced default and zero keeps the net tented
-- completeness-waiver: unauthorized access (a pure geometry function of an in-memory placement — no request, file, or user surface; access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a pure geometry function of an in-memory placement — no request, file, or user surface; access control lives in serve/auth)
 - completeness-waiver: i/o failure (reads and returns arena-allocated slices only — no file, socket, or process boundary is crossed)
 - completeness-waiver: concurrent access (pure functions of their inputs with no globals or shared state; each call owns its arena)
 - completeness-waiver: empty inputs (empty copper or an all-tented rule set returns the empty Relief by construction — the byte-identity guarantee `any()` reports, exercised by export_gerber's no-relief mask test)
@@ -4616,6 +4616,8 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 ## eval/modules
 
 - a component's (thermal …) form is cached on the component and a component-family declares one for its whole package
+- a design in a project with no lib/ of its own resolves every passive from the bundled standard library, footprint included
+- a project's own lib/components file overrides the bundled family of the same name
 - Module calls bind purely positional arguments in declaration order
 - Module calls accept named (param expr) arguments in any order
 - Module calls mix leading positional with trailing named arguments
@@ -4713,7 +4715,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - componentPrefix maps passive families to their ref-des letters
 - instancePrefix honors a component's explicit (refdes "X") class over the name heuristic
 - Passives prelude resolves the standard cap/res/ind/ferrite/led families when their files exist
-- Passives prelude silently skips library entries whose files are missing instead of failing the build
+- Passives prelude never fails a build, and resolves every standard family from the bundled standard library when the project carries none
 - Explicit import after prelude pre-loads is a no-op (resolveImport short-circuits on cached components)
 - parseId extracts 8-char ID from form children
 - parseId returns null when no ID present
@@ -4943,7 +4945,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - completeness-waiver: large inputs (output is linear in parts x pads; every library read is capped at max_lib_bytes / max_footprint_bytes and the packed page is clamped to a sheet KiCad accepts)
 - completeness-waiver: malformed encoding (library files — pinouts, footprints, and vendor .kicad_sym sources alike — are parsed by the shared sexpr parser and any parse failure degrades to "no data for this component"; the vendor reader carries a std.testing.fuzz harness, and the emitted bytes are re-parsed by that same parser before they are returned)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
-- completeness-waiver: unauthorized access (a local CLI over a project directory the invoking user already owns; every library file is opened read-only and server-side access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a local CLI over a project directory the invoking user already owns; every library file is opened read-only and server-side access control lives in serve/auth)
 
 ## kicad_sch_push
 
@@ -4961,7 +4963,7 @@ Public functions: classify, commit, findLock, isLockName, planFor, run, targetFo
 - The sync-kicad-sch CLI reads --project-dir, --dry-run and --force in any order and takes the lone positional as the design
 - completeness-waiver: empty inputs (a design with no board declaration is the empty case and is rejected by name on every surface; an empty target directory is the ordinary first push, covered by the create path)
 - completeness-waiver: large inputs (every read is capped — an existing sheet at max_sheet_bytes, a lock body at max_lock_bytes — and the emitted bytes are the exporter's, already self-checked before they reach here)
-- completeness-waiver: unauthorized access (the CLI runs as the invoking user over paths that user already owns; the HTTP and CLI surfaces sit behind the existing ward middleware and the tool is registered as a mutation)
+- completeness-waiver: unauthorized access (the CLI runs as the invoking user over paths that user already owns; the HTTP and CLI surfaces sit behind the existing serve/auth middleware and the tool is registered as a mutation)
 - completeness-waiver: i/o failure (a target that cannot be read classifies as foreign and refuses rather than being overwritten; a staging failure removes its temps and leaves the directory byte-identical)
 - completeness-waiver: concurrent access (a KiCad lock in the project directory refuses the push outright — that is the concurrency guard — and the writes themselves are rename-into-place)
 - completeness-waiver: malformed encoding (an unparseable existing sheet is foreign, so malformed input refuses instead of being replaced; parsing itself belongs to sexpr/parser, which is fuzzed)
@@ -5120,7 +5122,7 @@ in y-down (SVG) coordinates and every page helper converts arithmetically
 - the self-check rejects a corrupted stream length, xref offset, and unbalanced content stream
 - dash patterns, clip rectangles, and translation nest and unwind with the graphics-state stack
 - fuzzing an arbitrary operation sequence never crashes and always passes the structural self-check
-- completeness-waiver: unauthorized access (an in-memory byte writer with no request, file, or user surface; access control for the export endpoint lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (an in-memory byte writer with no request, file, or user surface; access control for the export endpoint lives in serve/auth)
 - completeness-waiver: i/o failure (finish returns the whole file as bytes the caller owns — the writer opens no file, socket, or pipe, so writing them out is the caller's failure domain)
 - completeness-waiver: concurrent access (a Doc owns its pages and their content buffers with no globals or shared state; concurrent documents are independent, and a single Doc is used by one thread the way an ArrayList is)
 - completeness-waiver: integer overflow (coordinates stay in clamped f64 arithmetic, while object numbers, byte offsets, and page counts are allocator-backed slice lengths bounded by the process address space)
@@ -6058,40 +6060,20 @@ Public functions: run
 
 Public functions: notFound, serve
 
-- Ward member maps to the writer role, admin to admin, and an unknown role to reader
-- A configured browsable url is reported to ward while an unset one omits the header
-- An unconfigured ward adapter reports session and bearer paths unconfigured so requests fail closed
-- The service scope check accepts a scope containing the service name and rejects one without it
-- The ward auth-server url is derived by stripping the login path from the configured login url
-- The auth-server url prefers explicit config over the login-path strip
-- A cookieless session request is decided as a redirect to the ward login url carrying the return target
-- An api path is distinguished from a non-api path for the 401-versus-redirect choice
-- The ward session cookie value is read from the cookie header and absent when empty or missing
-- A cached session role is read back by token and reported unknown when absent or expired
 - Admin and writer may write while reader may not, and roles stringify lowercase
-- An unavailable session verifier resolves the request to fail closed rather than admit it
-- A loopback request under dev mode bypasses auth even when the ward backend is unconfigured
-- A loopback request carrying any proxy header does not receive the dev bypass
-- A request from a non-loopback peer does not receive the dev bypass
-- A loopback request with dev mode disabled does not receive the dev bypass
-- An ipv6 loopback peer receives the dev bypass while a non-loopback ipv6 peer does not
-- An unauthenticated api request is answered 401 json rather than a login redirect
-- An unauthenticated page request is redirected 302 to the ward login carrying the return url
-- A reader's mutating request is forbidden while a writer, a safe method, or a read-only post passes
-- A valid plugin token admits a sync request without a ward call while an invalid one falls through
-- A live ward bearer admits a sync request as the fallback when no plugin token matches
-- A malformed sync bearer with ward configured falls through to the session gate rather than admitting
-- A session-allowlisted public route is served without any credential
-- An allocation failure during the sync bearer fallback surfaces as an error rather than admitting
-- The protected-resource metadata derives its resource url from the host and names the ward server
-- A reader drives the read-only pcb-drc and pcb-score-batch posts but not the pcb-drc-rules write
-- A sync bearer scoped for another service is not admitted and falls through to the session gate
-- Ward state initialization builds distinct http clients for the session and bearer verify paths
-- The sync bearer grant requires both a service scope and a writer-capable role
-- A ward reader's netlisp-scoped bearer does not admit the destructive sync write while a member's and an admin's do
-- Every read-only post prefix exempts only its own route family while safe methods are never write-gated
-- Every public route entry is served without a session while a sibling sharing its leading text is not
-- The system dossier page is session-gated and refuses like its sibling system page rather than as a JSON api
+- Every public route entry is served without a credential while a sibling sharing its leading text is not
+- An api path is distinguished from a page path for the json-versus-text refusal
+- A loopback unproxied request is admitted as a local admin
+- An ipv6 loopback peer is admitted while a non-loopback ipv6 peer is refused
+- A request from a non-loopback peer is forbidden rather than admitted as local
+- A loopback request carrying any proxy header is refused rather than treated as local
+- A refused api request answers json while a refused page answers plain text
+- Allow-remote admits a proxied request from a public peer as admin
+- Allow-remote admits a mutating request because the proxy in front owns the auth
+- The health probe and static assets are served to a remote peer without a credential
+- A valid plugin token admits a remote sync request while a bogus one is refused
+- A sync request whose bearer header is empty or blank is not admitted by the plugin path
+- A malformed authorization header is not a plugin token while a lowercase scheme still is
 
 ## serve/sync
 
@@ -6273,7 +6255,7 @@ order, preferred/allowed layer masks, waypoints, via budgets).
 - a route_experiment topology override plans a topology for every route wave of that run alone
 - The retained-copper bundle handed to the connectivity oracle carries the board's poured zones, so a net joined only through a pour is not reported open
 - completeness-waiver: large inputs (linear over the placement's nets and the plan's waves; a bigger board only lengthens the policy slice)
-- completeness-waiver: unauthorized access (a pure in-memory lowering; endpoint access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a pure in-memory lowering; endpoint access control lives in serve/auth)
 - completeness-waiver: i/o failure (no disk or socket — inputs are the already-evaluated block and solved placement)
 - completeness-waiver: concurrent access (a stateless pure function over immutable inputs into per-call arena-owned slices)
 - completeness-waiver: malformed encoding (inputs are typed Zig structs from the evaluator; unknown selector names become plan warnings upstream)
@@ -6312,7 +6294,7 @@ serialization; a routed net returns `"status":"routed"` with its trace length,
 via count, and signal layers filtered from the RouteResult; an unmatched name
 is a 404. Net names resolve through the shared exact-or-leaf case-insensitive
 `(nets …)` lookup (`plan_resolve.netIndexByName`). Read-only POST — access
-control lives in serve/ward_auth (listed in read_only_posts).
+control lives in serve/auth.
 
 The same analysis is the read-only `diagnose_net` CLI tool (args `name`, `net`,
 optional `layout` / `sub`), so an agent can interrogate one net without routing
@@ -6331,7 +6313,7 @@ request.
 - the analyze failure mapping keeps the shared PCB read status codes and adds this module's own two
 - completeness-waiver: empty inputs (a missing or empty "net" field is rejected 400 by parseNet before any routing, and a net matching nothing answers 404)
 - completeness-waiver: large inputs (answering is a linear scan of the one bounded diagnostic route's tracks, vias, and failed set — a bigger board only lengthens those slices)
-- completeness-waiver: unauthorized access (a read-only POST whose access control lives in serve/ward_auth's read_only_posts, not restated here)
+- completeness-waiver: unauthorized access (a read-only POST whose access control lives in serve/auth, not restated here)
 - completeness-waiver: i/o failure (project reads flow through solveForRequest, whose PngError maps to a 404/500 JSON error; the handler does no direct disk I/O)
 - completeness-waiver: concurrent access (each request routes into its own per-call arena and persists nothing, so there is no shared mutable state)
 - completeness-waiver: malformed encoding (a non-object body or non-string/absent "net" field is rejected 400 before any routing runs)
@@ -6357,7 +6339,7 @@ invalid free that only their request arenas hide.
 - a decoded path parameter is a fresh copy the caller owns and can free, leaving an invalid escape as written
 - completeness-waiver: empty inputs (an empty parameter decodes to an empty slice; the bullet above covers the escape-shaped edges)
 - completeness-waiver: large inputs (one allocation plus a single in-place pass, both linear in a path parameter httpz has already bounded)
-- completeness-waiver: unauthorized access (a pure string transform reachable only from handlers whose access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a pure string transform reachable only from handlers whose access control lives in serve/auth)
 - completeness-waiver: i/o failure (touches no file, socket or process; its only failure is allocation)
 - completeness-waiver: concurrent access (allocates and mutates only the caller's own copy, so two callers share nothing)
 - completeness-waiver: malformed encoding (an invalid or truncated escape is left as written rather than rejected, which is the bullet above)
@@ -6409,7 +6391,7 @@ use-after-free.
 - every lookup, insert and eviction is serialised on the store's own lock, so concurrent request threads sharing one store can read and retain simultaneously without tearing an entry or handing back a field another thread is evicting
 - completeness-waiver: empty inputs (an empty ladder is retained and returned as an empty slice; a never-seen design is the miss the first bullet covers)
 - completeness-waiver: large inputs (a field over-running the byte budget is refused rather than retained, and the trim above bounds everything else; the grid itself is capped by placement/thermal_field)
-- completeness-waiver: unauthorized access (an in-process cache behind handlers whose access control lives in serve/ward_auth; the project-dir key is what keeps two projects apart)
+- completeness-waiver: unauthorized access (an in-process cache behind handlers whose access control lives in serve/auth; the project-dir key is what keeps two projects apart)
 - completeness-waiver: i/o failure (the only I/O is the mtime stat page_cache performs, whose failure invalidates the entry rather than propagating)
 - completeness-waiver: malformed encoding (keys are opaque byte slices joined by a NUL that cannot occur in either half, compared for equality and never decoded)
 - completeness-waiver: integer overflow (the byte tally is a usize sum bounded by the budget above and the use clock wraps deliberately; every cached quantity is an f32 or f64 degree)
@@ -6470,7 +6452,7 @@ nothing here writes to the project dir.
 - GET /api/thermal-field/:name says why it has no field instead of answering an empty grid, and rejects a non-numeric ?ambient
 - completeness-waiver: empty inputs (a missing :name and a name matching nothing are both answered 404 by the bullets above; a design with no thermal data screens to insufficient_data, which eval/thermal covers)
 - completeness-waiver: large inputs (answering is one linear pass over an already-evaluated block; a bigger design only lengthens the rows it formats)
-- completeness-waiver: unauthorized access (a read-only GET whose access control lives in serve/ward_auth, not restated here)
+- completeness-waiver: unauthorized access (a read-only GET whose access control lives in serve/auth, not restated here)
 - completeness-waiver: i/o failure (every project read flows through evalNamedBlock, whose FileNotFound / NotADesign / InvalidName map to a 404 and whose remaining failures map to a logged 500; the handler does no direct disk I/O)
 - completeness-waiver: concurrent access (each request evaluates into its own arena and persists nothing, so there is no shared mutable state)
 - completeness-waiver: malformed encoding (the path param is percent-decoded before any lookup and a non-numeric ?ambient is rejected 400; every emitted string is escaped through the shared json_writer helpers)
@@ -6568,7 +6550,7 @@ Read-only: nothing here writes to the project dir.
 - the thermal page uses touch-sized navigation and single-column content at phone width, with wide tables scrolling inside their own box rather than the page
 - completeness-waiver: empty inputs (a missing :name and a name matching nothing are both answered 404 by the bullets above; a design with no thermal data renders the insufficient-data hint review_thermal already covers)
 - completeness-waiver: large inputs (rendering is a linear pass over an already-screened block; a bigger design only lengthens the rows it formats, and the wide tables scroll inside their own box)
-- completeness-waiver: unauthorized access (a read-only GET whose access control lives in serve/ward_auth, not restated here)
+- completeness-waiver: unauthorized access (a read-only GET whose access control lives in serve/auth, not restated here)
 - completeness-waiver: i/o failure (every project read flows through evalNamedBlock, whose FileNotFound / NotADesign / InvalidName map to a 404 and whose remaining failures map to a logged 500; a placement that fails to solve degrades to the no-ladder page rather than an error)
 - completeness-waiver: concurrent access (each request evaluates and screens into its own request arena and persists nothing, so there is no shared mutable state)
 - completeness-waiver: malformed encoding (the path param is percent-decoded before any lookup, every emitted string is HTML-escaped and every emitted URL percent-encoded, and a non-numeric ?ambient falls back to bench ambient)
@@ -6608,7 +6590,7 @@ design-sibling .review.json sidecar.
 - read-only reviewers see every disposition and generated result but cannot edit controls
 - completeness-waiver: empty inputs (a missing or unknown board name answers 404; a missing sidecar is the valid all-open review state)
 - completeness-waiver: large inputs (the catalog is fixed at 258 items, persisted entries are capped to that count, state and request bytes are bounded, and evidence/note fields have independent limits)
-- completeness-waiver: unauthorized access (GET is session-gated and read-only; POST additionally requires a writer role and the review mutation header)
+- completeness-waiver: unauthorized access (GET is gated by serve/auth and read-only; POST additionally requires a writer role and the review mutation header)
 - completeness-waiver: i/o failure (state read/write failures answer JSON errors without replacing the prior atomic sidecar; an audit collection failure is shown separately without hiding the checklist)
 - completeness-waiver: concurrent access (one server-state mutex covers each state read-modify-write and atomic replacement prevents torn readers)
 - completeness-waiver: malformed encoding (the JSON parser validates request/state structure, catalog ids and statuses are allowlisted, HTML uses the shared XML escaper, script strings use the shared script-safe JSON writer, and audit HTML comes from the safe Markdown AST)
@@ -6647,7 +6629,7 @@ are never touched.
 - the replay final payload carries solver RF paths so adopting it preserves custom taper polygons
 - the upload replay layers the net-open connectivity check onto its geometric DRC
 - completeness-waiver: large inputs (uploads are size-capped at 48/8 MiB before parsing; the design replay is linear over the solved placement's nets)
-- completeness-waiver: unauthorized access (read-only compute endpoints; access control lives in serve/ward_auth, and a design name must match the project design list — also the traversal guard)
+- completeness-waiver: unauthorized access (read-only compute endpoints; access control lives in serve/auth, and a design name must match the project design list — also the traversal guard)
 - completeness-waiver: i/o failure (the upload path is in-memory; design solve/list failures surface as the shared 404/500 pngFailure JSON and nothing is ever written)
 - completeness-waiver: concurrent access (request-local arena state only; no shared state is mutated)
 - completeness-waiver: malformed encoding (a malformed multipart body answers 400 via parseUpload; the board/project parsers are fuzzed in kicad_pcb/snapshot)
@@ -6687,7 +6669,7 @@ pipeline, so the blocking and live contracts cannot drift.
 - a completed live run persists as the design's cached replay
 - completeness-waiver: empty inputs (a missing body or parts array answers 400 before any job begins; polling or cancelling a design with no job answers 404; a partless placement routes to an immediate done job with empty arrays)
 - completeness-waiver: large inputs (each poll batch is capped at 200 events and the client re-polls; events and payloads are linear in the router's own bounded timeline)
-- completeness-waiver: unauthorized access (start and cancel are compute-only POSTs allowlisted in serve/ward_auth's read_only_posts exactly like the blocking route; the poll is a GET behind the same dispatch middleware)
+- completeness-waiver: unauthorized access (start and cancel are compute-only POSTs behind the same dispatch middleware as the blocking route; the poll is a GET behind it too)
 - completeness-waiver: i/o failure (the only disk write is the best-effort cached-replay persist, swallowed like the design replay's; a failed solve answers 4xx/5xx and spawns nothing, and a failed spawn finishes the job as errored)
 - completeness-waiver: concurrent access (one Store mutex serializes every job mutation; jobs are generation-versioned so a superseded thread's writes are dropped, a start while running is refused, and only a finished job's replacement frees its memory)
 - completeness-waiver: malformed encoding (a body that isn't JSON answers 400 before any thread exists; malformed query cursors read as zero; event JSON strings are escaped by the shared writeJsonString)
@@ -6754,7 +6736,7 @@ Public functions: importZipBytes, extractStepBytes, uploadZipApi
 - KiCad ZIP import stages outside RAM-backed /tmp and reads entries with bounded std.zip extraction, without requiring system unzip
 - completeness-waiver: empty inputs (an empty or non-ZIP body fails archive extraction and writes no library entry)
 - completeness-waiver: large inputs (HTTP bodies are capped at 64 MiB; extracted symbols and footprints at 10 MiB each; STEP models at 50 MiB)
-- completeness-waiver: unauthorized access (the route is dispatched only after the shared Ward authorization middleware accepts the request)
+- completeness-waiver: unauthorized access (the route is dispatched only after the shared serve/auth middleware accepts the request)
 - completeness-waiver: i/o failure (staging and library-write failures return a 500-class ImportError and the staged archive is removed on every later exit)
 - completeness-waiver: concurrent access (process-unique timestamp-plus-atomic-counter staging names prevent colliding uploads)
 - completeness-waiver: malformed encoding (std.zip validates archive structure, filenames, compression methods, extents, and CRC before bytes reach a converter)
@@ -6911,7 +6893,6 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 Public functions: cseEmail, csePassword, digikeyClientId, digikeyClientSecret, digikeyApiBase, cseMinIntervalMs, cseMaxInFlight, digikeyMinIntervalMs, digikeyMaxInFlight
 
 - stripQuotes removes one layer of matching quotes
-- The ward cache ttl maps a zero or out-of-range value to the default and keeps valid values
 - The git auto-commit env gate disables only on a bare 0 and is enabled otherwise
 
 ## paths
@@ -6923,6 +6904,34 @@ Public functions: designSourcePath, designSourcePathUnique, designSiblingPath
 - A release source lookup rejects duplicate design basenames instead of selecting the first directory walk result
 - Module release sidecars resolve beside the selected module source even when an orphan artifact with the same basename exists under src
 - A src index revalidation triggered by another request leaves a traced lookup's consumed-input closure unchanged
+
+## stdlib
+
+The standard library `stdlib/**/*.sexp` that `build.zig` compiles into the
+binary, and the single point at which a `lib/<sub>/<name>.sexp` sub-path is
+resolved. A project's own `lib/` always wins; then the `--lib-dir` /
+`NETLISP_LIB_DIR` root; then a `NETLISP_STDLIB_DIR` directory laid out like
+`stdlib/`; then the embedded table. The bundle exists so a project directory
+with no `lib/` of its own still evaluates — every family the passives prelude
+auto-imports is carried, with the land pattern each one names. A file served
+from the table reports a synthetic `netlisp:stdlib/…` path that `readPath`
+reads back, so a caller keeping a read-set of resolved paths stays complete.
+
+- Every passive family the evaluator auto-imports is carried by the bundled standard library
+- Every footprint a bundled component names resolves inside the bundle
+- A project's own lib/ file overrides the bundled one of the same name
+- A bundled path reads back through readPath so a recorded read-set stays complete
+- NETLISP_STDLIB_DIR replaces the embedded table without disturbing the project's own lib/
+- The bundle lists its own contents so library search and describe can see it
+
+- completeness-waiver: empty inputs (an empty sub-path matches no table row and no file, so it resolves to null on the same path a missing name takes; a zero-byte library file is under every cap and its emptiness is the parser's contract)
+- completeness-waiver: large inputs (each entry point takes the caller's `max_bytes` from `lib_limits` and refuses an oversized file — table row or disk file alike — by returning null, which is the swallow every reader already implements)
+- completeness-waiver: unauthorized access (the three roots are operator-supplied local directories and the bundle is compiled in; permissions on them belong to the filesystem, and the traversal contract on the names spliced into a sub-path belongs to `paths` and each handler's own validation)
+- completeness-waiver: I/O failure (a read error on any disk root is indistinguishable here from absence by design — resolution simply continues to the next root and ultimately to the bundle, which cannot fail to read)
+- completeness-waiver: concurrent access (the two override roots are written once by `main.zig` before any command dispatches and are read-only thereafter; the embedded table is immutable static storage, so every reader is thread-safe without a lock)
+- completeness-waiver: malformed encoding (nothing here parses — bytes are handed back verbatim and a malformed library file is diagnosed by the sexpr parser at the reader that asked for it)
+- completeness-waiver: integer overflow (the only arithmetic is slicing a matched prefix off a path whose length was just compared, and a byte-length comparison against `max_bytes`; no counter accumulates)
+- completeness-waiver: panic-free (every fallible step — the allocations for a path or a byte copy — is a `catch`/`orelse` returning null, so an exhausted allocator degrades to an unresolved file rather than a panic)
 
 ## lib_limits
 
@@ -7504,6 +7513,7 @@ is what makes the predicate exact rather than approximately right.
 - every board renderer paints exposed pad copper above routed traces, so a normally masked trace entering a land cannot visually coat that component pad with solder mask
 - a via-in-pad keeps its drilled centre visible after component pads paint above routed copper
 - exposed RF copper on both board faces uses the same swept taper polygons in Assembly and the PCB 3D viewer
+- the serve bind address parses loopback and any-interface and refuses a non-address
 - the retired /pcb-route-lab page 302-redirects to the /pcb-layout page for the same design
 - assembly model bodies load from persistent calibrated PNGs and render STEP only to populate a missing or stale filesystem cache entry
 - the assembly model-picture cache invalidates when its STEP file or saved alignment changes
@@ -7631,12 +7641,12 @@ is what makes the predicate exact rather than approximately right.
 - hand-routing starts and continues only from pads and traces on the active copper layer, so opposite-face lands cannot steal a route click
 - The hand-route tool lays both legs of a differential pair together with mitered offset corners
 - The hand-route differential pair holds its class gap through the shared run, then fans each leg to its own outstanding destination when the pair terminates on separate series passives
-- The auto-commit author is the ward user, falling back to the dev-admin identity
+- The auto-commit author is the request identity, falling back to the local identity
 - The auto-commit parses porcelain status into a dirty-path set including a rename's source
 - The auto-commit always excludes history snapshots and backup artifacts
 - The auto-commit stages only new-or-changed paths, never pre-existing loose work
 - The auto-commit message names the tool and touched paths on one greppable line
-- A per-mutation auto-commit records only touched paths as the ward user, sparing loose work
+- A per-mutation auto-commit records only touched paths as the request identity, sparing loose work
 - The auto-commit is a silent no-op when the project dir is not a git repository
 - Browser Component Search Engine imports auto-commit the combined generated library changes
 - the pcb-describe JSON carries a progress block and mirrors stale-plan warnings into lint
@@ -7857,6 +7867,7 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 - synthesized footprint fallback geometry is a non-waivable release identity failure
 - 0R0 is a zero-ohm jumper that requires authored current and maximum-resistance evidence, never tolerance
 - HTTP and MCP readiness expose the same revision lock independent of canonical project-root spelling
+- a project with no lib/modules directory has an empty canonical-module policy rather than an unverifiable one
 - strict canonical-module policy is incomplete, and therefore release-blocking, when any module source is malformed
 - SI-prefixed passive ratings are parsed with case-insensitive unit names, including the common `mOhm` spelling
 - selected layout evidence rejects every malformed or silently defaulted manufacturing record before release
@@ -7927,7 +7938,7 @@ slice resolves the selector member names into part/net sets.
 - A pcb-plan form inside a section is rejected by the scope table with a warning
 - completeness-waiver: empty inputs (a bare `(pcb-plan)` or empty place/route parses to an empty PcbPlanSpec — every member slice defaults empty, no special case)
 - completeness-waiver: large inputs (the parser only copies atoms already present in the AST, adding no multiplicative expansion; wave/member counts are bounded by the source file the evaluator already holds)
-- completeness-waiver: unauthorized access (pure AST-to-struct parsing with no I/O, network, or auth surface — access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (pure AST-to-struct parsing with no I/O, network, or auth surface — access control lives in serve/auth)
 - completeness-waiver: i/o failure (no file, socket, or syscall access — the parser reads only the in-memory AST, so there is no I/O to fail)
 - completeness-waiver: concurrent access (a pure function over an immutable AST slice into per-call ArrayLists — no shared mutable state, so concurrent evaluations are independent)
 - completeness-waiver: malformed encoding (malformed waves — no name, unknown selector head, cross-section selector, unknown class atom, duplicate rest — are warned and skipped, never a hard error; covered by the skip/warn tests)
@@ -8014,7 +8025,7 @@ function; unresolved selector names become warnings, never errors.
 - an absent plan synthesizes connector power and high-speed waves from module policy
 - completeness-waiver: empty inputs (an empty PcbPlanSpec resolves to a single implicit rest wave per section; a placement with no parts/nets yields empty member sets — no special case)
 - completeness-waiver: large inputs (a pure O(waves·members + parts + nets) scan over typed slices; a bigger board only lengthens the member sets, never the plan shape)
-- completeness-waiver: unauthorized access (a pure in-memory computation with no I/O or auth surface — access control lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a pure in-memory computation with no I/O or auth surface — access control lives in serve/auth)
 - completeness-waiver: i/o failure (no disk, socket, or syscall — every input arrives in the caller-assembled Context and PcbPlanSpec)
 - completeness-waiver: concurrent access (a stateless pure function over immutable inputs into per-call arena-owned slices — concurrent resolutions are independent)
 - completeness-waiver: malformed encoding (inputs are typed Zig structs, not parsed bytes; an unrecognized selector name is warned, never a hard error)
@@ -8050,7 +8061,7 @@ mutex-guarded, idle-evicted, capped table held in ServerState.
 - the frontier grid cells round-trip through base64
 - completeness-waiver: empty inputs (a design with no parts/nets solves to an empty placement that routes to a done summary with empty board arrays; a hint body with no net/points/layers answers 400 via parseHint; distilling zero accepted hints yields a bare `(pcb-plan)`)
 - completeness-waiver: large inputs (the solve is bounded by the design; the timeline/board JSON is linear over the placement's nets and parts; the frontier grid is capped by the router's own bounds)
-- completeness-waiver: unauthorized access (all /api routes gate through the serve dispatch middleware / serve/ward_auth, and a design name must match the project design list — also the path-traversal guard, via route_review.isListedDesign)
+- completeness-waiver: unauthorized access (all /api routes gate through the serve dispatch middleware / serve/auth, and a design name must match the project design list — also the path-traversal guard, via route_review.isListedDesign)
 - completeness-waiver: i/o failure (a design solve/list failure surfaces as a 404/500 JSON error and leaves no session — createSession frees its partial arena via errdefer; the router session owns its own arena and never touches the design's board file)
 - completeness-waiver: concurrent access (one Store mutex serializes every session operation; sessions are one-per-design, capped, and idle-evicted, and each session's retained hint memory lives in its own arena that outlives requests)
 - completeness-waiver: malformed encoding (a malformed hint body answers 400 via parseHint; a malformed poses body degrades to no poses via route_review.parsePosesFromBody; the design source is never re-serialized)
@@ -8094,7 +8105,7 @@ unchanged by the session machinery.
 - accepted hints are recorded in order and appended to the timeline as decisions
 - completeness-waiver: empty inputs (a fully-routable board has an empty failure queue, so the first event finishes straight to a done summary; an empty/overflowed grid yields an aborted status with no live session)
 - completeness-waiver: large inputs (the automatic passes are the router's own bounded passes; the frontier flood is expansion-capped and its grid downsamples to a bounded cell count, recording the effective cell_mm)
-- completeness-waiver: unauthorized access (an in-process router driver with no auth surface; endpoint access control lives in serve/ward_auth on the serve half)
+- completeness-waiver: unauthorized access (an in-process router driver with no auth surface; endpoint access control lives in serve/auth on the serve half)
 - completeness-waiver: i/o failure (no disk or socket — inputs are an in-memory placement plus routing options, and the session owns an arena rather than any board file)
 - completeness-waiver: concurrent access (one session is single-threaded over its own arena that outlives requests; the serve half serializes session operations under a Store mutex)
 - completeness-waiver: malformed encoding (inputs are typed router structs; a hint naming an out-of-range net index is bounds-checked and ignored rather than raising)
@@ -8137,7 +8148,7 @@ rendering wrong.
 - The full-project sweep skips gracefully when the design tree read fails or is not checked out
 - Translates the block-icon polygon glyph the draw layer can emit
 - Fuzzing the translator with arbitrary bytes never panics and never leaks
-- completeness-waiver: unauthorized access (a pure in-memory string-to-display-list function with no auth surface; the SVG it consumes is produced in-process by the renderer, and access control for the endpoints that will serve the PDF lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (a pure in-memory string-to-display-list function with no auth surface; the SVG it consumes is produced in-process by the renderer, and access control for the endpoints that will serve the PDF lives in serve/auth)
 - completeness-waiver: concurrent access (stateless — every call owns a stack-local Parser and allocates only into the caller's arena, so two translations share nothing and need no locking)
 
 ## export-pdf
@@ -8201,7 +8212,7 @@ reads a clock, so a fixed injected stamp yields byte-identical output.
 - The light theme resolves the print palette while the default resolves the screen palette
 - The default dark theme paints every page with the web background while the print theme leaves pages white
 - The Tj extractor decodes escaped parens, backslashes and octal escapes
-- completeness-waiver: unauthorized access (an in-memory composer over an already-evaluated DesignBlock, with no request, user, or write surface; the CLI resolves the design by name through the same path build/check use, and access control for the endpoint that will serve the PDF lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (an in-memory composer over an already-evaluated DesignBlock, with no request, user, or write surface; the CLI resolves the design by name through the same path build/check use, and access control for the endpoint that will serve the PDF lives in serve/auth)
 - completeness-waiver: i/o failure (compose returns the whole file as bytes the caller owns and opens no file, socket, or pipe; the only read it triggers is the render context's library lookup, which the renderer already degrades gracefully, and writing the result out is the CLI's failure domain)
 - completeness-waiver: concurrent access (a Composer owns its pdf.Doc, its page list, and a scratch arena with no globals or shared state, so two composes share nothing; the DesignBlock and ReviewDoc it borrows are read-only)
 - completeness-waiver: malformed encoding (the composer consumes trusted in-process data — an evaluated DesignBlock plus SVG its own renderer just emitted — and every byte it writes goes through pdf.encodeWinAnsi, which is fuzzed in the pdf section; markup outside the SVG subset is rejected by svg2pdf, whose fuzz harness covers arbitrary bytes)
@@ -8251,7 +8262,7 @@ short is a refusal naming the binding object and the millimetres it lacked.
 - The ramp fraction picks the shortest octilinear jog and falls back to a perpendicular staple when no jog exists
 - A direction is snapped to the exact octilinear table so a displaced run carries no rounding dust
 - completeness-waiver: large inputs (every scan is bounded before it runs — a polyline is walked at a fixed 0.05 mm step capped at 65536 samples, the displacement solve is capped at 6 rebuild passes and 12 mm of travel, and cascade breadth is bounded by the caller's max_cascade; a working set is one router rescue's local copper, not a whole board)
-- completeness-waiver: unauthorized access (an in-process geometry function with no request, user, file, or socket; the rescue tier that calls it runs inside the router, and access control for the endpoints that reach the router lives in serve/ward_auth)
+- completeness-waiver: unauthorized access (an in-process geometry function with no request, user, file, or socket; the rescue tier that calls it runs inside the router, and access control for the endpoints that reach the router lives in serve/auth)
 - completeness-waiver: i/o failure (no disk, socket, or pipe — the inputs are caller-owned slices of millimetre coordinates and every byte of output is allocated from the caller's allocator, so the only failure mode is OutOfMemory, which is propagated)
 - completeness-waiver: concurrent access (single-threaded and side-effect-free: the engine owns a private slot array in the caller's arena, never writes through any input slice, and holds no globals, so two shoves over the same Scene share nothing)
 - completeness-waiver: malformed encoding (there is no encoding — inputs are typed f64 records, not parsed text; a degenerate polyline, an empty corridor, or a zero-length segment is handled structurally rather than raised, and a caller's non-finite coordinate simply fails every clearance comparison and refuses)

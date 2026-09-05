@@ -28,6 +28,7 @@ const gerber_dump = @import("gerber_dump.zig");
 const netlist_dump = @import("netlist_dump.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
 const build_id = @import("build_id.zig");
+const stdlib = @import("stdlib.zig");
 
 /// Process capabilities installed from `std.process.Init` for infrastructure
 /// adapters imported throughout the application graph.
@@ -88,6 +89,20 @@ fn oneShotAllocator(process_arena: *std.heap.ArenaAllocator) std.mem.Allocator {
     return process_arena.allocator();
 }
 
+/// Install the roots every `lib/<sub>/<name>.sexp` lookup falls through to
+/// after the project's own `lib/`: `--lib-dir` (or `NETLISP_LIB_DIR`) names a
+/// shared/company library laid out like a project, and `NETLISP_STDLIB_DIR`
+/// replaces the standard library compiled into this binary. Called once here,
+/// before any command dispatches, because the ~40 readers of library files all
+/// take a project directory and resolve the rest through `stdlib.zig` — see
+/// docs/standard-library.md.
+fn installLibraryRoots(allocator: std.mem.Allocator, args: []const []const u8) void {
+    const flag: ?[]const u8 = optionalArg(args, "--lib-dir");
+    const lib_dir: ?[]const u8 = if (flag) |f| f else config.libDir(allocator);
+    const stdlib_dir: ?[]const u8 = config.stdlibDir(allocator);
+    stdlib.setRoots(lib_dir, stdlib_dir);
+}
+
 /// CLI entry point: parses `argv[1]` as the subcommand name and dispatches
 /// to the matching `cmd*` handler in `commands.zig` (or one of the local
 /// `convert-*` / `parse` / `mint-plugin-token` helpers). Prints the usage
@@ -113,6 +128,7 @@ pub fn main(init: std.process.Init) !void {
     const service_allocator = init.gpa;
     process_build_id = build_id.load(init.io, arena, ".");
     const args = try init.minimal.args.toSlice(arena);
+    installLibraryRoots(arena, args);
 
     if (args.len < 2) {
         try printUsage();
@@ -382,9 +398,11 @@ fn dispatchServe(io: std.Io, allocator: std.mem.Allocator, scratch_allocator: st
     const auth_dir_override = optionalArg(args, "--auth-dir") orelse readAuthDirEnv(arena, environ);
     try serve_mod.serve(io, allocator, scratch_allocator, .{
         .port = port,
+        .bind = optionalArg(args, "--bind") orelse serve_mod.default_bind_address,
         .project_dir = project_dir,
         .auth_dir = auth_dir_override,
         .skip_warmup = hasFlag(args, "--skip-warmup"),
+        .allow_remote = hasFlag(args, "--allow-remote"),
     });
 }
 
@@ -539,7 +557,7 @@ fn printUsage() !void {
         \\  netlisp reference [section]             Print the DSL grammar reference (docs/language-forms.md)
         \\  netlisp tool list                       List every structured CLI tool and its JSON schema
         \\  netlisp tool <name> [--project-dir <d>] [--args <json> | --args-file <path>] [--output <path|->]  Invoke any structured tool
-        \\  netlisp serve [--project-dir <d>] [--port <n>] [--skip-warmup]  Start web server (default port 7050)
+        \\  netlisp serve [--project-dir <d>] [--port <n>] [--bind <addr>] [--allow-remote] [--skip-warmup]  Start web server (default 127.0.0.1:7050; a loopback request is admin, --allow-remote makes EVERY request admin for a deployment behind an authenticating reverse proxy)
         \\  netlisp mint-plugin-token [--project-dir <d>] [--label <l>]  Mint a bearer token for the KiCad plugin
         \\  netlisp import-kicad <board.kicad_pcb> [--project-dir <d>] [--name <n>] [--title <t>] [--dry-run]  Migrate a KiCad board into a netlisp design
         \\  netlisp import-kicad-layout [--project-dir <d>] <design> [--board <path>] [--dry-run] [--chord-tol-mm <mm>]  Import a routed board's placement/outline/copper as the design's starred layout (board read-only)
@@ -567,6 +585,12 @@ fn printUsage() !void {
         \\  netlisp gen-language-docs [--output <path>] [--check]  Regenerate (or verify with --check) docs/language-forms.md from the dispatch tables
         \\  netlisp version                          Print the runtime build id (the netlisp commit, or the current checkout's HEAD)
         \\  netlisp help                            Show this help
+        \\
+        \\Library resolution (any command above):
+        \\  --lib-dir <d>          Search <d>/lib/... after the project's own lib/ (env: NETLISP_LIB_DIR)
+        \\  NETLISP_STDLIB_DIR=<d> Use <d> instead of the standard library bundled into this binary
+        \\                         Order: project lib/, then --lib-dir, then the standard library.
+        \\                         See docs/standard-library.md for what is bundled.
         \\
     );
 }
@@ -681,7 +705,6 @@ test {
     _ = @import("serve/kicad_sch_export.zig");
     _ = @import("serve/sync_kicad_sch.zig");
     _ = @import("serve/auth_store.zig");
-    _ = @import("serve/ward_auth.zig");
     _ = @import("serve/sync.zig");
     _ = @import("serve/board_backup.zig");
     _ = @import("serve/component_search.zig");

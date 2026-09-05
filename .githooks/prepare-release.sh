@@ -4,11 +4,14 @@
 set -uo pipefail
 
 TOP="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REQUIRED_ZIG="0.17.0-dev.1683+5ceec001b"
-PRODUCTION_ZIG="/home/epentland/zig-toolchains/0.17.0-dev.1683+5ceec001b-eda-286f77f2-8f4af965/zig"
-REQUIRED_ZIG_SHA256="8f4af9650b5358abcdd8a283976d30b5dcdca2b400e44af25953b2e34101e7d4"
+# The one toolchain: the official pinned Zig from PATH (or $ZIG), the same
+# compiler development and CI use. `.zigversion` is the single source of truth
+# for which snapshot that is — read it rather than duplicating the string, so
+# a pin bump cannot leave the release path behind. `build.zig` rejects any
+# other version too; this check exists to say so before a six-minute build.
+REQUIRED_ZIG="$(tr -d '[:space:]' <"$TOP/.zigversion")"
 ARTIFACT_POLICY="release-safe-stripped-v1"
-ZIG="${ZIG:-$PRODUCTION_ZIG}"
+ZIG="${ZIG:-zig}"
 STRIP="${STRIP:-/usr/bin/strip}"
 READELF="${READELF:-/usr/bin/readelf}"
 ts() { date "+%Y-%m-%d %H:%M:%S"; }
@@ -53,17 +56,31 @@ valid_build_id() {
   case "$value" in *[!0-9a-f]*) return 1 ;; esac
 }
 
-if [ ! -x "$ZIG" ] || [ "$("$ZIG" version 2>/dev/null)" != "$REQUIRED_ZIG" ]; then
-  echo "prepare-release: requires Zig $REQUIRED_ZIG; found '$("$ZIG" version 2>/dev/null || echo unavailable)' at $ZIG" >&2
+if [ -z "$REQUIRED_ZIG" ]; then
+  echo "prepare-release: .zigversion is empty or missing at $TOP/.zigversion" >&2
   exit 1
 fi
+# Resolve `zig` to an absolute path once, so every job below runs the exact
+# binary this check validated and `sha256sum` has something to open.
+ZIG="$(command -v "$ZIG" 2>/dev/null)" || ZIG=""
+if [ -z "$ZIG" ] || [ ! -x "$ZIG" ]; then
+  echo "prepare-release: no usable Zig compiler on PATH (\$ZIG overrides it)" >&2
+  echo "  install the pinned toolchain with scripts/install-zig.sh --link (see ZIG_TOOLCHAIN.md)" >&2
+  exit 1
+fi
+ZIG_VERSION="$("$ZIG" version 2>/dev/null || echo unavailable)"
+if [ "$ZIG_VERSION" != "$REQUIRED_ZIG" ]; then
+  echo "prepare-release: wrong Zig compiler at $ZIG" >&2
+  echo "  required (.zigversion): $REQUIRED_ZIG" >&2
+  echo "  found:                  $ZIG_VERSION" >&2
+  echo "  install the pinned toolchain with scripts/install-zig.sh --link (see ZIG_TOOLCHAIN.md)" >&2
+  exit 1
+fi
+# The compiler binary's SHA-256 is a FINGERPRINT, not a pin: no particular
+# value is required, but it keys the per-tree build caches and is recorded with
+# the candidate, so artifacts emitted by two different compilers that report
+# the same version can never be reused for each other.
 ZIG_SHA256="$(sha256sum "$ZIG" | awk '{print $1}')" || exit 1
-if [ "$ZIG_SHA256" != "$REQUIRED_ZIG_SHA256" ]; then
-  echo "prepare-release: compiler SHA-256 mismatch at $ZIG" >&2
-  echo "  required: $REQUIRED_ZIG_SHA256" >&2
-  echo "  found:    $ZIG_SHA256" >&2
-  exit 1
-fi
 if ! command -v setsid >/dev/null 2>&1; then
   echo "prepare-release: requires setsid so a failed test can stop the complete ReleaseSafe process group" >&2
   exit 1

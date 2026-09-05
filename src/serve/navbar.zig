@@ -1,8 +1,9 @@
 //! Shared primary navigation for every online HTML surface.
 //!
 //! Full-screen editors may keep a page-specific toolbar immediately below it,
-//! but the first bar is always this one so Home, Library and Account never move
-//! or disappear between workflows.
+//! but the first bar is always this one so Home and Library never move or
+//! disappear between workflows. There is no account link: netlisp has no
+//! accounts (see `serve/auth.zig`).
 
 const std = @import("std");
 
@@ -25,7 +26,7 @@ pub fn write(w: *std.Io.Writer, active: Active) std.Io.Writer.Error!void {
     try w.writeAll(">Netlisp</a><a href=\"/library\"");
     if (active == .library) try w.writeAll(" class=\"active\" aria-current=\"page\"");
     try w.writeAll(">Library</a>");
-    try w.writeAll("<a href=\"https://ward.eugenepentland.dev/admin\" style=\"margin-left:auto\">Account</a></nav>");
+    try w.writeAll("</nav>");
 }
 
 test "navbar always exposes one direct home link" {
@@ -36,5 +37,7 @@ test "navbar always exposes one direct home link" {
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, html, "href=\"/\""));
     try std.testing.expect(std.mem.indexOf(u8, html, ">Netlisp</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "href=\"/library\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, ">Account</a>") != null);
+    // No account link: netlisp has no accounts to manage.
+    try std.testing.expect(std.mem.indexOf(u8, html, ">Account</a>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "http") == null);
 }

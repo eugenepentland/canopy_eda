@@ -6,7 +6,7 @@
 //! which in production is its own git checkout. Left alone, each mutation lands
 //! as an anonymous uncommitted working-tree change: no attribution, no durable
 //! history, no recoverability. This module commits exactly that mutation's file
-//! changes to git, authored as the acting ward user.
+//! changes to git, authored as the acting request identity.
 //!
 //! ## The seam
 //!
@@ -34,9 +34,11 @@
 //!   touched paths are staged (`git add -A -- <paths>`, which also stages
 //!   deletions) and committed with a pathspec, so other staged or loose work is
 //!   left exactly as it was.
-//! * **Attributed.** `--author` is the acting ward user (`<name> <name@ward>`);
-//!   the committer stays the server (`netlisp <netlisp@server>`). The dev-bypass
-//!   path authors as the dev-admin identity.
+//! * **Attributed.** `--author` is the acting request identity
+//!   (`<name> <name@netlisp>`) — `local` for a loopback request, `remote` when
+//!   `--allow-remote` is in force; the committer stays the server
+//!   (`netlisp <netlisp@server>`). A request with no identity at all (the
+//!   plugin-token sync path) authors as the fallback identity.
 //! * **Fail-open.** git missing, not a repo, a lost commit race, or any non-zero
 //!   git exit is logged to stderr and swallowed — the mutation already succeeded,
 //!   so no error ever replaces the CLI result.
@@ -56,12 +58,13 @@ const subprocess = @import("subprocess.zig");
 const committer_name = "netlisp";
 const committer_email = "netlisp@server";
 
-/// Author identity used when there is no ward user (the local-dev bypass).
-const dev_author = "netlisp-dev";
+/// Author identity used when the request carries no identity at all (the
+/// plugin-token sync path).
+const fallback_author = "netlisp-local";
 
-/// Ward has no email for a user, so the author email is synthesized as
-/// `<username>@ward`.
-const author_domain = "ward";
+/// netlisp keeps no email for an identity, so the author email is synthesized
+/// as `<username>@netlisp`.
+const author_domain = "netlisp";
 
 /// git subprocess guards. `git status` on a busy design repo stays well under a
 /// few hundred KiB; the cap and wall-clock deadline exist only so a wedged git
@@ -115,7 +118,7 @@ pub fn begin(allocator: std.mem.Allocator, project_dir: []const u8) ?Session {
 }
 
 /// Commit the paths this mutation touched (`after − before`), authored as
-/// `username` (null → the dev-admin identity), with `tool_name` in the subject.
+/// `username` (null → the fallback identity), with `tool_name` in the subject.
 /// A no-op when `session` is null. Fail-open: every git failure is logged and
 /// swallowed so it can never replace the CLI result.
 pub fn commit(session: ?Session, username: ?[]const u8, tool_name: []const u8) void {
@@ -268,7 +271,8 @@ fn parseStatusZ(allocator: std.mem.Allocator, data: []const u8, set: *PathSet) s
     }
 }
 
-/// Stage exactly `paths` and commit only them, authored as the ward user. Never
+/// Stage exactly `paths` and commit only them, authored as the request
+/// identity. Never
 /// touches the rest of the index/tree. Fail-open on every git error.
 fn stageAndCommit(
     allocator: std.mem.Allocator,
@@ -330,11 +334,11 @@ fn runGit(allocator: std.mem.Allocator, argv: []const []const u8, label: []const
     return true;
 }
 
-/// The `--author` value for the commit: `<name> <name@ward>`, using the ward
-/// username or, when there is none (the dev bypass) or it is empty, the
-/// dev-admin identity.
+/// The `--author` value for the commit: `<name> <name@netlisp>`, using the
+/// request identity or, when there is none (the plugin-token path) or it is
+/// empty, the fallback identity.
 fn authorArg(allocator: std.mem.Allocator, username: ?[]const u8) std.mem.Allocator.Error![]const u8 {
-    const name = if (username) |u| (if (u.len > 0) u else dev_author) else dev_author;
+    const name = if (username) |u| (if (u.len > 0) u else fallback_author) else fallback_author;
     return std.fmt.allocPrint(allocator, "{s} <{s}@{s}>", .{ name, name, author_domain });
 }
 
@@ -358,21 +362,21 @@ fn commitMessage(
 
 const testing = std.testing;
 
-test "authorArg attributes to the ward user and falls back to the dev identity" {
-    // spec: Web Server - The auto-commit author is the ward user, falling back to the dev-admin identity
+test "authorArg attributes to the request identity and falls back to the local identity" {
+    // spec: Web Server - The auto-commit author is the request identity, falling back to the local identity
     const a = try authorArg(testing.allocator, "ada");
     defer testing.allocator.free(a);
-    try testing.expectEqualStrings("ada <ada@ward>", a);
+    try testing.expectEqualStrings("ada <ada@netlisp>", a);
 
-    // A null username (the dev bypass) authors as the dev-admin identity.
-    const dev = try authorArg(testing.allocator, null);
-    defer testing.allocator.free(dev);
-    try testing.expectEqualStrings("netlisp-dev <netlisp-dev@ward>", dev);
+    // A null username (the plugin-token path) authors as the fallback identity.
+    const anon = try authorArg(testing.allocator, null);
+    defer testing.allocator.free(anon);
+    try testing.expectEqualStrings("netlisp-local <netlisp-local@netlisp>", anon);
 
     // An empty username is treated the same as absent.
     const empty = try authorArg(testing.allocator, "");
     defer testing.allocator.free(empty);
-    try testing.expectEqualStrings("netlisp-dev <netlisp-dev@ward>", empty);
+    try testing.expectEqualStrings("netlisp-local <netlisp-local@netlisp>", empty);
 }
 
 test "parseStatusZ reads porcelain paths including a rename's source" {
@@ -489,7 +493,7 @@ fn tmpPath(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir, sub: []const 
 }
 
 test "commit stages only the mutation's paths and leaves loose work dirty" {
-    // spec: Web Server - A per-mutation auto-commit records only touched paths as the ward user, sparing loose work
+    // spec: Web Server - A per-mutation auto-commit records only touched paths as the request identity, sparing loose work
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -518,7 +522,7 @@ test "commit stages only the mutation's paths and leaves loose work dirty" {
 
     commit(session, "ada", "write_file");
 
-    // HEAD is the auto-commit: authored by the ward user, committed by the
+    // HEAD is the auto-commit: authored by the request identity, committed by the
     // server, and touching ONLY the mutation's file.
     const fmt = try std.process.run(a, infra_fs.currentIo(), .{
         .argv = &.{ "git", "-C", dir, "log", "-1", "--pretty=%an|%ae|%cn|%ce|%s" },
@@ -527,7 +531,7 @@ test "commit stages only the mutation's paths and leaves loose work dirty" {
     });
     defer a.free(fmt.stdout);
     defer a.free(fmt.stderr);
-    try testing.expect(std.mem.indexOf(u8, fmt.stdout, "ada|ada@ward|netlisp|netlisp@server|") != null);
+    try testing.expect(std.mem.indexOf(u8, fmt.stdout, "ada|ada@netlisp|netlisp|netlisp@server|") != null);
     try testing.expect(std.mem.indexOf(u8, fmt.stdout, "cli: write_file mutated.sexp") != null);
 
     const files = try std.process.run(a, infra_fs.currentIo(), .{

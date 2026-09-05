@@ -1134,22 +1134,30 @@ test "passives prelude loads all standard families" {
     }
 }
 
-// spec: eval/evaluator - Passives prelude silently skips library entries whose files are missing instead of failing the build
+// spec: eval/evaluator - Passives prelude never fails a build, and resolves every standard family from the bundled standard library when the project carries none
 test "passives prelude tolerates missing files" {
-    const alloc = std.testing.allocator;
+    // page_allocator, not testing.allocator: the component cache borrows the
+    // library file buffers for the evaluator's life and production never frees
+    // them, so the deliberate retention would be reported as a leak.
+    const alloc = std.heap.page_allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
     defer alloc.free(path);
 
-    // No lib/components dir at all — every prelude entry is unresolvable.
+    // No lib/components dir at all. The prelude's swallow means this can never
+    // fail a build; before the standard library was bundled it also resolved
+    // nothing, and now every entry comes out of the binary instead.
     var eval = Evaluator.init(alloc, path);
     defer eval.deinit();
     var env = Env.init(alloc, null);
     defer env.deinit();
 
     modules.loadPassivesPrelude(&eval, &env);
-    try std.testing.expectEqual(@as(u32, 0), eval.component_cache.count());
+    try std.testing.expectEqual(@as(u32, 16), eval.component_cache.count());
+    try std.testing.expect(eval.component_cache.contains("cap-0402"));
+    try std.testing.expect(eval.component_cache.contains("ferrite-0402"));
+    try std.testing.expect(eval.component_cache.contains("led-0402"));
 }
 
 // spec: eval/evaluator - Explicit import after prelude pre-loads is a no-op (resolveImport short-circuits on cached components)

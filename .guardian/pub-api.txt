@@ -273,24 +273,19 @@ src/commands.zig::cmdSystemCheck | fn cmdSystemCheck(allocator: std.mem.Allocato
 src/commands.zig::syncKicadSchReport | fn syncKicadSchReport(allocator: std.mem.Allocator, args: []const []const u8) CommandError!SyncSchReport
 src/component_classification.zig::isActiveSemiconductor | fn isActiveSemiconductor(inst: env.Instance) bool
 src/component_classification.zig::isPassThroughConnector | fn isPassThroughConnector(inst: env.Instance) bool
+src/config.zig::allowRemote | fn allowRemote(allocator: std.mem.Allocator) bool
 src/config.zig::cseEmail | fn cseEmail(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::cseMaxInFlight | fn cseMaxInFlight(allocator: std.mem.Allocator) u32
 src/config.zig::cseMinIntervalMs | fn cseMinIntervalMs(allocator: std.mem.Allocator) u64
 src/config.zig::csePassword | fn csePassword(allocator: std.mem.Allocator) ?[]u8
-src/config.zig::devMode | fn devMode(allocator: std.mem.Allocator) bool
 src/config.zig::digikeyApiBase | fn digikeyApiBase(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::digikeyClientId | fn digikeyClientId(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::digikeyClientSecret | fn digikeyClientSecret(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::digikeyMaxInFlight | fn digikeyMaxInFlight(allocator: std.mem.Allocator) u32
 src/config.zig::digikeyMinIntervalMs | fn digikeyMinIntervalMs(allocator: std.mem.Allocator) u64
 src/config.zig::gitAutocommitEnabled | fn gitAutocommitEnabled(allocator: std.mem.Allocator) bool
-src/config.zig::wardAuthServerUrl | fn wardAuthServerUrl(allocator: std.mem.Allocator) ?[]u8
-src/config.zig::wardCacheTtlSecs | fn wardCacheTtlSecs(allocator: std.mem.Allocator, default: i64) i64
-src/config.zig::wardIntrospectUrl | fn wardIntrospectUrl(allocator: std.mem.Allocator) ?[]u8
-src/config.zig::wardLoginUrl | fn wardLoginUrl(allocator: std.mem.Allocator) ?[]u8
-src/config.zig::wardServiceName | fn wardServiceName(allocator: std.mem.Allocator) ?[]u8
-src/config.zig::wardServiceUrl | fn wardServiceUrl(allocator: std.mem.Allocator) ?[]u8
-src/config.zig::wardVerifyUrl | fn wardVerifyUrl(allocator: std.mem.Allocator) ?[]u8
+src/config.zig::libDir | fn libDir(allocator: std.mem.Allocator) ?[]u8
+src/config.zig::stdlibDir | fn stdlibDir(allocator: std.mem.Allocator) ?[]u8
 src/convert/alt_functions.zig::AltEntry struct_
 src/convert/alt_functions.zig::AltError value
 src/convert/alt_functions.zig::mergePinoutWithAlts | fn mergePinoutWithAlts( allocator: std.mem.Allocator, pinout_source: []const u8, alts: []const AltEntry, ) AltError![]const u8
@@ -484,7 +479,7 @@ src/erc.zig::PinoutEntry struct_
 src/erc.zig::Severity value
 src/erc.zig::Violation struct_
 src/erc.zig::ViolationKind enum_
-src/erc.zig::loadPinoutMap | fn loadPinoutMap(allocator: std.mem.Allocator, path: []const u8) ?std.StringHashMapUnmanaged(PinoutEntry)
+src/erc.zig::loadPinoutMap | fn loadPinoutMap(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?std.StringHashMapUnmanaged(PinoutEntry)
 src/erc.zig::runErc | fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8) std.mem.Allocator.Error![]const Violation
 src/erc.zig::writeViolationsJson | fn writeViolationsJson(allocator: std.mem.Allocator, violations: []const Violation) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
 src/escape.zig::decodeXmlAlloc | fn decodeXmlAlloc(gpa: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8
@@ -1332,8 +1327,6 @@ src/infra/fs.zig::writeFile | fn writeFile(self: Dir, options: std.Io.Dir.WriteF
 src/infra/log.zig::emitLine | fn emitLine(buf: []u8, res: std.fmt.BufPrintError![]u8) void
 src/infra/log.zig::progress | fn progress(comptime fmt: []const u8, args: anytype) void
 src/infra/log.zig::warn | fn warn(comptime fmt: []const u8, args: anytype) void
-src/infra/net.zig::HttpClient value
-src/infra/net.zig::initHttpClient | fn initHttpClient(allocator: std.mem.Allocator) HttpClient
 src/infra/process_alloc.zig::durable value
 src/infra/random.zig::bytes | fn bytes(buf: []u8) std.Io.RandomSecureError!void
 src/infra/source_transaction.zig::Guard struct_
@@ -4045,6 +4038,7 @@ src/serve.zig::ServeOptions struct_
 src/serve.zig::Server struct_
 src/serve.zig::ServerState struct_
 src/serve.zig::bumpLiveVersion | fn bumpLiveVersion(name: []const u8) u32
+src/serve.zig::default_bind_address value
 src/serve.zig::deinit | fn deinit(self: *Caches) void
 src/serve.zig::deinit | fn deinit(self: *ReadCaches) void
 src/serve.zig::dispatch | fn dispatch( self: *Server, action: *const fn (*Server, *httpz.Request, *httpz.Response) anyerror!void, req: *httpz.Request, res: *httpz.Response, ) !void
@@ -4072,6 +4066,7 @@ src/serve/api.zig::exportKicadApi | fn exportKicadApi(ctx: *Server, req: *httpz.
 src/serve/api.zig::exportNetlistApi | fn exportNetlistApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::exportReviewPackageApi | fn exportReviewPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::freePinsApi | fn freePinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/api.zig::healthzApi | fn healthzApi(_: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::pinoutApi | fn pinoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::pushApi | fn pushApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/api.zig::removeComponentDatasheetApi | fn removeComponentDatasheetApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -4092,9 +4087,10 @@ src/serve/assembly_page_cache.zig::store | fn store(self: *Store, in: anytype) v
 src/serve/assets_css.zig::index_css value
 src/serve/assets_css.zig::navbar_css value
 src/serve/auth.zig::HandlerError value
+src/serve/auth.zig::Role enum_
 src/serve/auth.zig::authMiddleware | fn authMiddleware(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!bool
-src/serve/auth.zig::isLocalhostRequest | fn isLocalhostRequest(ctx: *Server, req: *httpz.Request) bool
-src/serve/auth.zig::validatePluginBearerToken | fn validatePluginBearerToken(ctx: *Server, req: *httpz.Request) bool
+src/serve/auth.zig::canWrite | fn canWrite(self: Role) bool
+src/serve/auth.zig::toString | fn toString(self: Role) []const u8
 src/serve/auth_store.zig::ensureAuthDir | fn ensureAuthDir(auth_dir: []const u8) void
 src/serve/auth_store.zig::sha256Hex | fn sha256Hex(allocator: std.mem.Allocator, input: []const u8) std.mem.Allocator.Error![]u8
 src/serve/auth_store.zig::writeFileAtomicWithBackup | fn writeFileAtomicWithBackup(allocator: std.mem.Allocator, path: []const u8, data: []const u8) void
@@ -5162,18 +5158,6 @@ src/serve/vfs.zig::listDir | fn listDir( allocator: std.mem.Allocator, project_d
 src/serve/vfs.zig::moveFile | fn moveFile( allocator: std.mem.Allocator, project_dir: []const u8, from_rel: []const u8, to_rel: []const u8, out: *std.ArrayList(u8), ) VfsError!bool
 src/serve/vfs.zig::readFile | fn readFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, offset: ?u64, limit: ?u64, out: *std.ArrayList(u8), ) VfsError!bool
 src/serve/vfs.zig::writeFile | fn writeFile( allocator: std.mem.Allocator, project_dir: []const u8, rel_path: []const u8, content: []const u8, opts: WriteOpts, out: *std.ArrayList(u8), ) VfsError!bool
-src/serve/ward_auth.zig::AuthError value
-src/serve/ward_auth.zig::Role enum_
-src/serve/ward_auth.zig::WardState struct_
-src/serve/ward_auth.zig::authMiddleware | fn authMiddleware(ctx: *Server, req: *httpz.Request, res: *httpz.Response) AuthError!bool
-src/serve/ward_auth.zig::authServerUrl | fn authServerUrl(ctx: *Server) []const u8
-src/serve/ward_auth.zig::canWrite | fn canWrite(self: Role) bool
-src/serve/ward_auth.zig::deriveAuthServer | fn deriveAuthServer(login_url: []const u8) []const u8
-src/serve/ward_auth.zig::init | fn init(self: *WardState, allocator: std.mem.Allocator) void
-src/serve/ward_auth.zig::mapWardRole | fn mapWardRole(role: ward.verdict.Role) Role
-src/serve/ward_auth.zig::metadataProtectedResource | fn metadataProtectedResource(ctx: *Server, req: *httpz.Request, res: *httpz.Response) AuthError!void
-src/serve/ward_auth.zig::toString | fn toString(self: Role) []const u8
-src/serve/ward_auth.zig::verify | fn verify( self: *FakeVerifier, allocator: std.mem.Allocator, token: []const u8, ) std.mem.Allocator.Error!ward.verdict.Verdict
 src/serve/warm_sched.zig::Flight struct_
 src/serve/warm_sched.zig::claim | fn claim(self: *Flight, key: []const u8) bool
 src/serve/warm_sched.zig::enterInteractive | fn enterInteractive() void
@@ -5274,6 +5258,26 @@ src/spurious.zig::productBranches | fn productBranches(m: f64, n: f64, rf: Band,
 src/spurious.zig::requiredRf | fn requiredRf(lo_hz: f64, band: Band, side: Sideband) Band
 src/spurious.zig::signedProduct | fn signedProduct(m: f64, n: f64, rf: Band, lo_hz: f64) Band
 src/spurious.zig::width | fn width(self: Band) f64
+src/stdlib.zig::Found struct_
+src/stdlib.zig::StemIterator struct_
+src/stdlib.zig::bundled | fn bundled(sub_path: []const u8) ?[]const u8
+src/stdlib.zig::bundledPath | fn bundledPath(allocator: std.mem.Allocator, sub_path: []const u8) std.mem.Allocator.Error![]u8
+src/stdlib.zig::bundled_prefix value
+src/stdlib.zig::displayPath | fn displayPath(path: []const u8) []const u8
+src/stdlib.zig::exists | fn exists(allocator: std.mem.Allocator, project_dir: []const u8, sub_path: []const u8) bool
+src/stdlib.zig::isBundledPath | fn isBundledPath(path: []const u8) bool
+src/stdlib.zig::libRoot | fn libRoot() ?[]const u8
+src/stdlib.zig::listDirs | fn listDirs( allocator: std.mem.Allocator, project_dir: []const u8, sub: []const u8, out: *std.ArrayList([]const u8), ) std.mem.Allocator.Error!void
+src/stdlib.zig::max_stems_prefix value
+src/stdlib.zig::next | fn next(self: *StemIterator) ?[]const u8
+src/stdlib.zig::open | fn open( allocator: std.mem.Allocator, project_dir: []const u8, sub_path: []const u8, max_bytes: usize, ) ?Found
+src/stdlib.zig::read | fn read( allocator: std.mem.Allocator, project_dir: []const u8, sub_path: []const u8, max_bytes: usize, ) ?[]u8
+src/stdlib.zig::readPath | fn readPath(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ?[]u8
+src/stdlib.zig::resolvePath | fn resolvePath( allocator: std.mem.Allocator, project_dir: []const u8, sub_path: []const u8, ) ?[]u8
+src/stdlib.zig::setRoots | fn setRoots(lib: ?[]const u8, stdlib: ?[]const u8) void
+src/stdlib.zig::standard | fn standard(allocator: std.mem.Allocator, sub_path: []const u8, max_bytes: usize) ?Found
+src/stdlib.zig::stems | fn stems(prefix: []const u8) StemIterator
+src/stdlib.zig::stemsIn | fn stemsIn(buf: []u8, sub: []const u8) StemIterator
 src/subcircuit_seed_drc.zig::reject | fn reject(alloc: std.mem.Allocator, input: anytype) std.mem.Allocator.Error!void
 src/subcircuit_seed_drc.zig::rejectEmpty | fn rejectEmpty(comptime Acc: type, alloc: std.mem.Allocator, acc: *Acc) std.mem.Allocator.Error!void
 src/subcircuit_seed_drc.zig::retainAccepted | fn retainAccepted(comptime Acc: type, alloc: std.mem.Allocator, acc: *Acc) std.mem.Allocator.Error![]const bool

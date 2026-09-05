@@ -15,6 +15,8 @@ const thermal = @import("thermal.zig");
 const design_block_mod = @import("design_block.zig");
 const special_forms = @import("special_forms.zig");
 const forms_mod = @import("forms.zig");
+const lib_limits = @import("../lib_limits.zig");
+const stdlib_mod = @import("../stdlib.zig");
 const Evaluator = @import("evaluator.zig").Evaluator;
 const EvalError = @import("evaluator.zig").EvalError;
 const ComponentData = Evaluator.ComponentData;
@@ -30,6 +32,10 @@ const footprint_form = "footprint";
 const datasheet_form = "datasheet";
 const thermal_form = "thermal";
 
+/// Cap on one `(import …)` library file read. The class figure, so a component
+/// or module file the editor loads is never refused here.
+const lib_read_max_bytes: usize = lib_limits.max_lib_file_bytes;
+
 /// Maximum module call nesting. A self-recursive module — an authoring typo
 /// like `(defmodule m () (m))`, or two modules calling each other — would
 /// otherwise recurse until the process stack overflows and takes down the
@@ -38,9 +44,12 @@ const thermal_form = "thermal";
 const max_module_depth: usize = 64;
 
 /// Standard passive families auto-imported into every design and module
-/// before their body evaluates. The list mirrors the inventory in
-/// projects/designs/lib/components/ — keep both in sync when adding a new
-/// 04xx/06xx package family.
+/// before their body evaluates. Every name here is carried by the bundled
+/// standard library (`stdlib/components/`), which is what lets a project with
+/// no `lib/` of its own evaluate — a test in `src/stdlib.zig` holds the two
+/// lists together, so adding a package family here without shipping its file
+/// (and its land pattern) fails the suite rather than the user's first build.
+/// A project that carries its own copy still wins; see docs/standard-library.md.
 const passives_prelude = [_][]const u8{
     "cap-0201", "cap-0402", "cap-0603",     "cap-0805",
     "res-0201", "res-0402", "res-0603",     "res-0805",
@@ -52,11 +61,11 @@ const passives_prelude = [_][]const u8{
 /// don't need to list them in `(import …)` headers. Idempotent: the
 /// `passives_prelude_loaded` flag short-circuits subsequent calls, which
 /// also guards against recursion if a module load triggers prelude load
-/// for a name that happens to itself be a module. Failures (missing
-/// library files) are intentionally swallowed — projects that haven't
-/// stocked every package size still build, and the resolver later raises
-/// `UnboundVariable` at the actual use site if a referenced part is
-/// genuinely missing.
+/// for a name that happens to itself be a module. Failures are still
+/// swallowed — a project may deliberately replace a family with a file that
+/// does not parse, and the resolver raises `UnboundVariable` at the actual use
+/// site — but they are now rare rather than the norm: with the bundle behind
+/// every name, an empty project library resolves all sixteen.
 pub fn loadPassivesPrelude(self: *Evaluator, env: *Env) void {
     if (self.passives_prelude_loaded) return;
     self.passives_prelude_loaded = true;
@@ -88,10 +97,11 @@ pub fn evalImport(self: *Evaluator, args: []const Node, env: *Env) EvalError!Val
     return .nil;
 }
 
-/// Locate `name` on disk and load it as the right kind of file. Searches
-/// `lib/components/` then `lib/modules/`, under both the project_dir and
-/// the shared lib_dir. Components get cached in `component_cache`; modules
-/// are evaluated against a heap-owned env and bound into the caller's env.
+/// Locate `name` and load it as the right kind of file. Searches
+/// `lib/components/` then `lib/modules/` under every on-disk root
+/// (`libSearchRoots`), then the bundled standard library. Components get
+/// cached in `component_cache`; modules are evaluated against a heap-owned env
+/// and bound into the caller's env.
 pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!void {
     // Already loaded?
     if (self.component_cache.contains(name)) return;
@@ -115,22 +125,18 @@ pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!vo
     }
 
     // Search path: components first, then modules.
-    // Search project_dir first, then lib_dir (shared library fallback).
     const search_prefixes = [_][]const u8{
         "lib/components/",
         "lib/modules/",
     };
-    const search_roots = if (std.mem.eql(u8, self.project_dir, self.lib_dir))
-        &[_][]const u8{self.project_dir}
-    else
-        &[_][]const u8{ self.project_dir, self.lib_dir };
+    var roots_buf: [3][]const u8 = undefined;
+    const search_roots = libSearchRoots(self, &roots_buf);
 
     // A module-shaped file that parsed but didn't define `name` (a name ≠
     // filename mismatch). Remembered so, if no other search location resolves,
     // the tail emits a precise diagnostic instead of the misleading
     // "no lib/... file". Buffers are `self.allocator`-owned and outlive eval.
-    var mismatch_path: ?[]const u8 = null;
-    var mismatch_actual: ?[]const u8 = null;
+    var mismatch: Mismatch = .{};
 
     for (search_roots) |root| {
         for (search_prefixes) |prefix| {
@@ -138,80 +144,139 @@ pub fn resolveImport(self: *Evaluator, name: []const u8, env: *Env) EvalError!vo
             defer self.allocator.free(path);
 
             // Note: don't free file_content — AST nodes reference slices into it
-            const file_content = infra_fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch continue;
-
-            // A parse failure here means the library file EXISTS but is
-            // malformed — record a diagnostic naming the file AND the failing
-            // location within it (carried out of the parser via `parseDiag`),
-            // so `evalImport`'s fallback doesn't misreport it as "no lib/... file"
-            // and the user is pointed at the exact line/col to fix. The span is
-            // into the imported file's buffer, so `diag_format` blanks the
-            // (design-file) source line, but the message is self-describing.
-            var pdiag: parser_mod.ParseDiagnostic = .{};
-            const nodes = parser_mod.parseDiag(self.allocator, file_content, &pdiag) catch {
-                self.setErrorFmt(pdiag.span, "syntax error in '{s}' at {d}:{d}: {s}", .{ path, pdiag.span.line, pdiag.span.col, pdiag.message });
-                return EvalError.ImportError;
-            };
-
-            // Record this read in `loaded_files` so a caller can reconstruct the
-            // evaluator's complete file read-set (design + checks + every
-            // imported lib file) for mtime-based cache invalidation. `path` is
-            // freed when this call returns, so key on a dup owned by
-            // `self.allocator` (the request arena on the serve path). That same
-            // eval-lifetime buffer is what diagnostics raised inside this file
-            // carry as their `file`, so the read-set key and the diagnostic
-            // path can never disagree.
-            const owned_path = ownedFilePath(self, path, nodes);
-
-            // Everything this file evaluates — its component/family load, its
-            // `(defmodule …)` registration — reports against the file itself.
-            const saved_file = self.current_file;
-            self.current_file = owned_path;
-            defer self.current_file = saved_file;
-
-            // Determine what kind of file this is
-            if (nodes.len > 0) {
-                if (nodes[0].isForm("component")) {
-                    try loadComponent(self, name, nodes[0]);
-                    return;
-                }
-                if (nodes[0].isForm("component-family")) {
-                    try loadComponentFamily(self, name, nodes[0]);
-                    return;
-                }
-                // Module file — evaluate in a heap-allocated env (must outlive module def)
-                const mod_env = self.allocator.create(Env) catch return EvalError.OutOfMemory;
-                mod_env.* = Env.init(self.allocator, null);
-                loadPassivesPrelude(self, mod_env);
-                _ = self.evalNodes(nodes, mod_env) catch return EvalError.ImportError;
-                // The defmodule should have been registered; copy module binding to caller env
-                if (mod_env.get(name)) |v| {
-                    try env.put(name, v);
-                    return;
-                }
-                // The file exists and parses but defines no module named `name`
-                // (a name ≠ filename mismatch). Destroy the orphaned env
-                // (nothing references it now) and remember the mismatch so the
-                // search can still try the remaining roots/prefixes; if none
-                // resolve, the tail emits a precise diagnostic. `path` is freed
-                // on loop exit, so dup it into an eval-lifetime buffer.
-                mod_env.deinit();
-                self.allocator.destroy(mod_env);
-                if (mismatch_path == null) {
-                    mismatch_path = self.allocator.dupe(u8, path) catch null;
-                    mismatch_actual = firstDefmoduleName(nodes);
-                }
-            }
+            const file_content = infra_fs.cwd().readFileAlloc(self.allocator, path, lib_read_max_bytes) catch continue;
+            if (try loadLibraryFile(self, name, env, path, file_content, &mismatch)) return;
         }
     }
-    if (mismatch_path) |mp| {
-        if (mismatch_actual) |actual| {
+
+    // The bundled standard library, last: a project's own files always win, so
+    // a new project evaluates without a `lib/` while an established one never
+    // has a shipped part shadow the one it curated. Same loader, same
+    // diagnostics; only the path is synthetic (see src/stdlib.zig).
+    for (search_prefixes) |prefix| {
+        const sub_path = std.fmt.allocPrint(self.allocator, "{s}{s}.sexp", .{ prefix, name }) catch return EvalError.OutOfMemory;
+        defer self.allocator.free(sub_path);
+        const found = stdlib_mod.standard(self.allocator, sub_path, lib_read_max_bytes) orelse continue;
+        defer self.allocator.free(found.path);
+        if (try loadLibraryFile(self, name, env, found.path, found.bytes, &mismatch)) return;
+    }
+
+    if (mismatch.path) |mp| {
+        if (mismatch.actual) |actual| {
             self.setErrorFmt(.{ .line = 1, .col = 1, .offset = 0 }, "'{s}' defines module '{s}', not '{s}' — rename the file or the (defmodule …)", .{ mp, actual, name });
         } else {
             self.setErrorFmt(.{ .line = 1, .col = 1, .offset = 0 }, "'{s}' defines no module named '{s}'", .{ mp, name });
         }
     }
     return EvalError.ImportError;
+}
+
+/// A module-shaped library file that parsed but defined no `(defmodule name)`
+/// matching the name being imported. Carried across the whole search so a
+/// later root can still resolve the import, and only reported if none does.
+const Mismatch = struct {
+    /// The offending file, duped into an eval-lifetime buffer.
+    path: ?[]const u8 = null,
+    /// The module that file DOES define, when it defines exactly one.
+    actual: ?[]const u8 = null,
+};
+
+/// The on-disk roots `(import …)` searches, in order: the project, the
+/// evaluator's shared `lib_dir` when it differs, and the process-wide
+/// `--lib-dir` / `NETLISP_LIB_DIR` root when it differs from both. The bundled
+/// standard library is deliberately NOT a root — it has no directory — and is
+/// consulted only after every root has missed.
+fn libSearchRoots(self: *Evaluator, buf: *[3][]const u8) [][]const u8 {
+    var count: usize = 0;
+    buf[count] = self.project_dir;
+    count += 1;
+    if (!std.mem.eql(u8, self.project_dir, self.lib_dir)) {
+        buf[count] = self.lib_dir;
+        count += 1;
+    }
+    if (stdlib_mod.libRoot()) |root| {
+        if (!std.mem.eql(u8, root, self.project_dir) and !std.mem.eql(u8, root, self.lib_dir)) {
+            buf[count] = root;
+            count += 1;
+        }
+    }
+    return buf[0..count];
+}
+
+/// Load one candidate library file whose bytes are already in hand, from
+/// wherever the search found it. True when `name` was resolved — the component
+/// is cached, or the module is bound into `env`. False means "keep looking",
+/// with a module-name mismatch recorded in `mismatch` for the failure message.
+///
+/// `content` is never freed: the AST nodes reference slices into it.
+fn loadLibraryFile(
+    self: *Evaluator,
+    name: []const u8,
+    env: *Env,
+    path: []const u8,
+    content: []const u8,
+    mismatch: *Mismatch,
+) EvalError!bool {
+    // A parse failure here means the library file EXISTS but is malformed —
+    // record a diagnostic naming the file AND the failing location within it
+    // (carried out of the parser via `parseDiag`), so `evalImport`'s fallback
+    // doesn't misreport it as "no lib/... file" and the user is pointed at the
+    // exact line/col to fix. The span is into the imported file's buffer, so
+    // `diag_format` blanks the (design-file) source line, but the message is
+    // self-describing.
+    var pdiag: parser_mod.ParseDiagnostic = .{};
+    const nodes = parser_mod.parseDiag(self.allocator, content, &pdiag) catch {
+        self.setErrorFmt(pdiag.span, "syntax error in '{s}' at {d}:{d}: {s}", .{ path, pdiag.span.line, pdiag.span.col, pdiag.message });
+        return EvalError.ImportError;
+    };
+
+    // Record this read in `loaded_files` so a caller can reconstruct the
+    // evaluator's complete file read-set (design + checks + every imported lib
+    // file) for mtime-based cache invalidation. `path` is freed when the search
+    // moves on, so key on a dup owned by `self.allocator` (the request arena on
+    // the serve path). That same eval-lifetime buffer is what diagnostics
+    // raised inside this file carry as their `file`, so the read-set key and
+    // the diagnostic path can never disagree.
+    const owned_path = ownedFilePath(self, path, nodes);
+
+    // Everything this file evaluates — its component/family load, its
+    // `(defmodule …)` registration — reports against the file itself.
+    const saved_file = self.current_file;
+    self.current_file = owned_path;
+    defer self.current_file = saved_file;
+
+    if (nodes.len == 0) return false;
+    if (nodes[0].isForm("component")) {
+        try loadComponent(self, name, nodes[0]);
+        return true;
+    }
+    if (nodes[0].isForm("component-family")) {
+        try loadComponentFamily(self, name, nodes[0]);
+        return true;
+    }
+
+    // Module file — evaluate in a heap-allocated env (must outlive module def)
+    const mod_env = self.allocator.create(Env) catch return EvalError.OutOfMemory;
+    mod_env.* = Env.init(self.allocator, null);
+    loadPassivesPrelude(self, mod_env);
+    _ = self.evalNodes(nodes, mod_env) catch return EvalError.ImportError;
+    // The defmodule should have been registered; copy module binding to caller env
+    if (mod_env.get(name)) |v| {
+        try env.put(name, v);
+        return true;
+    }
+    // The file exists and parses but defines no module named `name` (a name ≠
+    // filename mismatch). Destroy the orphaned env (nothing references it now)
+    // and remember the mismatch so the search can still try the remaining
+    // roots/prefixes; if none resolve, the tail emits a precise diagnostic.
+    // `path` is freed when the search moves on, so dup it.
+    mod_env.deinit();
+    self.allocator.destroy(mod_env);
+    if (mismatch.path == null) {
+        mismatch.path = self.allocator.dupe(u8, path) catch null;
+        mismatch.actual = firstDefmoduleName(nodes);
+    }
+    return false;
 }
 
 /// The eval-lifetime copy of `path` used as this file's `loaded_files` key.
@@ -1031,4 +1096,95 @@ test "module errors carry the module file, not the importing design" {
     const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
     try testing.expect(std.mem.indexOf(u8, diag.file, "lib/modules/thrower.sexp") != null);
     try testing.expectEqual(@as(u32, 3), diag.span.line);
+}
+
+/// Write `design` as the sole source of a temp project and evaluate it. The
+/// project has whatever `tmp` already holds and nothing else — in particular no
+/// `lib/` unless the caller made one — so what resolves is exactly what the
+/// library search order provides.
+fn evalTempDesign(alloc: std.mem.Allocator, tmp: *std.testing.TmpDir, design: []const u8) !*env_mod.DesignBlock {
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/board.sexp", .data = design });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    const design_path = try std.fmt.allocPrint(alloc, "{s}/src/board.sexp", .{project});
+    // The evaluator retains its parsed source and component cache for the
+    // life of the design, so it is deliberately not deinit'd here (the caller
+    // uses page_allocator, matching production's lifecycle).
+    const eval = try alloc.create(Evaluator);
+    eval.* = Evaluator.init(alloc, project);
+    const value = try eval.evalFile(design_path);
+    return switch (value) {
+        .design_block => |b| b,
+        else => error.TestUnexpectedResult,
+    };
+}
+
+/// The instance with `ref_des`, or null when the design has none.
+fn instanceByRef(block: *const env_mod.DesignBlock, ref_des: []const u8) ?env_mod.Instance {
+    for (block.instances) |inst| {
+        if (std.mem.eql(u8, inst.ref_des, ref_des)) return inst;
+    }
+    return null;
+}
+
+// spec: eval/modules - a design in a project with no lib/ of its own resolves every passive from the bundled standard library, footprint included
+test "a project with no library still resolves the standard passives" {
+    // page_allocator for the same lifecycle production uses: parsed AST and
+    // component cache are retained for the design's life, never freed.
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const block = try evalTempDesign(alloc, &tmp,
+        \\(design-block "No Library Here"
+        \\  (instance "C1" (cap-0402 "100nF") (pin 1 "VDD") (pin 2 "GND"))
+        \\  (instance "R1" (res-0402 "10k") (pin 1 "VDD") (pin 2 "LED_A"))
+        \\  (instance "L1" (ind-0603 "10uH") (pin 1 "VDD") (pin 2 "VFILT"))
+        \\  (instance "D1" (led-0402 "red") (pin 1 "LED_A") (pin 2 "GND")))
+    );
+
+    try testing.expectEqual(@as(usize, 4), block.instances.len);
+    // Every instance resolved to a real family AND to the land pattern that
+    // family names — a footprint-less instance builds but cannot be fabricated.
+    const expected = [_]struct { ref: []const u8, footprint: []const u8 }{
+        .{ .ref = "C1", .footprint = "c-0402" },
+        .{ .ref = "R1", .footprint = "r-0402" },
+        .{ .ref = "L1", .footprint = "l-0603" },
+        .{ .ref = "D1", .footprint = "led-0402" },
+    };
+    for (expected) |want| {
+        const inst = instanceByRef(block, want.ref) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(want.footprint, inst.footprint);
+    }
+}
+
+// spec: eval/modules - a project's own lib/components file overrides the bundled family of the same name
+test "a project component file shadows the bundled one" {
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/cap-0402.sexp",
+        .data =
+        \\(component-family "cap-0402"
+        \\  (description "house 0402 capacitor")
+        \\  (symbol generic-cap)
+        \\  (footprint house-c-0402)
+        \\  (parameter "value" capacitance))
+        ,
+    });
+
+    const block = try evalTempDesign(alloc, &tmp,
+        \\(design-block "House Rules"
+        \\  (instance "C1" (cap-0402 "100nF") (pin 1 "VDD") (pin 2 "GND"))
+        \\  (instance "C2" (cap-0603 "1uF") (pin 1 "VDD") (pin 2 "GND")))
+    );
+
+    // The project's own file wins for the name it defines …
+    const c1 = instanceByRef(block, "C1") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("house-c-0402", c1.footprint);
+    // … and shadows nothing else: every other family still comes from the bundle.
+    const c2 = instanceByRef(block, "C2") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("c-0603", c2.footprint);
 }

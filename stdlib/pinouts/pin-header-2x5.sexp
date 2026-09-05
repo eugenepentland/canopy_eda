@@ -1,0 +1,11 @@
+(pinout "pin-header-2x5"
+  (pin 1 "1")
+  (pin 2 "2")
+  (pin 3 "3")
+  (pin 4 "4")
+  (pin 5 "5")
+  (pin 6 "6")
+  (pin 7 "7")
+  (pin 8 "8")
+  (pin 9 "9")
+  (pin 10 "10"))

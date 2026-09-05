@@ -197,7 +197,18 @@ pub const Collection = struct {
 pub fn collectWithStatus(allocator: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error!Collection {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/lib/modules", .{project_dir});
     defer allocator.free(dir_path);
-    var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return .{ .matches = &.{}, .complete = false };
+    // A project with no `lib/modules/` at all has an EMPTY module policy, not
+    // an unverifiable one: there is no canonical module for a design to have
+    // diverged from. That is the ordinary state of a new project (and of one
+    // that draws every part from the bundled standard library), and reporting
+    // it as incomplete made `netlisp check` release-block on a design that
+    // uses no modules. Every other reason the directory will not open —
+    // permissions, an I/O error, a file where a directory belongs — still
+    // means the policy could not be read, and still fails closed.
+    var dir = infra_fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| return .{
+        .matches = &.{},
+        .complete = err == error.FileNotFound,
+    };
     defer dir.close();
 
     var complete = true;

@@ -13,6 +13,13 @@ WorkingDirectory=@TOP@
 # Production batches all live-design persistence through the quiet-period
 # checkpoint timer instead of making one commit per MCP tool call.
 Environment=NETLISP_GIT_AUTOCOMMIT=0
+# netlisp binds 127.0.0.1 and admits only a loopback, unproxied request; a
+# request that arrives through a reverse proxy (any `X-Forwarded-*` header) is
+# answered 403. The shipped unit is therefore LOCAL-ONLY. To serve a public URL,
+# put an authenticating proxy in front of this port and add `--allow-remote`
+# to ExecStart (before `--port`): with that flag EVERY request netlisp receives
+# is an admin, so it is correct only while the proxy authenticates callers —
+# see docs/auth.md.
 ExecStart=@TOP@/.deploy/bin/netlisp serve --project-dir @TOP@/projects/designs --port @PORT@
 # Restart=always, NOT on-failure (2026-07-25): systemd counts termination by
 # SIGTERM/SIGINT/SIGHUP/SIGPIPE as a CLEAN exit, so `pkill netlisp` or

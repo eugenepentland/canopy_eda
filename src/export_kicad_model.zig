@@ -19,6 +19,7 @@ const footprint_mod = @import("export_kicad_footprint.zig");
 const exportFootprintMod = footprint_mod.exportFootprintMod;
 const findModelFile = footprint_mod.findModelFile;
 const lib_limits = @import("lib_limits.zig");
+const stdlib = @import("stdlib.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
 /// Length of the JSON key prefix `"rotation":[` (advance past it to read array).
@@ -171,10 +172,10 @@ pub fn exportFootprints(
         if (processed_fps.contains(inst.footprint)) continue;
         try processed_fps.put(allocator, inst.footprint, {});
 
-        const fp_path = try std.fmt.allocPrint(allocator, "{s}/lib/footprints/{s}.sexp", .{ project_dir, inst.footprint });
-        defer allocator.free(fp_path);
+        const fp_sub = try std.fmt.allocPrint(allocator, "lib/footprints/{s}.sexp", .{inst.footprint});
+        defer allocator.free(fp_sub);
 
-        const fp_source = infra_fs.cwd().readFileAlloc(allocator, fp_path, lib_limits.max_footprint_bytes) catch continue;
+        const fp_source = stdlib.read(allocator, project_dir, fp_sub, lib_limits.max_footprint_bytes) orelse continue;
         defer allocator.free(fp_source);
 
         const kicad_name = extractFootprintName(allocator, fp_source) catch inst.footprint;

@@ -104,11 +104,12 @@ SETTLE_SECONDS="${DEPLOY_SETTLE_SECONDS:-0}"
 DEBOUNCE_TIMER="${DEPLOY_DEBOUNCE_TIMER-netlisp-deploy-debounce.timer}"
 CANDIDATE_ROOT="$TOP/.git/release-candidates"
 SERVICE="${NETLISP_SERVICE:-netlisp.service}"
-REQUIRED_ZIG="0.17.0-dev.1683+5ceec001b"
-PRODUCTION_ZIG="/home/epentland/zig-toolchains/0.17.0-dev.1683+5ceec001b-eda-286f77f2-8f4af965/zig"
-REQUIRED_ZIG_SHA256="8f4af9650b5358abcdd8a283976d30b5dcdca2b400e44af25953b2e34101e7d4"
+# The one toolchain: the official pinned Zig from PATH (or $ZIG). `.zigversion`
+# is the single source of truth for which snapshot that is, so a pin bump can
+# never leave the deploy path behind.
+REQUIRED_ZIG="$(tr -d '[:space:]' <"$TOP/.zigversion")"
 ARTIFACT_POLICY="release-safe-stripped-v1"
-ZIG="${ZIG:-$PRODUCTION_ZIG}"
+ZIG="${ZIG:-zig}"
 ts() { date "+%Y-%m-%d %H:%M:%S"; }
 
 valid_build_id() {
@@ -167,17 +168,50 @@ restore_good_build_id() {
   rm -f "$DEPLOY_ID"
 }
 
-if [ ! -x "$ZIG" ] || [ "$("$ZIG" version 2>/dev/null)" != "$REQUIRED_ZIG" ]; then
-  echo "deploy-prod: requires Zig $REQUIRED_ZIG; found '$("$ZIG" version 2>/dev/null || echo unavailable)' at $ZIG" >&2
+if [ -z "$REQUIRED_ZIG" ]; then
+  echo "deploy-prod: .zigversion is empty or missing at $TOP/.zigversion" >&2
   exit 1
 fi
+# Resolve `zig` to an absolute path once, so the preparation this may trigger
+# and the fingerprint below both name the exact binary that was validated.
+#
+# PATH is not enough on its own here: this script also runs from a systemd user
+# timer, whose PATH is the manager's default and need not contain
+# ~/.local/bin. So fall back to the two locations scripts/install-zig.sh
+# writes before giving up — a deploy that cannot find the compiler is a silent
+# prod freeze.
+resolved="$(command -v "$ZIG" 2>/dev/null)" || resolved=""
+if [ -z "$resolved" ]; then
+  for candidate in \
+    "$HOME/.local/bin/zig" \
+    "${ZIG_INSTALL_DIR:-$HOME/.local/share/netlisp/zig}/$REQUIRED_ZIG/zig"; do
+    if [ -x "$candidate" ]; then
+      resolved="$candidate"
+      break
+    fi
+  done
+fi
+ZIG="$resolved"
+if [ -z "$ZIG" ] || [ ! -x "$ZIG" ]; then
+  echo "deploy-prod: no usable Zig compiler on PATH (\$ZIG overrides it)" >&2
+  echo "  install the pinned toolchain with scripts/install-zig.sh --link (see ZIG_TOOLCHAIN.md)" >&2
+  exit 1
+fi
+ZIG_VERSION="$("$ZIG" version 2>/dev/null || echo unavailable)"
+if [ "$ZIG_VERSION" != "$REQUIRED_ZIG" ]; then
+  echo "deploy-prod: wrong Zig compiler at $ZIG" >&2
+  echo "  required (.zigversion): $REQUIRED_ZIG" >&2
+  echo "  found:                  $ZIG_VERSION" >&2
+  echo "  install the pinned toolchain with scripts/install-zig.sh --link (see ZIG_TOOLCHAIN.md)" >&2
+  exit 1
+fi
+# A fingerprint, not a pin: the candidate records which compiler binary emitted
+# it, so an artifact from a different build of the same version is never
+# adopted as this one's.
 ZIG_SHA256="$(sha256sum "$ZIG" | awk '{print $1}')" || exit 1
-if [ "$ZIG_SHA256" != "$REQUIRED_ZIG_SHA256" ]; then
-  echo "deploy-prod: compiler SHA-256 mismatch at $ZIG" >&2
-  echo "  required: $REQUIRED_ZIG_SHA256" >&2
-  echo "  found:    $ZIG_SHA256" >&2
-  exit 1
-fi
+# The preparation this may run below must use the very binary just validated,
+# not re-resolve a possibly different one from its own environment.
+export ZIG
 
 # Prod is only ever built from the MAIN checkout (that is the tree the systemd
 # unit's WorkingDirectory points at). In a linked worktree $TOP/.git is a FILE,
@@ -194,12 +228,13 @@ fi
 export ZIG_LOCAL_CACHE_DIR="${ZIG_LOCAL_CACHE_DIR:-$TOP/.git/deploy-zig-cache}"
 
 # Health probes: "URL=expected_http_code", space separated.
-#   /.well-known/oauth-protected-resource — served unauthenticated, proves the
-#     process is listening AND routing AND emitting a real response body (200).
-#   /                                     — proves the ward auth path works; an
-#     unauthenticated browser hit must redirect to ward's login (302).
-# A 502/000/500 on either means the binary is not serving traffic.
-HEALTH_URLS="${HEALTH_URLS:-http://127.0.0.1:7050/.well-known/oauth-protected-resource=200 http://127.0.0.1:7050/=302}"
+#   /healthz — served unauthenticated ahead of every handler, proves the process
+#     is listening AND routing AND emitting a real response body (200). It reads
+#     no design, sidecar or cache, so a cold process answers it as fast as a warm
+#     one. Deliberately NOT `/`: that renders the design list, which on a cold
+#     process is the slowest read on the server.
+# A 502/000/500 means the binary is not serving traffic.
+HEALTH_URLS="${HEALTH_URLS:-http://127.0.0.1:7050/healthz=200}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-90}"
 HEALTH_INTERVAL="${HEALTH_INTERVAL:-3}"
 

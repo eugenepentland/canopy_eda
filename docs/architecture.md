@@ -29,6 +29,7 @@ The intended workflow is text-first and live: edit a `.sexp` file → run `netli
 | **Sub-block** | An instance of another `.sexp` file. If that file is a `defmodule`, it takes parameters; otherwise it's a plain composition. |
 | **Component vs component-family** | `component` is a fixed part (`res-0402`, `tpsm84338rcjr`). `component-family` is a parameterised template (`(cap "100nF")`, `(res "10k")`). |
 | **Hubs vs spokes** | A rendering convention. Hubs are ICs/connectors/transistors (ref-des `U/J/P/X/Q`) — they get drawn as boxes on a grid. Spokes are R/C/L/F/D — they're rendered inline on the connection between two hubs. |
+| **Standard library** | The component set compiled into the `netlisp` binary (`stdlib/`): the sixteen passive families every design auto-imports, their land patterns, and a few generic board features. Resolution is project `lib/` → `--lib-dir` / `NETLISP_LIB_DIR` → `NETLISP_STDLIB_DIR` → the bundle, first hit per name — so a project with no `lib/` still evaluates and a project with one always wins. See [standard-library.md](standard-library.md). |
 | **Stable ID** | An 8-char hex ID grafted onto every instance/series/decouple, written back into the source file on first build. Lets ref-deses be reshuffled without breaking BOM/PCB linkage. |
 
 ## 3. The pipeline
@@ -172,9 +173,9 @@ served. Report sections include:
 
 ### Web server (`netlisp serve`)
 
-Default port 7050. Dev URL: `http://localhost:7050`. Production URL: `https://netlisp.eugenepentland.dev`.
+Default bind `127.0.0.1:7050` (`http://localhost:7050`); `--bind`/`--allow-remote` widen that for a deployment behind a reverse proxy.
 
-**Pages.** `/` (design list), `/schematics/:name` and `/modules/:name` (board and module schematics), `/pcb-layout/:name` (2D and `?view=3d`), `/assembly-debug/:name`, `/thermal/:name`, `/library`, `/library/footprint/:name`, `/library/3d/:footprint`, `/route-review`, and `/pdf-view/:filename`. `/modules` and the retired `/pcb-route-lab/:name` redirect into those current surfaces. The datasheet viewer loads its pinned PDF.js runtime and worker from the embedded same-origin static registry, so it has no CDN dependency. Sign-in and account management are not netlisp pages — the navbar Account link points at ward's admin portal (`https://ward.eugenepentland.dev/admin`).
+**Pages.** `/` (design list), `/schematics/:name` and `/modules/:name` (board and module schematics), `/pcb-layout/:name` (2D and `?view=3d`), `/assembly-debug/:name`, `/thermal/:name`, `/library`, `/library/footprint/:name`, `/library/3d/:footprint`, `/route-review`, and `/pdf-view/:filename`. `/modules` and the retired `/pcb-route-lab/:name` redirect into those current surfaces. The datasheet viewer loads its pinned PDF.js runtime and worker from the embedded same-origin static registry, so it has no CDN dependency. There are no sign-in or account pages: netlisp has no accounts (see **Authentication & authorisation**).
 
 **Read APIs.** `/api/designs`, `/api/scene-graph/:name`, `/api/erc/:name`, `/api/version/:name`, `/api/pinout/:name`, `/api/footprint/:name`, `/api/datasheets`, `/datasheets/:filename`.
 
@@ -190,19 +191,14 @@ Default port 7050. Dev URL: `http://localhost:7050`. Production URL: `https://ne
 
 ### Authentication & authorisation
 
-netlisp is a **pure resource server** — it runs no auth of its own. Everything (passkeys/WebAuthn, sessions, invites, roles, OAuth) is delegated to **ward** (the `wardd` auth server, repo `~/ai/ward`, public `https://ward.eugenepentland.dev`, local `http://127.0.0.1:9000`). The adapter is `src/serve/ward_auth.zig` (HTTP seam in `src/infra/net.zig`).
+netlisp is a **local tool**: no accounts, no sessions, no external auth service. The whole model lives in `src/serve/auth.zig`, whose `authMiddleware` gates every request before dispatch. Full reference: [docs/auth.md](auth.md).
 
-- **Browser sessions.** The `ward_session` cookie (domain `.eugenepentland.dev`) is verified against wardd `GET /verify`. No cookie → `302` to `https://ward.eugenepentland.dev/login?rd=<url>`; wardd unreachable → `503` (fail-closed).
-- **Sync API bearers.** The KiCad sync endpoint accepts its dedicated plugin
-  token first, then a ward token verified through `POST /oauth/introspect`; the
-  ward token must carry the `netlisp` service scope and a writer-capable role.
-- **Roles.** ward member → `writer`, ward admin → `admin`, unknown → `reader`
-  for browser/API writes. Local CLI tools run with the invoking user's
-  filesystem authority. Registration and account management live in ward's
-  admin portal (`/admin`).
-- **Plugin tokens (bearer).** For KiCad sync API clients — minted via `netlisp mint-plugin-token`, stored in `plugin_tokens.json` under the auth dir, checked *before* the ward bearer on `/api/sync-kicad-pcb/*`.
-- **Config (env / `.env`).** `WARD_VERIFY_URL`, `WARD_LOGIN_URL`, `WARD_INTROSPECT_URL`, `WARD_SERVICE_NAME` (default `netlisp`), `WARD_CACHE_TTL_SECS` (default `30`, the revocation-lag bound). Unset → fail closed (`503`) outside the dev bypass.
-- **Dev bypass.** `NETLISP_DEV` grants a local admin identity to a loopback, unproxied request (env opt-in) — no wardd needed for local development.
+- **Loopback is admin.** A request whose *TCP peer* is loopback and which no reverse proxy relayed (no `Forwarded` / `X-Forwarded-*` / `X-Real-IP` header) acts as the `local` admin. Locality is derived from the connected socket, never from a header.
+- **Everything else is `403`** — JSON on `/api/`, plain text elsewhere — naming `--allow-remote` in the body.
+- **Plugin tokens (bearer).** For KiCad sync API clients — minted via `netlisp mint-plugin-token`, hashed into `plugin_tokens.json` under the auth dir, and accepted on `POST /api/sync-kicad-pcb/*` alone.
+- **Public routes.** `GET /healthz` (a fixed liveness body for deployment probes) and `/static/*`.
+- **Deployments.** `netlisp serve --bind <addr>` (default `127.0.0.1`) widens the socket; `--allow-remote` (or `NETLISP_ALLOW_REMOTE=1`) makes **every** request an admin. That combination is only correct behind a reverse proxy that is itself authenticating callers — netlisp lends it no auth of its own.
+- **Roles.** `admin` / `writer` / `reader` still gate the review and system surfaces; an admitted request is `admin`, and the plugin-token sync path stays at the default `reader` because the token authorizes a route rather than an identity. Local CLI tools run with the invoking user's filesystem authority.
 
 ### Structured CLI tools
 
@@ -281,7 +277,7 @@ projects/designs/
     └── plugin_tokens.json        # KiCad-sync bearer tokens (netlisp_p_*)
 ```
 
-(Post ward-migration this is the only auth sidecar: passkeys, sessions, invites, and OAuth clients/tokens now live in wardd, not on disk here. The old `users.json` / `oauth_clients.json` / `oauth_tokens.json` stores are gone.)
+(This is the only auth sidecar netlisp has: there are no users, sessions, invites, or OAuth clients to store.)
 
 KiCad sync writes the declared `.kicad_pcb` directly and does not maintain netlisp
 sidecars beside it. KiCad may create transient project lock files while pcbnew
@@ -304,7 +300,7 @@ has the board open:
 | `netlisp check [--project-dir P] <name>` | Run ERC and emit violations as JSON. |
 | `netlisp tool list` | Print every structured tool and its JSON input schema. |
 | `netlisp tool <name> [--project-dir P] [--args JSON\|--args-file F] [--output F]` | Invoke any structured tool locally. |
-| `netlisp serve [--project-dir P] [--port 7050] [--auth-dir D]` | Start the web server. |
+| `netlisp serve [--project-dir P] [--port 7050] [--bind 127.0.0.1] [--allow-remote] [--auth-dir D]` | Start the web server. |
 | `netlisp export-kicad [--project-dir P] --output-dir D <name>` | Export KiCad netlist + footprints + STEP models. |
 | `netlisp export-review [--project-dir P] --output-dir D <name>` | Export design-review markdown + BOM CSV. |
 | `netlisp convert-footprint <f.kicad_mod>` | Convert a KiCad footprint to `.sexp`. |
@@ -315,7 +311,7 @@ has the board open:
 | `netlisp mint-plugin-token [--label <l>] [--auth-dir D]` | Issue a bearer token for KiCad sync API clients. |
 | `netlisp help` | Print usage. |
 
-(User/invite/password management is no longer a netlisp CLI — it moved to wardd's admin portal. The old `mint-invite` and `set-password` commands are gone.)
+(There is no user/invite/password management: netlisp has no accounts. The old `mint-invite` and `set-password` commands are gone.)
 
 ## 7. Appendix: HTTP and structured CLI surfaces
 
@@ -334,7 +330,7 @@ has the board open:
 
 #### Auth
 
-netlisp serves no login/account/authorization-server routes — those all live in wardd (`https://ward.eugenepentland.dev`). Browser sessions are verified against wardd `GET /verify`; the KiCad sync API also accepts its dedicated plugin token or a service-scoped ward bearer. See **Authentication & authorisation**.
+netlisp serves no login, account, or authorization-server routes — it has no accounts. A loopback request is an admin; the KiCad sync API additionally accepts its dedicated plugin token. See **Authentication & authorisation**.
 
 #### Read APIs
 | Method | Path | Purpose |
