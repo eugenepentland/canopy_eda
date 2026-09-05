@@ -181,7 +181,7 @@ test "MCP fab readiness matches HTTP and canonical project roots" {
     );
 }
 
-// spec: fabrication-release - MCP preserves the full release report and null authorization token for an ambiguous source bundle
+// spec: fabrication-release - MCP preserves the full release report and a null production authorization token for an ambiguous source bundle
 test "MCP and HTTP preserve full findings for an ambiguous release source" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();

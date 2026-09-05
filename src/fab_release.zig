@@ -640,7 +640,11 @@ pub fn makeLock(
     };
 }
 
-/// The readiness API plus the lock the user must echo to export.
+/// The readiness API plus the lock the user must echo to export. Production
+/// callers use `release_token`, which remains null for incomplete evidence.
+/// The browser's explicitly acknowledged prototype path uses
+/// `prototype_token`: it binds the exact same findings and input snapshot but
+/// does not claim that the production gate passed.
 pub const ReadinessJsonError = std.mem.Allocator.Error || std.Io.Writer.Error || error{InvalidReadinessJson};
 pub const ReportWriteError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
@@ -678,6 +682,8 @@ pub fn writeReadinessJson(
         try json_writer.writeString(writer, &lock.token)
     else
         try writer.writeAll("null");
+    try writer.writeAll(",\"prototype_token\":");
+    try json_writer.writeString(writer, &lock.token);
     try writer.writeAll(",\"revision\":");
     try json_writer.writeString(writer, evidence.design.revision.id);
     try writer.writeAll(",\"part_number\":");

@@ -7810,11 +7810,11 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 
 ## fabrication-release
 
-- DRC findings require a separate explicit browser acknowledgment while non-DRC evidence failures remain visibly non-waivable
+- the browser always offers an explicit prototype/test-board acknowledgment that can export with DRC or production-readiness findings while keeping the reports visible
 - every acknowledged fabrication ZIP includes dedicated JSON and Markdown reports containing every raw DRC error and warning
 - a panelized fabrication ZIP retains the single-board BOM and centroid and adds panel BOM and centroid files with repeated placements and total quantities
 - a stable release renderer may extend the exact read trace with assembly-only inputs, while any changed byte still blocks packaging
-- revision, source-ID, BOM/centroid, and fallback-geometry identity failures can never be waived
+- production releases treat revision, source-ID, BOM/centroid, and fallback-geometry identity failures as non-waivable; an explicitly labeled prototype export does not claim that production gate passed
 - consumed-input closure identity is independent of filesystem read order
 - exact read tracing retains child-directory identity and rejects an A/B/A byte sequence
 - a hidden cache probe is absent from the read trace while a real mid-scope edit still fails verification
@@ -7840,9 +7840,9 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 - allocation failure while lowering saved fabrication layers, copper, zones, keepouts, or perimeter vias blocks release rather than certifying a partial board
 - allocation failure while parsing a valid selected sidecar row is non-waivable incomplete evidence rather than silently dropped copper or silk
 - redundant saved polygons and dimensions must match the exact sketch-derived manufacturing geometry or release evidence is incomplete
-- duplicate design basenames are a non-waivable source-bundle ambiguity while all independent release findings remain visible
-- MCP preserves the full release report and null authorization token for an ambiguous source bundle
-- an in-request A/B/A sidecar mutation invalidates HTTP readiness and export without granting an authorization token
+- production releases treat a duplicate design basename as a non-waivable source-bundle ambiguity, while an explicitly acknowledged prototype can export the resolved test board with every finding attached
+- MCP preserves the full release report and a null production authorization token for an ambiguous source bundle
+- an in-request A/B/A sidecar mutation invalidates production HTTP readiness and export without granting a production authorization token
 - release tokens bind finding counts, report statistics, and complete DRC bridge evidence
 - only an unavailable project revision can refuse a fabrication package before the exact board inputs are evaluated and digested
 - the fast fabrication refusal cites the same source-revision finding as the full report and states that the rest of the report was not computed

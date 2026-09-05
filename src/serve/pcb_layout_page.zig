@@ -4835,6 +4835,14 @@ fn releaseEvidenceBlocked(gate: fab_gate.Result, lock: fab_release.Lock) bool {
         fab_release.projectStatusBlocksRelease(lock.project_status);
 }
 
+/// A prototype handoff is deliberately allowed to carry failed/incomplete
+/// production evidence. It still needs a resolved board, an exact snapshot
+/// token, and the explicit browser acknowledgment; actual composition errors
+/// and a token that changes during generation remain hard failures.
+fn prototypeExport(req: *httpz.Request) bool {
+    return queryFlag(req, "prototype");
+}
+
 fn releaseNeedsWaiver(gate: fab_gate.Result, lock: fab_release.Lock) bool {
     return gate.report.errors.len > 0 or gate.report.warnings.len > 0 or gate.drc.raw.len > gate.drc.effective.len or
         fab_release.projectStatusNeedsWaiver(lock.project_status);
@@ -4999,7 +5007,7 @@ fn pcbFabReadinessApiHooked(
     var lock = (try releaseLock(ctx, req, res, name, evidence)) orelse return;
     fab_release.bindBaseline(&lock, project_before, layout_before, bom_before);
     fab_release.bindTracedInputs(&lock, traced_inputs, read_trace.verify());
-    if (releaseEvidenceBlocked(gate, lock)) {
+    if (releaseEvidenceBlocked(gate, lock) and !prototypeExport(req)) {
         res.status = 500;
         var failed_json: std.Io.Writer.Allocating = .init(req.arena);
         try fab_release.writeReadinessJson(req.arena, &failed_json.writer, evidence, lock);
@@ -5023,8 +5031,10 @@ fn pcbFabReadinessApiHooked(
 ///
 /// Gated by the fab-readiness report (`/api/fab-readiness`): every request must
 /// echo that exact report's `?confirm=<release_token>`. Remaining findings also
-/// require `?waive=1`; internal check failures are never waivable. `?dnp=keep`
-/// keeps Do-Not-Populate parts in the centroid CSV
+/// require `?waive=1`. The browser's explicit test-board path sends
+/// `?prototype=1`, echoes the separately labeled prototype snapshot token, and
+/// may package incomplete production evidence; the ZIP records every finding.
+/// `?dnp=keep` keeps Do-Not-Populate parts in the centroid CSV
 /// (dropped by default). `?layout=<row>` packages the named saved layout —
 /// gate and files built from the same view, so they still agree.
 pub fn pcbGerbersApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
@@ -5078,14 +5088,16 @@ fn pcbGerbersApiHooked(
     // it cannot, deciding it again costs seconds and changes nothing: refuse
     // here, with the finding the full report would have carried, before the
     // board is restored, poured, checked and digested (`fab_package`).
-    if (fab_package.refuseEarly(req.arena, ctx.project_dir, name, queryOpt(req, "layout"), project_before)) |refusal| {
-        res.status = 500;
-        var refused: std.Io.Writer.Allocating = .init(req.arena);
-        try fab_package.writeRefusalJson(&refused.writer, name, refusal);
-        res.content_type = .JSON;
-        res.body = refused.written();
-        timer.lap("refused");
-        return;
+    if (!prototypeExport(req)) {
+        if (fab_package.refuseEarly(req.arena, ctx.project_dir, name, queryOpt(req, "layout"), project_before)) |refusal| {
+            res.status = 500;
+            var refused: std.Io.Writer.Allocating = .init(req.arena);
+            try fab_package.writeRefusalJson(&refused.writer, name, refusal);
+            res.content_type = .JSON;
+            res.body = refused.written();
+            timer.lap("refused");
+            return;
+        }
     }
     const gate_evaluator = if (module_res) |resolved| resolved.eval else &evaluator;
     const bom_evidence_complete = try fab_gate.prepareBomEvidence(req.arena, ctx.project_dir, name, block);
@@ -5129,7 +5141,8 @@ fn pcbGerbersApiHooked(
     fab_release.bindBaseline(&lock, project_before, layout_before, bom_before);
     fab_release.bindTracedInputs(&lock, traced_inputs, read_trace.verify());
     timer.lap("release_lock");
-    if (releaseEvidenceBlocked(gate, lock)) {
+    const prototype = prototypeExport(req);
+    if (releaseEvidenceBlocked(gate, lock) and !prototype) {
         res.status = 500;
         var failed_json: std.Io.Writer.Allocating = .init(req.arena);
         try fab_release.writeReadinessJson(req.arena, &failed_json.writer, evidence, lock);
@@ -5139,7 +5152,7 @@ fn pcbGerbersApiHooked(
         return;
     }
     const confirmed = if (queryOpt(req, "confirm")) |token| std.mem.eql(u8, token, &lock.token) else false;
-    const needs_waiver = releaseNeedsWaiver(gate, lock);
+    const needs_waiver = prototype or releaseNeedsWaiver(gate, lock);
     const waived = queryFlag(req, "waive");
     const waiver_missing = needs_waiver and !waived;
     if (!confirmed or waiver_missing) {
@@ -5186,7 +5199,8 @@ fn pcbGerbersApiHooked(
     var final_lock = (try releaseLock(ctx, req, res, name, evidence)) orelse return;
     fab_release.bindBaseline(&final_lock, project_before, layout_before, bom_before);
     fab_release.bindTracedInputs(&final_lock, traced_inputs, read_trace.verify());
-    if (fab_release.projectStatusBlocksRelease(final_lock.project_status) or !std.mem.eql(u8, &lock.token, &final_lock.token)) {
+    const production_status_blocked = !prototype and fab_release.projectStatusBlocksRelease(final_lock.project_status);
+    if (production_status_blocked or !std.mem.eql(u8, &lock.token, &final_lock.token)) {
         res.status = 428;
         var changed: std.Io.Writer.Allocating = .init(req.arena);
         try fab_release.writeReadinessJson(req.arena, &changed.writer, evidence, final_lock);
@@ -14008,6 +14022,14 @@ const FabEndpointResponse = struct {
     content_type: ?[]const u8,
 };
 
+const FabEndpointCall = struct {
+    gerbers: bool,
+    confirm: ?[]const u8,
+    waive: bool,
+    prototype: bool = false,
+    snapshot_hook: ?*ReleaseSnapshotHook = null,
+};
+
 fn callFabEndpoint(
     allocator: std.mem.Allocator,
     project: []const u8,
@@ -14015,16 +14037,23 @@ fn callFabEndpoint(
     confirm: ?[]const u8,
     waive: bool,
 ) !FabEndpointResponse {
-    return callFabEndpointHooked(allocator, project, gerbers, confirm, waive, null);
+    return callFabEndpointHooked(allocator, project, .{ .gerbers = gerbers, .confirm = confirm, .waive = waive });
 }
 
-fn callFabEndpointHooked(
+fn callPrototypeFabEndpoint(
     allocator: std.mem.Allocator,
     project: []const u8,
     gerbers: bool,
     confirm: ?[]const u8,
     waive: bool,
-    snapshot_hook: ?*ReleaseSnapshotHook,
+) !FabEndpointResponse {
+    return callFabEndpointHooked(allocator, project, .{ .gerbers = gerbers, .confirm = confirm, .waive = waive, .prototype = true });
+}
+
+fn callFabEndpointHooked(
+    allocator: std.mem.Allocator,
+    project: []const u8,
+    call: FabEndpointCall,
 ) !FabEndpointResponse {
     var state = serve_root.ServerState{};
     var server = Server{ .allocator = allocator, .project_dir = project, .auth_dir = project, .state = &state };
@@ -14032,13 +14061,14 @@ fn callFabEndpointHooked(
     defer request.deinit();
     request.param("name", "fabok");
     request.query("layout", "release");
-    if (confirm) |token| request.query("confirm", token);
-    if (waive) request.query("waive", "1");
+    if (call.confirm) |token| request.query("confirm", token);
+    if (call.waive) request.query("waive", "1");
+    if (call.prototype) request.query("prototype", "1");
     paths.beginRequest();
-    if (gerbers)
-        try pcbGerbersApiHooked(&server, request.req, request.res, snapshot_hook)
+    if (call.gerbers)
+        try pcbGerbersApiHooked(&server, request.req, request.res, call.snapshot_hook)
     else
-        try pcbFabReadinessApiHooked(&server, request.req, request.res, snapshot_hook);
+        try pcbFabReadinessApiHooked(&server, request.req, request.res, call.snapshot_hook);
     return .{
         .status = request.res.status,
         .body = try allocator.dupe(u8, request.res.body),
@@ -14283,8 +14313,8 @@ fn initializeFabReleaseGit(allocator: std.mem.Allocator, project: []const u8) !v
     try runFabTestGit(allocator, project, &.{ "-c", "user.name=Fab Test", "-c", "user.email=fab@test.invalid", "commit", "-q", "-m", "fixture" });
 }
 
-// spec: fabrication-release - duplicate design basenames are a non-waivable source-bundle ambiguity while all independent release findings remain visible
-test "duplicate release source basename blocks HTTP token and ZIP without hiding findings" {
+// spec: fabrication-release - production releases treat a duplicate design basename as a non-waivable source-bundle ambiguity, while an explicitly acknowledged prototype can export the resolved test board with every finding attached
+test "duplicate release source blocks production but permits acknowledged prototype" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const allocator = arena_state.allocator();
@@ -14303,6 +14333,7 @@ test "duplicate release source basename blocks HTTP token and ZIP without hiding
     try std.testing.expectEqual(@as(u16, 500), readiness_response.status);
     const readiness_json = try std.json.parseFromSliceLeaky(std.json.Value, allocator, readiness_response.body, .{});
     try std.testing.expect(readiness_json.object.get("release_token").? == .null);
+    try std.testing.expect(readiness_json.object.get("prototype_token").? == .string);
     try std.testing.expectEqualStrings("ambiguous", readiness_json.object.get("project_status").?.string);
     try std.testing.expect(std.mem.indexOf(u8, readiness_response.body, "source-bundle-ambiguous") != null);
     try std.testing.expect(std.mem.indexOf(u8, readiness_response.body, "intentional fixture waiver") != null);
@@ -14310,9 +14341,18 @@ test "duplicate release source basename blocks HTTP token and ZIP without hiding
     const package_response = try callFabEndpoint(allocator, project, true, "not-an-authorization", true);
     try std.testing.expectEqual(@as(u16, 500), package_response.status);
     try std.testing.expect(!std.mem.startsWith(u8, package_response.body, "PK\x03\x04"));
+
+    const prototype_ready = try callPrototypeFabEndpoint(allocator, project, false, null, false);
+    try std.testing.expectEqual(@as(u16, 200), prototype_ready.status);
+    const prototype_json = try std.json.parseFromSliceLeaky(std.json.Value, allocator, prototype_ready.body, .{});
+    const prototype_token = prototype_json.object.get("prototype_token").?.string;
+    try std.testing.expect(!prototype_json.object.get("internal_checks_complete").?.bool);
+    const prototype_package = try callPrototypeFabEndpoint(allocator, project, true, prototype_token, true);
+    try std.testing.expectEqual(@as(u16, 200), prototype_package.status);
+    try std.testing.expect(std.mem.startsWith(u8, prototype_package.body, "PK\x03\x04"));
 }
 
-// spec: fabrication-release - an in-request A/B/A sidecar mutation invalidates HTTP readiness and export without granting an authorization token
+// spec: fabrication-release - an in-request A/B/A sidecar mutation invalidates production HTTP readiness and export without granting a production authorization token
 test "in-request layout ABA invalidates HTTP readiness and export" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -14330,7 +14370,7 @@ test "in-request layout ABA invalidates HTTP readiness and export" {
     , .{});
     var hook = ReleaseSnapshotHook{ .path = layout_path, .during = during, .restored = original };
 
-    const readiness_response = try callFabEndpointHooked(allocator, project, false, null, false, &hook);
+    const readiness_response = try callFabEndpointHooked(allocator, project, .{ .gerbers = false, .confirm = null, .waive = false, .snapshot_hook = &hook });
     try std.testing.expect(!hook.failed);
     try std.testing.expectEqual(@as(u16, 500), readiness_response.status);
     const readiness_json = try std.json.parseFromSliceLeaky(std.json.Value, allocator, readiness_response.body, .{});
@@ -14340,7 +14380,7 @@ test "in-request layout ABA invalidates HTTP readiness and export" {
     try std.testing.expect(readiness_json.object.get("raw_drc_count").?.integer > 0);
 
     hook.failed = false;
-    const package_response = try callFabEndpointHooked(allocator, project, true, "stale-token", true, &hook);
+    const package_response = try callFabEndpointHooked(allocator, project, .{ .gerbers = true, .confirm = "stale-token", .waive = true, .snapshot_hook = &hook });
     try std.testing.expect(!hook.failed);
     try std.testing.expectEqual(@as(u16, 500), package_response.status);
     try std.testing.expect(!std.mem.startsWith(u8, package_response.body, "PK\x03\x04"));
@@ -14859,14 +14899,16 @@ test "deferred fabrication ID retains and refreshes its saved anchor" {
     try std.testing.expect(std.mem.indexOf(u8, js, "t.text=PCB.fab_text.text;t.fabrication_id=true") != null);
 }
 
-// spec: fabrication-release - DRC findings require a separate explicit browser acknowledgment while non-DRC evidence failures remain visibly non-waivable
-test "fabrication export explicitly acknowledges DRC findings" {
+// spec: fabrication-release - the browser always offers an explicit prototype/test-board acknowledgment that can export with DRC or production-readiness findings while keeping the reports visible
+test "fabrication export explicitly acknowledges prototype findings" {
     const js = @embedFile("assets/pcb_board.js");
     try std.testing.expect(std.mem.indexOf(u8, js, "id=\"fab-drc-ack\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "Acknowledge DRC findings and export") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "Acknowledge and export test board") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "prototype_token") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "prototype=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "drcAck&&!drcAck.checked") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "drc-report.json") != null);
-    try std.testing.expect(std.mem.indexOf(u8, js, "non-waivable release-evidence blockers") != null);
+    try std.testing.expect(std.mem.indexOf(u8, js, "does not mark this board production-ready") != null);
 }
 
 test "PCB viewer replaces detected footprint pin-one circles with live collision-aware dots" {

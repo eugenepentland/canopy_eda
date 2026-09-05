@@ -12484,10 +12484,12 @@ function fabPanelPreview(){
 function fabZipUrl(rep){
  var q=fabq();
  var add=function(k,v){q+=q?"&":"?";q+=k+"="+encodeURIComponent(v);};
- add("confirm",rep.release_token||"");
- if(rep.needs_waiver)add("waive","1");
+ var prototype=fabExportKind==="fabrication";
+ add("confirm",prototype?(rep.prototype_token||""):(rep.release_token||""));
+ if(prototype||rep.needs_waiver)add("waive","1");
  return (fabExportKind==="archive"?"/api/design-archive/":"/api/pcb-gerbers/")+encodeURIComponent(PCB.name)+q;}
 function fabq(){var fields=[];
+ if(fabExportKind==="fabrication")fields.push("prototype=1");
  var layout=curLayout||PCB.shown_layout;if(layout)fields.push("layout="+encodeURIComponent(layout));
  if(fabExportKind==="fabrication"&&fabPanel.enabled){
   fields.push("panel=1","panel_rows="+fabPanel.rows,"panel_columns="+fabPanel.columns,
@@ -12545,11 +12547,14 @@ function fabRenderReport(rep){
    var layer=d.layer==null?"":(" · layer "+d.layer),gap=d.gap_mm==null?"":(" · gap "+Number(d.gap_mm).toFixed(3)+" / "+Number(d.required_mm).toFixed(3)+" mm");
    h+='<li><code>'+pEsc(d.severity||"")+' · '+pEsc(d.kind||"DRC")+'</code>'+pEsc(where+layer+gap)+(parties.length?' — '+pEsc(parties.join(' ↔ ')):'')+'</li>';});
   h+='</ul></details>';}
- if(rep.raw_drc_count){
+ var prototype=fabExportKind==="fabrication";
+ if(prototype||rep.raw_drc_count){
   h+='<label class="fab-ack"><input type="checkbox" id="fab-drc-ack">'+
-   '<span>I understand this export contains <b>'+Number(rep.raw_drc_count)+'</b> DRC finding(s). '+
+   '<span>'+(prototype?'I understand this is a prototype/test-board export and accept every readiness issue and the <b>'+Number(rep.raw_drc_count||0)+'</b> DRC finding(s). ':'I understand this export contains <b>'+Number(rep.raw_drc_count)+'</b> DRC finding(s). ')+
    'All DRC errors and warnings will be included in the ZIP\'s dedicated <code>*-drc-report.json</code> and <code>*-drc-report.md</code> files.</span></label>';}
- if(!rep.internal_checks_complete)
+ if(!rep.internal_checks_complete&&prototype)
+  h+='<div class="fab-blocked">Production-release checks are incomplete. The checked acknowledgment permits a prototype Gerber export; it does not mark this board production-ready.</div>';
+ else if(!rep.internal_checks_complete)
   h+='<div class="fab-blocked">DRC findings can be accepted, but export remains disabled until the non-waivable release-evidence blockers above are resolved.</div>';
  if((!rep.errors||!rep.errors.length)&&(!rep.warnings||!rep.warnings.length))
  h+='<div class="fab-sec ok">Board is fab-ready.</div>';
@@ -12602,11 +12607,12 @@ function fabOpenModal(rep){
  [["top","Top"],["right","Right"],["bottom","Bottom"],["left","Left"]].forEach(function(pair){var side=pair[0],cap=pair[1],hole=document.getElementById("fab-panel-tooling-"+side),fid=document.getElementById("fab-panel-fiducial-"+side);if(hole)hole.addEventListener("change",function(){fabPanel["tooling"+cap]=hole.checked;fabPanelPreview();});if(fid)fid.addEventListener("change",function(){fabPanel["fiducial"+cap]=fid.checked;fabPanelPreview();});});
  panelSyncMethod();panelSyncRailPairs();
  var hasErr=rep.errors&&rep.errors.length,hasWarn=rep.needs_waiver,drcAck=document.getElementById("fab-drc-ack");
+ var prototype=fabExportKind==="fabrication",token=prototype?rep.prototype_token:rep.release_token;
  var what=fabExportKind==="archive"?"Complete design archive":"Fabrication release";
- title.textContent=hasErr?what+" — problems found":hasWarn?what+" — waiver required":what+" — ready to confirm";
- go.textContent=drcAck?"Acknowledge DRC findings and export":hasWarn?"Confirm waiver and export":(fabExportKind==="archive"?"Confirm and export archive":"Confirm release and export");
+ title.textContent=prototype?"Prototype/test-board export — review findings":hasErr?what+" — problems found":hasWarn?what+" — waiver required":what+" — ready to confirm";
+ go.textContent=prototype?"Acknowledge and export test board":drcAck?"Acknowledge DRC findings and export":hasWarn?"Confirm waiver and export":(fabExportKind==="archive"?"Confirm and export archive":"Confirm release and export");
  go.className=hasWarn?"btn fab-danger":"btn";
- function syncFabGo(){go.disabled=!rep.internal_checks_complete||!rep.release_token||(drcAck&&!drcAck.checked);}
+ function syncFabGo(){go.disabled=!token||(drcAck&&!drcAck.checked)||(!prototype&&!rep.internal_checks_complete);}
  if(drcAck)drcAck.addEventListener("change",syncFabGo);syncFabGo();
  go.onclick=function(){fabDownload(rep);};
  m.hidden=false;}

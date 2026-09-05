@@ -172,7 +172,7 @@ test "non-waivable release ids still exist at their emit sites" {
     try std.testing.expectEqual(@as(usize, hard_ids.len), upstream_checked + local_seen + tag_seen);
 }
 
-// spec: fabrication-release - revision, source-ID, BOM/centroid, and fallback-geometry identity failures can never be waived
+// spec: fabrication-release - production releases treat revision, source-ID, BOM/centroid, and fallback-geometry identity failures as non-waivable; an explicitly labeled prototype export does not claim that production gate passed
 test "release identity hard failures are nonwaivable" {
     const ordinary = fab_readiness.Report{ .errors = &.{.{ .id = "component-underrated", .message = "rating" }}, .warnings = &.{}, .stats = .{} };
     const duplicate_source = fab_readiness.Report{ .errors = &.{.{ .id = "duplicate-source-identity", .message = "duplicate" }}, .warnings = &.{}, .stats = .{} };
