@@ -217,7 +217,7 @@ fn collectMissingRequirements(
 /// so the author can SEE a wrong guess instead of discovering it as a bad board.
 /// Each net whose *name* reads as a layout-critical class (input rail, switch
 /// node, clock, RF, feedback, analog — `module_policy.isInterestingClass`) gets
-/// one `info` row naming the class and the `(module-policy (net-class …))`
+/// one `info` row naming the class and the `(module-policy (placement-class …))`
 /// override. Name-only (`classifyNetName`), so it runs on the netlist with no
 /// placement solve; the placement-aware view (incl. per-hub ModuleClass) stays
 /// on `/api/pcb-describe`. Ground/power/plain-signal nets are intentionally
@@ -239,7 +239,7 @@ fn checkLayoutClasses(
         const msg = std.fmt.allocPrint(
             allocator,
             "Net \"{s}\" reads as {s} for PCB layout (drives loop weighting / routing order) — " ++
-                "if that's wrong, pin it with (module-policy (net-class \"{s}\" <class>))",
+                "if that's wrong, pin it with (module-policy (placement-class \"{s}\" <class>))",
             .{ net.name, @tagName(cls), net.name },
         ) catch return;
         try violations.append(allocator, .{
@@ -5208,6 +5208,9 @@ test "layout class surfacing flags only the interesting nets" {
     try std.testing.expectEqual(@as(usize, 2), violations.items.len);
     for (violations.items) |v| {
         try std.testing.expectEqual(ViolationKind.layout_class_inferred, v.kind);
+        // The hint names the current spelling; (net-class …) is the deprecated one.
+        try std.testing.expect(std.mem.indexOf(u8, v.message, "(module-policy (placement-class") != null);
+        try std.testing.expect(std.mem.indexOf(u8, v.message, "(net-class") == null);
         try std.testing.expectEqual(Severity.info, v.severity);
     }
 }
