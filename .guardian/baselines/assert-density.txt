@@ -1,0 +1,2 @@
+# guardian-snapshot v3
+assert-density|tree: #.# assert(s)/fn over # fn(s), #.#/KLOC over # code line(s) — TIGER_STYLE averages #.#/fn (reference, not a gate)
