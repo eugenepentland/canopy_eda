@@ -1,8 +1,13 @@
 //! Design-file version history: before every mutation a timestamped copy of
-//! the `.sexp` is written under `<project>/history/<name>/<ts>/`, and this
+//! the `.sexp` is written under `<state>/history/<name>/<ts>/`, and this
 //! module lists, restores, and (for layouts) snapshots them. A snapshot
 //! captures the design source only — an old revision re-evaluates against
 //! today's lib/ modules.
+//!
+//! `<state>` is the project directory unless `--state-dir` / `NETLISP_STATE_DIR`
+//! relocated runtime output (`paths.stateDir`). Sources and sidecars never
+//! move; only these snapshots do, which is what lets a TRACKED project be
+//! served and laid out without its `git status` filling up.
 
 const std = @import("std");
 const infra_fs = @import("../infra/fs.zig");
@@ -24,6 +29,14 @@ const note_max_bytes: usize = 4096;
 // — so a Save/Update to the `.layouts.json` sidecar keeps a rolling backup
 // without polluting the source-snapshot list (`listSnapshots` skips the
 // `layouts/` subdir). Retention: newest `MAX_LAYOUT_SNAPSHOTS` per design.
+/// The directory that holds this project's `history/` tree: the process
+/// runtime-state root, which is `project_dir` itself unless `--state-dir` /
+/// `NETLISP_STATE_DIR` moved it. Every path below is built from this, so the
+/// relocation is one decision rather than four spellings.
+fn historyRoot(project_dir: []const u8) []const u8 {
+    return paths.stateDir(project_dir);
+}
+
 const layout_subdir = "layouts";
 const max_layout_snapshots: usize = 20;
 
@@ -63,7 +76,7 @@ pub fn snapshot(
     const id = try sortable_stamp.now(allocator);
     errdefer allocator.free(id);
 
-    const dir = try std.fmt.allocPrint(allocator, "{s}/history/{s}/{s}", .{ project_dir, name, id });
+    const dir = try std.fmt.allocPrint(allocator, "{s}/history/{s}/{s}", .{ historyRoot(project_dir), name, id });
     defer allocator.free(dir);
     try infra_fs.cwd().makePath(dir);
 
@@ -99,7 +112,7 @@ pub fn listSnapshots(
     project_dir: []const u8,
     name: []const u8,
 ) HistoryError![]SnapshotInfo {
-    const dir_path = try std.fmt.allocPrint(allocator, "{s}/history/{s}", .{ project_dir, name });
+    const dir_path = try std.fmt.allocPrint(allocator, "{s}/history/{s}", .{ historyRoot(project_dir), name });
     defer allocator.free(dir_path);
 
     var entries: std.ArrayList(SnapshotInfo) = .empty;
@@ -167,7 +180,7 @@ pub fn restore(
     for (id) |c| if (c == '/' or c == '\\' or c == 0) return error.InvalidSnapshotId;
     if (std.mem.indexOf(u8, id, "..") != null) return error.InvalidSnapshotId;
 
-    const dir = try std.fmt.allocPrint(allocator, "{s}/history/{s}/{s}", .{ project_dir, name, id });
+    const dir = try std.fmt.allocPrint(allocator, "{s}/history/{s}/{s}", .{ historyRoot(project_dir), name, id });
     defer allocator.free(dir);
     infra_fs.cwd().access(dir, .{}) catch return error.SnapshotNotFound;
 
@@ -186,7 +199,7 @@ pub fn restore(
 /// `<project>/history/<name>/layouts` — the layout-snapshot root for `name`
 /// (caller owns). One chokepoint so the path shape lives in a single place.
 fn layoutHistoryDir(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) std.mem.Allocator.Error![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}/history/{s}/" ++ layout_subdir, .{ project_dir, name });
+    return std.fmt.allocPrint(allocator, "{s}/history/{s}/" ++ layout_subdir, .{ historyRoot(project_dir), name });
 }
 
 /// Copy the `.layouts.json` sidecar at `sidecar_path` into
@@ -420,4 +433,51 @@ test "restore rejects traversal chars only, letting a clean id reach the lookup"
         error.SnapshotNotFound,
         restore(std.testing.allocator, "/no/such/project/dir", "design", "cleanid123"),
     );
+}
+
+// spec: Web Server - An installed runtime-state root moves history/ off the project, leaving its sources and sidecars in place
+test "a state root relocates history without moving the design" {
+    const alloc = std.testing.allocator;
+    var project_tmp = std.testing.tmpDir(.{});
+    defer project_tmp.cleanup();
+    var state_tmp = std.testing.tmpDir(.{});
+    defer state_tmp.cleanup();
+    const project = try project_tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project);
+    const state = try state_tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(state);
+
+    const sidecar = try std.fmt.allocPrint(alloc, "{s}/foo.layouts.json", .{project});
+    defer alloc.free(sidecar);
+    try infra_fs.cwd().writeFile(.{ .sub_path = sidecar, .data = "{\"rev\":7,\"layouts\":[]}" });
+
+    // Serving or laying out a TRACKED project used to drop history/ into it.
+    paths.setStateRoot(state);
+    defer paths.setStateRoot(null);
+
+    const id = (try snapshotLayouts(alloc, project, "foo", sidecar)) orelse return error.TestExpectedId;
+    defer alloc.free(id);
+
+    // The snapshot is readable exactly as before — the relocation is invisible
+    // to every caller, which is why no call site had to learn about it …
+    const p = try layoutSnapshotPath(alloc, project, "foo", id);
+    defer alloc.free(p);
+    try std.testing.expect(std.mem.startsWith(u8, p, state));
+    const data = try infra_fs.cwd().readFileAlloc(alloc, p, 1 << 20);
+    defer alloc.free(data);
+    try std.testing.expect(std.mem.indexOf(u8, data, "\"rev\":7") != null);
+
+    // … and the project directory grew no history/ at all.
+    const in_project = try std.fmt.allocPrint(alloc, "{s}/history", .{project});
+    defer alloc.free(in_project);
+    try std.testing.expectError(error.FileNotFound, infra_fs.cwd().access(in_project, .{}));
+
+    // Clearing the root puts the next snapshot back beside the design, so the
+    // relocation is a startup decision and not a one-way door.
+    paths.setStateRoot(null);
+    const back_id = (try snapshotLayouts(alloc, project, "foo", sidecar)) orelse return error.TestExpectedId;
+    defer alloc.free(back_id);
+    const back = try layoutSnapshotPath(alloc, project, "foo", back_id);
+    defer alloc.free(back);
+    try std.testing.expect(std.mem.startsWith(u8, back, project));
 }

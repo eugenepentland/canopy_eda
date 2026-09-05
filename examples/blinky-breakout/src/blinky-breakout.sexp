@@ -62,8 +62,9 @@
   (let t-blink (* 0.8 (* r-osc c-osc)))
   (let f-blink (/ 1.0 t-blink))
 
-  ;; Assertions are recorded, not fatal: a failing one is a finding in
-  ;; `netlisp check` and in the review report, never a stopped build.
+  ;; Assertions never stop evaluation: every one below is checked and recorded,
+  ;; so one run reports all of them. `build` and `export-kicad` then refuse to
+  ;; emit anything if one failed; `check` and the review report it and carry on.
   (assert (> (- v-in v-rail) 0.5)
     "LDO input-to-output headroom must exceed the regulator's dropout voltage")
   (assert-range (* i-led 1000.0) 2.0 10.0 "LED current (mA)")

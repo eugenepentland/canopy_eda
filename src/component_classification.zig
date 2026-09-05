@@ -200,6 +200,23 @@ fn describesConnector(inst: env.Instance) bool {
     return false;
 }
 
+/// True when `ref_des` names board FIXTURE rather than a circuit block: a test
+/// point, a mounting hole or its hardware, or a fiducial. Each is a pad and a
+/// label and nothing else.
+///
+/// The schematic's hub/spoke split (`render_svg/draw.isHubRef`) calls every
+/// non-passive prefix a hub, so these count as hubs and are drawn as hubs —
+/// correctly, they do have a pad on a net. But a surface budgeting how many
+/// BLOCKS it can draw legibly must not spend that budget on them: a 20-part
+/// board with four test points and four mounting holes has four real blocks,
+/// not twelve. They still render; they just do not crowd the sheet.
+pub fn isFixtureClass(ref_des: []const u8) bool {
+    const fixtures = [_][]const u8{ "TP", "H", "MH", "MK", "M", "FID" };
+    const class = refDesClass(ref_des);
+    for (fixtures) |c| if (std.mem.eql(u8, class, c)) return true;
+    return false;
+}
+
 fn refDesClass(ref_des: []const u8) []const u8 {
     var end: usize = 0;
     while (end < ref_des.len and std.ascii.isAlphabetic(ref_des[end])) : (end += 1) {}

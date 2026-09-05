@@ -14,6 +14,7 @@ const font = @import("font5x7.zig");
 const png = @import("png.zig");
 const review = @import("review.zig");
 const net_name = @import("net_name.zig");
+const component_classification = @import("component_classification.zig");
 
 /// Schematic pin ordering / connection-routing presentation.
 pub const View = enum { sequential, functional };
@@ -41,6 +42,10 @@ pub const Error = render_html.RenderError || svg2pdf.Error || png.Error || error
     TooManyBlocks,
 };
 
+/// How many CIRCUIT hubs an unfocused contact sheet will draw before it
+/// demands a `sub`/`ref` focus, so the output stays inspectable rather than
+/// stamp-sized. Board fixture — test points, mounting holes, fiducials — is
+/// drawn but never counted (`countedHubs`).
 const max_unfocused_hubs: usize = 8;
 const max_height: f32 = 6000;
 const margin: f32 = 24;
@@ -67,7 +72,7 @@ pub fn errorMessage(err: anyerror) []const u8 {
         error.SubNotFound => "schematic sub-block not found",
         error.RefNotFound => "schematic hub ref not found (use its full path when a leaf ref is ambiguous)",
         error.NoSchematicBlocks => "target contains no renderable schematic hub",
-        error.TooManyBlocks => "design has more than eight schematic hubs; choose sub=<slug> or ref=<hub>",
+        error.TooManyBlocks => "design has more than eight schematic circuit hubs (test points, mounting holes and fiducials are not counted); choose sub=<slug> or ref=<hub>",
         else => @errorName(err),
     };
 }
@@ -89,7 +94,7 @@ pub fn render(
 
     const refs = try selectRefs(allocator, block, &ctx, opts);
     if (refs.len == 0) return error.NoSchematicBlocks;
-    if (opts.sub == null and opts.ref == null and refs.len > max_unfocused_hubs) return error.TooManyBlocks;
+    if (opts.sub == null and opts.ref == null and countedHubs(refs) > max_unfocused_hubs) return error.TooManyBlocks;
 
     var pin_groups: std.ArrayList(env_mod.PinGroup) = .empty;
     try collectPinGroups(allocator, block, &pin_groups);
@@ -121,6 +126,19 @@ pub fn render(
 
     const width = std.math.clamp(opts.width, 320, 4000);
     return paintDocuments(allocator, docs.items, width, opts.theme);
+}
+
+/// How many of `refs` spend the legibility budget: every hub that is not board
+/// fixture. Four test points and four mounting holes used to be eight "hubs",
+/// so the twenty-part example refused to render whole and demanded a `--ref`
+/// for a sheet that has four real blocks on it.
+fn countedHubs(refs: []const []const u8) usize {
+    var n: usize = 0;
+    for (refs) |ref| {
+        if (component_classification.isFixtureClass(net_name.leaf(ref))) continue;
+        n += 1;
+    }
+    return n;
 }
 
 fn selectRefs(
@@ -484,6 +502,82 @@ test "native schematic render returns PNG bytes" {
     const bytes = try render(arena.allocator(), &block, "", .{ .width = 640 });
     try std.testing.expect(bytes.len > 100);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x89, 0x50, 0x4e, 0x47 }, bytes[0..4]);
+}
+
+/// Nine hubs — four circuit blocks plus five board fixture parts — one net so
+/// every one of them reaches `hub_order`. Nine is deliberately one over
+/// `max_unfocused_hubs`, so only the fixture exclusion can let it render.
+const heavy_refs = [_][]const u8{ "U1", "U2", "J1", "J2", "TP1", "TP2", "TP3", "TP4", "H1" };
+/// The same nine slots with every fixture ref renamed to a circuit hub: the
+/// control that proves the cap still bites.
+const crowded_refs = [_][]const u8{ "U1", "U2", "J1", "J2", "U3", "U4", "U5", "U6", "U7" };
+
+/// One `(instance …)` per ref, wearing a nameless part — the render only needs
+/// the ref-des to classify and box it.
+fn refInstances(comptime refs: []const []const u8) [refs.len]env_mod.Instance {
+    var out: [refs.len]env_mod.Instance = undefined;
+    for (&out, refs) |*inst, ref| inst.* = .{ .ref_des = ref, .component = "part", .value = "", .footprint = "", .symbol = "" };
+    return out;
+}
+
+/// Pad 1 of every ref, so one net joins them all and none is dropped as
+/// unconnected before the hub order is built.
+fn refPins(comptime refs: []const []const u8) [refs.len]env_mod.PinRef {
+    var out: [refs.len]env_mod.PinRef = undefined;
+    for (&out, refs) |*pin, ref| pin.* = .{ .ref_des = ref, .pin = "1" };
+    return out;
+}
+
+const heavy_instances = refInstances(&heavy_refs);
+const heavy_pins = refPins(&heavy_refs);
+const heavy_nets = [_]env_mod.Net{.{ .name = "SIG", .pins = &heavy_pins }};
+const crowded_instances = refInstances(&crowded_refs);
+const crowded_pins = refPins(&crowded_refs);
+const crowded_nets = [_]env_mod.Net{.{ .name = "SIG", .pins = &crowded_pins }};
+
+const heavy_block: env_mod.DesignBlock = .{
+    .name = "fixture heavy",
+    .instances = &heavy_instances,
+    .nets = &heavy_nets,
+    .ports = &.{},
+    .notes = &.{},
+    .groups = &.{},
+    .sub_blocks = &.{},
+};
+
+// spec: Web Server - Test points, mounting holes and fiducials do not spend the unfocused schematic PNG's hub budget
+test "board fixture does not spend the unfocused hub budget" {
+    // Every non-passive prefix is a hub, so a twenty-part board with four test
+    // points and four mounting holes reported twelve of them and demanded a
+    // --ref for a sheet that has four real blocks on it.
+    const mixed = [_][]const u8{ "U1", "U2", "J1", "J2", "TP1", "TP2", "TP3", "TP4", "H1", "H2", "H3", "H4", "FID1" };
+    try std.testing.expectEqual(@as(usize, 4), countedHubs(&mixed));
+
+    // A sub-block path is classified by its leaf, not by the block name.
+    const nested = [_][]const u8{ "power/TP1", "power/U3" };
+    try std.testing.expectEqual(@as(usize, 1), countedHubs(&nested));
+
+    // The cap still bites on real circuit hubs — this is not a raise.
+    const nine_real = [_][]const u8{ "U1", "U2", "U3", "U4", "U5", "U6", "U7", "U8", "U9", "TP1" };
+    try std.testing.expect(countedHubs(&nine_real) > max_unfocused_hubs);
+}
+
+// spec: Web Server - An unfocused schematic PNG renders a board whose hub count is only over the cap because of its test points and mounting holes
+test "a fixture-heavy board renders unfocused, nine real hubs still refuse" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var block = heavy_block;
+    const bytes = try render(arena.allocator(), &block, "", .{ .width = 640 });
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x89, 0x50, 0x4e, 0x47 }, bytes[0..4]);
+
+    // The same nine slots with the five fixture parts renamed into circuit
+    // hubs is over the cap, so the exclusion is what let the first render
+    // through rather than a raised limit.
+    var crowded = heavy_block;
+    crowded.instances = &crowded_instances;
+    crowded.nets = &crowded_nets;
+    try std.testing.expectError(error.TooManyBlocks, render(arena.allocator(), &crowded, "", .{ .width = 640 }));
 }
 
 // spec: Web Server - Schematic image view parsing accepts the UI's Sequential and Functional names and defaults to Functional

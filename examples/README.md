@@ -34,8 +34,8 @@ The three lines at the top are the design's own assertions:
 
 ```text
 PASS: LDO input-to-output headroom must exceed the regulator's dropout voltage
-PASS: LED current (mA) = 4.8148 (range 2.0-10.0)
-PASS: Blink rate (Hz) = 2.6596 (range 0.5-5.0)
+PASS: LED current (mA) = 4.8148 (range 2-10)
+PASS: Blink rate (Hz) = 2.6596 (range 0.5-5)
 ```
 
 The build also **writes two things back into `src/`**:
@@ -144,16 +144,30 @@ These bindings are then used as values:
 
 Assertions never interrupt *evaluation*: the design is evaluated to the end
 and every assertion is recorded, so one run tells you about all of them rather
-than stopping at the first. They then surface in `netlisp build`, in `netlisp
-check` and in the review PDF — and a failing one makes those commands exit
-non-zero, so nothing quietly ships a board whose own arithmetic disagrees with
-it. Change `r-led` to `27R` and rebuild:
+than stopping at the first. What happens next is decided per command, by what
+it hands you (`netlisp help` states the same rule):
+
+* **`build` and `export-kicad` hand off the board.** A failed assertion is
+  fatal there: every assertion prints, the failing ones at `file:line:col`,
+  and *nothing* is written — no resolved netlist, no `.bom`, no KiCad project.
+  Exit 1.
+* **`check` reports.** The failure is one error-severity finding beside the
+  ERC and requirement findings, the whole report still prints, exit 1.
+* **`export-pdf`, the served pages and `review-audit` review.** The failure
+  lands in the validation table and the document is still produced: a review
+  of a board that fails its own arithmetic is exactly what you want to read.
+
+Change `r-led` to `27R` and rebuild:
 
 ```text
 PASS: LDO input-to-output headroom must exceed the regulator's dropout voltage
-FAIL: LED current (mA) = 48.1481 (range 2.0-10.0)
-PASS: Blink rate (Hz) = 2.6596 (range 0.5-5.0)
-Build failed: assertion violations
+FAIL: examples/blinky-breakout/src/blinky-breakout.sexp:70:17: LED current (mA) = 48.1481 (range 2-10)
+PASS: Blink rate (Hz) = 2.6596 (range 0.5-5)
+Build failed: the design's own assertions do not hold — nothing was emitted.
+  Evaluation never stops at an assertion, so every one above was checked; a
+  command that EMITS refuses to write a netlist, BOM or export the design's
+  own arithmetic contradicts. `netlisp check` reports the same failures as
+  findings beside ERC, prints its whole report, and exits 1.
 ```
 
 ### The board boundary
@@ -330,7 +344,17 @@ file is the design, and the page re-renders when it changes.
 
 Serving or laying out a project makes the tool write runtime state beside it —
 `logs/` for the interaction log, `history/` for layout snapshots. Both are
-git-ignored here; the tracked example is `src/` and `lib/` only.
+git-ignored here; the tracked example is `src/` and `lib/` only. To keep it out
+of the project entirely, put that output somewhere else:
+
+```bash
+zig build run -- serve --project-dir examples/blinky-breakout \
+    --state-dir ~/.cache/netlisp/blinky-state
+```
+
+`--state-dir <d>` (or `NETLISP_STATE_DIR`) works on every command and moves
+only what the tool writes while running; sources, sidecars and exports stay
+where they are.
 
 ## 5. Lay it out and route it
 

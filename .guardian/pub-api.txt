@@ -275,6 +275,7 @@ src/commands.zig::cmdSyncKicadSch | fn cmdSyncKicadSch(allocator: std.mem.Alloca
 src/commands.zig::cmdSystemCheck | fn cmdSystemCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::syncKicadSchReport | fn syncKicadSchReport(allocator: std.mem.Allocator, args: []const []const u8) CommandError!SyncSchReport
 src/component_classification.zig::isActiveSemiconductor | fn isActiveSemiconductor(inst: env.Instance) bool
+src/component_classification.zig::isFixtureClass | fn isFixtureClass(ref_des: []const u8) bool
 src/component_classification.zig::isPassThroughConnector | fn isPassThroughConnector(inst: env.Instance) bool
 src/config.zig::allowRemote | fn allowRemote(allocator: std.mem.Allocator) bool
 src/config.zig::cseEmail | fn cseEmail(allocator: std.mem.Allocator) ?[]u8
@@ -288,6 +289,7 @@ src/config.zig::digikeyMaxInFlight | fn digikeyMaxInFlight(allocator: std.mem.Al
 src/config.zig::digikeyMinIntervalMs | fn digikeyMinIntervalMs(allocator: std.mem.Allocator) u64
 src/config.zig::gitAutocommitEnabled | fn gitAutocommitEnabled(allocator: std.mem.Allocator) bool
 src/config.zig::libDir | fn libDir(allocator: std.mem.Allocator) ?[]u8
+src/config.zig::stateDir | fn stateDir(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::stdlibDir | fn stdlibDir(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::wardAuthServerUrl | fn wardAuthServerUrl(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::wardCacheTtlSecs | fn wardCacheTtlSecs(allocator: std.mem.Allocator, default: i64) i64
@@ -762,9 +764,14 @@ src/eval/evaluator.zig::setErrorFmt | fn setErrorFmt(self: *Evaluator, span: ast
 src/eval/evaluator.zig::warnFmt | fn warnFmt(self: *Evaluator, span: ast.Span, comptime fmt: []const u8, args: anytype) void
 src/eval/fmt.zig::Directive struct_
 src/eval/fmt.zig::DirectiveArg enum_
+src/eval/fmt.zig::Failure struct_
 src/eval/fmt.zig::FmtError value
+src/eval/fmt.zig::assertRangeMessage | fn assertRangeMessage( allocator: std.mem.Allocator, label: []const u8, value: f64, lo: f64, hi: f64, ) FmtError![]const u8
+src/eval/fmt.zig::directive_list value
 src/eval/fmt.zig::directives value
 src/eval/fmt.zig::format | fn format(allocator: std.mem.Allocator, template: []const u8, args: []const Value) FmtError![]const u8
+src/eval/fmt.zig::formatMeasured | fn formatMeasured(writer: *std.Io.Writer, v: f64) FmtError!void
+src/eval/fmt.zig::formatWhere | fn formatWhere( allocator: std.mem.Allocator, template: []const u8, args: []const Value, where: *Failure, ) FmtError![]const u8
 src/eval/footprint_pads.zig::PadIds value
 src/eval/footprint_pads.zig::get | fn get(self: *Evaluator, fp_name: []const u8) ?*const PadIds
 src/eval/forms.zig::ArityViolation struct_
@@ -839,6 +846,7 @@ src/eval/instance.zig::PinTail struct_
 src/eval/instance.zig::ResolvedComponent struct_
 src/eval/instance.zig::TrailingArgs struct_
 src/eval/instance.zig::buildInstance | fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) EvalError!InstanceResult
+src/eval/instance.zig::checkSuffixedPinToken | fn checkSuffixedPinToken( self: *Evaluator, node: Node, ref_des: []const u8, form: []const u8, pads: PartPads, ) EvalError!void
 src/eval/instance.zig::componentFamily | fn componentFamily(val: Value) []const u8
 src/eval/instance.zig::evalFanoutForm | fn evalFanoutForm( self: *Evaluator, form_children: []const Node, env: *Env, instances: *std.ArrayList(Instance), all_pin_nets: *std.ArrayList(PinNetDecl), ) EvalError!void
 src/eval/instance.zig::evalSeriesForm | fn evalSeriesForm( self: *Evaluator, form_children: []const Node, env: *Env, instances: *std.ArrayList(Instance), all_pin_nets: *std.ArrayList(PinNetDecl), note_list: *std.ArrayList(Note), ) EvalError!void
@@ -1951,6 +1959,8 @@ src/paths.zig::beginRequest | fn beginRequest() void
 src/paths.zig::designSiblingPath | fn designSiblingPath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ext: []const u8, ) PathError![]u8
 src/paths.zig::designSourcePath | fn designSourcePath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) PathError![]u8
 src/paths.zig::designSourcePathUnique | fn designSourcePathUnique( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) UniquePathError![]u8
+src/paths.zig::setStateRoot | fn setStateRoot(dir: ?[]const u8) void
+src/paths.zig::stateDir | fn stateDir(project_dir: []const u8) []const u8
 src/pdf.zig::Anchor enum_
 src/pdf.zig::Arc struct_
 src/pdf.zig::Doc struct_

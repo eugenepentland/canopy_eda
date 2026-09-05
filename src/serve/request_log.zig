@@ -123,8 +123,11 @@ pub const Stage = struct {
 /// so two servers in one process stay independent, and so the OFF state is the
 /// default rather than something a test has to remember to arrange.
 pub const Store = struct {
-    /// Project directory whose `logs/` subdirectory receives the file. Null
-    /// (the default) disables logging entirely.
+    /// Directory whose `logs/` subdirectory receives the file — the project
+    /// directory, or the runtime-state root when `--state-dir` /
+    /// `NETLISP_STATE_DIR` relocated it (`paths.stateDir`, resolved by the one
+    /// caller that constructs a real server). Null (the default) disables
+    /// logging entirely.
     project_dir: ?[]const u8 = null,
     /// Serializes the stat+write pair across httpz worker threads.
     mutex: infra_fs.Mutex = .{},
