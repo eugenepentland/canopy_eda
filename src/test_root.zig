@@ -409,6 +409,7 @@ test {
     _ = @import("serve/api.zig");
     _ = @import("serve/pcb_step_export.zig");
     _ = @import("serve/auth.zig");
+    _ = @import("serve/ward_auth.zig");
     _ = @import("serve/auth_store.zig");
     _ = @import("serve/autocommit.zig");
     _ = @import("serve/board_backup.zig");
