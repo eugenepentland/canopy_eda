@@ -74,17 +74,14 @@
             .url = "https://github.com/eugenepentland/guardian-zig/archive/refs/tags/v0.2.1.tar.gz",
             .hash = "guardian-0.2.1-Qv8iu_GLPQBNOe5Zp3pE9AGxcf6Bxfm4dtwCaa6iaYyN",
         },
-        // Latest upstream main at migration time, vendored so the small Zig
-        // master compatibility delta is durable and reviewed with this tree.
-        .zt = .{ .path = "vendor/zt" },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
-        // httpz, websocket, metrics, and zt are intentionally vendored at
-        // exact revisions so a clean package build never follows moving Zig
-        // master dependencies or needs network access.
+        // httpz, websocket and metrics are intentionally vendored at exact
+        // revisions so a clean package build never follows moving Zig master
+        // dependencies or needs network access.
         "vendor",
         // Needed by the `gen-language-docs --check` build step (compares the
         // committed reference against the dispatch tables) and by Guardian,

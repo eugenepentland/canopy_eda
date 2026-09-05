@@ -1,7 +1,7 @@
 //! The `/library` page and its APIs: list library parts, fetch an ECAD model
 //! from Component Search Engine, and upload or delete a library entry.
 //! Mutations write under the project's `lib/` tree (traversal-safe); the HTML
-//! rendering itself lives in the `library.zt` template.
+//! rendering itself lives in the `templates/library.zig` template.
 
 const std = @import("std");
 const httpz = @import("httpz");
@@ -80,7 +80,7 @@ const RowWithMtime = struct {
 
 /// Walk `lib/components/`, `lib/pinouts/`, `lib/footprints/` and return
 /// a flat slice of `LibraryRow`s sorted newest-first by mtime, ready to
-/// feed the `library.zt` template. Strings are allocator-owned.
+/// feed the `templates/library.zig` template. Strings are allocator-owned.
 fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerError![]LibraryRow {
     var buf: std.ArrayList(RowWithMtime) = .empty;
     var referenced_pinouts = std.StringHashMapUnmanaged(void).empty;

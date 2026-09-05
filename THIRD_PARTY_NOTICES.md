@@ -13,17 +13,21 @@ It is grouped by how the code reaches a user:
 - **[Part 2 — Build-time only](#part-2--build-time-only)**: needed to build or
   check netlisp, never redistributed as part of it.
 
-Two things stand out and are stated up front rather than buried:
-
-> ⚠ **`vendor/zt` has no licence at all.** Its upstream
-> (<https://github.com/lalinsky/zt>) publishes no `LICENSE`, at the pinned
-> revision or at HEAD, so nobody has demonstrated permission to redistribute
-> it — and its code is linked into the `netlisp` executable. See
-> [zt](#zt-no-licence) and [`vendor/zt/LICENSE-MISSING.md`](vendor/zt/LICENSE-MISSING.md).
+One thing stands out and is stated up front rather than buried:
 
 > ⚠ **`occt-import-js` and the OpenCASCADE it embeds are LGPL-2.1, not
 > permissive.** They are served to browsers as two unmodified files. See
 > [occt-import-js + OCCT](#occt-import-js--open-cascade-technology).
+
+Every licence below is established. Nothing in this repository is
+redistributed without a grant.
+
+The server-rendered pages under `src/serve/templates/` are **first-party**:
+hand-maintained Zig that writes HTML to a writer, with its escaping sinks in
+`src/serve/templates/html.zig` and `src/escape.zig`. They were once compiled
+from a `.zt` source language by a third-party template compiler whose upstream
+published no licence; that compiler and its vendored copy were removed on
+2026-09-05, and no part of it survives in this tree or in the shipped binary.
 
 ## At a glance
 
@@ -39,7 +43,6 @@ Two things stand out and are stated up front rather than buried:
 | [http.zig (`httpz`)](#httpz-httpzig) | `e6c23eb9` | `MIT` | `vendor/httpz/` | binary |
 | [websocket.zig](#websocketzig) | `3318a78a` | `MIT` | `vendor/httpz/deps/websocket/` | binary |
 | [metrics.zig](#metricszig) | `21fe85ea` | `MIT` | `vendor/httpz/deps/metrics/` | binary |
-| [zt](#zt-no-licence) | `a8b94373` | **none — unresolved** | `vendor/zt/` | binary |
 | [Hershey Simplex fonts](#hershey-simplex-vector-fonts) | 1967 data | public-domain data, acknowledgement required | `src/silk_font.zig`, `src/serve/assets/pcb_board.js` | binary + browser |
 | [Adobe Core 14 AFM metrics](#adobe-core-14-afm-font-metrics) | Core14 AFMs (1997) | Adobe AFM redistribution notice | `src/pdf_afm.zig` | binary |
 | [Zig standard library](#zig-standard-library) | 0.17.0-dev.1683+5ceec001b | `MIT` | linked from the compiler | binary |
@@ -388,39 +391,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
-
-## zt (no licence)
-
-| | |
-| --- | --- |
-| **Revision** | `a8b94373999c2483efa5f646438263785f70743d` (branch `main`) |
-| **Licence** | **None. Upstream publishes no licence of any kind.** |
-| **Upstream** | <https://github.com/lalinsky/zt> |
-| **In this tree** | `vendor/zt/` |
-| **Modified** | Yes — ported to the pinned Zig snapshot (~350 changed lines in `src/ast.zig`, `codegen.zig`, `main.zig`, `parser.zig`, plus build files) |
-
-The HTML template language that compiles `src/serve/templates/*.zt` into Zig.
-It is **not** build-time only: `build.zig` also does
-`exe_mod.addImport("zt", …)`, so its runtime module is compiled into the
-shipped `netlisp` executable.
-
-**Verified 2026-09-05, and this is a blocker, not an oversight:**
-
-- `GET /repos/lalinsky/zt/license` → `404 Not Found`
-- the repository record's `license` field is `null`
-- the full recursive git tree at `a8b94373…` (59 entries) contains no
-  `LICENSE`, `LICENSE.*`, `COPYING`, `NOTICE` or `LEGAL` file
-- the repository root at `main` (HEAD) has the same 11 top-level entries — no
-  licence file there either
-- neither `README.md` nor `build.zig.zon` states a licence or an SPDX id
-
-With no grant, the author retains all rights and **no one — this repository
-included — has demonstrated permission to copy, modify or redistribute this
-code.** netlisp's MIT licence cannot cover it, so `vendor/zt/` is explicitly
-outside the scope of [`LICENSE`](LICENSE).
-
-Details and the three ways out (ask upstream to license it, replace it, or
-drop it) are in [`vendor/zt/LICENSE-MISSING.md`](vendor/zt/LICENSE-MISSING.md).
 
 ## Hershey Simplex vector fonts
 

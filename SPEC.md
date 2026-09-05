@@ -205,9 +205,9 @@ write.
 ## Development pipeline
 
 The build graph and tracked hooks keep a fresh worktree deterministic while
-shortening the commit-to-deploy critical path. Generated zt output is committed
-and still regenerated from source; every reader waits on the same generate and
-format predecessor. Every internal netlisp artifact and workflow uses self-hosted
+shortening the commit-to-deploy critical path. Nothing under `src/` is
+generated at build time, so every reader compiles the committed tree with no
+ordering to arrange. Every internal netlisp artifact and workflow uses self-hosted
 Debug. Release preparation is the sole ReleaseSafe boundary: it gates one clean
 commit, then overlaps the Debug full suite with the independent self-hosted
 ReleaseSafe production build and publishes an immutable, checksum-addressed
@@ -225,7 +225,6 @@ candidate for deployment.
 - Pins every gated full-test invocation with `--seed=1` so an unchanged tree's test run is a cache hit
 - Resolves build identity at runtime without making each commit a compiler input
 - Follows a worktree gitdir pointer and commondir to the shared refs, with packed-refs and detached HEAD fallbacks
-- Orders generated templates before every compiler and Guardian consumer
 - Runs full tests and forces the concurrent ReleaseSafe build through the self-hosted backend for one exact commit
 - Cancels the complete concurrent ReleaseSafe process group as soon as full Debug tests fail
 - Selects a bounded reverse-dependency Debug subset from the Git diff, always includes boundary smoke tests, then analyzes the whole suite without narrowing the release gate
@@ -7841,6 +7840,12 @@ is what makes the predicate exact rather than approximately right.
 - The sync-kicad-sch CLI subcommand, the sync-kicad-sch endpoint and the sync_kicad_sch MCP tool plan one guarded schematic push, so all three name the same target and the same per-file operations
 - The import-kicad CLI subcommand and the import_kicad MCP tool run one importer, so importing one board under one name writes the same design and the same generated library files
 - The push endpoint and the build MCP tool publish one live scene for one design, so both name every part by the ref-des its stable id owns rather than by its position in the source
+
+- A page template escapes every interpolated value for the context it lands in, so a component description carrying markup renders as text and cannot open a tag or close an attribute
+- A page attribute whose value is null is omitted whole rather than emitted empty, so a navigation link that is not the current page carries no current-page marking at all
+- A page value that renders itself writes its own markup straight into the page, in a text node and in an attribute alike
+- An embedded style or script block passes through a page unescaped, exactly as it was compiled in
+- One page template nests another through a single render call, and the same template bound as a component renders byte for byte what the direct call renders
 - completeness-waiver: concurrent access (httpz owns request threading and each handler answers from its own response arena; the two pieces of state that really are shared — the live scene graph and a design's layout sidecar — are specified where they live, under the push and layout-backfill sections, rather than restated per endpoint)
 
 ## fab_readiness

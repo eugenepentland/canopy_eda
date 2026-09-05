@@ -12,12 +12,34 @@ const std = @import("std");
 /// means the same helper is safe in every SVG/HTML text and attribute context,
 /// so callers never have to reason about which context they are in.
 pub fn writeXml(w: anytype, s: []const u8) !void {
+    return writeEntities(w, s, "&#39;");
+}
+
+/// `writeXml` with the apostrophe spelled as the hexadecimal character
+/// reference `&#x27;` rather than the decimal `&#39;`. Both are U+0027 to every
+/// XML and HTML parser, so the two forms are interchangeable for a reader; they
+/// are not interchangeable for a byte comparison, which is the whole reason
+/// this variant exists. The page templates in `src/serve/templates/` have
+/// emitted the hex form since they were written, and their rendered pages are
+/// compared byte-for-byte against captured references, so they call this and
+/// every other caller calls `writeXml`.
+///
+/// Only `writeXml`'s spelling round-trips through `decodeXmlAlloc`; nothing
+/// decodes template output, which goes straight to a browser.
+pub fn writeXmlHexApos(w: anytype, s: []const u8) !void {
+    return writeEntities(w, s, "&#x27;");
+}
+
+/// The one entity table. `apostrophe` is the only thing the two public
+/// spellings above disagree about — keeping the other four in a single switch
+/// is what stops them from drifting apart.
+fn writeEntities(w: anytype, s: []const u8, comptime apostrophe: []const u8) !void {
     for (s) |c| switch (c) {
         '&' => try w.writeAll("&amp;"),
         '<' => try w.writeAll("&lt;"),
         '>' => try w.writeAll("&gt;"),
         '"' => try w.writeAll("&quot;"),
-        '\'' => try w.writeAll("&#39;"),
+        '\'' => try w.writeAll(apostrophe),
         else => try w.writeByte(c),
     };
 }
@@ -73,6 +95,25 @@ test "writeXml neutralizes a script/attribute breakout" {
     try std.testing.expect(std.mem.indexOfScalar(u8, written, '<') == null);
     try std.testing.expect(std.mem.indexOfScalar(u8, written, '>') == null);
     try std.testing.expect(std.mem.indexOfScalar(u8, written, '"') == null);
+}
+
+test "the two apostrophe spellings differ in nothing but the apostrophe" {
+    var decimal: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer decimal.deinit();
+    var hex: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer hex.deinit();
+    // Every byte, so a character escaped by one spelling and not the other
+    // fails here rather than on a page nobody diffed.
+    var all: [256]u8 = undefined;
+    for (&all, 0..) |*b, i| b.* = @intCast(i);
+    try writeXml(&decimal.writer, &all);
+    try writeXmlHexApos(&hex.writer, &all);
+
+    const at = std.mem.indexOf(u8, decimal.written(), "&#39;").?;
+    try std.testing.expectEqualStrings(decimal.written()[0..at], hex.written()[0..at]);
+    try std.testing.expectEqualStrings("&#39;", decimal.written()[at..][0..5]);
+    try std.testing.expectEqualStrings("&#x27;", hex.written()[at..][0..6]);
+    try std.testing.expectEqualStrings(decimal.written()[at + 5 ..], hex.written()[at + 6 ..]);
 }
 
 test "decodeXmlAlloc round-trips every byte writeXml can escape" {

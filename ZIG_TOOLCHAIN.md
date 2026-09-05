@@ -166,5 +166,5 @@ chore. The steps:
    moves `std` APIs.
 5. Re-measure the build-mode table above if the timings shifted noticeably.
 
-The dependency graph in `build.zig.zon` (httpz, zt, ward, guardian) is pinned
+The dependency graph in `build.zig.zon` (httpz, ward, guardian) is pinned
 separately and generally has to move with the compiler.
