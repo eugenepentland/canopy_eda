@@ -1,6 +1,11 @@
 # Web Server
 
-> Moved verbatim from CLAUDE.md (2026-08-19); linked from its Reference Docs section.
+**What this is:** the canonical reference for every HTTP route `netlisp serve`
+answers and every structured tool `netlisp tool` exposes, with request and
+response shapes. Read it if you are calling netlisp over HTTP, driving it from
+a script or an agent, or changing a server endpoint.
+[`agents.md`](agents.md) is the friendlier entry point for the tool surface;
+[`auth.md`](auth.md) covers who is allowed to call what.
 
 `netlisp serve` binds **`127.0.0.1:7050`** by default — netlisp is a local
 tool, and a loopback request is an admin (see [auth.md](auth.md)). A deployment
@@ -493,7 +498,7 @@ Auth in full: [auth.md](auth.md).
 
 #### Assembly variants over HTTP
 
-A design that declares `(variant "NAME" …)` forms (docs/sexpr-language.md →
+A design that declares `(variant "NAME" …)` forms (docs/sexp-language.md →
 “Assembly variants”) is served as ONE of them. Every surface defaults to the
 design's `(default)` variant, and failing that the base (implicit) one.
 
@@ -530,7 +535,7 @@ assembly than the caller asked for.
   the writer role. The readiness, draft, dossier and release paths read the
   system contract from `src/systems/<name>/system.sexp` when it exists and fall
   back to `system.json` otherwise (see
-  [docs/sexpr-language.md § System contracts](sexpr-language.md)); the
+  [docs/sexp-language.md § System contracts](sexp-language.md)); the
   document-editing and attestation endpoints still read and write the JSON
   form.
 - **System interface findings**: `GET /api/systems/:name/readiness` (and the
@@ -549,7 +554,7 @@ assembly than the caller asked for.
   joint are never reported — the manifest's canonical/alias layer exists
   precisely so `V_12V` and `V_12V_RF` are one conductor. The per-finding
   meanings are tabulated in
-  [docs/sexpr-language.md § `interface_mismatch` findings](sexpr-language.md).
+  [docs/sexp-language.md § `interface_mismatch` findings](sexp-language.md).
 - **System dossier**: `GET /systems/:name/dossier` — the draft package's
   self-contained HTML dossier as a readable page, byte-identical to the
   `review/<base>.html` member of the same system's `draft.zip` (one composer,
@@ -812,7 +817,7 @@ Tools include:
   must be under `lib/modules/` or `src/`. Returns
   `{ok,file,rewritten,written,netlist_equivalent,parts_without_pinout,
   positional_parts,skipped[{ref,pad,reason}],skipped_omitted,diff}`. Full rules
-  in `docs/sexpr-language.md`.
+  in `docs/sexp-language.md`.
 - **Hand-off exporters (read-only)**: `export_pinmap` `{name, format?, refs?}`
   and `export_spice` `{name}`. Both return the exported file **text itself**
   rather than a JSON envelope — so `netlisp tool export_pinmap … --output
@@ -848,7 +853,7 @@ Tools include:
   evaluated design-scope form set. Default `write:false` returns the three
   unified diffs without touching a file. Returns
   `{ok,design,moved,written,equivalent,files[{path,forms,lines,diff}]}`. Full
-  rules in `docs/sexpr-language.md` → "Sidecar files".
+  rules in `docs/sexp-language.md` → "Sidecar files".
 - **VFS file ops**: `read_file`, `list_dir`, `glob` (read-only);
   `write_file`, `edit_file`, `delete_file`, `move_file` (mutation).
 - **Build / state**: `build`, `regenerate_pinout`, `restore_version`.

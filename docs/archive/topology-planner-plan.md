@@ -33,7 +33,7 @@ the router already honours.
 ## Why this is not the disproved negotiated-congestion branch
 
 The PathFinder-style phase was tried and disproved (83/90, worse than doing
-nothing — docs/autorouter-plan.md:41) because it ran *inside* the DRC-gated
+nothing — docs/archive/autorouter-plan.md:41) because it ran *inside* the DRC-gated
 transactional router and could not pass through illegal intermediate states.
 The planner holds its overlapping/fractional state in its own continuous model
 where overlap is legal by construction, and hands the router only soft costs.
@@ -203,7 +203,7 @@ planner corridors are), plus the pour-fed rails from-zero must route as
 copper. **Not addressable:** `SPI_SCK` (lattice-resolution wall — legal
 detour clears obstacles by 0.07–0.20 mm, needs the 0.05 mm window path) and
 the `GND` buck-thermal-pad via-anchor case. The "six SPI nets in one J1
-corridor" story was retracted (docs/autorouter-plan.md:235) — don't judge the
+corridor" story was retracted (docs/archive/autorouter-plan.md:235) — don't judge the
 planner on it.
 
 **Success:** arm 1 or 2 ≥ 85/91 raw (vs 82) with no corpus regression and no

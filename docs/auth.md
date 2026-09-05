@@ -1,5 +1,10 @@
 # Auth
 
+**What this is:** netlisp's complete security model — who is allowed to call
+what, and what changes when the server is not on your own machine. Read it
+before exposing `netlisp serve` beyond loopback, before minting a token for a
+KiCad client, or when a request comes back `403`.
+
 netlisp is a **local tool**. It has no user database, no session store, no
 passwords or passkeys. By default it needs no external auth service. Local mode uses three
 rules in `src/serve/auth.zig`, and `authMiddleware` there is the single seam

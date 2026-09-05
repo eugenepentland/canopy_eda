@@ -1,6 +1,10 @@
 # Build System
 
-> Moved verbatim from CLAUDE.md (2026-08-19); linked from its Reference Docs section.
+**What this is:** the internals of netlisp's `build.zig` — build modes, codegen
+backends, the steps the graph exposes, and which command answers which
+question. Read it when a build behaves unexpectedly or you are adding a step;
+for the everyday commands, [`build-and-run.md`](build-and-run.md) and
+[`../CONTRIBUTING.md`](../CONTRIBUTING.md) are enough.
 
 Dependencies: `httpz` (HTTP server), `guardian` (code-quality gate).
 
