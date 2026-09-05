@@ -14,6 +14,11 @@ Nothing yet.
 
 ## [0.1.0] - 2026-09-05
 
+> **Clones made before 2026-09-05 must be re-cloned.** The history was
+> rewritten before this release to remove the maintainer's private board
+> designs, library and datasheets from every commit; commit ids changed.
+
+
 First public release. netlisp is a command-line EDA tool for schematic capture
 where the design is a set of `.sexp` text files rather than a drawing: one Zig
 binary evaluates them into a schematic viewer, checks, a BOM, a PCB layout and
