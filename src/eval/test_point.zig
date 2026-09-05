@@ -2,12 +2,15 @@
 //! with `(virtual)` preserving the schematic-only marker behavior.
 
 const std = @import("std");
+const connect_mod = @import("connect.zig");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("env.zig");
+const deprecations = @import("deprecations.zig");
 const evaluator_mod = @import("evaluator.zig");
 const instance_mod = @import("instance.zig");
 const modules = @import("modules.zig");
 const ids = @import("ids.zig");
+const sidecars = @import("sidecars.zig");
 
 const Node = ast.Node;
 const TestPoint = env_mod.TestPoint;
@@ -21,12 +24,18 @@ const Note = env_mod.Note;
 
 const component_name = "testpoint";
 
-/// Mutable design-block collections populated by a test-point form.
+/// The accumulators a `(section …)` shares with the block it lives in: every
+/// form a section may contain appends to the enclosing design's lists, not to a
+/// section-local copy. Carried as one struct because the section and
+/// sub-section dispatchers are at the parameter-count ceiling.
 pub const EvalContext = struct {
     instances: *std.ArrayList(Instance),
     pin_nets: *std.ArrayList(PinNetDecl),
     notes: *std.ArrayList(Note),
     test_points: *std.ArrayList(TestPoint),
+    /// `(connect …)`/`(chain …)` forms queued for the block's post-build
+    /// resolution pass — see `eval/connect.zig`.
+    connects: *std.ArrayList(connect_mod.Pending),
 };
 
 /// Parse a `(test-point "TP1" "NET" [(virtual)] (purpose "...")
@@ -105,6 +114,19 @@ pub fn evalForm(
         return null;
     }
 
+    // A non-virtual declaration is exactly `(instance "TP" testpoint (pin 1 "NET"))`
+    // plus the purpose/required-for metadata, so it is a second spelling for a
+    // physical part. `(virtual)` keeps its own meaning (a marker with no pad)
+    // and is NOT deprecated.
+    deprecations.note(
+        self,
+        form_children[0].span,
+        "a non-virtual (test-point \"{s}\" \"{s}\" …) places the same physical pad as " ++
+            "(instance \"{s}\" testpoint (pin 1 \"{s}\")) — prefer the instance spelling, " ++
+            "and keep (test-point …) for the (virtual) schematic-only marker",
+        .{ tp.ref_des, tp.net, tp.ref_des, tp.net },
+    );
+
     // The unified form is self-contained: callers should not have to retain
     // an `(import testpoint)` solely because the declaration now emits a pad.
     try modules.resolveImport(self, component_name, env);
@@ -115,6 +137,7 @@ pub fn evalForm(
         try self.pending_ids.append(self.allocator, .{
             .form_offset = form_children[0].span.offset -| 1,
             .id = inst_id,
+            .file = sidecars.pendingIdFile(self),
         });
     }
 
@@ -284,6 +307,22 @@ test "default form materializes a physical testpoint" {
     try std.testing.expectEqual(@as(usize, 1), block.test_points.len);
     try std.testing.expectEqualStrings("TP1", block.test_points[0].ref_des);
     try std.testing.expect(!block.test_points[0].virtual);
+    // Placing the same pad as `(instance "TP" testpoint (pin 1 …))` makes this
+    // a second spelling for one part, so it reports itself as deprecated —
+    // still working, and an info rather than a warning.
+    try std.testing.expectEqual(@as(usize, 1), block.deprecations.len);
+    try std.testing.expect(std.mem.indexOf(u8, block.deprecations[0].message, "testpoint (pin 1") != null);
+}
+
+// spec: eval/test_point - The (virtual) marker keeps its own meaning and is not reported as a deprecated spelling
+test "virtual test points are not deprecated" {
+    const block = try evalFixture(std.heap.page_allocator,
+        \\(design-block "probe"
+        \\  (test-point "TP_SIG" "SIG" (virtual)))
+    );
+    // Nothing else in the language expresses "a marker with no pad", so there
+    // is no spelling to recommend and nothing to deprecate.
+    try std.testing.expectEqual(@as(usize, 0), block.deprecations.len);
 }
 
 // spec: eval/test_point - Keeps (virtual) test points marker-only with no physical instance or pad net

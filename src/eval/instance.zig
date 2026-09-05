@@ -6,6 +6,8 @@
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("env.zig");
+const attrs_mod = @import("attrs.zig");
+const deprecations = @import("deprecations.zig");
 const evaluator_mod = @import("evaluator.zig");
 const Evaluator = evaluator_mod.Evaluator;
 const EvalError = evaluator_mod.EvalError;
@@ -15,6 +17,8 @@ const footprint_pads = @import("footprint_pads.zig");
 const suggest = @import("suggest.zig");
 const thermal = @import("thermal.zig");
 const forms_mod = @import("forms.zig");
+const variants = @import("variants.zig");
+const sidecars = @import("sidecars.zig");
 const PinNetDecl = evaluator_mod.PinNetDecl;
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -83,6 +87,10 @@ pub const ResolvedComponent = struct {
     pinout: []const u8,
     properties: []const env_mod.Property,
     attrs: []const []const u8,
+    /// The authored typed attributes, kept alongside `properties` (which
+    /// already contains them) so a later parts-table selection that overwrites
+    /// a rating can still be compared against what the design asked for.
+    typed_attrs: []const env_mod.Property = &.{},
     docs: env_mod.ComponentDocs = .{},
     /// The library part's `(thermal …)` envelope, carried through so every
     /// instance built from this component reaches the thermal analyzer with
@@ -111,6 +119,10 @@ pub fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent {
         .component_instance => |ci| ci.attrs,
         else => &.{},
     };
+    const typed: []const env_mod.Property = switch (val) {
+        .component_instance => |ci| ci.typed_attrs,
+        else => &.{},
+    };
     if (self.component_cache.get(family)) |cd| {
         return .{
             .family = family,
@@ -118,8 +130,9 @@ pub fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent {
             .footprint = cd.footprint_name,
             .symbol = cd.symbol_name,
             .pinout = cd.pinout_name,
-            .properties = cd.properties,
+            .properties = withTypedAttributes(self, cd.properties, typed),
             .attrs = attrs,
+            .typed_attrs = typed,
             .docs = cd.docs,
             .thermal = cd.thermal,
             .requirements = cd.requirements,
@@ -133,9 +146,54 @@ pub fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent {
         .footprint = "",
         .symbol = "",
         .pinout = "",
-        .properties = &.{},
+        .properties = withTypedAttributes(self, &.{}, typed),
         .attrs = attrs,
+        .typed_attrs = typed,
     };
+}
+
+/// The library component's properties with the instantiation's typed
+/// attributes layered on top.
+///
+/// The authored rating wins over a library default under the same key: the
+/// design just said `(cap-0402 "1uF" (rating 25V))` about THIS placement,
+/// which is strictly more specific than whatever the family declares for all
+/// of them. A parts-table selection later overrides both — the selected row is
+/// the physical part, and `erc.checkTypedAttributeMismatch` reports the case
+/// where it disagrees with what was asked for instead of letting it pass in
+/// silence.
+///
+/// `esr`/`esl` additionally land as the PDN model numbers
+/// (`pdn-esr-ohm` / `pdn-esl-h`) `placement/pdn_impedance` already reads, so
+/// an authored override reaches the impedance screen without teaching it a
+/// second spelling.
+fn withTypedAttributes(
+    self: *Evaluator,
+    base: []const env_mod.Property,
+    typed: []const env_mod.Property,
+) []const env_mod.Property {
+    if (typed.len == 0) return base;
+    var merged: std.ArrayList(env_mod.Property) = .empty;
+    for (base) |property| {
+        if (hasProperty(typed, property.key)) continue;
+        merged.append(self.allocator, property) catch return base;
+    }
+    for (typed) |property| {
+        merged.append(self.allocator, property) catch return base;
+        const slot = attrs_mod.slotForKey(property.key) orelse continue;
+        const model = attrs_mod.modelProperty(slot, property.value) orelse continue;
+        if (hasProperty(base, model.key) or hasProperty(merged.items, model.key)) continue;
+        const rendered = std.fmt.allocPrint(self.allocator, "{d}", .{model.value}) catch continue;
+        merged.append(self.allocator, .{ .key = model.key, .value = rendered }) catch return base;
+    }
+    return merged.toOwnedSlice(self.allocator) catch base;
+}
+
+fn hasProperty(properties: []const env_mod.Property, key: []const u8) bool {
+    for (properties) |property| {
+        if (std.ascii.eqlIgnoreCase(property.key, key)) return true;
+    }
+    return false;
 }
 
 /// Evaluate an `(instance "REF" (component …) (pin …) …)` form into an
@@ -167,6 +225,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         try self.pending_ids.append(self.allocator, .{
             .form_offset = form_children[0].span.offset -| 1,
             .id = inst_id,
+            .file = sidecars.pendingIdFile(self),
         });
     }
 
@@ -195,6 +254,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         .pinout = resolved.pinout,
         .properties = resolved.properties,
         .attrs = resolved.attrs,
+        .typed_attrs = resolved.typed_attrs,
         .docs = resolved.docs,
         .requirements = resolved.requirements,
         .requirements_ignored = resolved.requirements_ignored,
@@ -220,6 +280,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     var inline_notes: std.ArrayList(Note) = .empty;
     var inline_props: std.ArrayList(env_mod.Property) = .empty;
     var dnp_flag = false;
+    var variant_rules: std.ArrayList(env_mod.VariantRule) = .empty;
     var binds: env_mod.InstanceBinds = .{};
     var strap_oks: std.ArrayList(env_mod.StrapOk) = .empty;
     var nc_oks: std.ArrayList(env_mod.NcOk) = .empty;
@@ -245,6 +306,12 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         } else if (form.isForm("dnp")) {
             // (dnp) — mark Do Not Populate. Bare flag form (no value).
             dnp_flag = true;
+        } else if (variants.isInstanceForm(form)) {
+            // (only-in …) / (dnp-in …) / (value-in …) — assembly-variant
+            // clauses. Names are checked against the ROOT design's `(variant …)`
+            // declarations here, so a typo inside a module body reports the
+            // module's own file and line.
+            try variants.parseInstanceForm(self, form, ref_des, resolved.family, env, &variant_rules);
         } else if (form.isForm("decouples")) {
             try parseDecouples(self, form, ref_des, env, &binds.decouple);
         } else if (form.isForm("near")) {
@@ -289,9 +356,22 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
 
     warnPinoutlessMultiPad(self, form_children[0].span, &inst, reverse_pinout, pin_nets.items);
 
+    try variants.validateInstance(self, form_children[0].span, ref_des, dnp_flag, variant_rules.items);
+
     var final_inst = inst;
     final_inst.pinout_facts = summarisePinout(reverse_pinout);
-    final_inst.dnp = dnp_flag;
+    // The SELECTED assembly variant lands on the two fields the rest of the
+    // toolchain already reads — `dnp` and `value` — so ERC exemptions, the BOM,
+    // the KiCad attributes, the schematic and the layout need no variant
+    // awareness. The clauses themselves ride along for the population matrix.
+    const applied = variants.apply(self.variants.scope, variant_rules.items);
+    final_inst.dnp = dnp_flag or applied.dnp;
+    if (applied.value) |override| {
+        final_inst.variants.base_value = inst.value;
+        final_inst.value = override;
+    }
+    if (variant_rules.items.len > 0)
+        final_inst.variants.rules = variant_rules.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
     final_inst.bind = binds;
     final_inst.thermal.power = power;
     if (strap_oks.items.len > 0) final_inst.strap_oks = strap_oks.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
@@ -336,7 +416,10 @@ fn parseUnknownSubForm(
     const key = fc[0].asAtom() orelse return;
     if (env_mod.containsString(&known_forms, key)) return;
     const val = (try self.evalNode(fc[1], env)).asString() orelse {
-        if (!env_mod.containsString(&grid_hint_forms, key)) {
+        if (env_mod.containsString(&grid_hint_forms, key)) {
+            deprecations.note(self, form.span, "({s} …) on (instance \"{s}\" …) is accepted and does nothing — " ++
+                "only (section … (row N) (col N)) and (diagram-layout …) place anything; delete it", .{ key, ref_des });
+        } else {
             self.warnFmt(form.span, "ignored sub-form ({s} …) in (instance \"{s}\" …) — property values must be strings", .{ key, ref_des });
         }
         return;
@@ -543,6 +626,13 @@ fn parsePartForm(
     const before = pin_nets.items.len;
     for (children[2..]) |child| {
         if (child.isForm("pin")) try parsePinForm(self, child, ref_des, env, pin_nets, pads);
+        const kids = child.asList() orelse continue;
+        if (kids.len == 0) continue;
+        const head = kids[0].asAtom() orelse continue;
+        if (env_mod.containsString(&grid_hint_forms, head)) {
+            deprecations.note(self, child.span, "(part \"{s}\" … ({s} …)) is accepted and does nothing — " ++
+                "multi-part units are placed automatically; delete it", .{ name, head });
+        }
     }
     var part_pins: std.ArrayList(env_mod.PartPin) = .empty;
     for (pin_nets.items[before..]) |pn| {
@@ -800,6 +890,7 @@ pub fn instanceFromValue(self: *Evaluator, val: Value, ref_des: []const u8, sour
         .pinout = resolved.pinout,
         .properties = resolved.properties,
         .attrs = resolved.attrs,
+        .typed_attrs = resolved.typed_attrs,
         .docs = resolved.docs,
         .requirements = resolved.requirements,
         .requirements_ignored = resolved.requirements_ignored,
@@ -882,7 +973,8 @@ pub fn componentFamily(val: Value) []const u8 {
 /// else lexicographically (a BGA "A1" / "B2"). Mirrors the placement optimizer's
 /// `pinLess`; here it is the tie-break that makes a duplicated function name
 /// resolve to the same pad on every run.
-fn padLess(a: []const u8, b: []const u8) bool {
+/// Public so `(chain …)`'s two-terminal through path picks the SAME pad order.
+pub fn padLess(a: []const u8, b: []const u8) bool {
     const ai: ?i64 = std.fmt.parseInt(i64, a, 10) catch null;
     const bi: ?i64 = std.fmt.parseInt(i64, b, 10) catch null;
     if (ai != null and bi != null) return ai.? < bi.?;
@@ -974,6 +1066,7 @@ pub fn evalSeriesForm(
             try self.pending_ids.append(self.allocator, .{
                 .form_offset = form_children[0].span.offset -| 1,
                 .id = gen,
+                .file = sidecars.pendingIdFile(self),
             });
             break :blk gen;
         };
@@ -1007,6 +1100,7 @@ pub fn evalSeriesForm(
             try self.pending_ids.append(self.allocator, .{
                 .form_offset = form_children[0].span.offset -| 1,
                 .id = s_id,
+                .file = sidecars.pendingIdFile(self),
             });
         }
         const ta = try parseTrailingArgs(self, form_children[3..], env);
@@ -1047,6 +1141,7 @@ pub fn evalFanoutForm(
         try self.pending_ids.append(self.allocator, .{
             .form_offset = form_children[0].span.offset -| 1,
             .id = gen,
+            .file = sidecars.pendingIdFile(self),
         });
         break :blk gen;
     };
@@ -1482,6 +1577,37 @@ test "part form wires pins and records the part" {
     try testing.expectEqualStrings("A", res.instance.parts[0].pins[0].group);
     try testing.expectEqualStrings("B", res.instance.parts[1].name);
     try testing.expectEqual(@as(usize, 1), res.instance.parts[1].pins.len);
+}
+
+// spec: eval/instance - the inert (row N) / (col N) grid hints on an instance and inside (part …) report themselves as doing nothing
+test "inert grid hints are reported as deprecated, not warned about" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    try eval.component_cache.put(alloc, "ic8", .{
+        .name = "ic8",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    const src = "(instance \"U1\" ic8 (row 2) (col 1) (part \"A\" (row 0) (pin 1 \"NET1\")))";
+    const nodes = try parser_mod.parse(alloc, src);
+    const res = try buildInstance(&eval, nodes[0].asList().?, &env);
+
+    // The hints are still accepted and still change nothing: the pin wires and
+    // the part records, exactly as without them.
+    try testing.expectEqual(@as(usize, 1), res.pin_nets.len);
+    try testing.expectEqual(@as(usize, 1), res.instance.parts.len);
+    // Three inert hints, three infos — and no warning, because they have always
+    // been legal and the release profile turns warnings into errors.
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+    try testing.expectEqual(@as(usize, 3), eval.deprecations.items.items.len);
+    for (eval.deprecations.items.items) |dep| {
+        try testing.expect(std.mem.indexOf(u8, dep.message, "does nothing") != null);
+    }
 }
 
 // spec: eval/evaluator - a pinout-less instance wiring three or more pads warns that the pad numbers are unchecked

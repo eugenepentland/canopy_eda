@@ -186,7 +186,12 @@ const Mismatch = struct {
 /// `--lib-dir` / `NETLISP_LIB_DIR` root when it differs from both. The bundled
 /// standard library is deliberately NOT a root — it has no directory — and is
 /// consulted only after every root has missed.
-fn libSearchRoots(self: *Evaluator, buf: *[3][]const u8) [][]const u8 {
+/// The on-disk roots a library sub-path is searched under, in priority order:
+/// the project, this evaluator's `lib_dir`, then the `--lib-dir` root. The
+/// standard library is NOT one of them — it is the tail every caller appends
+/// itself, through `stdlib.standard`. Shared with `eval/interfaces.zig` so an
+/// `(interface …)` file resolves exactly where an imported module would.
+pub fn libSearchRoots(self: *Evaluator, buf: *[3][]const u8) [][]const u8 {
     var count: usize = 0;
     buf[count] = self.project_dir;
     count += 1;
@@ -665,12 +670,24 @@ fn bodyHasInnerBlock(body: []const Node) bool {
 /// expression (a call to another module) has no scope form and is NOT raw — it
 /// runs through `evalNodes` so its final expression's value flows out and any
 /// error inside it (e.g. an unbound name) propagates with the call stack.
+///
+/// The structural statements `when`/`unless`/`for`/`repeat` count too: a body
+/// whose parts are all conditional or looped is still a raw design body, and
+/// evaluating it as an expression would reach `(instance …)` in value
+/// position. `if` deliberately does NOT count — the corpus idiom
+/// `(if cond (design-block …) (design-block …))` selects a whole block as a
+/// VALUE, and must keep running through `evalNodes`.
 fn bodyHasScopeForm(body: []const Node) bool {
     for (body) |node| {
         const children = node.asList() orelse continue;
         if (children.len == 0) continue;
         const head = children[0].asAtom() orelse continue;
         if (forms_mod.ScopeForm.fromAtom(head) != null) return true;
+        const sf = forms_mod.SpecialForm.fromAtom(head) orelse continue;
+        switch (sf) {
+            .when_, .unless_, .for_, .repeat => return true,
+            else => {},
+        }
     }
     return false;
 }
@@ -927,6 +944,23 @@ test "wrapped module stamps definition name separately from display title" {
     try testing.expectEqualStrings("3V3 Supply", value.design_block.name);
     try testing.expectEqualStrings("buck", value.design_block.module_name);
     try testing.expectEqual(env_mod.BlockOrigin.embedded, value.design_block.origin);
+}
+
+// spec: eval/modules - a module body whose parts are all inside structural statements is still a raw design body
+test "a module body of only structural statements materializes a design" {
+    var eval: Evaluator = undefined;
+    const source = "(defmodule m ((fit 1)) (when (== fit 1) (port \"VOUT\" out))) (m)";
+    const value = try evalModuleSource(std.heap.page_allocator, &eval, source);
+    try testing.expectEqual(@as(usize, 1), value.design_block.ports.len);
+    try testing.expectEqualStrings("VOUT", value.design_block.ports[0].name);
+}
+
+// spec: eval/modules - a module body that selects a whole design-block with if still yields that block as a value
+test "if selecting a design-block in a module body stays an expression" {
+    var eval: Evaluator = undefined;
+    const source = "(defmodule m ((v 1)) (if (== v 1) (design-block \"A\") (design-block \"B\"))) (m)";
+    const value = try evalModuleSource(std.heap.page_allocator, &eval, source);
+    try testing.expectEqualStrings("A", value.design_block.name);
 }
 
 // spec: eval/modules - Module calls accept named (param expr) arguments in any order

@@ -25,6 +25,11 @@ pub const Value = union(enum) {
         value: []const u8,
         /// Schematic-level attributes (e.g., "np0", "x7r" for dielectric type)
         attrs: []const []const u8 = &.{},
+        /// The subset of those attributes that `eval/attrs.zig` could place in
+        /// a typed slot, keyed by the slot's property name. Authored keyed
+        /// (`(rating 25V)`) and bare (`"25V"`) attributes both land here, which
+        /// is what makes the two spellings mean the same thing downstream.
+        typed_attrs: []const Property = &.{},
     },
     /// A block definition: a named, optionally-parameterized circuit.
     block_def: BlockDef,
@@ -194,6 +199,40 @@ pub const Port = struct {
     }
 };
 
+/// One expanded lane of a `(port-group …)`: which interface signal it stands
+/// for, and the `Port` that carries it. Kept alongside the ports rather than
+/// inside them because the interesting object is the GROUP — ERC's
+/// both-or-neither rule and the board-side `(bridge-interface …)` both ask
+/// "what are this bundle's lanes", never "what bundle is this port in".
+pub const PortGroupMember = struct {
+    /// Signal name as the interface definition spells it (`SCK`, `MOSI`).
+    signal: []const u8,
+    /// The port the expansion declared — `PREFIX_SIGNAL` unless a
+    /// `(rename …)` named it outright.
+    port: []const u8,
+    /// That port's net. Equal to `port` for the ordinary short-form port; a
+    /// board-side group's peer lookup reads this, not the name.
+    net: []const u8,
+    /// A lane the bundle allows to stay open (UART's CTS/RTS, JTAG's TRST),
+    /// or one the author marked `optional`. Never demanded by ERC.
+    optional: bool = false,
+};
+
+/// A boundary bus declared as one thing by `(port-group "PREFIX" iface …)`.
+/// The member ports are ordinary `Port`s in `DesignBlock.ports`; this record
+/// is what makes them addressable — and checkable — as a bundle.
+pub const PortGroup = struct {
+    /// How `(bridge-interface "GROUP" …)` addresses it: the declared prefix,
+    /// or the interface name when the prefix is empty.
+    name: []const u8,
+    /// Interface definition the group expanded from (`spi`, `i2c`, …).
+    interface: []const u8,
+    /// `peripheral` (the definition's own point of view) or `controller`
+    /// (every direction mirrored).
+    role: []const u8 = "peripheral",
+    members: []const PortGroupMember = &.{},
+};
+
 /// A note annotation.
 pub const Note = struct {
     ref_des: []const u8,
@@ -287,6 +326,11 @@ pub const Verification = struct {
     /// of `Instance.ref_des`, so the sign-off survives ref-des renumbering and
     /// sub-block renames. Set by the `(verifies (req (id <hex>) …) …)` form.
     target_id: []const u8 = "",
+    /// True when the sign-off targets a DESIGN-owned rule rather than a part:
+    /// `(verifies (req design-rule <id>) …)`. Both `ref_des` and `target_id`
+    /// are empty then — a design rule belongs to a block, not to a placement —
+    /// and `req_id` is matched against `DesignRule.id`.
+    design_rule: bool = false,
     /// Requirement ID — either explicit `(id …)` from the component file or
     /// the CRC32-derived fallback. Matched against `Requirement.id`.
     req_id: []const u8,
@@ -361,6 +405,74 @@ pub const Requirement = struct {
     /// freezing first will break links, so we recommend running
     /// `netlisp freeze-requirement-ids` once a design starts using verifies.
     id: []const u8 = "",
+};
+
+/// Which authority a requirement rule came from: `library` for a rule a
+/// component's `lib/components/<name>.sexp` declares and every design placing
+/// the part inherits, `design` for a rule the design (or one of its modules)
+/// wrote about itself. The two are gated identically — the distinction exists
+/// so a reviewer can tell an inherited datasheet obligation from a rule this
+/// board's author chose to hold itself to.
+pub const RuleSource = enum { library, design };
+
+/// One predicate of a design-owned `(net-rule …)`, judged against a single
+/// matched net. Each is a property of the net itself, not of a placed part —
+/// which is why they live here and not in `Check`.
+pub const NetPredicate = union(enum) {
+    /// `(min-bulk-uf F)` — the capacitance summed over every capacitor
+    /// bridging this net and a ground net must be at least F µF.
+    min_bulk_uf: f64,
+    /// `(declared-envelope)` — `eval/net_envelopes` must carry an entry for
+    /// this net, authored or derived.
+    declared_envelope,
+    /// `(in-net-class)` — some `(net-class … (nets …))` must list this net.
+    in_net_class,
+    /// `(max-fanout N)` — the net may land on at most N pins.
+    max_fanout: u32,
+
+    /// Source spelling of this predicate's head atom, for diagnostics and the
+    /// generated reference. Derived from the tag so the two cannot drift.
+    pub fn sourceName(self: NetPredicate) []const u8 {
+        return switch (self) {
+            .min_bulk_uf => "min-bulk-uf",
+            .declared_envelope => "declared-envelope",
+            .in_net_class => "in-net-class",
+            .max_fanout => "max-fanout",
+        };
+    }
+};
+
+/// A rule the DESIGN owns, as opposed to one a component library hands it.
+/// Authored at design-block, section, sub-section or module scope; evaluated
+/// by `req_design_rules.zig` into the same requirement-result pipeline library
+/// requirements flow through, so `netlisp check`, the review document, the
+/// `run_checks` tool and the `(verifies …)` sign-off treat both identically.
+pub const DesignRule = struct {
+    /// What the rule asserts.
+    pub const Body = union(enum) {
+        /// `(requirement "…" (on "REF") (check …))` — an ordinary check
+        /// primitive aimed at one placed instance. `target` is a ref-des in
+        /// the rule's containing block, or `"sub/REF"` for one inside a
+        /// sub-block (judged in that sub-block's block, exactly as a library
+        /// requirement on the same part would be).
+        on_instance: struct { target: []const u8, check: Check },
+        /// `(net-rule "…" (nets GLOB…) predicate…)` — every net matched by
+        /// any glob must satisfy every predicate.
+        net_scoped: struct { globs: []const []const u8, predicates: []const NetPredicate },
+    };
+
+    text: []const u8,
+    ref: ?NoteRef = null,
+    /// 8-char hex id. An explicit `(id "…")` wins; otherwise the CRC32 of
+    /// `text`, exactly as `Requirement.id` derives from the component text, so
+    /// a `(verifies …)` sign-off survives every edit that leaves the rule's
+    /// own sentence alone.
+    id: []const u8 = "",
+    /// Section path the rule was authored under: `""` at design-block scope,
+    /// `"Power"` inside a section, `"Power/LDO"` inside a sub-section. Display
+    /// only — a rule is judged against its containing BLOCK regardless.
+    scope: []const u8 = "",
+    body: Body,
 };
 
 /// Compute the auto-derived 8-char hex requirement ID from the requirement
@@ -633,6 +745,102 @@ pub const Property = struct {
     value: []const u8,
 };
 
+/// One `(variant "NAME" ["doc"] [(default)])` declared at design-block scope.
+///
+/// Variants here are ASSEMBLY variants: one PCB, one netlist, one set of
+/// footprints, differing only in which parts are populated and what value a
+/// populated part carries. Nothing structural (a different net, a different
+/// footprint) is expressible, on purpose — a structural difference is a
+/// different board, and pretending otherwise is what makes variant systems
+/// silently ship the wrong copper.
+pub const VariantDecl = struct {
+    name: []const u8,
+    /// Optional prose from the declaration's second string argument.
+    doc: []const u8 = "",
+    /// True for the single `(default)`-marked declaration, which every surface
+    /// selects when no `--variant` / `?variant=` is given.
+    is_default: bool = false,
+};
+
+/// Which of the three instance-level variant sub-forms a `VariantRule` records.
+pub const VariantRuleKind = enum {
+    /// `(only-in "V"…)` — populated ONLY in the listed variants.
+    only_in,
+    /// `(dnp-in "V"…)` — Do Not Populate in the listed variants.
+    dnp_in,
+    /// `(value-in "V" "4.7k")` — value override in one variant.
+    value_in,
+};
+
+/// One variant clause authored on an instance. Rules are kept on the instance
+/// (rather than collapsed at parse time) so a surface can report the whole
+/// population matrix — `populated_in` — without re-evaluating the design once
+/// per variant.
+pub const VariantRule = struct {
+    kind: VariantRuleKind,
+    /// The variant name this clause names. Validated against the root design's
+    /// declarations when the instance is built, so it is always a declared name.
+    variant: []const u8,
+    /// The `(value-in …)` override. Empty for the two population kinds.
+    value: []const u8 = "",
+};
+
+/// Everything one instance declares about assembly variants. Grouped like
+/// `InstanceBinds` and `InstanceThermal` — the fields are only ever read
+/// together, by the population-matrix reporters and the BOM writer.
+pub const InstanceVariants = struct {
+    /// `(only-in …)` / `(dnp-in …)` / `(value-in …)` clauses in source order.
+    /// The instance's own `dnp` and `value` already reflect the SELECTED
+    /// variant; these are kept so a surface can report the whole population
+    /// matrix without re-evaluating the design once per variant.
+    rules: []const VariantRule = &.{},
+    /// The value the source authored before any `(value-in …)` override was
+    /// applied. Empty when no override applied — which is every part in every
+    /// design that declares no variants. The `.bom` sidecar fingerprints THIS
+    /// (not `value`), so building a non-default variant cannot invalidate the
+    /// identity ledger the base assembly's MPN selections live in.
+    base_value: []const u8 = "",
+
+    /// The value this part carries in the variant that was selected.
+    pub fn baseValue(self: InstanceVariants, value: []const u8) []const u8 {
+        return if (self.base_value.len > 0) self.base_value else value;
+    }
+};
+
+/// The variant space of the design being evaluated plus the one selected for
+/// this evaluation. Lives on the `Evaluator` for the duration of the ROOT
+/// design's materialization, so every instance — including instances a
+/// `(sub-block …)` module emits — resolves against the same declarations, and
+/// is copied onto the finished `DesignBlock` as the record of what was built.
+pub const VariantScope = struct {
+    decls: []const VariantDecl = &.{},
+    /// Index into `decls` of the selected variant, or null for the implicit
+    /// base variant (nothing declared, or nothing selected and no `(default)`).
+    active: ?usize = null,
+
+    /// The selected variant's name; "" for the base variant.
+    pub fn activeName(self: VariantScope) []const u8 {
+        const i = self.active orelse return "";
+        return self.decls[i].name;
+    }
+
+    /// Index of `name` among the declarations, or null when undeclared.
+    pub fn find(self: VariantScope, name: []const u8) ?usize {
+        for (self.decls, 0..) |d, i| {
+            if (std.mem.eql(u8, d.name, name)) return i;
+        }
+        return null;
+    }
+
+    /// Index of the `(default)`-marked declaration, or null when none is.
+    pub fn defaultIndex(self: VariantScope) ?usize {
+        for (self.decls, 0..) |d, i| {
+            if (d.is_default) return i;
+        }
+        return null;
+    }
+};
+
 /// A placed component in the design — a single ref-des bound to a library
 /// component plus its value, footprint, attached requirements, and per-part
 /// pin breakdown for multi-part symbols.
@@ -672,6 +880,12 @@ pub const Instance = struct {
     electrical: []const ElectricalDecl = &.{},
     /// Schematic-level attributes (e.g., "np0", "x7r" for dielectric type)
     attrs: []const []const u8 = &.{},
+    /// The authored typed attributes (`voltage`, `dielectric`, `tolerance`,
+    /// `power`, `current`, `tempco`, `esr`, `esl`), keyed by property name.
+    /// They are already merged into `properties`; this is the record of what
+    /// the DESIGN asked for, kept so a parts-table row that overrides a rating
+    /// can be reported as a disagreement rather than silently winning.
+    typed_attrs: []const Property = &.{},
     /// `(check (max-distance …))` requirements resolved against this
     /// placement — see `DistanceRule`. Empty for every part that declares
     /// none, which is almost all of them.
@@ -694,6 +908,9 @@ pub const Instance = struct {
     /// during a rework), but it is excluded from the assembly BOM and marked DNP
     /// in the schematic, the KiCad netlist, and the .kicad_pcb footprint attrs.
     dnp: bool = false,
+    /// What this instance declares about assembly variants. `dnp` and `value`
+    /// above already reflect the SELECTED variant; see `InstanceVariants`.
+    variants: InstanceVariants = .{},
     /// Every authored *placement* binding this instance carries — which hub pad
     /// it decouples, which pad it must sit beside. See `InstanceBinds`.
     bind: InstanceBinds = .{},
@@ -1210,13 +1427,30 @@ pub const NetEnvelope = struct {
     /// design already makes, `declared` is an author's `(net-envelope …)`.
     pub const Origin = enum { derived, declared };
 
+    /// The audit trail behind one envelope, grouped so the envelope itself
+    /// stays a small record. Every field is free text meant for a human or a
+    /// JSON reader: nothing downstream branches on it.
+    pub const Provenance = struct {
+        /// The rule that established the envelope and what it rests on —
+        /// `"rail V_12V"`, `"series-domain via V_3V3"`, `"set-resistor U1.SET
+        /// through R_SET"`, `"declared in module ldo_5v"`. Empty only for an
+        /// envelope built by a caller that states no rule (test fixtures).
+        rule: []const u8 = "",
+        /// Free text from a `(net-envelope … "why")`; empty when derived.
+        why: []const u8 = "",
+        /// The ferrite-class ROOT net this envelope was resolved on — the one
+        /// DC node a bead's two nets share. Equal to the net's own name when
+        /// no bead bridges it, which is the common case.
+        root: []const u8 = "",
+    };
+
     /// Flattened (`sub-block/`-scoped, net-tie-canonicalised) net name.
     net: []const u8,
     min: f64,
     max: f64,
     origin: Origin = .derived,
-    /// Free text from a `(net-envelope … "why")`; empty when derived.
-    rationale: []const u8 = "",
+    /// How this envelope came to be — see `Provenance`.
+    provenance: Provenance = .{},
     /// Correlation class for envelopes derived through series resistors and
     /// inductors (`eval/net_envelopes`' series-domain pass). Nets sharing a
     /// nonzero `domain` are ONE DC node reached through series conductors, so
@@ -1231,6 +1465,42 @@ pub const NetEnvelope = struct {
     /// may prove safety against such a bound, but must not report the bound
     /// itself as an exposure the part experiences.
     bounded: bool = false,
+};
+
+/// One authored `(net-envelope "NET" (rated LO HI) ["why"])` form, exactly as
+/// written. `net` is the name the AUTHOR wrote: module-local inside a module
+/// body, flat (`sub-block/NET`) when a board reaches into a module. Resolution
+/// against the flattened netlist happens in `eval/net_envelopes.build`.
+pub const NetEnvelopeDecl = struct {
+    net: []const u8,
+    min: f64,
+    max: f64,
+    /// Free text from the optional trailing string.
+    rationale: []const u8 = "",
+    /// Provenance text for the envelope this declaration produces — how the
+    /// published entry says WHO claimed it. A module's own declarations are
+    /// restamped `declared in module <path>` as the parent lifts them.
+    rule: []const u8 = "declared on the board",
+};
+
+/// A design block's two envelope halves.
+///
+/// `published` is the answer: worst-case DC voltage per FLAT net name, derived
+/// by `eval/net_envelopes.build` from rails, ports, ferrite classes, series
+/// domains and every declaration in scope. Separate from `rails` on purpose —
+/// a rail is a node in the supply tree (it gets a test point, a current budget,
+/// a PDN screen), while an envelope is only "what potential does copper on this
+/// net reach", which is also true of a filtered pin node and of a signal whose
+/// driver the author declared.
+///
+/// `declared` is this block's OWN `(net-envelope …)` forms, unresolved. A
+/// module publishes them so its PARENT can re-apply each one under the
+/// `sub-block/` prefix the instantiation gives it: that is what lets a module
+/// own the envelope of its own SET/FB node once instead of every board that
+/// instantiates it restating the same datasheet arithmetic.
+pub const NetEnvelopeTable = struct {
+    published: []const NetEnvelope = &.{},
+    declared: []const NetEnvelopeDecl = &.{},
 };
 
 /// Board-level transient intent for one physical power domain. Unlike the DC
@@ -2220,6 +2490,17 @@ pub const BlockOrigin = enum { design_root, embedded };
 /// (instances + nets + ports), the section/sub-block tree, and the design
 /// metadata (verifications, rails, functions) the review and diagram layers
 /// consume.
+/// One use of a superseded spelling, already resolved to a source position so
+/// nothing downstream needs the AST. `file` is the file the form actually
+/// lives in (a module body reports against the module, like `EvalWarning`),
+/// and `message` names both what is deprecated and the recommended spelling.
+pub const DeprecatedForm = struct {
+    file: []const u8,
+    line: u32,
+    col: u32,
+    message: []const u8,
+};
+
 pub const DesignBlock = struct {
     name: []const u8,
     instances: []const Instance,
@@ -2229,6 +2510,12 @@ pub const DesignBlock = struct {
     groups: []const Group,
     sub_blocks: []const SubBlock,
     sections: []const Section = &.{},
+    /// Boundary buses declared as one thing by `(port-group …)`. Their member
+    /// ports are in `ports` like any other; this list is what lets ERC hold a
+    /// bundle to a both-or-neither connection rule and lets a parent wire the
+    /// whole bus with one `(bridge-interface …)`. Empty for blocks that
+    /// declare their boundary signal by signal.
+    port_groups: []const PortGroup = &.{},
     /// Hand-authored functional super-blocks (`(function …)` forms) — the
     /// top-level "what the system does" layer above sections. Empty for
     /// designs that don't author them.
@@ -2252,17 +2539,22 @@ pub const DesignBlock = struct {
     /// Design-side `(verifies …)` sign-offs that answer library requirements
     /// the netlist alone can't verify.
     verifications: []const Verification = &.{},
+    /// Design-owned rules — `(requirement … (on "REF") (check …))` and
+    /// `(net-rule …)` — authored anywhere in this block's body, including
+    /// inside its `(section …)` bodies (each rule records the section path it
+    /// came from in `DesignRule.scope`; the rule is judged against THIS block
+    /// either way). Empty for every design that authors none.
+    authored_rules: []const DesignRule = &.{},
     /// Derived power rails, populated by `eval/rails.build` at the tail of
     /// `evalDesignBlock`. Empty for blocks with no regulator sub-blocks or
     /// board-edge power ports.
     rails: []const PowerRail = &.{},
-    /// Worst-case DC voltage envelopes per FLAT net name, populated by
-    /// `eval/net_envelopes.build`. Separate from `rails` on purpose: a rail is
-    /// a node in the supply tree (it gets a test point, a current budget, a PDN
-    /// screen), while an envelope is only "what potential does copper on this
-    /// net reach", which is also true of a filtered pin node and of a signal
-    /// whose driver the author declared.
-    net_envelopes: []const NetEnvelope = &.{},
+    /// Everything this block says about net potentials — see
+    /// `NetEnvelopeTable`. The two halves travel together because the
+    /// declarations are the INPUT a parent re-derives its own published table
+    /// from, and a block that lost one while keeping the other would publish
+    /// an envelope set no enclosing design could reproduce.
+    envelopes: NetEnvelopeTable = .{},
     /// Author-pinned placement classes from `(module-policy (net-class …))`,
     /// consulted before the name heuristic by the placer, the ERC info row and
     /// the describe facts. Named like envelopes: the flattened net name, or a
@@ -2281,6 +2573,14 @@ pub const DesignBlock = struct {
     /// when the design has no PCB target — the file-based KiCad sync
     /// endpoint refuses to write without it.
     kicad_pcb_path: ?[]const u8 = null,
+    /// Retired-but-accepted spellings the evaluator met while building this
+    /// block, in source order. Populated by `materializeBlock` from the
+    /// evaluator's running list, so the ROOT block's slice covers the whole
+    /// design (module bodies included) and each nested block owns the subset
+    /// raised inside it. ERC turns them into `deprecated_form` **info**
+    /// findings — never evaluator warnings, because the release profile
+    /// promotes those to errors and every old spelling still works.
+    deprecations: []const DeprecatedForm = &.{},
     /// Placeholder parts declared via top-level `(stub …)` forms — sketched
     /// components with a bounding box and named signals but no real library
     /// footprint yet. They render as diagram nodes and export as pad-less KiCad
@@ -2321,6 +2621,11 @@ pub const DesignBlock = struct {
     /// place-then-route wave order a later resolution slice turns into concrete
     /// part/net member sets. Null ⇒ no plan authored.
     pcb_plan: ?PcbPlanSpec = null,
+    /// Assembly variants declared by top-level `(variant …)` forms plus the one
+    /// this evaluation selected. Empty declarations ⇒ the design has exactly one
+    /// (implicit, unnamed) assembly. Every instance's `dnp` and `value` already
+    /// reflect the selection.
+    variants: VariantScope = .{},
 };
 
 /// Assertion result.

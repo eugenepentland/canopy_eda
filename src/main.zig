@@ -26,6 +26,8 @@ const drc_dump = @import("drc_dump.zig");
 const power_flow_cli = @import("power_flow_cli.zig");
 const gerber_dump = @import("gerber_dump.zig");
 const netlist_dump = @import("netlist_dump.zig");
+const export_pinmap = @import("export_pinmap.zig");
+const export_spice = @import("export_spice.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
 const build_id = @import("build_id.zig");
 const build_options = @import("build_options");
@@ -331,6 +333,16 @@ fn dispatchQueryCommand(
         try power_flow_cli.cmdPowerFlow(allocator, args);
         return true;
     }
+    // The two hand-off exporters: read-only, deterministic renderings of one
+    // design for a downstream toolchain (a firmware header, a SPICE deck).
+    if (std.mem.eql(u8, command, "export-pinmap")) {
+        try export_pinmap.cmdExportPinmap(allocator, args);
+        return true;
+    }
+    if (std.mem.eql(u8, command, "export-spice")) {
+        try export_spice.cmdExportSpice(allocator, args);
+        return true;
+    }
     return dispatchDumpCommand(allocator, command, args);
 }
 
@@ -546,12 +558,13 @@ fn printUsage() !void {
         \\
         \\Usage:
         \\  netlisp parse <file>                   Parse and pretty-print an S-expression file
-        \\  netlisp build [--project-dir <d>]       Evaluate and emit resolved design
-        \\  netlisp check [--project-dir <d>] [--severity <s>] [--profile authoring|preflight|release] <name>  Run ERC + requirements
+        \\  netlisp build [--project-dir <d>] [--variant <v>]  Evaluate and emit resolved design
+        \\  netlisp check [--project-dir <d>] [--severity <s>] [--profile authoring|preflight|release] [--variant <v>] <name>  Run ERC + requirements
         \\  netlisp system-check [--project-dir <d>] <system>  Print system review/fabrication readiness as JSON; fail while blocked
+        \\                                                    (contract: src/systems/<system>/system.sexp, else system.json)
         \\  netlisp review-audit [--project-dir <d>] [--layout <name>] [--output <file.md>] <design>  Write the generated Board Review Audit (Markdown) from release-profile checks, profiles, ladder, fab gate, notes
-        \\  netlisp designs [--project-dir <d>]     List designs (name + title) as JSON
-        \\  netlisp instances [--project-dir <d>] <name>  List a design's parts as JSON
+        \\  netlisp designs [--project-dir <d>]     List designs (name + title + declared assembly variants) as JSON
+        \\  netlisp instances [--project-dir <d>] [--variant <v>] <name>  List a design's parts as JSON (with the variant catalog and each part's populated_in when the design declares variants)
         \\  netlisp net [--project-dir <d>] <name> <net>  Pins + passives on a net as JSON
         \\  netlisp free-pins [--project-dir <d>] <name> <ref> [--category <c>]  Unassigned pins on an IC
         \\  netlisp schematic [--project-dir <d>] <name>  Full scene-graph JSON (instances, nets, ports, ERC)
@@ -568,10 +581,12 @@ fn printUsage() !void {
         \\  netlisp merge-layout [--project-dir <d>] <design> --from <source.layouts.json> --layout <name> [--star] [--dry-run]  Upsert one named layout without text-merging sidecars
         \\  netlisp inspect-kicad <board.kicad_pcb> [--nets]  Inspect physical layout + project routing rules as JSON (read-only)
         \\  netlisp route-kicad-reference <board.kicad_pcb> [--net <name>]... [--reference-guides|--reference-corridor|--reference-path] [--reference-tolerance-mm <mm>] [--output-png <preview.png>]  Virtually erase + route a fixed layout
-        \\  netlisp export-kicad --project-dir <d> --output-dir <out> [--with-schematic] <name>  Export KiCad netlist + footprints (--with-schematic adds the .kicad_sch hierarchy + project sidecars, so the directory opens as a complete KiCad project)
-        \\  netlisp export-kicad-sch --project-dir <d> [--output <root>] [--output-dir <dir>] [--flat] [--no-vendor-symbols] <name>  Export a hierarchical KiCad schematic (root + one .kicad_sch per section/module, plus sym-lib-table / fp-lib-table / <name>.kicad_pro / netlisp.kicad_sym; parts with a lib/sources/*.kicad_sym are drawn from it)
+        \\  netlisp export-kicad --project-dir <d> --output-dir <out> [--with-schematic] [--variant <v>] <name>  Export KiCad netlist + footprints (--with-schematic adds the .kicad_sch hierarchy + project sidecars, so the directory opens as a complete KiCad project)
+        \\  netlisp export-kicad-sch --project-dir <d> [--output <root>] [--output-dir <dir>] [--flat] [--no-vendor-symbols] [--variant <v>] <name>  Export a hierarchical KiCad schematic (root + one .kicad_sch per section/module, plus sym-lib-table / fp-lib-table / <name>.kicad_pro / netlisp.kicad_sym; parts with a lib/sources/*.kicad_sym are drawn from it)
         \\  netlisp sync-kicad-sch --project-dir <d> [--dry-run] [--force] <name>  Push that schematic INTO the KiCad project directory the design's (kicad-pcb "<path>") names — guarded (refuses a hand-drawn sheet or a locked project; replaced files roll into backups/)
-        \\  netlisp export-pdf [--project-dir <d>] <name> [--output <file>] [--theme light|dark]  Export the design-review PDF (cover, per-section schematics, validation + power tables)
+        \\  netlisp export-pinmap [--project-dir <d>] [--ref REF]… [--format c|json] [--output <file>] <name>  Export the firmware pin map — every connected pad of every hub IC with its pinout function, its (as …)/(alt …) alternates, its net, and the (pins … (group …)) / (section …) it was declared in (read-only; C header or JSON)
+        \\  netlisp export-spice [--project-dir <d>] [--output <file>] <name>  Export a flattened SPICE netlist — R/C/L/ferrite/diode/transistor element lines plus one empty .subckt stub per IC (read-only; no models, no parasitics — the header says so)
+        \\  netlisp export-pdf [--project-dir <d>] <name> [--output <file>] [--theme light|dark] [--variant <v>]  Export the design-review PDF (cover, per-section schematics, validation + power tables)
         \\  netlisp export-system-review [--project-dir <d>] <system> [--output <file.zip>]  Export a watermarked review ZIP — combined Markdown, searchable PDF, and a self-contained offline HTML dossier — with no fabrication CAM
         \\  netlisp export-elmer-thermal [--project-dir <d>] [--output-dir <out>] [--layout <name>] [--ambient <C>] [--scenario <natural|airflow_1ms|airflow_2ms>] <name>  Export an Elmer FEM thermal case
         \\  netlisp compare-elmer-thermal [--project-dir <d>] [--output-dir <out>] [--layout <name>] [--ambient <C>] [--scenario <natural|airflow_1ms|airflow_2ms>] [--solver <path>] <name>  Run Elmer and write a side-by-side thermal comparison
@@ -632,6 +647,7 @@ test {
     _ = @import("refdes_stability.zig");
     _ = @import("eval/pin_enrichment.zig");
     _ = @import("eval/net_envelopes.zig");
+    _ = @import("eval/net_envelope_rules.zig");
     _ = @import("eval/rails.zig");
     _ = @import("eval/test_point.zig");
     _ = @import("eval/micro_forms.zig");

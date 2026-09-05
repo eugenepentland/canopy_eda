@@ -234,7 +234,7 @@ suffix, a new classifier keyword — regenerate and commit it:
 zig build docs
 ```
 
-The hand-written language reference is [docs/sexp-language.md](docs/sexp-language.md);
+The hand-written language reference is [docs/sexpr-language.md](docs/sexpr-language.md);
 `docs/language-forms.md` is the machine-checked companion, and the binary will
 also print it with `netlisp reference [section]`. Start at
 [docs/architecture.md](docs/architecture.md) for how the pipeline fits together

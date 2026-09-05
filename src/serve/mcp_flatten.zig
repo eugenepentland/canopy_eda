@@ -16,6 +16,8 @@ const json_writer = @import("../json_writer.zig");
 const export_kicad = @import("../export_kicad.zig");
 const netlist_mod = @import("../export_kicad_netlist.zig");
 const net_names = @import("../net_name.zig");
+const variants = @import("../eval/variants.zig");
+const net_envelopes = @import("../eval/net_envelopes.zig");
 
 const FlatInstance = export_kicad.FlatInstance;
 const FlatNet = export_kicad.FlatNet;
@@ -25,6 +27,55 @@ const FlatPin = export_kicad.FlatPin;
 fn writeRefDesOpen(w: anytype, ref: []const u8) !void {
     try w.writeAll("{\"ref_des\":");
     try json_writer.writeString(w, ref);
+}
+
+// ── Assembly variants ──────────────────────────────────────────────────
+
+/// Emit the design's `"variants"` catalog and the `"variant"` this listing was
+/// evaluated with, as the leading keys of an instances document.
+///
+/// Both keys are OMITTED for a design that declares none, so every design in
+/// the corpus keeps the exact document it emitted before variants existed —
+/// the reader learns "this design has one assembly" from their absence.
+pub fn writeVariantHeader(w: anytype, block: *const env_mod.DesignBlock) !void {
+    if (block.variants.decls.len == 0) return;
+    try w.writeAll("\"variants\":[");
+    for (block.variants.decls, 0..) |d, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try json_writer.writeString(w, d.name);
+        try w.writeAll(",\"doc\":");
+        try json_writer.writeString(w, d.doc);
+        try w.print(",\"default\":{s}}}", .{if (d.is_default) "true" else "false"});
+    }
+    try w.writeAll("],\"variant\":");
+    try json_writer.writeString(w, block.variants.activeName());
+    try w.writeAll(",");
+}
+
+/// Emit one instance's `,"populated_in":[…]` — every declared variant the part
+/// is stuffed in, base included as `""`. Omitted (like the header) for a design
+/// that declares no variants.
+pub fn writePopulatedIn(
+    w: anytype,
+    block: *const env_mod.DesignBlock,
+    inst_variants: env_mod.InstanceVariants,
+    dnp: bool,
+) !void {
+    if (block.variants.decls.len == 0) return;
+    // `dnp` here is the SELECTED variant's answer, so a permanent `(dnp)` has
+    // to be read back off the clauses: a part DNP for a reason no clause could
+    // have produced is DNP in every variant.
+    const base_dnp = variants.unconditionalDnp(dnp, inst_variants.rules);
+    try w.writeAll(",\"populated_in\":[");
+    var written: usize = 0;
+    for (block.variants.decls) |d| {
+        if (!variants.populatedIn(inst_variants.rules, base_dnp, d.name)) continue;
+        if (written > 0) try w.writeAll(",");
+        try json_writer.writeString(w, d.name);
+        written += 1;
+    }
+    try w.writeAll("]");
 }
 
 // ── Pin classification (shared with the top-level list_free_pins) ───────
@@ -245,7 +296,9 @@ pub fn listInstancesFlat(
     var list: std.ArrayList(FlatInstance) = .empty;
     try netlist_mod.collectInstances(allocator, block, "", &list);
 
-    try w.writeAll("{\"instances\":[");
+    try w.writeAll("{");
+    try writeVariantHeader(w, block);
+    try w.writeAll("\"instances\":[");
     for (list.items, 0..) |fi, i| {
         if (i > 0) try w.writeAll(",");
         try writeRefDesOpen(w, fi.ref_des);
@@ -258,7 +311,9 @@ pub fn listInstancesFlat(
         try w.writeAll(",\"value\":");
         try json_writer.writeString(w, fi.value);
         const pc = instancePinCount(eval, fi.component, fi.symbol, &.{});
-        try w.print(",\"pin_count\":{d}}}", .{pc});
+        try w.print(",\"pin_count\":{d}", .{pc});
+        try writePopulatedIn(w, block, fi.variants, fi.dnp);
+        try w.writeAll("}");
     }
     try w.writeAll("]}");
     return true;
@@ -335,6 +390,33 @@ fn mergedByRawPin(merged: []const FlatNet, p: FlatPin) ?usize {
     return null;
 }
 
+/// Emit the `envelope` member of a `get_net` payload: the worst-case DC
+/// potential window `eval/net_envelopes` proves for this net, how it was
+/// established, and the ferrite-class root it was resolved on.
+///
+/// `null` when the design declares nothing that bounds the net — the honest
+/// answer, and the same one `(cap-rating …)` reports as `unproven`. `source`
+/// separates an author's `(net-envelope …)` claim (`authored`) from a
+/// consequence of declarations the design already makes (`derived`), and
+/// `origin` names the rule and what it rests on.
+pub fn writeNetEnvelope(
+    w: anytype,
+    block: *const env_mod.DesignBlock,
+    net: []const u8,
+) !void {
+    try w.writeAll(",\"envelope\":");
+    const found = net_envelopes.lookup(block, net) orelse return w.writeAll("null");
+    try w.print("{{\"lo\":{d},\"hi\":{d},\"source\":", .{ found.min, found.max });
+    try json_writer.writeString(w, if (found.origin == .declared) "authored" else "derived");
+    try w.writeAll(",\"origin\":");
+    try json_writer.writeString(w, found.provenance.rule);
+    try w.writeAll(",\"why\":");
+    try json_writer.writeString(w, found.provenance.why);
+    try w.writeAll(",\"path\":");
+    try json_writer.writeString(w, if (found.provenance.root.len > 0) found.provenance.root else found.net);
+    try w.writeAll("}");
+}
+
 /// Flattened `get_net`: every pin on the merged rail (flattened refs +
 /// resolved function names) plus the passives on it. `query` accepts the
 /// canonical merged name or a sub-scoped spelling.
@@ -359,6 +441,7 @@ pub fn getNetFlat(
 
     try w.writeAll("{\"name\":");
     try json_writer.writeString(w, net.name);
+    try writeNetEnvelope(w, block, net.name);
     try w.writeAll(",\"pins\":[");
 
     var passive_refs: std.StringHashMapUnmanaged(void) = .empty;

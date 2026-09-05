@@ -8,6 +8,7 @@ const erc_mod = @import("erc.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const review_thermal = @import("review_thermal.zig");
+const req_design_rules = @import("req_design_rules.zig");
 
 // ── Repeated string literals ──────────────────────────────────────
 const component_key: []const u8 = ",\"component\":";
@@ -130,12 +131,47 @@ pub fn renderToJson(allocator: std.mem.Allocator, doc: review.ReviewDoc) (std.me
     try w.writeAll(",\"subblock_requirements\":");
     try writeComponentRequirements(w, doc.subblock_requirements);
 
+    try writeDesignRules(w, doc.design_rules);
+
     try w.writeAll("}");
     return buf.toOwnedSlice();
 }
 
 fn boolStr(b: bool) []const u8 {
     return if (b) "true" else "false";
+}
+
+/// Design-owned rules as their own array, never folded into
+/// `component_requirements`: `source` is what tells a consumer whether a rule
+/// was inherited from a component library or written by this design, and the
+/// two are addressed differently by a `(verifies …)` sign-off.
+fn writeDesignRules(w: anytype, rules: []const req_design_rules.Outcome) !void {
+    try w.writeAll(",\"design_rules\":[");
+    for (rules, 0..) |rule, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"source\":\"design\",\"id\":");
+        try json_writer.writeString(w, rule.rule.id);
+        try w.writeAll(",\"text\":");
+        try json_writer.writeString(w, rule.rule.text);
+        try w.print(",\"kind\":\"{s}\"", .{if (rule.netScoped()) "net-rule" else "on"});
+        try w.print(status_fmt, .{@tagName(rule.status)});
+        try w.writeAll(",\"block_path\":");
+        try json_writer.writeString(w, rule.block_path);
+        try w.writeAll(",\"scope\":");
+        try json_writer.writeString(w, rule.rule.scope);
+        try w.writeAll(",\"targets\":[");
+        for (rule.targets, 0..) |target, j| {
+            if (j > 0) try w.writeAll(",");
+            try w.writeAll("{\"name\":");
+            try json_writer.writeString(w, target.name);
+            try w.print(status_fmt, .{@tagName(target.status)});
+            try w.writeAll(",\"message\":");
+            try json_writer.writeString(w, target.message);
+            try w.writeAll("}");
+        }
+        try w.writeAll("]}");
+    }
+    try w.writeAll("]");
 }
 
 fn writeComponentRequirements(
@@ -152,7 +188,10 @@ fn writeComponentRequirements(
         try w.writeAll(",\"requirements\":[");
         for (entry.requirements, 0..) |r, j| {
             if (j > 0) try w.writeAll(",");
-            try w.writeAll("{\"text\":");
+            // Stated rather than implied: a consumer reading one merged list of
+            // rules must be able to tell an inherited datasheet obligation from
+            // a rule the design wrote for itself (`design_rules` below).
+            try w.writeAll("{\"source\":\"library\",\"text\":");
             try json_writer.writeString(w, r.text);
             if (r.id.len > 0) {
                 try w.writeAll(",\"id\":");

@@ -726,3 +726,78 @@ real time and none is specific to that board.
   `.gitignore` now excludes them under `examples/*/`.
 - **`export-schematic-png` refuses more than 8 hubs**, and test points and
   mounting holes count as hubs, so a 20-part board already needs `--ref`.
+
+## 2026-09-05 · claude · structural control flow in every design scope
+- **blocker:** `zig build test-affected` died with `error: writing dependencies.zig contents: NoSpaceLeft` — the root volume was at 100% (0 bytes free) with 211 worktrees under `.claude/worktrees/`, several holding 12–18 GB generated `.zig-cache` trees from sessions a day or more old. This is the same failure as the 2026-08-25 entry above, recurring at a much larger scale now that waves of parallel agents each create a worktree. Deleting four stale caches (`twin-parity`, `rf-taper-complete`, `autoroute-taper-polygon`, `autoroute-rf-gap`) freed 100 GB and the suite then passed; cost was 3 diagnostic calls plus one full re-run.
+- **idea:** Make the cleanup mechanical rather than per-agent judgement — e.g. `scripts/worktree_gc.sh` (or a `zig build worktree-gc` step) that deletes `.zig-cache`/`zig-out` under any worktree whose branch is merged into `main` or whose tree has been untouched for N hours, and a preflight in the worktree-creation docs that fails loudly with the offending sizes. Every agent that hits this currently re-derives the same `du -sh .claude/worktrees/*/.zig-cache` investigation, and the alternative — guessing which worktree is safe to prune — is exactly the risk the docs should remove.
+- **workaround:** `du -sh .claude/worktrees/*/.zig-cache | sort -h | tail`, cross-check `ls -dlt .claude/worktrees/*/` for age, and delete only `.zig-cache` (rebuildable) from worktrees older than the current wave — never the worktree itself.
+- **status:** mitigated
+
+## 2026-09-05 — export-pinmap / export-spice (DSL-2 wave)
+
+- **A `**` string-repetition operator in a test body makes five Guardian
+  contract checks fail with no finding.** `const big = "1" ++ "0" ** 40;` in
+  one test made `durable-write-errors`, `persistent-read-errors`,
+  `mutation-boundary`, `request-decoding` and `edit-identity` all report
+  `FAILED without naming a single finding — its verdict cannot be keyed,
+  baselined or accepted`. Nothing names the file, so the only way to find it is
+  to bisect a new file down to a single test; that cost ~8 tool calls. Spelling
+  the literal out fixed all five. Two asks: name the file whose parse failed,
+  and teach the shared parser the `**` operator.
+- **The C-string escaper in a new exporter is reported as the `json-escaper-def`
+  idiom.** That rule's fragment is `fn writeJson`, so two JSON *object* emitters
+  (`writeJsonPart`, `writeJsonRow`) whose free strings already go through
+  `json_writer` matched it by name alone. Renaming them was the fix, but the
+  rule cannot tell an escaper from an emitter — which the guardian.toml note
+  above the rule already says. Consider matching the escaper's body shape.
+- **`/` was 100% full when this task started** (466G, 0 avail), so `zig build`
+  died with `writing dependencies.zig contents: NoSpaceLeft`. The cause is
+  211 task worktrees each holding a ~300 MB `zig-out` plus a multi-GB
+  `.zig-cache`; 40 `zig-out` directories older than 7 days were removed here,
+  which freed 113 G. A periodic sweep of build outputs in worktrees whose branch
+  has merged would stop this recurring.
+
+## 2026-09-05 — module-owned net envelopes (DSL wave)
+
+- **A full disk truncated a source file to 0 bytes mid-edit.** Eleven parallel
+  worktrees each hold a ~5 GB `.zig-cache`; the 466 GB volume hit 100 % and a
+  write to `src/eval/net_envelopes.zig` failed after the file had been
+  truncated, silently losing ~20 minutes of work (recovered from HEAD and
+  re-applied). Anything that fans a wave out across worktrees should either cap
+  concurrent worktrees or reap `.zig-cache` from worktrees whose branch is
+  merged. A pre-write free-space guard in the harness would turn this from data
+  loss into an error.
+- **`(port … (rated LO HI))` silently drops evaluated bounds.** The port parser
+  reads both numbers with `asNumber()` and never evaluates them, while the
+  sibling `(nominal …)` on the same form does evaluate. So
+  `lib/modules/bcuda-lt3045-ldo.sexp`'s
+  `(port "VOUT" out power (nominal vout) (rated (* vout 0.95) (* vout 1.05)))`
+  contributes NO rated range at all — the rail derives as the single point
+  `vout`, which is why `V_BASE_5V15` and `lna/VDD_FILT` come out as
+  5.110–5.110 V against boards that author 5.05–5.17 V. It is silent: no
+  warning, and the form looks like it works. Either evaluate the two bounds
+  (`net-envelope`'s `(rated …)` now does) or warn when they are not literals.
+  Fixing it changes derived rails corpus-wide, so it wants its own change.
+
+- **A `(decouple …)` can write source the next build refuses to read.** With
+  `(decouple-defaults (ic "U1"))` set, a positional
+  `(decouple "V_3V3" (cap-0402 "100nF") 1 per-pin R1 1)` whose host ref is NOT
+  the default IC has its `R1` reinterpreted as a *pin*, so one form emits two
+  differently-keyed children and `netlisp build` pins an
+  `(ids ("100nF@R1#0" …) ("100nF@1#0" …))` sidecar onto it. The **second**
+  build then fails on the file the first one wrote:
+  `src/x.sexp:6:70: error: unknown name 'ids' — did you mean 'ind'?`. Verified
+  on `main` (3b35239b) with a four-line design; not introduced by any recent
+  change. Two seams: the `per-pin REF` token should not silently become a pin
+  when a default IC is set (spell out which it is, or diagnose the ambiguity),
+  and an `(ids …)` anchor on a `(decouple …)` form must be inert on re-read the
+  way it is on `(repeat …)`. Cost here was ~20 minutes of chasing a probe
+  design that had built clean once.
+- **Parallel worktrees can fill the disk and the failure does not say so.** With
+  eleven agent worktrees each holding a 3–18 GB `.zig-cache`, `/` hit 100% and
+  `zig build test` failed with `error: writing dependencies.zig contents:
+  NoSpaceLeft` — which reads like a codegen bug, not a full disk. `du -sh
+  .claude/worktrees/*/.zig-cache` found it in one command. Worth either a
+  preflight free-space check in `build.zig` that names the real cause, or a
+  documented `zig build clean-worktree-caches` so an agent has a sanctioned way
+  to reclaim space without touching another agent's tree.

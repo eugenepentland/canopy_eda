@@ -17,7 +17,7 @@ behind an authenticating reverse proxy. `GET /healthz` answers a fixed
 Auth in full: [auth.md](auth.md).
 
 - **Design list**: `GET /` — links to all .sexp designs, with per-card health chips (ERC errors/warnings, failed assertions, open notes, green PASS)
-- **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG. The page also embeds the design-review panels inline (power-budget table, power-sequence, test-points, per-section coverage). There is no standalone review-report endpoint.
+- **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG. `?variant=NAME` renders one of the design's declared assembly variants (see “Assembly variants” below). The page also embeds the design-review panels inline (power-budget table, power-sequence, test-points, per-section coverage). There is no standalone review-report endpoint.
 - **Thermal review**: `GET /thermal/:name[?ambient=NN][?scenario=natural|fan|airflow_1ms|airflow_2ms|heatsink|fan_heatsink][?layout=<saved>][?fragment=1][?row=<saved>]` — the **Thermal** tab (last in the shared design-view bar, right after Assembly, on the schematic / PCB / 3D / assembly pages; modules get it too, without Assembly). Server-rendered dark page: the board-coupled verdict pill + sentence with the package-level screen demoted under it, the ambient window, a cooling-scenario picker, the `?thermal=1` heat-zone image of the selected scenario, the cooling ladder (four generic rungs plus a board-authored fan row when present, and a combined fan-plus-heatsink row when both physical assemblies are configured), a per-part junction table for that scenario sorted hottest first (each row cross-probing to `/pcb-layout/<name>?focus=<ref>` + `/schematics/<name>#comp-<ref>` and announcing itself on the shared `netlisp-xprobe` channel), and a coverage footer with the unplaced refs and the screening-grade caveat. In the combined rung, fan convection is confined to its selected PCB face. An opposite-face sink keeps its natural-convection resistance and receives no fan credit; a same-face board sink receives overlap-weighted cooling from outlet-to-outer-surface distance while its base replaces direct PCB convection beneath it. Every sentence and cell comes from `review_thermal.zig`, so the page and the review panel/PDF can never disagree. `?ambient` is clamped to −55…125 rather than refused and `?fragment=1` answers the two ambient-dependent regions alone (what the page's own client swaps in); switching scenario is client-side. A design with no cooling ladder shows the reason instead of the picker, the image and the ladder — never a broken image. Toolbar: `⤓ PDF` → `/api/schematic-pdf/:name`, `{ } JSON` → `/api/thermal/:name`. `?layout=<saved>` screens one named saved layout instead of the design's default board — a layout picker beside the ambient window switches it, and the choice rides into the board frame, the tab bar, the cross-probe links and the JSON link, so nothing on the page describes a board other than the one it names; a `?layout` nobody saved falls back to the default board and says so rather than screening a board under the wrong name. Below the tables a **Compare layouts** panel lists every saved layout of the design (parts, saved copper, hottest part, Tj, and Δ against the board on screen). Only the shown board's row is filled on load — every other row is a whole second solve, so rows fill one at a time on click or via a "Solve all" sweep the reader can stop; `?row=<saved>` answers one row's cells alone. A design with one board renders no panel. `:name` resolves as a design or a bare `lib/modules` module (percent-decoded first); unknown name → 404 plain text. Read-only (`src/serve/thermal_page.zig`).
 - **Scene graph**: `GET /api/scene-graph/:name` — JSON scene graph for schematic (used by the live-push pipeline)
 - **Schematic PDF**: `GET /api/schematic-pdf/:name[?theme=light]` — the design-review document as an `application/pdf` attachment (default = the viewer's dark screen theme, page background included; `?theme=light` = print palette) (`<name>.pdf`): cover, one A4-landscape sheet per `(section …)` (the section's hub blocks **plus the single-instance `(sub-block …)` modules that section owns** shelf-packed into a 2D grid at one uniform scale, each cell captioned with its pin-group label or `<sub-block> - <module title>`, the section's notes and its modules' notes under the grid; a section with no drawing at all packs as a compact entry, and the `(sub-block)` appendix keeps only what no section drew — unattached and multi-instance `x N` modules), validation appendix, power/test-point tables. The HTTP twin of `netlisp export-pdf` (`src/serve/schematic_pdf.zig` → `src/export_pdf.zig`), so the download and the CLI's output are the same document, with a real `/CreationDate` added. `:name` resolves as a design or a bare `lib/modules` module (percent-decoded first); unknown name → 404 plain text. Read-only, composed on demand, self-checked by `pdf.validate` before it is served, and then retained (`src/serve/read_cache.zig`) keyed by design and `?theme=`, against the evaluator read-set plus the placement sidecars its cooling ladder is solved from. A cached document is served without re-running `pdf.validate` — those exact bytes already passed it — and keeps the `/CreationDate` (and matching cover date) of the compose that produced it, so two downloads of an unchanged design are byte-identical. `X-Netlisp-Pdf-Cache: hit|miss|bypass` reports which happened. The schematic page's `⤓ PDF` toolbar button points here (module pages too).
@@ -489,6 +489,37 @@ Auth in full: [auth.md](auth.md).
   archive then opens as a complete KiCad project); `?schematic=0` returns the
   netlist-only bundle this endpoint used to serve, byte-identical. The CLI's
   directory flow is the other way round — opt in with `--with-schematic`.
+  `?variant=NAME` selects an assembly variant; so does `GET /api/export-bom-csv/:name`.
+
+#### Assembly variants over HTTP
+
+A design that declares `(variant "NAME" …)` forms (docs/sexpr-language.md →
+“Assembly variants”) is served as ONE of them. Every surface defaults to the
+design's `(default)` variant, and failing that the base (implicit) one.
+
+`?variant=NAME` is honoured by:
+
+- `GET /schematics/:name` — the rendered HTML cache keys each variant apart, so
+  the Lite page and the Pro page are separate cache slots rather than whichever
+  request landed first. The embedded BOM table follows the same selection.
+- the export seam shared by `GET /api/export-bom/:name`,
+  `GET /api/export-kicad/:name` and the other by-name exports. A
+  variant-declaring design's BOM CSV also carries a `Populated In` column
+  naming, per line, which variants stuff that part.
+
+Everything else — the PCB layout page and `/api/pcb-describe`, the DRC and
+routing surfaces, the assembly workspace, the system-review pages — renders the
+DEFAULT variant. That is deliberate rather than pending: an assembly variant
+changes population and values, never copper, so the board those surfaces show is
+the same board in every variant. Their caches key on the layout sidecar rather
+than on the evaluation, so adding a variant axis there would cost a cache
+dimension for a picture that does not change. A variant-aware PCB *population*
+view (which pads get paste, per-variant assembly drawings) is the real
+follow-up, and wants its own surface rather than a query parameter on this one.
+
+An undeclared variant name fails the evaluation and renders the diagnostic page
+(or a 500 on the export endpoints) rather than silently serving a different
+assembly than the caller asked for.
 - **Library upload**: `GET /library`, `POST /api/upload-symbol`, `POST /api/upload-footprint`
 - **System review workspace**: `GET /systems/:name` — the document editor over
   `src/systems/<name>/system.json`, with `GET|PUT /api/systems/:name/docs/:doc`,
@@ -496,7 +527,29 @@ Auth in full: [auth.md](auth.md).
   `GET /api/systems/:name/readiness`, `GET /api/systems/:name/draft.zip` and
   `POST /api/systems/:name/release` behind it. Session-gated like the rest of
   the browser surface; every mutation needs the `X-Netlisp-Review: 1` header and
-  the writer role.
+  the writer role. The readiness, draft, dossier and release paths read the
+  system contract from `src/systems/<name>/system.sexp` when it exists and fall
+  back to `system.json` otherwise (see
+  [docs/sexpr-language.md § System contracts](sexpr-language.md)); the
+  document-editing and attestation endpoints still read and write the JSON
+  form.
+- **System interface findings**: `GET /api/systems/:name/readiness` (and the
+  identical document `netlisp system-check` prints) carries three fields beyond
+  the historical gate: `manifest` — the project-relative contract actually
+  read; `checks.interface_contract` — false while any error-severity finding
+  stands, and part of `blocked` exactly like the other gates; and `findings[]`,
+  each `{class, kind, severity, interface, board, pin, detail}`.
+
+  `class` is `interface_mismatch` for the board-to-board contract checks
+  (`contact_unconnected_one_side`, `voltage_domain_mismatch`,
+  `unknown_contact_pin`, `contact_count_over_pads`, `duplicate_contact_claim`
+  at `error`; `contacts_not_covered`, `connector_pinout_unavailable` at
+  `warning`) and `manifest_shadowed` for the notice that a `system.sexp` has
+  made the `system.json` beside it inert. Two differing net *names* across a
+  joint are never reported — the manifest's canonical/alias layer exists
+  precisely so `V_12V` and `V_12V_RF` are one conductor. The per-finding
+  meanings are tabulated in
+  [docs/sexpr-language.md § `interface_mismatch` findings](sexpr-language.md).
 - **System dossier**: `GET /systems/:name/dossier` — the draft package's
   self-contained HTML dossier as a readable page, byte-identical to the
   `review/<base>.html` member of the same system's `draft.zip` (one composer,
@@ -684,7 +737,11 @@ Tools include:
 - **Project / introspection (read-only)**: `list_designs`, `list_library`,
   `list_history`, `list_instances`, `list_free_pins`, `get_net`,
   `describe_component`, `get_schematic`, `get_pcb_layout_image`, `get_version`,
-  `run_checks`, `review_audit`. `get_pcb_layout_image` returns the PCB layout
+  `run_checks`, `review_audit`. `list_instances` and `run_checks` take an
+  optional `variant` argument naming one of the design's declared assembly
+  variants (default: its `(default)` variant, else the base); a variant-declaring
+  design also makes `list_instances` return a `variants[]` catalog, the selected
+  `variant`, and each part's `populated_in`. `get_pcb_layout_image` returns the PCB layout
   as a PNG (same renderer as `GET /api/pcb-png/:name`) so
   an agent can visually inspect placement; args: `name`, optional `nets`/`refs`
   (arrays or comma-strings) to spotlight a subsystem, `route`, `width`, `layout`,
@@ -756,6 +813,42 @@ Tools include:
   `{ok,file,rewritten,written,netlist_equivalent,parts_without_pinout,
   positional_parts,skipped[{ref,pad,reason}],skipped_omitted,diff}`. Full rules
   in `docs/sexpr-language.md`.
+- **Hand-off exporters (read-only)**: `export_pinmap` `{name, format?, refs?}`
+  and `export_spice` `{name}`. Both return the exported file **text itself**
+  rather than a JSON envelope — so `netlisp tool export_pinmap … --output
+  pinmap.h` writes a usable header — and a plain `error: …` line with
+  `ok:false` on refusal. Neither writes a project file, which is why both are
+  read-only. `export_pinmap` writes the firmware pin map: one row per connected
+  pad of each selected part carrying the pad id, the pinout function name, the
+  `(alt …)`/`(as …)` alternates, the flattened net, the `(pins … (group "…"))`
+  label and the enclosing `(section …)` with its `(role …)`/`(protocol …)`.
+  `format:"c"` (default) is an include-guarded header with one
+  `#define <REF>_<NET>_PIN "<pad>"` per row plus a `static const
+  {pad,function,net,group}` table per part; `format:"json"` is the same rows
+  with the alternates as an array. `refs` names parts exactly (by flattened
+  ref-des, its leaf, or the instance's source name) and overrides the default
+  hub-class selection. `export_spice` writes a flattened SPICE deck: R/C/L,
+  ferrite-as-DC-resistance, `D`/`Q`/`M` and one `X` line per IC into an EMPTY
+  `.subckt` stub, with ground-class nets on node 0. It carries no models, no
+  stub bodies and no parasitics — the deck's own header says so. Both are
+  deterministic: only the build id moves between runs (`diff -I '^\*#'` for the
+  C header and the deck, `diff -I '"build_id"'` for the JSON).
+- **Design splitting (mutation)**: `split-design` `{design, write?}` — move a
+  design's physical and diagram declarations out of `src/<name>.sexp` into the
+  two autoloaded sidecars `<name>.layout.sexp` (`board`, `stackup`, `net-class`,
+  `pcb-plan`, `design-rules`, `pdn`, `module-policy`, `net-envelope`,
+  `power-plane`, `rough`, `fabrication-layer`, `kicad-pcb`) and
+  `<name>.diagram.sexp` (`diagram-layout`, design-scope `group`, `function`).
+  Each form is lifted at its parser span **byte for byte** with the comment
+  block written directly above it, and appended to the sidecar (an existing
+  sidecar is appended to, never overwritten); the circuit, `board-role`,
+  `hierarchical-ids` and every `(id …)` stay put. Both sidecars are autoloaded
+  and spliced back into `(design-block …)`, and the write is refused unless the
+  ORIGINAL and SPLIT trees flatten to the identical netlist AND the identical
+  evaluated design-scope form set. Default `write:false` returns the three
+  unified diffs without touching a file. Returns
+  `{ok,design,moved,written,equivalent,files[{path,forms,lines,diff}]}`. Full
+  rules in `docs/sexpr-language.md` → "Sidecar files".
 - **VFS file ops**: `read_file`, `list_dir`, `glob` (read-only);
   `write_file`, `edit_file`, `delete_file`, `move_file` (mutation).
 - **Build / state**: `build`, `regenerate_pinout`, `restore_version`.

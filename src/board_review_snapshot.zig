@@ -9,6 +9,7 @@
 const std = @import("std");
 const build_id = @import("build_id.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
+const ids = @import("eval/ids.zig");
 const env_mod = @import("eval/env.zig");
 const erc = @import("erc.zig");
 const frequency_plan = @import("frequency_plan.zig");
@@ -26,6 +27,7 @@ const export_kicad_footprint = @import("export_kicad_footprint.zig");
 const fab_readiness = @import("fab_readiness.zig");
 const fab_release = @import("fab_release.zig");
 const flat_netlist = @import("flat_netlist.zig");
+const system_sexp = @import("system_sexp.zig");
 const infra_fs = @import("infra/fs.zig");
 const net_name = @import("net_name.zig");
 const paths = @import("paths.zig");
@@ -33,6 +35,7 @@ const pdf = @import("pdf.zig");
 const render_pcb_png = @import("render_pcb_png.zig");
 const optimizer = @import("placement/optimizer.zig");
 const req_checks = @import("req_checks.zig");
+const req_design_rules = @import("req_design_rules.zig");
 const review = @import("review.zig");
 const review_json = @import("review_json.zig");
 const review_md = @import("review_md.zig");
@@ -70,6 +73,16 @@ pub const Connection = struct {
     connector: []const u8,
     pin: []const u8,
     net: []const u8,
+};
+
+/// One connector endpoint's complete pad table, retained beside the wired
+/// `connections` so a system contract can tell a pad the netlist leaves
+/// unconnected from a pad the connector does not have at all. `pads` is empty
+/// when the instance resolves no pinout, which is absent evidence rather than
+/// a connector with no contacts.
+pub const ConnectorPads = struct {
+    connector: []const u8,
+    pads: []const []const u8,
 };
 
 /// Retention ceilings for the engineering evidence below. A system document
@@ -445,6 +458,8 @@ pub const Snapshot = struct {
         /// Complete evaluated source closure under project-relative names.
         sources: []const zipfile.Entry,
         connections: []const Connection,
+        /// Complete pad tables for the same requested connectors.
+        connector_pads: []const ConnectorPads = &.{},
     },
     /// Design-derived engineering evidence — power, heat, rule checks,
     /// mechanical outline, loop filters, BOM rollup — computed from the same
@@ -485,6 +500,7 @@ fn buildImpl(
     const violations = try erc.runErc(allocator, named.block, project_dir);
     var checks = try req_checks.runChecks(allocator, &evaluator, named.block);
     req_checks.applyVerifications(&checks, named.block, named.block.instances);
+    const design_rules = req_design_rules.runVerified(allocator, &evaluator, named.block);
 
     var doc = try review.buildReview(
         allocator,
@@ -492,7 +508,7 @@ fn buildImpl(
         named.block,
         evaluator.assertions.items,
         violations,
-        &checks,
+        .{ .checks = &checks, .design_rules = design_rules },
     );
     doc.power.scenarios = try thermal_api.scenariosFor(
         allocator,
@@ -550,6 +566,7 @@ fn buildImpl(
 
     const source_entries = try collectSources(allocator, project_dir, root_source_path, &evaluator);
     const connections = try collectConnections(allocator, named.block, options.connectors);
+    const connector_pads = try collectConnectorPads(allocator, &evaluator, named.block, options.connectors);
     const engineering = try collectEngineering(
         allocator,
         named.block,
@@ -594,6 +611,7 @@ fn buildImpl(
             .fab_inputs = traced_fab_inputs,
             .sources = source_entries,
             .connections = connections,
+            .connector_pads = connector_pads,
         },
         .analysis = engineering,
     };
@@ -1130,7 +1148,7 @@ pub fn verifySnapshot(
 /// archive reads as "omit the member".
 fn renderDiagram(
     allocator: std.mem.Allocator,
-    block: *const @import("eval/env.zig").DesignBlock,
+    block: *const env_mod.DesignBlock,
 ) ![]const u8 {
     const sub_attachments = try membership.computeSubBlockAttachments(allocator, block);
     defer allocator.free(sub_attachments);
@@ -1145,7 +1163,7 @@ fn renderDiagram(
 
 fn collectConnections(
     allocator: std.mem.Allocator,
-    block: *const @import("eval/env.zig").DesignBlock,
+    block: *const env_mod.DesignBlock,
     connectors: []const []const u8,
 ) ![]const Connection {
     const ConnectorTarget = struct {
@@ -1182,16 +1200,15 @@ fn collectConnections(
     return out.items;
 }
 
-/// Resolve a stable source handle such as `base-interface/J1` to the current
-/// evaluated ref-des while preserving the sub-block path. Evaluator-wide
-/// numbering may turn that module-local `J1` into `U19`; `origin_key` and
-/// `label` retain the authored identity specifically so contracts do not drift
-/// when unrelated parts are inserted or removed.
-fn evaluatedConnectorHandle(
-    allocator: std.mem.Allocator,
-    root: *const @import("eval/env.zig").DesignBlock,
+/// Resolve a stable source handle such as `base-interface/J1` to the instance
+/// the evaluator produced for it. Evaluator-wide numbering may turn that
+/// module-local `J1` into `U19`; `origin_key` and `label` retain the authored
+/// identity specifically so contracts do not drift when unrelated parts are
+/// inserted or removed.
+fn findConnectorInstance(
+    root: *const env_mod.DesignBlock,
     connector: []const u8,
-) ![]const u8 {
+) ?*const env_mod.Instance {
     const prefix = net_name.parent(connector) orelse "";
     const source_name = net_name.leaf(connector);
 
@@ -1201,18 +1218,127 @@ fn evaluatedConnectorHandle(
         while (segments.next()) |segment| {
             block = for (block.sub_blocks) |sub_block| {
                 if (std.mem.eql(u8, sub_block.name, segment)) break sub_block.block;
-            } else return allocator.dupe(u8, connector);
+            } else return null;
         }
     }
 
-    const evaluated = for (block.instances) |instance| {
+    for (block.instances) |*instance| {
         if (std.mem.eql(u8, instance.ref_des, source_name) or
             std.mem.eql(u8, instance.label, source_name) or
-            std.mem.eql(u8, instance.origin_key, source_name)) break instance.ref_des;
-    } else return allocator.dupe(u8, connector);
+            std.mem.eql(u8, instance.origin_key, source_name)) return instance;
+    }
+    return null;
+}
 
-    if (prefix.len == 0) return allocator.dupe(u8, evaluated);
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, evaluated });
+/// The same resolution as a flattened ref-des path, which is what the netlist
+/// spells its pins with.
+fn evaluatedConnectorHandle(
+    allocator: std.mem.Allocator,
+    root: *const env_mod.DesignBlock,
+    connector: []const u8,
+) ![]const u8 {
+    const instance = findConnectorInstance(root, connector) orelse
+        return allocator.dupe(u8, connector);
+    const prefix = net_name.parent(connector) orelse "";
+    if (prefix.len == 0) return allocator.dupe(u8, instance.ref_des);
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, instance.ref_des });
+}
+
+/// Every contact of one stable connector handle on an already-evaluated
+/// design: its complete pad table with the net each pad reaches, empty for a
+/// pad the netlist leaves unconnected. Null when the handle names no instance
+/// or the instance resolves no pinout — absent evidence, not a connector with
+/// no contacts. This is the pad table `(system …)`'s `(auto)` derives from.
+pub const ConnectorContactsError = std.mem.Allocator.Error;
+
+pub fn connectorContacts(
+    allocator: std.mem.Allocator,
+    evaluator: *Evaluator,
+    block: *const env_mod.DesignBlock,
+    connector: []const u8,
+) ConnectorContactsError!?[]const system_sexp.Contact {
+    const instance = findConnectorInstance(block, connector) orelse return null;
+    const pin_map = symbolPinsFor(evaluator, instance) orelse return null;
+    var pads: std.ArrayList([]const u8) = .empty;
+    var keys = pin_map.iterator();
+    while (keys.next()) |entry| try pads.append(allocator, entry.key_ptr.*);
+    std.mem.sort([]const u8, pads.items, {}, lessPadId);
+
+    const evaluated = try evaluatedConnectorHandle(allocator, block, connector);
+    var nets: std.ArrayList(flat_netlist.FlatNet) = .empty;
+    try flat_netlist.flattenAndMergeNets(allocator, block, &nets);
+
+    var out: std.ArrayList(system_sexp.Contact) = .empty;
+    for (pads.items) |pad| {
+        var wired: []const u8 = "";
+        outer: for (nets.items) |net| {
+            for (net.pins) |pin| {
+                if (!std.mem.eql(u8, pin.ref_des, evaluated)) continue;
+                if (!system_sexp.sameContact(pin.pin, pad)) continue;
+                wired = net.name;
+                break :outer;
+            }
+        }
+        try out.append(allocator, .{ .pin = pad, .net = wired });
+    }
+    return out.items;
+}
+
+/// Read each requested connector's complete pad table out of the pinout its
+/// placed part resolves to. A part with no pinout (every positional passive,
+/// and any connector whose library entry omits one) yields an empty pad list,
+/// which downstream contract checks treat as absent evidence rather than as a
+/// zero-contact connector.
+fn collectConnectorPads(
+    allocator: std.mem.Allocator,
+    evaluator: *Evaluator,
+    block: *const env_mod.DesignBlock,
+    connectors: []const []const u8,
+) ![]const ConnectorPads {
+    var out: std.ArrayList(ConnectorPads) = .empty;
+    for (connectors) |connector| {
+        var pads: std.ArrayList([]const u8) = .empty;
+        if (findConnectorInstance(block, connector)) |instance| {
+            if (symbolPinsFor(evaluator, instance)) |pin_map| {
+                var pins = pin_map.iterator();
+                while (pins.next()) |entry| try pads.append(allocator, try allocator.dupe(u8, entry.key_ptr.*));
+                std.mem.sort([]const u8, pads.items, {}, lessPadId);
+            }
+        }
+        try out.append(allocator, .{
+            .connector = try allocator.dupe(u8, connector),
+            .pads = pads.items,
+        });
+    }
+    return out.items;
+}
+
+/// Prefer the component's declared pinout name, then its symbol name, then the
+/// instance's own symbol — the same order `list_free_pins` resolves.
+fn symbolPinsFor(
+    evaluator: *Evaluator,
+    instance: *const env_mod.Instance,
+) ?*const std.StringHashMapUnmanaged([]const u8) {
+    const lookup_name = if (evaluator.component_cache.get(instance.component)) |component|
+        (if (component.pinout_name.len > 0)
+            component.pinout_name
+        else if (component.symbol_name.len > 0)
+            component.symbol_name
+        else
+            instance.symbol)
+    else
+        instance.symbol;
+    if (lookup_name.len == 0) return null;
+    return ids.getSymbolPins(evaluator, lookup_name);
+}
+
+/// Order pad ids the way a reader expects a connector's contacts: numerically
+/// when both are plain decimals (so `2` precedes `10`), lexically otherwise.
+fn lessPadId(_: void, a: []const u8, b: []const u8) bool {
+    const left = std.fmt.parseUnsigned(u64, a, 10) catch return std.mem.lessThan(u8, a, b);
+    const right = std.fmt.parseUnsigned(u64, b, 10) catch return std.mem.lessThan(u8, a, b);
+    if (left != right) return left < right;
+    return std.mem.lessThan(u8, a, b);
 }
 
 const NotesEvidence = struct {

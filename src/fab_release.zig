@@ -22,6 +22,7 @@ const paths = @import("paths.zig");
 const module_metadata = @import("module_metadata.zig");
 const pcb_rules_json = @import("serve/pcb_rules_json.zig");
 const subprocess = @import("serve/subprocess.zig");
+const sidecars = @import("eval/sidecars.zig");
 const zipfile = @import("zipfile.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -103,12 +104,29 @@ pub const InputPaths = struct {
     checks: []const u8,
     layout: []const u8,
     bom: []const u8,
+    /// The `.layout.sexp` / `.diagram.sexp` siblings that EXIST beside the
+    /// source. Only present files join the closure: an absent sidecar hashes
+    /// as "not-consumed", so listing one unconditionally would move the
+    /// recorded closure digest of every design that has none.
+    extra_sidecars: []const []const u8 = &.{},
 
     pub fn deinit(self: InputPaths, allocator: std.mem.Allocator) void {
         allocator.free(self.source);
         allocator.free(self.checks);
         allocator.free(self.layout);
         allocator.free(self.bom);
+        for (self.extra_sidecars) |path| allocator.free(path);
+        allocator.free(self.extra_sidecars);
+    }
+
+    /// Every source-language input, in digest order: the design, its checks
+    /// sidecar, then whichever layout/diagram sidecars exist.
+    pub fn sourceClosure(self: InputPaths, allocator: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
+        var out = try allocator.alloc([]const u8, 2 + self.extra_sidecars.len);
+        out[0] = self.source;
+        out[1] = self.checks;
+        @memcpy(out[2..], self.extra_sidecars);
+        return out;
     }
 };
 
@@ -134,7 +152,26 @@ pub fn inputPaths(allocator: std.mem.Allocator, project_dir: []const u8, name: [
     const layout = try std.fmt.allocPrint(allocator, "{s}/{s}.layouts.json", .{ source_dir, name });
     errdefer allocator.free(layout);
     const bom = try std.fmt.allocPrint(allocator, "{s}/{s}.bom", .{ source_dir, name });
-    return .{ .source = source, .checks = checks, .layout = layout, .bom = bom };
+    errdefer allocator.free(bom);
+    var extra: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (extra.items) |path| allocator.free(path);
+        extra.deinit(allocator);
+    }
+    for (sidecars.kinds) |kind| {
+        if (kind == .checks) continue; // already listed unconditionally above
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}{s}", .{ source_dir, name, kind.ext() });
+        if (infra_fs.cwd().access(path, .{})) |_| {
+            try extra.append(allocator, path);
+        } else |_| allocator.free(path);
+    }
+    return .{
+        .source = source,
+        .checks = checks,
+        .layout = layout,
+        .bom = bom,
+        .extra_sidecars = try extra.toOwnedSlice(allocator),
+    };
 }
 
 /// Exact input digests selected from the one release read trace.
@@ -159,7 +196,9 @@ pub fn tracedInputs(
     };
     const input_paths = resolved orelse return .{};
     defer input_paths.deinit(allocator);
-    const source = trace.closureDigest(&.{ input_paths.source, input_paths.checks });
+    const closure = try input_paths.sourceClosure(allocator);
+    defer allocator.free(closure);
+    const source = trace.closureDigest(closure);
     const layout = trace.digestForPath(input_paths.layout) orelse return .{ .source = source };
     const bom_digest = trace.digestForPath(input_paths.bom) orelse return .{ .source = source, .layout = layout };
     if (trace.digestForPath(input_paths.source) == null) return .{ .source = source, .layout = layout, .bom = bom_digest };

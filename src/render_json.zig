@@ -512,6 +512,11 @@ const SceneGraph = struct {
     /// The design's top-level boundary `(port …)` forms, so schematic clients
     /// can list / add / remove them (the design-level interface view).
     ports: []const env_mod.Port = &.{},
+    /// The design's `(port-group …)` bundles, so a client can draw one SPI or
+    /// I²C chip instead of four unrelated port rows. Empty for a design that
+    /// declares its boundary signal by signal, and then the key is omitted
+    /// entirely — the scene graph of every existing design is unchanged.
+    port_groups: []const env_mod.PortGroup = &.{},
     /// Authored sheets with their block-diagram category (same classifier as
     /// the system overview), in authored order. The renderer orders its bands
     /// canonically (power → mcu → memory → …) and colors glance chips from
@@ -920,6 +925,7 @@ pub fn renderSceneGraph(allocator: Allocator, block: *const DesignBlock, project
     scene.sheet_meta = try buildSheetMeta(allocator, block, sub_attachments);
     scene.functions = block.functions;
     scene.ports = block.ports;
+    scene.port_groups = block.port_groups;
     scene.power_rails = try buildPowerRails(allocator, block);
 
     var alt_map: PinoutAltMap = .empty;
@@ -1913,11 +1919,45 @@ fn serializeScene(allocator: Allocator, scene: *const SceneGraph) ![]const u8 {
         try w.writeAll("}");
     }
     try w.writeAll("]");
+    try writePortGroupsJson(w, scene.port_groups);
 
     try writeRailsJson(w, scene.power_rails);
 
     try w.writeAll("}");
     return buf.toOwnedSlice();
+}
+
+/// Emit `,"port_groups":[{"name":"IMU","interface":"spi","role":"peripheral",
+/// "members":[{"signal":"SCK","port":"IMU_SCK","net":"IMU_SCK"},…]},…]` — the
+/// boundary buses declared as one thing. Written only when the design declares
+/// any, so a design with none emits exactly the JSON it always did.
+fn writePortGroupsJson(w: anytype, groups: []const env_mod.PortGroup) !void {
+    if (groups.len == 0) return;
+    try w.writeAll(",\"port_groups\":[");
+    for (groups, 0..) |group, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try json_writer.writeString(w, group.name);
+        try w.writeAll(",\"interface\":");
+        try json_writer.writeString(w, group.interface);
+        try w.writeAll(",\"role\":");
+        try json_writer.writeString(w, group.role);
+        try w.writeAll(",\"members\":[");
+        for (group.members, 0..) |member, j| {
+            if (j > 0) try w.writeAll(",");
+            try w.writeAll("{\"signal\":");
+            try json_writer.writeString(w, member.signal);
+            try w.writeAll(",\"port\":");
+            try json_writer.writeString(w, member.port);
+            try w.writeAll(",\"net\":");
+            try json_writer.writeString(w, member.net);
+            try w.writeAll(",\"optional\":");
+            try w.writeAll(if (member.optional) "true" else "false");
+            try w.writeAll("}");
+        }
+        try w.writeAll("]}");
+    }
+    try w.writeAll("]");
 }
 
 /// Emit `,"pins":[{"pin":"1","net":"VDD2"},…]` — a part's real pin→net bindings.

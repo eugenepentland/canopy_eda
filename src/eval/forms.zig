@@ -22,6 +22,8 @@ pub const SpecialForm = enum {
     repeat,
     for_,
     if_,
+    when_,
+    unless_,
     import,
     defmodule,
     design_block,
@@ -31,6 +33,7 @@ pub const SpecialForm = enum {
     fmt_,
     id_,
     implements,
+    interface,
 
     pub fn fromAtom(name: []const u8) ?SpecialForm {
         return atom_to_form.get(name);
@@ -52,6 +55,8 @@ const atom_to_form = std.StaticStringMap(SpecialForm).initComptime(.{
     .{ "repeat", .repeat },
     .{ "for", .for_ },
     .{ "if", .if_ },
+    .{ "when", .when_ },
+    .{ "unless", .unless_ },
     .{ "import", .import },
     .{ "defmodule", .defmodule },
     .{ "design-block", .design_block },
@@ -61,6 +66,7 @@ const atom_to_form = std.StaticStringMap(SpecialForm).initComptime(.{
     .{ "fmt", .fmt_ },
     .{ "id", .id_ },
     .{ "implements", .implements },
+    .{ "interface", .interface },
 });
 
 /// Arithmetic, comparison, and logic builtin operators. Recognising
@@ -120,6 +126,7 @@ pub const ScopeForm = enum {
     port,
     bus_port,
     diff_port,
+    port_group,
     note,
     section,
     decouple,
@@ -127,6 +134,8 @@ pub const ScopeForm = enum {
     fanout,
     net,
     bus_net,
+    connect,
+    chain,
     pullup,
     pulldown,
     divider,
@@ -165,6 +174,10 @@ pub const ScopeForm = enum {
     design_rules,
     pcb_plan,
     module_policy,
+    variant,
+    // Design-owned rules — accepted at every scope
+    requirement,
+    net_rule,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -176,6 +189,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "port", .port },
     .{ "bus-port", .bus_port },
     .{ "diff-port", .diff_port },
+    .{ "port-group", .port_group },
     .{ "note", .note },
     .{ "section", .section },
     .{ "decouple", .decouple },
@@ -183,6 +197,8 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "fanout", .fanout },
     .{ "net", .net },
     .{ "bus-net", .bus_net },
+    .{ "connect", .connect },
+    .{ "chain", .chain },
     .{ "pullup", .pullup },
     .{ "pulldown", .pulldown },
     .{ "divider", .divider },
@@ -221,6 +237,9 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "frequency-plan", .frequency_plan },
     .{ "design-rules", .design_rules },
     .{ "pcb-plan", .pcb_plan },
+    .{ "variant", .variant },
+    .{ "requirement", .requirement },
+    .{ "net-rule", .net_rule },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -249,6 +268,8 @@ pub const special_form_schema = blk: {
         .{ .repeat, .{ .min_args = 4, .max_args = null } },
         .{ .for_, .{ .min_args = 3, .max_args = null } },
         .{ .if_, .{ .min_args = 3, .max_args = 3 } },
+        .{ .when_, .{ .min_args = 2, .max_args = null } },
+        .{ .unless_, .{ .min_args = 2, .max_args = null } },
         .{ .import, .{ .min_args = 1, .max_args = null } },
         .{ .defmodule, .{ .min_args = 2, .max_args = null } },
         .{ .design_block, .{ .min_args = 1, .max_args = null } },
@@ -257,6 +278,7 @@ pub const special_form_schema = blk: {
         .{ .assert_range, .{ .min_args = 4, .max_args = 4 } },
         .{ .fmt_, .{ .min_args = 1, .max_args = null } },
         .{ .implements, .{ .min_args = 1, .max_args = null } },
+        .{ .interface, .{ .min_args = 2, .max_args = null } },
     };
     var table: [@typeInfo(SpecialForm).@"enum".field_names.len]?FormSchema = @splat(null);
     for (pairs) |p| table[@backingInt(p[0])] = p[1];
@@ -344,7 +366,17 @@ pub const special_form_docs = blk: {
     };
     t[@backingInt(SpecialForm.if_)] = .{
         .syntax = "(if cond then else)",
-        .summary = "Short-circuit conditional. Only the matching branch is evaluated.",
+        .summary = "Short-circuit conditional. Only the matching branch is evaluated. In design scope " ++
+            "each branch is a single form and the whole conditional is sugar for `when`/`unless`.",
+    };
+    t[@backingInt(SpecialForm.when_)] = .{
+        .syntax = "(when cond form… [(id hex8)] [(ids (\"origin@branch\" hex8)…)])",
+        .summary = "Evaluate `form…` only when `cond` is true. In design scope the body may hold any " ++
+            "form the enclosing scope accepts, so a whole sub-circuit can be made conditional.",
+    };
+    t[@backingInt(SpecialForm.unless_)] = .{
+        .syntax = "(unless cond form… [(id hex8)] [(ids (\"origin@branch\" hex8)…)])",
+        .summary = "`when`'s negation — evaluate `form…` only when `cond` is false.",
     };
     t[@backingInt(SpecialForm.import)] = .{
         .syntax = "(import name…)",
@@ -389,6 +421,14 @@ pub const special_form_docs = blk: {
             "Canonical implementations prohibit direct board instantiation; recommended " ++
             "implementations warn; examples are discovery-only.",
     };
+    t[@backingInt(SpecialForm.interface)] = .{
+        .syntax = "(interface NAME [\"doc\"] (signal SIGNAL in|out|io|bidi [kind] [optional])…)",
+        .summary = "Define a named bus vocabulary — the SPI/I\u{b2}C/UART/SWD/JTAG lanes that are names " ++
+            "rather than numbered bus lanes. Directions are stated from the PERIPHERAL's point of " ++
+            "view; `(port-group … (role controller))` mirrors them. Valid at the top level of a " ++
+            "design or module file, and resolved on first use from `lib/interfaces/NAME.sexp` " ++
+            "(project, then `--lib-dir`, then the bundled standard library).",
+    };
     break :blk requireAllDocumented(SpecialForm, FormDoc, t);
 };
 
@@ -430,6 +470,30 @@ pub const ScopeAvailability = packed struct {
 /// A design-scope form's doc row plus the scopes that accept it.
 pub const ScopedFormDoc = struct { doc: FormDoc, scope: ScopeAvailability };
 
+/// One structural control-flow form: a `SpecialForm` that ALSO works as a
+/// design-scope statement, expanding into whatever the enclosing scope
+/// accepts. Their scope availability cannot live in `ScopeForm` (they are
+/// dispatched before it, and a body may hold `(design-block …)` in expression
+/// position), so it is declared here and rendered with the same D/S/s column.
+pub const StructuralFormDoc = struct {
+    form: SpecialForm,
+    scope: ScopeAvailability,
+    /// What the form contributes to identity, one line.
+    identity: []const u8,
+};
+
+/// The forms `docgen` renders under "Structural control flow". Every entry is
+/// accepted at design-block top level, in a `(section …)`, and in a nested
+/// sub-section; each body form is dispatched by the enclosing scope's own
+/// grammar, so a form illegal there is still illegal inside a branch.
+pub const structural_form_docs = [_]StructuralFormDoc{
+    .{ .form = .when_, .scope = .{ .design_block = true, .section = true, .sub_section = true }, .identity = "Children key off the anchor plus branch key `@t`." },
+    .{ .form = .unless_, .scope = .{ .design_block = true, .section = true, .sub_section = true }, .identity = "Children key off the anchor plus branch key `@t`." },
+    .{ .form = .if_, .scope = .{ .design_block = true, .section = true, .sub_section = true }, .identity = "Then-children key `@t`, else-children `@f`, so a condition flip cannot alias them." },
+    .{ .form = .for_, .scope = .{ .design_block = true, .section = true, .sub_section = true }, .identity = "Children key off the anchor plus the item's 0-based ordinal." },
+    .{ .form = .repeat, .scope = .{ .design_block = true, .section = true, .sub_section = true }, .identity = "Children key off the anchor plus the loop index." },
+};
+
 pub const scope_form_docs = blk: {
     const N = @typeInfo(ScopeForm).@"enum".field_names.len;
     var t: [N]?ScopedFormDoc = @splat(null);
@@ -463,6 +527,15 @@ pub const scope_form_docs = blk: {
             "defaults their kind to `differential`, and records the pairing so ERC holds the two lanes " ++
             "to a both-or-neither connection rule.",
     } };
+    t[@backingInt(ScopeForm.port_group)] = .{ .scope = tl, .doc = .{
+        .syntax = "(port-group \"PREFIX\" iface [optional] [(role controller|peripheral)] [(rename SIGNAL \"PORTNAME\")]… [(omit SIGNAL…)] port-modifier…)",
+        .summary = "Declare a whole named bus as one line: expands to one `(port …)` per signal of " ++
+            "the interface, named `PREFIX_SIGNAL` (an empty prefix gives bare signal names), replays " ++
+            "every trailing port modifier onto each lane the way `(diff-port …)` does, and records " ++
+            "the bundle so ERC holds it to a both-or-neither rule and a parent can wire it with one " ++
+            "`(bridge-interface …)`. The group is addressed by its prefix — by the interface name " ++
+            "when the prefix is empty. Its options are the \u{201c}Port-group sub-forms\u{201d} table.",
+    } };
     t[@backingInt(ScopeForm.note)] = .{ .scope = all, .doc = .{
         .syntax = "(note \"id\" \"text\" [(ref …)])",
         .summary = "Attach a design-time note to the surrounding scope.",
@@ -472,13 +545,15 @@ pub const scope_form_docs = blk: {
         .summary = "Functional subsystem card. Inside `(section …)` nests one level into a sub-section.",
     } };
     t[@backingInt(ScopeForm.decouple)] = .{ .scope = all, .doc = .{
-        .syntax = "(decouple \"NET\" [(comp \"val\")] COUNT per-pin [REF|auto] PIN…) | " ++
-            "(decouple \"NET\" (per-pin (comp \"val\") FN…)… (bulk (comp \"val\") COUNT)… (bypass …)…)",
-        .summary = "Emit COUNT decoupling caps per listed host pin. Component and REF may come from " ++
-            "(decouple-defaults …); a trailing `auto` expands to the pins already declared on the net. " ++
-            "The compact rail form takes sub-forms instead: `(per-pin …)` bypasses each named pin " ++
-            "function (inferring the host), `(bulk COMPONENT COUNT)` adds shared rail capacitance, and " ++
-            "`(bypass …)` takes the positional item list.",
+        .syntax = "(decouple \"NET\" (per-pin (comp \"val\") FN…)… (bulk (comp \"val\") COUNT)… (bypass …)…) | " ++
+            "(decouple \"NET\" [(comp \"val\")] COUNT per-pin [REF|auto] PIN…)",
+        .summary = "Emit decoupling caps for a rail. The sub-form spelling is the documented one: " ++
+            "`(per-pin …)` bypasses each named pin function (inferring the host), " ++
+            "`(bulk COMPONENT COUNT)` adds shared rail capacitance, and `(bypass …)` takes a positional " ++
+            "item list. The positional shorthand — COUNT per-pin REF PIN… — is the retired second " ++
+            "grammar on the same head: still accepted, and reported as a `deprecated_form` info. " ++
+            "Component and REF may come from (decouple-defaults …); a trailing `auto` expands to the " ++
+            "pins already declared on the net.",
     } };
     t[@backingInt(ScopeForm.series)] = .{ .scope = all, .doc = .{
         .syntax = "(series …)",
@@ -495,9 +570,29 @@ pub const scope_form_docs = blk: {
     t[@backingInt(ScopeForm.bus_net)] = .{ .scope = all, .doc = .{
         .syntax = "(bus-net \"PREFIX\" lo hi \"SUB\") | (bus-net \"PREFIX\" lo hi (suffix \"S\") (over \"SUB\" (port-base \"P\" N))) | " ++
             "(bus-net \"PREFIX\" lo hi [(suffixes S…)] (over \"SUB\"…) (ports P…))",
-        .summary = "Tie a lane range to a sub-block bus, including an optional parent suffix and offset child-port family. " ++
-            "The strided form distributes the channel range sub-major across every `(over …)` sub-block " ++
-            "and `(ports …)` port family, emitting one tie per `(suffixes …)` entry.",
+        .summary = "Tie a lane range to a sub-block bus. The basic 1:1 form — `(bus-net \"PREFIX\" lo hi \"SUB\")` " ++
+            "— is the documented one. The mapped form adds a parent suffix and an offset child-port " ++
+            "family; the strided form distributes the channel range sub-major across every `(over …)` " ++
+            "sub-block and `(ports …)` port family, emitting one tie per `(suffixes …)` entry. Both of " ++
+            "those are retired extra grammars on one head: still accepted, and each reported as a " ++
+            "`deprecated_form` info recommending the basic form or explicit (net …) / (bridge …) ties.",
+    } };
+    t[@backingInt(ScopeForm.connect)] = .{ .scope = all, .doc = .{
+        .syntax = "(connect END END… [(name \"NET\")] [(class \"net-class\")])",
+        .summary = "Wire two or more ends into one net without inventing a name for it. An END is " ++
+            "`\"REF.PAD\"`, `\"REF.FN\"` (a pinout function name), `\"sub/PORT\"`, or a plain net / " ++
+            "enclosing-block port name. With no `(name …)` and no plain-net end the net is named " ++
+            "`n~<end>~<end>` from the AUTHORED tokens, which survives ref-des renumbering; `(name …)` " ++
+            "supplies an authored name instead. Wiring a pad or a bridged sub-block port that already " ++
+            "carries a different net is an error, not a silent merge.",
+    } };
+    t[@backingInt(ScopeForm.chain)] = .{ .scope = all, .doc = .{
+        .syntax = "(chain \"NET_A\" ITEM… \"NET_B\" [(class \"net-class\")])",
+        .summary = "Cascade two-port items in order, with one anonymous net per gap. An ITEM is " ++
+            "`\"REF\"` (a two-terminal part, in on its first pad), `\"sub\"` (a module declaring exactly " ++
+            "one signal `out` port and, among the ports sharing that output's kind, exactly one `in`; " ++
+            "power, ground/bidi and optional ports are never candidates), or `\"REF/IN>OUT\"` naming the " ++
+            "two terminals explicitly. The first and last tokens are ordinary `(connect …)` ends.",
     } };
     t[@backingInt(ScopeForm.pullup)] = .{ .scope = all, .doc = .{
         .syntax = "(pullup \"SIGNAL\" VALUE \"RAIL\")",
@@ -580,15 +675,24 @@ pub const scope_form_docs = blk: {
     } };
     t[@backingInt(ScopeForm.test_point)] = .{ .scope = all, .doc = .{
         .syntax = "(test-point \"REF\" \"NET\" [(virtual)] [(purpose \"text\")] [(required-for tag…)])",
-        .summary = "Place a physical measurement / bring-up pad. Add `(virtual)` for a schematic-only marker.",
+        .summary = "Place a physical measurement / bring-up pad, or — with `(virtual)` — a schematic-only " ++
+            "marker with no pad. The physical case emits exactly what " ++
+            "`(instance \"TP\" testpoint (pin 1 \"NET\"))` does, so it is reported as a " ++
+            "`deprecated_form` info recommending the instance spelling; `(virtual)` has no other " ++
+            "spelling and is not deprecated.",
     } };
     t[@backingInt(ScopeForm.decouple_defaults)] = .{ .scope = tl, .doc = .{
         .syntax = "(decouple-defaults (ic \"REF\") (bypass (comp)))",
-        .summary = "Set per-design decouple defaults: a fallback IC ref and bypass cap so (decouple …) can omit both.",
+        .summary = "Set per-design decouple defaults: a fallback IC ref and bypass cap so (decouple …) can " ++
+            "omit both. Retired: it makes every (decouple …) that relies on it unreadable on its own, " ++
+            "so it is reported as a `deprecated_form` info. Still accepted — spell the host and the " ++
+            "part at each site instead.",
     } };
     t[@backingInt(ScopeForm.kicad_pcb)] = .{ .scope = tl, .doc = .{
         .syntax = "(kicad-pcb \"absolute/path/to/board.kicad_pcb\")",
-        .summary = "Declare the PCB file the file-based KiCad sync writes board updates to.",
+        .summary = "Declare the PCB file the file-based KiCad sync writes board updates to. Optional: a " ++
+            "`kicad-projects.sexp` at the project root maps design names to board paths and takes " ++
+            "precedence, so a machine-local path need not live in the source at all.",
     } };
     t[@backingInt(ScopeForm.stub)] = .{ .scope = tl, .doc = .{
         .syntax = "(stub \"name\" [(role …)] [(mpn …)] [(category key)] [(size W H)] [(channels N)] [(ref \"REF\")] (signal \"name\" class \"net\")…)",
@@ -751,13 +855,29 @@ pub const scope_form_docs = blk: {
             "DC budget but distinct AC domains.",
     } };
     t[@backingInt(ScopeForm.module_policy)] = .{ .scope = tl, .doc = .{
-        .syntax = "(module-policy (net-class \"NET\" ground|power|input_rail|switch_node|clock|rf|feedback|analog|control|signal)…)",
+        .syntax = "(module-policy (placement-class \"NET\" ground|power|input_rail|switch_node|clock|rf|feedback|analog|control|signal)…)",
         .summary = "Pin the PCB-layout criticality class of named nets, overriding the name heuristic " ++
             "the placer, the routing order and the `layout_class_inferred` ERC info use " ++
-            "(`module_policy.classifyNetName`). One (net-class …) child per net; the net is the " ++
+            "(`module_policy.classifyNetName`). One (placement-class …) child per net; the net is the " ++
             "FLATTENED name (\"sub-block/NET\" for a module-internal net) or a bare leaf that " ++
             "matches every module-local net of that name. A pinned net is no longer reported as " ++
-            "inferred. Unknown class atoms and malformed children are warned and dropped.",
+            "inferred. Unknown class atoms and malformed children are warned and dropped. " ++
+            "`(net-class …)` is the retired spelling of the same child — still accepted, and reported " ++
+            "as a `deprecated_form` info — because the TOP-LEVEL (net-class …) means routing geometry.",
+    } };
+    t[@backingInt(ScopeForm.requirement)] = .{ .scope = all, .doc = .{
+        .syntax = "(requirement \"text\" (on \"REF\") (check …) [(ref \"file.pdf\" (page N))] [(id \"…\")])",
+        .summary = "A rule the DESIGN owns, aimed with (on \"REF\") at one of its own placed parts " ++
+            "(or \"sub/REF\" for one inside a sub-block, judged in that sub-block). Every `(check …)` " ++
+            "primitive works unchanged. Gated exactly like the library requirement it mirrors and " ++
+            "signed off with (verifies (req design-rule <id>) …). See \u{201C}Design-owned rules\u{201D}.",
+    } };
+    t[@backingInt(ScopeForm.net_rule)] = .{ .scope = all, .doc = .{
+        .syntax = "(net-rule \"text\" (nets GLOB…) predicate… [(id \"…\")])",
+        .summary = "A design-owned rule about NETS rather than parts: every net a glob matches must " ++
+            "satisfy every predicate. Globs match flattened net names (`V_*`, `*_RF`, `sub/*`, an exact " ++
+            "name) and a glob matching nothing FAILS naming the glob. The predicates are the " ++
+            "\u{201C}Net-rule predicates\u{201D} table.",
     } };
     t[@backingInt(ScopeForm.net_envelope)] = .{ .scope = tl, .doc = .{
         .syntax = "(net-envelope \"NET\" (rated LO HI) [\"why\"])",
@@ -768,14 +888,24 @@ pub const scope_form_docs = blk: {
             "resistor likewise carries a known envelope onto the correlated node beyond it (an RC " ++
             "filter's tap, a termination or pull-up's far side, a bias tee fed through its choke), and " ++
             "a node joined to known nets only through series resistors and device pins is bounded by " ++
-            "the supplies those devices reach — both derived, never authored. This form is " ++
-            "for the nets no topology walk can bound — an enable a 3.3 V GPIO drives, a divider tap " ++
-            "sitting between two declared rails, a bus a transceiver holds. The net is named the way a " ++
+            "the supplies those devices reach, capped by any `(electrical … (max-voltage V))` the pin " ++
+            "declares. A divider tap between two bounded nets is solved by the leg ratio; a regulator's " ++
+            "FB pin sits at its `(feedback-divider … (reference-v V))`; a SET pin sits at " ++
+            "I_SET x R_SET from `(set-resistor-output …)`; and a bypassed bias node no conductor reaches " ++
+            "falls back to its pin's declared maximum — all derived, never authored. This form is " ++
+            "for the nets no walk can bound — an enable a 3.3 V GPIO drives, a bus a transceiver " ++
+            "holds, a pin whose datasheet corners are tighter than the rule. The net is named the way a " ++
             "rail is: the FLATTENED name, so a board-level declaration reaches the module-local net " ++
             "bridged onto it and a module-internal node is nameable as \"sub-block/NET\". The optional " ++
             "trailing string records why. A declaration that fails to COVER the envelope the design " ++
             "already proves for that net is a failed assertion, not a silent override — declaring an " ++
-            "enable at 3.3 V on a net a 5 V rail also reaches states something untrue.",
+            "enable at 3.3 V on a net a 5 V rail also reaches states something untrue. " ++
+            "MODULES OWN THEIR OWN NODES: written inside a `(defmodule …)`/`(block …)` body the net is " ++
+            "MODULE-LOCAL and LO/HI are evaluated expressions of the module's parameters " ++
+            "((rated (* vout 0.97) (* vout 1.03))), so a SET/FB/bias node is stated ONCE in the module " ++
+            "and applies to `sub-block/NET` at every instantiation, at that instantiation's numbers. " ++
+            "A board declaration for the same flattened net may restate or WIDEN what the module " ++
+            "claims; narrowing it is the same failed assertion, because the module owns the node.",
     } };
     t[@backingInt(ScopeForm.fabrication_layer)] = .{ .scope = tl, .doc = .{
         .syntax = "(fabrication-layer \"FILE.gbr\" (side top|bottom) (material \"NAME\") (thickness MM) " ++
@@ -1016,6 +1146,17 @@ pub const scope_form_docs = blk: {
             "pour-clearance 0.3, track-width 0.127, " ++
             "via 0.4 / 0.2, via-plating 0.025), so a design with no form uses those defaults.",
     } };
+    t[@backingInt(ScopeForm.variant)] = .{ .scope = tl, .doc = .{
+        .syntax = "(variant \"NAME\" [\"doc\"] [(default)])",
+        .summary = "Declare one ASSEMBLY variant — same PCB, same netlist, same footprints, " ++
+            "different population and values. Repeatable; at most one may carry `(default)`, " ++
+            "which is the variant every surface selects when none is asked for. A design with " ++
+            "no declaration has exactly one implicit (base) variant. Instances opt in with the " ++
+            "`(only-in …)` / `(dnp-in …)` / `(value-in …)` body forms, including instances a " ++
+            "`(sub-block …)` module places — variants are design-level, so a module names the " ++
+            "ROOT design's variant names. Select one with `--variant NAME`, `?variant=NAME`, " ++
+            "or a structured tool's `variant` argument.",
+    } };
     t[@backingInt(ScopeForm.revision)] = .{ .scope = tl, .doc = .{
         .syntax = "(revision \"ID\" [(date \"YYYY-MM-DD\")] [(change \"ID\" \"summary\")…])",
         .summary = "Declare the design's canonical board revision: a human-meaningful spin id " ++
@@ -1178,6 +1319,10 @@ pub fn reservedSubFormNames(comptime table: []const SubFormDoc) [reservedSubForm
 /// double a reference row and make the derived name lists ambiguous.
 fn requireUniqueSubFormNames(comptime table: []const SubFormDoc) void {
     comptime {
+        // Pairwise byte comparison over the whole table: quadratic in rows and
+        // linear in name length, so the default branch budget runs out on the
+        // larger registries long before anything is wrong with them.
+        @setEvalBranchQuota(100_000);
         for (table, 0..) |row, i| {
             for (table[i + 1 ..]) |other| {
                 if (std.mem.eql(u8, row.name, other.name))
@@ -1326,6 +1471,26 @@ pub const instance_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
         .summary = "Sign off a deliberately unconnected pad, satisfying the `no_connect` ERC rule.",
     },
     .{
+        .name = "only-in",
+        .syntax = "(only-in \"VARIANT\"…)",
+        .summary = "Populate this part ONLY in the listed assembly variants; every other variant " ++
+            "(the base included) leaves it Do Not Populate. The footprint and its pads stay on the " ++
+            "board either way. Cannot be combined with `(dnp)`, which is unconditional.",
+    },
+    .{
+        .name = "dnp-in",
+        .syntax = "(dnp-in \"VARIANT\"…)",
+        .summary = "Do Not Populate this part in the listed assembly variants, populating it in the " ++
+            "rest. The complement of `(only-in …)`; naming one variant in both is an error.",
+    },
+    .{
+        .name = "value-in",
+        .syntax = "(value-in \"VARIANT\" \"VALUE\")",
+        .summary = "Override this part's value in one assembly variant — repeat the form per variant. " ++
+            "The family's declared value-kind applies to the override exactly as to the authored " ++
+            "value, so a variant is not a way past the check that rejects `(cap-0402 \"4.7k\")`.",
+    },
+    .{
         .name = "id",
         .syntax = "(id hex8)",
         .summary = "Stable identity anchor. The build mints one into the source when it is missing.",
@@ -1387,6 +1552,14 @@ pub const sub_block_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
             "with an empty prefix, name the board net outright.",
     },
     .{
+        .name = "bridge-interface",
+        .syntax = "(bridge-interface \"GROUP\" (to \"NET_PREFIX\") | (to-group \"BOARDGROUP\") [(rename SIGNAL \"NET\")]…)",
+        .summary = "Wire one whole `(port-group …)` of the sub-block in a single line: every member " ++
+            "port ties to board net `NET_PREFIX_SIGNAL`, or to the same signal of a board-level " ++
+            "group. Exactly equivalent to the `(bridge …)` lines it replaces. Its own children are " ++
+            "the \u{201c}Bridge-interface sub-forms\u{201d} table.",
+    },
+    .{
         .name = "id",
         .syntax = "(id hex8)",
         .summary = "Stable identity anchor for the sub-block itself.",
@@ -1402,6 +1575,68 @@ pub const sub_block_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
         .syntax = "(reflow)",
         .summary = "Opt this sub-block out of module-layout composition, so the parent lays its contents " ++
             "out from scratch rather than reusing the module's own arrangement.",
+    },
+});
+
+/// Children of an `(interface NAME …)` definition. One row today: the
+/// vocabulary is a list of named lanes and nothing else.
+pub const interface_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
+    .{
+        .name = "signal",
+        .syntax = "(signal SIGNAL in|out|io|bidi [kind] [optional])",
+        .summary = "One named lane of the bundle. The direction is the PERIPHERAL's — `(port-group " ++
+            "… (role controller))` mirrors it, and a bidirectional lane is its own mirror. An " ++
+            "optional signal-type word (`clock`, `data`, …) is replayed onto the expanded port; " ++
+            "`optional` marks a lane a link may legitimately leave unwired.",
+    },
+});
+
+/// Options of a `(port-group "PREFIX" iface …)`. `eval/interfaces.zig` reads
+/// these by head atom; anything else is a trailing port modifier replayed onto
+/// every lane, so this table is the set it must NOT replay.
+pub const port_group_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
+    .{
+        .name = "role",
+        .syntax = "(role controller|peripheral)",
+        .summary = "Which end of the link this block is. `peripheral` (the default) keeps the " ++
+            "interface's own directions; `controller` mirrors every one of them. Unrelated to the " ++
+            "section-scope `(role …)` annotation.",
+    },
+    .{
+        .name = "rename",
+        .syntax = "(rename SIGNAL \"PORTNAME\")",
+        .summary = "Name one lane's port outright instead of `PREFIX_SIGNAL` — how a part whose " ++
+            "datasheet spells chip-select `CSN` keeps that name while still declaring `spi`.",
+    },
+    .{
+        .name = "omit",
+        .syntax = "(omit SIGNAL…)",
+        .summary = "Drop lanes the part does not have, e.g. the `MISO` of a write-only three-wire " ++
+            "SPI peripheral.",
+    },
+});
+
+/// Children of a `(bridge-interface "GROUP" …)` inside a `(sub-block …)`.
+/// `eval/interfaces.zig` derives its accepted set from the direct rows here.
+pub const bridge_interface_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
+    .{
+        .name = "to",
+        .syntax = "(to \"NET_PREFIX\")",
+        .summary = "Board nets for the bundle: member signal S ties to `NET_PREFIX_S`, joined by one " ++
+            "underscore (an empty prefix gives the bare signal names).",
+    },
+    .{
+        .name = "to-group",
+        .syntax = "(to-group \"BOARDGROUP\")",
+        .summary = "Tie the sub-block's bundle to a `(port-group …)` this block declares itself, " ++
+            "signal by signal — how a board passes a bus straight through to its own boundary. A " ++
+            "signal the board group does not carry is simply not tied.",
+    },
+    .{
+        .name = "rename",
+        .syntax = "(rename SIGNAL \"NET\")",
+        .summary = "Name one signal's board net outright, overriding `(to …)`/`(to-group …)` for " ++
+            "that lane — the odd chip-select that lands on a per-device net.",
     },
 });
 
@@ -1451,12 +1686,204 @@ pub const port_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
         .summary = "Where this port's net enters or leaves the module — the PCB rough placer's explicit " ++
             "flow hint, overriding the direction heuristic.",
     },
+    .{
+        .name = "role",
+        .syntax = "(role WORD)",
+        .summary = "What the port does in its interface (the section-port diagram reads it). The bare " ++
+            "`role WORD` keyword pair is the retired spelling: still accepted, and reported as a " ++
+            "`deprecated_form` info naming this one.",
+    },
+    .{
+        .name = "protocol",
+        .syntax = "(protocol WORD)",
+        .summary = "The bus or signalling standard this port speaks. Same retired bare `protocol WORD` " ++
+            "keyword-pair alias as `(role …)`.",
+    },
+    .{
+        .name = "class",
+        .syntax = "(class WORD)",
+        .summary = "A free classification key for the port. Same retired bare `class WORD` keyword-pair " ++
+            "alias as `(role …)`.",
+    },
 });
 
 /// Head atoms accepted in design scope that carry identity or layout intent
 /// rather than circuit content. `eval/design_block.isInertFormHead` derives
 /// its set from the direct rows here, so these never draw an
 /// unknown-sub-form warning.
+/// Body grammar of a system contract source, `src/systems/<name>/system.sexp`
+/// — the file `netlisp system-check`, the readiness gate and the `/systems`
+/// pages read a system's boards, board-to-board interfaces and review
+/// documents out of.
+///
+/// These are NOT evaluator forms. A system contract is never evaluated: it is
+/// parsed straight into the strict `netlisp-system-review-v1` spec that the
+/// long-standing `system.json` also parses to, so a design source writing
+/// `(interface …)` still gets the ordinary unknown-form warning. They are
+/// registered here because the generated reference documents one language, and
+/// `src/system_sexp.zig` proves its accepted head atoms are exactly this set.
+pub const system_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
+    .{
+        .name = "system",
+        .syntax = "(system \"NAME\" (title …) (part-number …) (revision …) (board …)… (interface …)… (document …)…)",
+        .summary = "The whole contract, one per file. NAME must match the `src/systems/<name>/` directory.",
+    },
+    .{
+        .name = "title",
+        .syntax = "(title \"Barracuda OC-303-1-01\")",
+        .summary = "Human title of the system, or of the enclosing board or document.",
+    },
+    .{
+        .name = "part-number",
+        .syntax = "(part-number \"OC-303-1-01\")",
+        .summary = "Stable assembly identity of the system or board, independent of the human title.",
+    },
+    .{
+        .name = "revision",
+        .syntax = "(revision \"B3\")",
+        .summary = "Revision of the system or board this contract is pinned to.",
+    },
+    .{
+        .name = "board",
+        .syntax = "(board \"NAME\" (role rf) (source \"src/…\") (part-number …) (revision …) [(layout …)] [(dnp …)])",
+        .summary = "One board in the product. NAME is the design lookup name; identity and layout must match what the board itself resolves to.",
+    },
+    .{
+        .name = "role",
+        .within = "board",
+        .syntax = "(role rf)",
+        .summary = "Archive identity of this board within the system — unique, and the directory its evidence lands in.",
+    },
+    .{
+        .name = "source",
+        .within = "board",
+        .syntax = "(source \"src/boards/barracuda/barracuda.sexp\")",
+        .summary = "Project-relative design source, checked against the path the design resolver selects.",
+    },
+    .{
+        .name = "layout",
+        .within = "board",
+        .syntax = "(layout \"Barracuda V2\")",
+        .summary = "Saved layout to release. Defaults to `blessed` — the board's starred default.",
+    },
+    .{
+        .name = "dnp",
+        .within = "board",
+        .syntax = "(dnp drop)",
+        .summary = "Whether do-not-populate parts are dropped (default) or kept in this board's outputs.",
+    },
+    .{
+        .name = "interface",
+        .syntax = "(interface \"ID\" (mates …) [(contact-count N)] [(auto)] (signal …)…)",
+        .summary = "One board-to-board connector contract. Checked against both boards' netlists as `interface_mismatch` findings.",
+    },
+    .{
+        .name = "mates",
+        .within = "interface",
+        .syntax = "(mates \"barracuda/J1\" \"barracuda-base/base-interface/J1\")",
+        .summary = "The two endpoints as `board/CONNECTOR` handles. The connector half may be a sub-block path; the board is the first segment.",
+    },
+    .{
+        .name = "contact-count",
+        .within = "interface",
+        .syntax = "(contact-count 40)",
+        .summary = "Physical contact count. Optional, and checked against the records present — declare it to catch a truncated table.",
+    },
+    .{
+        .name = "auto",
+        .within = "interface",
+        .syntax = "(auto)",
+        .summary = "Derive every contact from the two connectors' pad tables by contact number. Explicit `(signal …)` rows then override single contacts.",
+    },
+    .{
+        .name = "signal",
+        .syntax = "(signal \"CANONICAL\" (left PIN [\"NET\"]) (right PIN [\"NET\"]) [optional])",
+        .summary = "One physical contact. Without `(auto)` both nets are required; `optional` marks the contact as not required by the contract.",
+    },
+    .{
+        .name = "left",
+        .within = "signal",
+        .syntax = "(left 1 \"V_12V\")",
+        .summary = "The contact's pad on the first mated connector and the net it reaches there.",
+    },
+    .{
+        .name = "right",
+        .within = "signal",
+        .syntax = "(right 1 \"V_12V_RF\")",
+        .summary = "The same physical contact on the second connector. A net differing from CANONICAL becomes that endpoint's alias.",
+    },
+    .{
+        .name = "document",
+        .syntax = "(document \"ID\" (title …) (path \"…md\") (classification …) [(status …)] [(board …)] [(required …)] [(include-in-fab …)] [(generated …)])",
+        .summary = "One authored review document. A system needs at least one active required `checklist`.",
+    },
+    .{
+        .name = "classification",
+        .within = "document",
+        .syntax = "(classification review)",
+        .summary = "design, review, checklist, bringup, manufacturing or reference.",
+    },
+    .{
+        .name = "status",
+        .within = "document",
+        .syntax = "(status active)",
+        .summary = "active (default) or historical. A historical document never gates a release.",
+    },
+    .{
+        .name = "required",
+        .within = "document",
+        .syntax = "(required true)",
+        .summary = "Whether the release gate waits on this document. Default true.",
+    },
+    .{
+        .name = "include-in-fab",
+        .within = "document",
+        .syntax = "(include-in-fab false)",
+        .summary = "Whether the document travels in the fabrication archive. Default true.",
+    },
+    .{
+        .name = "generated",
+        .within = "document",
+        .syntax = "(generated system-summary interface-matrix)",
+        .summary = "Generated regions this document carries, each written as `<!-- netlisp:generated ID -->` … `<!-- /netlisp:generated -->`.",
+    },
+    .{
+        .name = "attestation",
+        .syntax = "(attestation (system-lock \"…\") [(attested-by …)] [(attested-at …)] (input …)… (document …)…)",
+        .summary = "The export-time content attestation. Normally absent from an authored contract; parsed so an attested manifest round-trips.",
+    },
+    .{
+        .name = "system-lock",
+        .within = "attestation",
+        .syntax = "(system-lock \"<64 hex>\")",
+        .summary = "Canonical digest over the contract and every attested input and document.",
+    },
+    .{
+        .name = "attested-by",
+        .within = "attestation",
+        .syntax = "(attested-by \"reviewer@example.com\")",
+        .summary = "Authenticated identity that approved the stored attestation.",
+    },
+    .{
+        .name = "attested-at",
+        .within = "attestation",
+        .syntax = "(attested-at \"2026-09-05T12:34:56Z\")",
+        .summary = "UTC second-precision approval timestamp.",
+    },
+    .{
+        .name = "input",
+        .within = "attestation",
+        .syntax = "(input \"src/board.sexp\" \"<64 hex>\")",
+        .summary = "Content hash of one attested release input.",
+    },
+    .{
+        .name = "checklist",
+        .within = "attestation",
+        .syntax = "(document \"id\" \"path\" \"<64 hex>\" (checklist 12 12 0))",
+        .summary = "Task totals recorded for an attested checklist document: total, complete, open.",
+    },
+});
+
 pub const marker_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
     .{
         .name = "id",
@@ -1626,6 +2053,9 @@ pub const sub_form_tables = [_][]const SubFormDoc{
     instance_form_docs,
     pins_form_docs,
     sub_block_form_docs,
+    interface_form_docs,
+    port_group_form_docs,
+    bridge_interface_form_docs,
     port_form_docs,
     marker_form_docs,
     component_form_docs,
@@ -1725,8 +2155,9 @@ test "instance sub-form registry reserves the instance body head atoms" {
     // Reserved = every direct child plus `(as …)`, which is written inside
     // `(pin …)` but guarded at instance level so a stray one is not a property.
     const expected = [_][]const u8{
-        "pin", "as",        "part", "bus",      "note",  "power",
-        "dnp", "decouples", "near", "strap-ok", "nc-ok", "id",
+        "pin",   "as",      "part",      "bus",      "note",
+        "power", "dnp",     "decouples", "near",     "strap-ok",
+        "nc-ok", "only-in", "dnp-in",    "value-in", "id",
     };
     try std.testing.expectEqual(expected.len, instance_reserved_forms.len);
     for (expected) |name| {

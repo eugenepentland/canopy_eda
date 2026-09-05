@@ -191,7 +191,8 @@ fn appendSidecars(
 ) !void {
     const suffixes = [_][]const u8{
         ".layouts.json",   ".autolayout.json", ".bom",         ".checks.sexp",
-        ".drc-rules.json", ".notes.md",        ".refdes.json",
+        ".drc-rules.json", ".notes.md",        ".refdes.json", ".layout.sexp",
+        ".diagram.sexp",
     };
     for (suffixes) |suffix| {
         const path = paths.designSiblingPath(allocator, input.project_dir, input.name, suffix) catch continue;

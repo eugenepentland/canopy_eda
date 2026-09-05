@@ -97,15 +97,25 @@ pub const name_rules = [_]NameRule{
     .{ .category = .connector, .keywords = &.{ "Connector", "Expansion", "Header", "Mounting", "SWD", "Debug", "RJ45", "B2B" } },
 };
 
-/// Classify a section/sub-block into a `Category` from a section name and
-/// its instances by walking `name_rules` in priority order, then falling
-/// back to a J/P ref-des connector heuristic, then `.peripheral`.
-pub fn classifyByName(name: []const u8, instances: []const env_mod.Instance) Category {
+/// The category `classifyByName` would derive from the NAME alone, or null
+/// when no keyword rule matches (so the caller can tell a keyword hit apart
+/// from the ref-des / `.peripheral` fallbacks). ERC's `section_category_inferred`
+/// info reads exactly this, so "a magic word decided it" and "the classifier
+/// gave up" stay distinguishable.
+pub fn nameKeywordCategory(name: []const u8) ?Category {
     for (name_rules) |rule| {
         for (rule.keywords) |kw| {
             if (containsCI(name, kw)) return rule.category;
         }
     }
+    return null;
+}
+
+/// Classify a section/sub-block into a `Category` from a section name and
+/// its instances by walking `name_rules` in priority order, then falling
+/// back to a J/P ref-des connector heuristic, then `.peripheral`.
+pub fn classifyByName(name: []const u8, instances: []const env_mod.Instance) Category {
+    if (nameKeywordCategory(name)) |cat| return cat;
     for (instances) |inst| {
         if (inst.ref_des.len > 0 and (inst.ref_des[0] == 'J' or inst.ref_des[0] == 'P')) return .connector;
     }

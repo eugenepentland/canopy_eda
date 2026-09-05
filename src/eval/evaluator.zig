@@ -19,9 +19,12 @@ const pll_loop = @import("../pll_loop.zig");
 const frequency_plan = @import("../frequency_plan.zig");
 const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
+const interfaces = @import("interfaces.zig");
+const deprecations_mod = @import("deprecations.zig");
 const forms = @import("forms.zig");
 const footprint_pads = @import("footprint_pads.zig");
 const value_kind = @import("value_kind.zig");
+const attrs_mod = @import("attrs.zig");
 const SpecialForm = forms.SpecialForm;
 const Builtin = forms.Builtin;
 pub const ids = @import("ids.zig");
@@ -194,6 +197,14 @@ pub const Evaluator = struct {
     /// so no two components ever share an id (incl. after copy-paste from
     /// another design built by the same evaluator).
     design_ids: std.StringHashMapUnmanaged(void),
+    /// Interface bundle definitions in scope, keyed by name. Filled by an
+    /// `(interface …)` form at a file's top level and, lazily, by the first
+    /// `(port-group … iface)` that names one — which reads
+    /// `lib/interfaces/<name>.sexp` through the standard library resolution
+    /// order. Process-wide for the run rather than lexically scoped: a
+    /// vocabulary is a shared naming convention, not a binding, and a module
+    /// that declares `spi` ports must mean the same `spi` its board does.
+    interfaces: std.StringHashMapUnmanaged(interfaces.Def) = .empty,
     /// True once `loadPassivesPrelude` has run. Guards against re-entering
     /// the prelude when a module load itself triggers another module load,
     /// and lets `evalFile` skip the work after the first design.
@@ -217,6 +228,12 @@ pub const Evaluator = struct {
     /// them as `file:line:col: warning: …` and the server can read the list
     /// off the evaluator after a build.
     warnings: std.ArrayList(EvalWarning) = .empty,
+    /// Superseded spellings met during evaluation (see `eval/deprecations.zig`).
+    /// Deliberately NOT `warnings`: the release profile turns evaluator
+    /// warnings into errors, and every deprecated spelling here still works.
+    /// `materializeBlock` hands each design-block its own slice; ERC renders
+    /// them as `deprecated_form` info findings.
+    deprecations: deprecations_mod.Log = .{},
     /// Module call stack, pushed by `callModule` around each body
     /// evaluation. While non-empty, `setError` appends one
     /// `  in module 'x' (called at L:C)` context line per frame
@@ -244,9 +261,32 @@ pub const Evaluator = struct {
     /// into a confusing downstream symptom.
     authored_refs: std.StringHashMapUnmanaged(AuthoredRef) = .empty,
 
+    /// Assembly-variant selection for this evaluation. See `VariantState`.
+    variants: VariantState = .{},
+
     /// Where a ref-des was authored: the span of the form that declared it,
     /// plus the file that form lives in (a module body's forms are not in the
     /// design file). Recorded per block scope in `authored_refs`.
+    /// Which assembly variant this evaluation builds, and the space it was
+    /// chosen from. One field rather than three because a caller only ever sets
+    /// `requested`, and everything else is derived from the root design.
+    pub const VariantState = struct {
+        /// The variant the CALLER asked for, set between `init` and the first
+        /// evaluation (`--variant NAME`, `?variant=NAME`, a tool's `variant`
+        /// argument). Null selects the design's `(default)` variant, else the
+        /// base. A name the root design never declares is a build error, not a
+        /// silent fallback.
+        requested: ?[]const u8 = null,
+        /// The root design's declarations plus the resolved selection, installed
+        /// by `materializeBlock` for the ROOT block only and live for the whole
+        /// materialization — module bodies included, which is what lets an
+        /// instance inside a `(sub-block …)` name a variant the root declared.
+        scope: env_mod.VariantScope = .{},
+        /// `materializeBlock` nesting depth. 0 means the block about to be built
+        /// IS the root — the one whose `(variant …)` forms define the space.
+        root_depth: u32 = 0,
+    };
+
     pub const AuthoredRef = struct {
         span: ast.Span,
         file: []const u8,
@@ -257,6 +297,11 @@ pub const Evaluator = struct {
         form_offset: u32,
         /// The generated 8-char hex ID to insert
         id: []const u8,
+        /// The sidecar file `form_offset` indexes, or "" for the design source
+        /// itself. A form spliced in from `<name>.layout.sexp` carries a span
+        /// into THAT buffer, so writing it into the design file would land on
+        /// an unrelated `(` — see `id_insert.persistMintedIds`.
+        file: []const u8 = "",
     };
 
     pub const PendingChildId = struct {
@@ -268,11 +313,19 @@ pub const Evaluator = struct {
         key: []const u8,
         /// The generated 8-char hex token for this child.
         id: []const u8,
+        /// The sidecar file `parent_form_offset` indexes, or "" for the design
+        /// source. See `PendingId.file`.
+        file: []const u8 = "",
     };
 
     pub const NetTie = struct {
         a: []const u8,
         b: []const u8,
+        /// Where the tie was written, when a form recorded it. Null for the
+        /// synthesized ties (auto-aliases, bus expansion) that have no single
+        /// authored site. `(connect …)` reads it to name BOTH places when a
+        /// sub-block port is wired twice.
+        span: ?ast.Span = null,
         /// True for ties synthesized from symbol pin-function matching
         /// (appendAutoAliases). These are block-local — buildNets consumes
         /// them for pin-name consolidation, but they must NOT leak into
@@ -366,6 +419,7 @@ pub const Evaluator = struct {
         for (self.frequency_plan_reports.items) |report| report.deinit(self.allocator);
         self.frequency_plan_reports.deinit(self.allocator);
         self.warnings.deinit(self.allocator);
+        self.deprecations.deinit(self.allocator);
         self.module_stack.deinit(self.allocator);
         self.imports_in_progress.deinit(self.allocator);
         self.authored_refs.deinit(self.allocator);
@@ -385,6 +439,9 @@ pub const Evaluator = struct {
         self.pending_ids.deinit(self.allocator);
         self.pending_child_ids.deinit(self.allocator);
         self.design_ids.deinit(self.allocator);
+        var iface_keys = self.interfaces.keyIterator();
+        while (iface_keys.next()) |key| self.allocator.free(key.*);
+        self.interfaces.deinit(self.allocator);
     }
 
     /// Evaluate a file and return the top-level design block. Routes
@@ -517,6 +574,8 @@ pub const Evaluator = struct {
             .repeat => special_forms.evalRepeat(self, args, env),
             .for_ => special_forms.evalFor(self, args, env),
             .if_ => special_forms.evalIf(self, args, env),
+            .when_ => special_forms.evalWhen(self, args, env, true),
+            .unless_ => special_forms.evalWhen(self, args, env, false),
             .import => modules.evalImport(self, args, env),
             .defmodule => modules.evalDefmodule(self, args, env),
             .design_block => design_block.evalDesignBlock(self, args, env),
@@ -538,6 +597,10 @@ pub const Evaluator = struct {
                 try special_forms.checkArity(self, .implements, args);
                 break :blk .nil;
             },
+            // A bus vocabulary, registered on the evaluator rather than bound
+            // into `env`: it is consulted by name from `(port-group …)` in
+            // module bodies the defining file never lexically encloses.
+            .interface => interfaces.evalDefinition(self, args),
         };
 
         // Builtins (evaluate arguments first). Looking the operator up
@@ -567,25 +630,26 @@ pub const Evaluator = struct {
         // Component-family invocation: (cap "100nF") or (cap "10pF" np0)
         if (self.component_cache.get(head_name)) |comp| {
             if (comp.is_family and args.len >= 1) {
-                const val = try self.evalNode(args[0], env);
-                const val_str = val.asString() orelse {
-                    self.setErrorFmt(args[0].span, "({s} …) value must be a string, e.g. ({s} \"100nF\")", .{ head_name, head_name });
-                    return EvalError.TypeError;
+                // A unit-bearing literal is a value spelling in its own right:
+                // `(cap-0402 100nF)` reads better than the quoted form and,
+                // unlike a bare `1e-7`, still says which quantity it is.
+                const val_str = if (args[0].literal) |literal| literal else blk: {
+                    const val = try self.evalNode(args[0], env);
+                    break :blk val.asString() orelse {
+                        self.setErrorFmt(args[0].span, "({s} …) value must be a string or a unit-bearing literal, e.g. ({s} \"100nF\") or ({s} 100nF)", .{ head_name, head_name, head_name });
+                        return EvalError.TypeError;
+                    };
                 };
                 if (!value_kind.accepts(comp.param_type, val_str)) {
                     self.setError(args[0].span, value_kind.mismatchMessage(self.allocator, head_name, comp.param_type, val_str));
                     return EvalError.TypeError;
                 }
-                // Collect additional args as schematic attributes
-                var attrs: std.ArrayList([]const u8) = .empty;
-                for (args[1..]) |attr_node| {
-                    const attr = attributeText(attr_node, env) orelse continue;
-                    attrs.append(self.allocator, attr) catch continue;
-                }
+                const collected = try self.collectAttributes(head_name, args[1..], env);
                 return .{ .component_instance = .{
                     .family = head_name,
                     .value = val_str,
-                    .attrs = attrs.toOwnedSlice(self.allocator) catch &.{},
+                    .attrs = collected.attrs,
+                    .typed_attrs = collected.typed,
                 } };
             }
             return .{ .component = head_name };
@@ -597,6 +661,100 @@ pub const Evaluator = struct {
         self.setError(head.span, suggest.unboundMessage(self, head_name, env));
         return EvalError.UnboundVariable;
     }
+
+    /// The trailing arguments of a component-family call, split into the raw
+    /// attribute list every existing consumer already reads and the typed
+    /// slots that land on the instance as properties.
+    ///
+    /// Both authored spellings produce the same pair:
+    ///
+    /// ```
+    /// (cap-0402 "1uF" x7r "10%" "25V")
+    /// (cap-0402 "1uF" (dielectric x7r) (tolerance 10%) (rating 25V))
+    /// ```
+    ///
+    /// A KEYED attribute is checked: an unknown key is an error with a
+    /// did-you-mean, and a slot filled twice is an error, because a keyed form
+    /// is new syntax with no legacy spellings to protect. A BARE attribute is
+    /// classified but never rejected — the corpus is full of words nothing can
+    /// place (`DNP`, `green`, `jumper`, a bead's `600R@100MHz`), and a second
+    /// bare attribute landing in a filled slot keeps the first rather than
+    /// failing a design that evaluated yesterday.
+    fn collectAttributes(
+        self: *Evaluator,
+        family: []const u8,
+        nodes: []const Node,
+        env: *Env,
+    ) EvalError!CollectedAttributes {
+        var raw: std.ArrayList([]const u8) = .empty;
+        var typed: std.ArrayList(env_mod.Property) = .empty;
+        for (nodes) |node| {
+            if (node.asList()) |children| {
+                const keyed = try self.keyedAttribute(family, node, children, env);
+                for (typed.items) |existing| {
+                    if (!std.ascii.eqlIgnoreCase(existing.key, keyed.key)) continue;
+                    self.setErrorFmt(node.span, "({s} …) sets '{s}' twice ('{s}' then '{s}') — give the attribute once", .{ family, keyed.key, existing.value, keyed.value });
+                    return EvalError.InvalidForm;
+                }
+                typed.append(self.allocator, keyed) catch continue;
+                const slot = attrs_mod.slotForKey(keyed.key) orelse continue;
+                // Only a parts-table selection column belongs in the raw list:
+                // `PartsDb.lookupStrict` demands that every raw attribute
+                // appear on the chosen row, and no row carries an esr/esl.
+                if (slot.isSelectionColumn()) raw.append(self.allocator, keyed.value) catch continue;
+                continue;
+            }
+            const text = attributeText(node, env) orelse continue;
+            raw.append(self.allocator, text) catch continue;
+            const slot = attrs_mod.classify(text) orelse continue;
+            const key = slot.propertyKey();
+            var filled = false;
+            for (typed.items) |existing| {
+                if (std.ascii.eqlIgnoreCase(existing.key, key)) filled = true;
+            }
+            if (filled) continue;
+            typed.append(self.allocator, .{ .key = key, .value = text }) catch continue;
+        }
+        return .{
+            .attrs = raw.toOwnedSlice(self.allocator) catch &.{},
+            .typed = typed.toOwnedSlice(self.allocator) catch &.{},
+        };
+    }
+
+    /// One `(key VALUE)` attribute sub-form, resolved to the property it sets.
+    fn keyedAttribute(
+        self: *Evaluator,
+        family: []const u8,
+        node: Node,
+        children: []const Node,
+        env: *Env,
+    ) EvalError!env_mod.Property {
+        const key = if (children.len > 0) children[0].asAtom() orelse "" else "";
+        const slot = attrs_mod.slotForKey(key) orelse {
+            if (attrs_mod.suggestKey(key)) |near| {
+                self.setErrorFmt(node.span, "({s} …) has no attribute '{s}' — did you mean ({s} …)?", .{ family, key, near });
+            } else {
+                self.setErrorFmt(node.span, "({s} …) has no attribute '{s}' — known attributes: {s}", .{ family, key, attrs_mod.key_list });
+            }
+            return EvalError.InvalidForm;
+        };
+        if (children.len != 2) {
+            self.setErrorFmt(node.span, "({s} …) expects exactly one value, e.g. ({s} 25V)", .{ key, key });
+            return EvalError.ArityError;
+        }
+        const text = attributeText(children[1], env) orelse {
+            self.setErrorFmt(children[1].span, "({s} …) value must be a literal, word, or string", .{key});
+            return EvalError.TypeError;
+        };
+        return .{ .key = slot.propertyKey(), .value = text };
+    }
+};
+
+/// The two views of a family call's trailing arguments — see
+/// `Evaluator.collectAttributes`.
+const CollectedAttributes = struct {
+    attrs: []const []const u8,
+    typed: []const env_mod.Property,
 };
 
 /// Resolve one trailing argument of a component-family call — `x7r` in
@@ -623,6 +781,9 @@ pub const Evaluator = struct {
 /// strings are always literal, and everything else (a list, a number) is
 /// dropped exactly as before.
 fn attributeText(node: Node, env: *Env) ?[]const u8 {
+    // A unit-bearing literal (`25V`, `10%`, `0.4nH`) is source text that has
+    // already been decoded to an f64; its spelling is the attribute.
+    if (node.literal) |suffixed| return suffixed;
     if (node.asString()) |literal| return literal;
     const word = node.asAtom() orelse return null;
     const bound = env.get(word) orelse return word;
@@ -657,6 +818,94 @@ test "component-family attributes resolve parameters and keep bare words" {
     try std.testing.expectEqualStrings("1%", attrs[0]);
     try std.testing.expectEqualStrings("jumper", attrs[1]);
     try std.testing.expectEqualStrings("0.063W", attrs[2]);
+}
+
+/// Assert that two family calls collected the same raw attribute list and the
+/// same typed slots, in the same order.
+fn expectSameAttributes(
+    raw_a: []const []const u8,
+    raw_b: []const []const u8,
+    typed_a: []const env_mod.Property,
+    typed_b: []const env_mod.Property,
+) !void {
+    try std.testing.expectEqual(raw_a.len, raw_b.len);
+    for (raw_a, raw_b) |a, b| try std.testing.expectEqualStrings(a, b);
+    try std.testing.expectEqual(typed_a.len, typed_b.len);
+    for (typed_a, typed_b) |a, b| {
+        try std.testing.expectEqualStrings(a.key, b.key);
+        try std.testing.expectEqualStrings(a.value, b.value);
+    }
+}
+
+/// An evaluator holding one parameterised passive family, for the
+/// attribute-collection tests below.
+fn familyEvaluator(alloc: std.mem.Allocator) !Evaluator {
+    var eval = Evaluator.init(alloc, ".");
+    try eval.component_cache.put(alloc, "cap-0402", .{
+        .name = "cap-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "capacitance",
+    });
+    return eval;
+}
+
+// spec: eval/evaluator - Keyed and bare component-family attributes produce the same raw attributes and the same typed slots
+test "keyed and bare family attributes are equivalent" {
+    // page_allocator: evaluator-allocated attribute slices are never freed.
+    const alloc = std.heap.page_allocator;
+    var eval = try familyEvaluator(alloc);
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(
+        alloc,
+        "(cap-0402 \"1uF\" x7r \"10%\" \"25V\")" ++
+            " (cap-0402 \"1uF\" (dielectric x7r) (tolerance 10%) (rating 25V))" ++
+            " (cap-0402 100nF (esr 10mR) DNP)",
+    );
+    const bare = (try eval.evalNode(nodes[0], &env)).component_instance;
+    const keyed = (try eval.evalNode(nodes[1], &env)).component_instance;
+    try expectSameAttributes(bare.attrs, keyed.attrs, bare.typed_attrs, keyed.typed_attrs);
+    try std.testing.expectEqualStrings("dielectric", bare.typed_attrs[0].key);
+    try std.testing.expectEqualStrings("x7r", bare.typed_attrs[0].value);
+    try std.testing.expectEqualStrings("tolerance", bare.typed_attrs[1].key);
+    try std.testing.expectEqualStrings("voltage", bare.typed_attrs[2].key);
+    try std.testing.expectEqualStrings("25V", bare.typed_attrs[2].value);
+
+    // A unit-bearing literal is a value; `esr` is typed but stays OUT of the
+    // raw list (no parts row is keyed by it); `DNP` stays a raw attribute.
+    const mixed = (try eval.evalNode(nodes[2], &env)).component_instance;
+    try std.testing.expectEqualStrings("100nF", mixed.value);
+    try std.testing.expectEqual(@as(usize, 1), mixed.attrs.len);
+    try std.testing.expectEqualStrings("DNP", mixed.attrs[0]);
+    try std.testing.expectEqual(@as(usize, 1), mixed.typed_attrs.len);
+    try std.testing.expectEqualStrings("esr", mixed.typed_attrs[0].key);
+    try std.testing.expectEqualStrings("10mR", mixed.typed_attrs[0].value);
+}
+
+// spec: eval/evaluator - An unknown keyed attribute is rejected with a did-you-mean and a repeated one is rejected as a duplicate
+test "keyed family attributes reject unknown and repeated keys" {
+    // page_allocator: evaluator-allocated attribute slices are never freed.
+    const alloc = std.heap.page_allocator;
+    var eval = try familyEvaluator(alloc);
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(
+        alloc,
+        "(cap-0402 \"1uF\" (voltag 25V))" ++
+            " (cap-0402 \"1uF\" (rating 25V) (voltage 50V))" ++
+            " (cap-0402 \"1uF\" (rating))",
+    );
+    try std.testing.expectError(EvalError.InvalidForm, eval.evalNode(nodes[0], &env));
+    try std.testing.expect(std.mem.indexOf(u8, eval.last_error.?.message, "did you mean (voltage …)") != null);
+    try std.testing.expectError(EvalError.InvalidForm, eval.evalNode(nodes[1], &env));
+    try std.testing.expect(std.mem.indexOf(u8, eval.last_error.?.message, "sets 'voltage' twice") != null);
+    try std.testing.expectError(EvalError.ArityError, eval.evalNode(nodes[2], &env));
 }
 
 // spec: eval/evaluator - last_error records the source span of an unknown form so callers can report file:line:col

@@ -21,6 +21,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Tokenizes SI-scaled literals (220k, 100nF, 3.3V, 10mA) as si_val with the suffix in the token text
 - SI suffix rules leave mm/mil dimensions, bare milli, and longer identifiers untouched
 - SI literal at a paren boundary ends the token
+- A trailing percent sign closes a numeric literal while a standalone percent stays an operator
 - Skips line comments starting with semicolon
 - Tokenizes arithmetic operators as distinct tokens
 - Tokenizes comparison operators as distinct tokens
@@ -36,6 +37,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Parses nested S-expression lists into a tree
 - Parses numbers and unit values into typed AST nodes
 - Parses SI-scaled literals (220k, 100nF, 3.3V, 10mA) into scaled float nodes
+- A suffixed literal keeps its source spelling on the node alongside its decoded value
 - Parses input containing comments by ignoring them
 - Parses multiple top-level forms into separate AST nodes
 - Identifies forms by head atom via isForm helper
@@ -50,6 +52,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Prints a simple list as a single-line S-expression string
 - Prints short nested lists inline on one line
 - Prints long nested lists with multiline indentation
+- Prints a suffixed numeric literal with the unit it was written with
 - Round-trips parse to print to parse producing identical AST
 - Round-trips every .sexp and .kicad_pcb file in the projects/designs tree, dot-directories excluded, through parse → print → parse with structurally equal AST, failing when the corpus count leaves its expected order of magnitude
 - Fuzzing parse-print-parse yields a structurally identical AST for accepted input
@@ -218,8 +221,10 @@ candidate for deployment.
 - Ground-via seed model and endpoint tests remain claimed by the shard manifest
 - RF pad adaptation tests remain claimed by the shard manifest
 - The live sub-circuit Stamp endpoint regression remains claimed by the shard manifest
+- The library-fact envelope rules remain claimed by the shard manifest
 - The saved-pose identity tests remain claimed by the shard manifest
 - Panelization export tests remain claimed by the shard manifest
+- The anonymous-wiring tests remain claimed by exactly one shard
 - Bridges every test-bearing module into the shard import graph so filters alone decide a shard's contents
 - Rejects a shard filter that no longer names a test in the tree
 - Pins every gated full-test invocation with `--seed=1` so an unchanged tree's test run is a cache hit
@@ -880,6 +885,105 @@ from the read-only resolve path rather than walking the hierarchy again.
 - completeness-waiver: integer overflow (no arithmetic beyond formatting already-computed net and pad counts)
 - completeness-waiver: panic-free (a design that fails to resolve degrades to a comment line and the next design)
 
+## export-names
+
+Public functions: sanitize, padLessThan, Style, Table, Assignment
+
+Name sanitising and uniqueness shared by the two hand-off exporters. A design is
+entitled to call a net `+3V3` and a part `usb/U2`; C macros and SPICE nodes
+accept neither, and folding them to `[A-Za-z0-9_]` is many-to-one — so `usb/DP`
+and `usb.DP` land on one spelling, and the second silently overwrites the first's
+macro or shorts the first's net. One `Table` per output stream makes that
+impossible: a candidate already held by a different design name is suffixed
+`_2`, `_3`, … in the order the exporter offered it, and the collision is reported
+so the file can name it. `padLessThan` is the pad order both exporters write
+their rows in, natural rather than lexicographic so a pad list reads `2` before
+`10`.
+
+- a design name folds to a legal C and SPICE fragment, with separators collapsed, a leading digit guarded and an empty fold named
+- two design names that fold to one spelling are separated by a numeric suffix, the collision is reported, and one name keeps one spelling however often it is asked for
+- pad ids sort in natural order so a numbered run reads 2 before 10 and a BGA row stays with its row letter
+- a digit run compares as a number of unbounded width, so a pad id longer than any integer type still orders correctly
+
+- completeness-waiver: empty inputs (an empty name folds to the placeholder fragment `X` rather than to an empty identifier that would splice into `U1__PIN`, and an empty table hands out its first candidate unchanged)
+- completeness-waiver: large inputs (every allocation is on the caller's arena and is proportional to the name it folds; a digit run is compared as text, so a pad id wider than any integer type still orders)
+- completeness-waiver: unauthorized access (pure string work over names the caller already holds; no file, network, environment or user capability is touched)
+- completeness-waiver: i/o failure (no I/O is performed; the only failure is allocation, which propagates as an error)
+- completeness-waiver: concurrent access (a `Table` is a plain value owned by the one exporter run that created it, and both exporters are single-threaded)
+- completeness-waiver: malformed encoding (every byte outside `[A-Za-z0-9_]` folds to `_`, so a name in any encoding yields a legal identifier rather than being rejected)
+- completeness-waiver: integer overflow (the collision counter is bounded by the number of names the caller offers, and digit runs are compared as text rather than parsed)
+- completeness-waiver: panic-free (allocation failure is the only error path; no assertion, cast or unreachable is present)
+
+## export-pinmap
+
+Public functions: cmdExportPinmap, tool, PinmapError
+
+The firmware pin map of a design, as a C header or as JSON. The board already
+knows which pad of which IC carries which net, what the silicon calls that pad,
+which alternate function the design signed the pad up for, and which functional
+block it was declared in; firmware re-types all of it off a PDF, and a pin move
+every other surface agrees on stays invisible to the C file naming the old pad.
+One row per CONNECTED pad of each selected part carries the pad, the pinout
+function name, the `(alt …)` and `(as …)` alternates, the flattened net, the
+`(pins … (group "…"))` label and the enclosing `(section …)` with its role and
+protocols. Selection is the hub classes carrying a `lib/pinouts` entry, or
+exactly the parts `--ref` names. Read-only: it resolves the design through the
+same seam the PCB page reads, writes to `--output` or stdout, and mints no id.
+
+- the CLI parses the project dir, the format, the output path and repeated ref filters, and refuses a run that names no design, names two, or names an unknown format
+- the C header carries an include guard, one macro per connected pad with the repeated net separated by a suffix, one table per part, and a *#-marked header carrying the build id
+- the JSON pin map carries the same rows with the alternates as an array and the build id alone on its own line
+- two renders of one pin map are byte-identical in both formats, so a differential comparison sees only real changes
+- the exported C header is accepted by a C99 compiler when one is on PATH, and the check reports no_compiler rather than failing when none is
+- a part with no readable pinout, no connected pad, or outside the selection is left out of the pin map
+- the exporter is registered as a read-only structured tool and its declared schema names every argument the handler reads
+- the tool refuses a missing design name and an unknown format with an ok:false error line rather than exporting something else
+
+- completeness-waiver: empty inputs (a run naming no design is a usage error; a design with no selected part renders a guarded but empty header and an empty `parts` array rather than failing)
+- completeness-waiver: large inputs (the whole run is on one arena released at exit, and the pad index is built in a single pass over the flattened nets rather than rescanned per part)
+- completeness-waiver: unauthorized access (a local read-only CLI and tool over the caller's own project directory; no network, no auth surface, and nothing but the caller's `--output` path is written)
+- completeness-waiver: i/o failure (a design that cannot be resolved fails the command by name; an unwritable `--output` path propagates its write error rather than reporting success)
+- completeness-waiver: concurrent access (single-threaded, sharing no state between runs and holding no lock)
+- completeness-waiver: malformed encoding (the design is parsed by the same evaluator seam the PCB page uses, and every name is folded to `[A-Za-z0-9_]` before it reaches a C identifier)
+- completeness-waiver: integer overflow (no arithmetic beyond formatting already-counted parts and pads)
+- completeness-waiver: panic-free (a missing pinout, an unresolved pad and an absent section each degrade to an empty field or a skipped part)
+
+## export-spice
+
+Public functions: cmdExportSpice, tool, SpiceError
+
+A flattened SPICE netlist for a design. Every connection a simulator needs is
+already on the board; what stops it opening in ngspice is transcription. R/C/L
+become element lines carrying the SI value parsed out of the authored string —
+which cannot be passed through verbatim, because SPICE reads `1M` as a milli. A
+ferrite bead is a DC short, so it becomes an `R` at the `dcr-max` its BOM part
+declares. Diodes and transistors name a `<MPN>_MODEL` placeholder whose `.model`
+card is written as a comment; every IC becomes an `X` line into an EMPTY
+`.subckt` stub whose pin list is the design's own. Ground-class nets map to node
+0 and every other net name is folded, with a fold collision reported rather than
+shorted. The deck therefore LOADS once models and bodies are supplied and does
+not simulate before that; the header comment states each limit in the file.
+
+- the CLI parses the project dir and the output path with one positional design name, and refuses a run that names no design, names two, or carries an unknown flag
+- a part's class comes from its component family before its ref-des letter, so a ferrite bead carrying an L ref-des is not written as an inductor, and a pad count decides the ambiguous packages
+- an authored value carrying a rating after its magnitude is read as its magnitude rather than as nothing
+- the element name carries its own class letter, so a ref-des that already starts with it is kept and a sub-block path or a bead written as a resistor is prefixed
+- the rendered deck writes one element line per part with ground on node 0, comments out a DNP part, names a model and a subcircuit stub for the parts that need one, and ends with .end
+- a component value is written as a plain decimal with the parser's binary floating-point residue trimmed away, and an integer spelling keeps every digit
+- two renders of one deck are byte-identical, so a differential comparison sees only real changes
+- a ground-class net maps to node 0 while every other net is folded, and the ground predicate is the project's own so a split or per-pin ground still reaches 0
+- the exporter is registered as a read-only structured tool and its declared schema names every argument the handler reads
+- the tool refuses a missing design name and an unresolvable design with an ok:false error line rather than exporting an empty deck
+
+- completeness-waiver: empty inputs (a run naming no design is a usage error; a design with no parts renders the header, the limits and `.end` rather than an empty file)
+- completeness-waiver: large inputs (the whole run is on one arena released at exit, and the pad index is built in a single pass over the flattened nets rather than rescanned per part)
+- completeness-waiver: unauthorized access (a local read-only CLI and tool over the caller's own project directory; no network, no auth surface, and nothing but the caller's `--output` path is written)
+- completeness-waiver: i/o failure (a design that cannot be resolved fails the command by name; an unwritable `--output` path propagates its write error rather than reporting success)
+- completeness-waiver: concurrent access (single-threaded, sharing no state between runs and holding no lock)
+- completeness-waiver: malformed encoding (the design is parsed by the same evaluator seam the PCB page uses, and every net and part name is folded to `[A-Z0-9_]` before it reaches a node or element name)
+- completeness-waiver: integer overflow (no arithmetic beyond formatting already-counted nets, parts and stubs; a value that does not parse becomes a parameter placeholder rather than a wrapped number)
+- completeness-waiver: panic-free (a part short of the pads its class needs, an unreadable value, an absent model and an absent pinout each degrade to a comment or a placeholder)
+
 ## power-flow
 
 Public functions: cmdPowerFlow, Args, FlowError
@@ -941,6 +1045,32 @@ identical netlist and the identical resolved bindings.
 - completeness-waiver: concurrent access (single-threaded; the plan is computed and proven against bytes already read, and each evaluation owns its own evaluator and arena)
 - completeness-waiver: malformed encoding (a source that does not parse or does not evaluate is refused, and a function name the tokenizer would read back as anything else is never spliced)
 - completeness-waiver: integer overflow (byte offsets come from the parser's own spans and are bounds-checked against the source before any splice; no input-derived arithmetic)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
+## split-design
+
+Public functions: tool, planSplit
+
+Moving a design's physical and diagram declarations into the sidecars by hand
+is a large, error-prone edit on the one file a board cannot afford to have
+subtly changed. This does it mechanically: each eligible top-level form is
+lifted at its parser span byte for byte, together with the comment block
+written directly above it, and the write is gated on the original and split
+trees evaluating to the same design — flattened netlist plus the evaluated
+design-scope form set, field for field.
+
+- each moved form leaves the design file with the comment block written directly above it and reaches its sidecar byte for byte, while the circuit and the file banner stay behind
+- the default run writes nothing and returns one unified diff per file, and write true writes all three files after proving the split evaluates to the identical design
+- an existing sidecar is appended to rather than overwritten, and an unreadable design or a missing name is refused with ok false
+- the split-design tool is registered as a mutation and its declared schema round-trips through netlisp tool list
+
+- completeness-waiver: empty inputs (a missing `design`, a name that resolves to no source, and a design with nothing eligible to move each answer with a named result instead of a write)
+- completeness-waiver: large inputs (both the design and each sidecar are read under the same 10 MiB cap the evaluator uses for a library file)
+- completeness-waiver: unauthorized access (a local CLI over the caller's own project directory; the design name must be a bare basename, so traversal and absolute paths are refused before any path is built, and the write is registered as a mutation like every other design edit)
+- completeness-waiver: i/o failure (an unreadable design is refused before anything is planned, an unreadable sidecar is treated as absent, and every write is a tmp-then-rename atomic replace so a crash cannot truncate a file)
+- completeness-waiver: concurrent access (single-threaded; the plan is computed and proven against bytes already read, and each of the two evaluations owns its own evaluator and arena)
+- completeness-waiver: malformed encoding (a design that does not parse, or whose original or split tree does not evaluate, is refused; forms move as raw spans so no re-encoding happens)
+- completeness-waiver: integer overflow (byte offsets come from the parser's own spans, are bounds-checked against the source, and every subtraction that could go negative uses saturating arithmetic)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
 ## bench-page
@@ -4540,6 +4670,8 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - SectionIterator walks every ## heading of the rendered reference in order
 - The generated reference names every category key so (category …) docs follow the classifier map
 - The generated reference has a Requirement checks section rendered from the checker's check_docs table
+- Every document the generated reference links to exists in docs/
+- The section-classifier reference states that an explicit (category …) is the source of truth
 - Every isForm head atom under src/eval is reachable from a form registry or listed as a deliberate exception
 - The generated reference renders one sub-form section per compound-form registry
 
@@ -4570,6 +4702,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - strap-ok, nc-ok and a (near …) own pad are held to the same pad set as (pin …)
 - a part with neither a pinout nor a footprint has an unknown pad set and every pad token passes
 - a footprint's pad ids check the pads of a part that has no pinout file
+- the inert (row N) / (col N) grid hints on an instance and inside (part …) report themselves as doing nothing
 - completeness-waiver: empty inputs (an instance with no net arguments retains the established component-only behavior)
 - completeness-waiver: large inputs (positional pad numbering is a bounded linear walk over the parsed instance children)
 - completeness-waiver: unauthorized access (pure in-process AST lowering with no request, identity, or authorization surface)
@@ -4579,12 +4712,28 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - completeness-waiver: integer overflow (the pad counter is bounded by the source slice length and formatting returns allocation errors)
 - completeness-waiver: panic-free (all new allocation and conversion failures propagate through the evaluator error set)
 
+## eval/attrs
+
+- Bare component-family attributes classify into typed slots and leave unplaceable spellings raw
+- Keyed attribute heads resolve to their slot and an unknown key gets a did-you-mean suggestion
+- Only parts-table selection slots stay in the raw attribute list and esr/esl decode into their PDN model properties
+- A selected rating satisfies an authored one when it is at least as good, and a different dielectric never is
+- completeness-waiver: empty inputs (an empty attribute text classifies as nothing and an empty key suggests nothing, both returning null)
+- completeness-waiver: large inputs (every function scans one short attribute token against a fixed vocabulary, and the edit distance refuses keys past its fixed row buffer)
+- completeness-waiver: unauthorized access (a pure string vocabulary with no request, identity, or authorization surface)
+- completeness-waiver: i/o failure (classification performs no filesystem, socket, or process I/O)
+- completeness-waiver: concurrent access (every function is pure over its arguments and shares no mutable state)
+- completeness-waiver: malformed encoding (undecodable text falls through to null, which the caller reads as "leave it a raw attribute")
+- completeness-waiver: integer overflow (the edit-distance rows are bounded by the fixed key length and magnitudes are parsed as floats)
+- completeness-waiver: panic-free (every parse and lookup returns an optional instead of asserting)
+
 ## eval/micro_forms
 
 - pullup and pulldown lower to one resistor with explicit signal and rail nets
 - divider emits two resistors and records a checked expected tap voltage
 - led emits a resistor and diode and accepts an explicit anode net for migrations
 - a shorthand value that is not the family's declared kind is rejected like a family call
+- Every shorthand writes a unit-bearing literal's own spelling as the part value
 - completeness-waiver: empty inputs (each shorthand diagnoses missing positional arguments and emits no partial circuit)
 - completeness-waiver: large inputs (every form emits at most two parts and scans only its own bounded child list)
 - completeness-waiver: unauthorized access (pure in-process AST lowering with no user, request, or authorization surface)
@@ -4594,10 +4743,104 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - completeness-waiver: integer overflow (resistor math uses finite floating-point inputs and IDs use bounded source keys)
 - completeness-waiver: panic-free (arity, type, allocation, and invalid-value failures return explicit evaluator errors)
 
+## eval/scope_control
+
+- kindOf maps only the structural special forms and rejects the rest
+- isStructuralNode is true for a control form and false for a scope form
+- the then and else branch key segments differ so a condition flip cannot alias children
+- when materializes its design-block-scope body only when the condition holds
+- unless is when's negation in design scope
+- if at design-block scope selects one single-form branch instead of dropping both
+- an if's then-child and else-child never share an id, so flipping the condition re-derives
+- conditional child identities are stable across rebuilds
+- for inside a section emits into that section like a hand-written child
+- when inside a section and inside a nested sub-section materializes into that scope
+- a for nested inside a when inside a section composes and keeps every child identity distinct
+- a non-boolean condition is an error naming the offending form
+- a form illegal in the enclosing scope is diagnosed at its own location inside a branch
+- design-scope if rejects a multi-form branch by name instead of silently dropping it
+- expression-position when returns the last body value and unless its negation
+- completeness-waiver: empty inputs (an empty branch body materializes nothing and a zero-length item list runs no iteration)
+- completeness-waiver: large inputs (iteration counts are bounded by `repeat`'s cap and by the literal length of a `for` item list)
+- completeness-waiver: unauthorized access (pure in-process AST expansion with no request, identity, or authorization surface)
+- completeness-waiver: i/o failure (control-flow expansion performs no filesystem, socket, or process I/O)
+- completeness-waiver: concurrent access (all structural state belongs to the caller's per-materialization build state)
+- completeness-waiver: malformed encoding (the parser has produced typed nodes before any branch is selected)
+- completeness-waiver: integer overflow (loop ordinals are bounded by the iteration cap and key formatting returns allocation errors)
+- completeness-waiver: panic-free (condition, arity, and allocation failures all return explicit evaluator errors)
+
+## eval/interfaces
+
+Interface bundles: the named-lane buses `bus-port`/`bus-net` cannot express.
+An `(interface NAME (signal …)…)` definition states one vocabulary — SPI,
+I²C, UART, SWD, JTAG ship with the binary under `stdlib/interfaces/` and a
+project shadows one with its own `lib/interfaces/<name>.sexp`. Directions are
+stated from the PERIPHERAL's point of view, and `(port-group … (role
+controller))` mirrors them. A module declares its side with `(port-group
+"PREFIX" iface …)`, which expands to one `(port …)` per signal and records the
+bundle on the block; a board wires the whole bundle with one
+`(bridge-interface "GROUP" (to "NET_PREFIX"))` in place of one `(rename …)` per
+signal.
+
+- A port-group expansion is indistinguishable from the hand-written ports it replaces
+- A controller port-group flips its lanes and honours rename, omit and replayed port modifiers
+- A project lib/interfaces file shadows the bundled interface of the same name
+- A bridge-interface emits exactly the net ties the bridge lines it replace would
+- A prefix joins a signal name with exactly one underscore and an empty prefix gives the bare name
+- The controller role mirrors in and out while a bidirectional lane stays bidirectional
+- The naming lint recognises a signal only as the final segment of a port name
+- Every signal of a bundled interface definition is a canonical row of the naming vocabulary
+- completeness-waiver: large inputs (a definition file is read under the shared library-file cap, and a bundle is a handful of lanes — the expansion emits one port per declared signal and nothing iterates further)
+- completeness-waiver: i/o failure (an unreadable or absent lib/interfaces file simply falls through to the next root and finally to the bundled table; only a named interface that NO root carries is an error, reported at the (port-group …) that asked)
+- completeness-waiver: unauthorized access (definitions are library data read through the same project/--lib-dir/stdlib order as components; the module grants no capability of its own)
+- completeness-waiver: concurrent access (the registry lives on one Evaluator, which is single-threaded for the whole of a build)
+- completeness-waiver: malformed encoding (a signal row that is not a name plus a direction warns and is skipped; a definition left with no lanes is an explicit error, never a silent empty bundle)
+- completeness-waiver: integer overflow (the only arithmetic is slice-length bookkeeping inside checked allocator calls)
+- completeness-waiver: panic-free (every malformed sub-form warns and continues; a missing interface, a non-string prefix and an empty definition all return an EvalError with a source span)
+
 ## eval/env
 
 - Stores and retrieves values by name in an environment
 - Resolves names through a parent environment chain
+
+## eval/authored_rules
+
+Design-owned rules — the `(requirement … (on "REF") (check …))` and
+`(net-rule …)` forms a design-block, a section, a nested sub-section or a
+module body may author about itself. This section covers their grammar; the
+evaluation lives in `req_design_rules`.
+
+- net-rule glob matching accepts prefix, suffix, hierarchy and exact selectors
+- every net-rule predicate keyword parses to its NetPredicate variant and rejects out-of-range arguments
+- every predicate_docs row's syntax leads with the keyword parsePredicate dispatches on
+- completeness-waiver: empty inputs (a rule missing its text, its (on …) target, its selector or every predicate is warned and dropped rather than accepted as a vacuous pass)
+- completeness-waiver: i/o failure (no file or network access; the AST is already in memory)
+- completeness-waiver: large inputs (glob matching is a memory-free two-pointer walk with no recursion, so a pathological pattern costs time, not stack)
+- completeness-waiver: unauthorized access (a pure function of the design source the caller already read)
+- completeness-waiver: concurrent access (pure parse over an already-read AST; no shared state)
+- completeness-waiver: malformed encoding (the sexpr parser owns byte-level rejection; a malformed rule form warns and is dropped)
+- completeness-waiver: integer overflow (the one float→int narrowing, `(max-fanout N)`, goes through numeric.checkedInt)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
+## req_design_rules
+
+Evaluation of design-owned rules against the built design, into the same
+requirement-result pipeline library requirements flow through.
+
+- a design-owned net rule reports one result per matched net and fails a glob that matched nothing
+- a design-owned (on "sub/REF") rule resolves the instance in that sub-block and judges the check against that block's nets
+- a design rule targeting a sub-block instance is judged in that sub-block's own block
+- a design rule's id is the CRC32 of its text unless an explicit (id …) pins it, so unrelated edits keep sign-offs attached
+- a design rule authored inside a section is judged against the containing block and records the section path
+- every predicate a net rule carries folds into one message per matched net
+- completeness-waiver: empty inputs (a design with no authored rules yields no outcomes; a glob matching no net is reported as a failure naming the glob)
+- completeness-waiver: i/o failure (no file or network access; the evaluated block and its flatten are already in memory)
+- completeness-waiver: large inputs (the flatten and its indices are built once per run and freed with the run's arena)
+- completeness-waiver: unauthorized access (a pure read of a design the caller already evaluated)
+- completeness-waiver: concurrent access (a pure read of one already-materialized design block; no shared state)
+- completeness-waiver: malformed encoding (operates on the evaluated block, never on bytes)
+- completeness-waiver: integer overflow (fanout and capacitance comparisons stay in usize/f64; no narrowing)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
 ## eval/check_grammar
 
@@ -4622,6 +4865,8 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - a project's own lib/components file overrides the bundled family of the same name
 - Module calls bind purely positional arguments in declaration order
 - Module calls accept named (param expr) arguments in any order
+- a module body whose parts are all inside structural statements is still a raw design body
+- a module body that selects a whole design-block with if still yields that block as a value
 - Module calls mix leading positional with trailing named arguments
 - A 2-list whose head is not a declared param stays a positional expression
 - Binding the same module parameter twice is diagnosed by name
@@ -4672,6 +4917,24 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - a name with no close candidate reports a plain unknown-name message
 - a fixed vocabulary yields the nearest spelling and never suggests an exact match
 
+## eval/variants
+
+- The base variant populates everything except parts reserved by only-in
+- The selected variant drives population and the value override
+- populatedIn reports the population matrix without re-evaluating the design
+- An unconditional dnp is the one no population clause could have set
+- Two parts roll onto one BOM line only when their variant clauses agree
+- valueIn reports the per-variant value without re-evaluating the design
+- A variant scope reports its active name and finds declarations by name
+- completeness-waiver: empty inputs (an empty rule set and an empty declaration list ARE the base variant — the case every design with no `(variant …)` form takes, asserted above)
+- completeness-waiver: large inputs (a variant name is capped at the did-you-mean scan's own name length, and a rule scan is linear over the clauses one instance authored by hand)
+- completeness-waiver: unauthorized access (pure in-memory resolution over the design the caller already evaluated; it opens nothing and checks no identity)
+- completeness-waiver: i/o failure (no file, socket or process is touched — declarations and clauses come from the already-parsed AST)
+- completeness-waiver: concurrent access (evaluation is single-threaded, and the selection is installed and torn down inside one materialization)
+- completeness-waiver: malformed encoding (a variant name is compared bytewise and never decoded, so a non-UTF-8 spelling is simply an undeclared name)
+- completeness-waiver: integer overflow (no arithmetic: the only number is a declaration index bounded by the declaration count)
+- completeness-waiver: panic-free (every path is a bounds-checked slice walk or a switch over the closed rule-kind enum)
+
 ## eval/net_suggest
 
 - a one-off net name suggests the established net it is closest to
@@ -4694,11 +4957,42 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - completeness-waiver: i/o failure (the validator reads only the already-materialized block, never the filesystem)
 - completeness-waiver: concurrent access (validation runs inline on the single evaluation thread that built the block)
 
+## eval/sidecars
+
+Public functions: accepts, homeOf, isSingleton, kindOfPath, pendingIdFile, siblingPath, splice, originIndex
+
+A board's `.sexp` accumulates content that is not the circuit. On the flagship
+board, `pcb-plan` alone was 20% of 1867 lines and the physical/diagram
+declarations together 39%, against 7.6% for the `(section …)` bodies.
+`<name>.checks.sexp` already proved the autoloaded-sibling shape; this
+generalises it to `<name>.layout.sexp` and `<name>.diagram.sexp`, each
+restricted by form kind so the split cannot silently become a second place to
+hide the circuit, and each reporting diagnostics and `(id …)` write-back
+against its own file rather than the design's.
+
+- the layout sidecar accepts physical forms, the diagram sidecar accepts arrangement forms, and each names the other's forms as belonging elsewhere
+- a path is recognised as a sidecar by its extension so a minted id is written back to the file its byte offset indexes
+- a design's .layout.sexp and .diagram.sexp siblings are autoloaded and spliced into the design body, so their forms take effect exactly as if written inline
+- a form of the wrong kind in a sidecar is refused with a diagnostic located in that sidecar and naming the file that should hold it
+- a singleton design-scope form declared in two of a design's files is refused with both locations named, instead of letting splice order pick a winner
+- a diagnostic raised while a spliced sidecar form evaluates reports the sidecar's own path and line, not the design file's
+
+- completeness-waiver: empty inputs (every sidecar is optional; an absent or empty one leaves the design exactly as it evaluates on its own)
+- completeness-waiver: large inputs (a sidecar is read through the evaluator's own file loader under its 10 MiB cap, and is parsed and cached once however many times it is referenced)
+- completeness-waiver: unauthorized access (a sidecar is resolved from the design's own path by extension, so it can only ever be a sibling of a design the caller already reached; no name from a request reaches this module)
+- completeness-waiver: i/o failure (a sidecar that cannot be read or parsed is treated as absent, degrading to the design's own forms rather than failing the build — the file-load contract the rest of the evaluator uses)
+- completeness-waiver: concurrent access (the splice runs inside one evaluator on one thread; the server's per-request evaluators share nothing, and the page cache stamps each sidecar so a concurrent edit invalidates rather than races)
+- completeness-waiver: malformed encoding (a sidecar that does not parse is reported by the parser's own located syntax error, and a top-level form the sidecar does not accept is a located error naming the file that should hold it)
+- completeness-waiver: integer overflow (no input-derived arithmetic; the splice concatenates node slices and the origin index compares pointers)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
 ## eval/evaluator
 - prescanIds skips the requirement id a (req (id …)) sign-off reference names, so a derived requirement id never collides with its own reference
 
 - A component-family attribute resolves a bound parameter to its value while an unbound vocabulary word stays literal
 - a component-family value contradicting the declared parameter kind is rejected at the call site
+- Keyed and bare component-family attributes produce the same raw attributes and the same typed slots
+- An unknown keyed attribute is rejected with a did-you-mean and a repeated one is rejected as a duplicate
 - Evaluates arithmetic expressions from S-expression AST
 - an error inside a module body appends the module call stack to the diagnostic
 - block with a string name evaluates as a design root
@@ -4756,6 +5050,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - insertPendingIds aborts when a pending id already exists in the source
 - insertPendingIds writes a child (ids …) sidecar and stays idempotent
 - persistMintedIds writes minted ids back like the CLI and is a no-op when nothing is pending
+- an id minted by a form spliced in from a sidecar is written back into that sidecar, leaving the design source byte-identical
 - a CLI export pins the ids its evaluation minted, so a second export of an untouched design reproduces the same identity
 
 ## convert/footprint
@@ -5369,7 +5664,11 @@ Public functions: renderSchematic
 ## erc
 
 - a floating net within two edits of a well-connected net suggests that net
+- a parts row that fails an authored typed attribute is reported instead of substituted in silence
 - a net pinned by (module-policy (net-class …)) is not reported as an inferred layout class
+- reports a section whose diagram category came from a name keyword, and stays silent once (category ...) pins it
+- one section name reports its inferred category once however many sub-blocks carry it
+- a deprecated spelling is an info finding carrying file:line:col and its replacement, never an error or a warning
 - a declared differential pair with exactly one wired lane is reported as half-connected, naming the wired lane and the open one
 - a declared differential pair wired on both lanes, or on neither, is not reported
 - a sub-block's differential pair tied on only one lane by the parent is reported as half-connected
@@ -5431,6 +5730,10 @@ Public functions: renderSchematic
 - Emits no overvoltage violation when every driver stays inside the declared ratings
 - Flags a driver whose output high exceeds a receiver's declared absolute-maximum voltage
 - The strap direct-tie check shares the power-pin check's supply-rail vocabulary
+- A port group with some lanes wired and a required lane open is reported as interface_half_connected
+- A fully wired port group and a wholly unwired one are both silent, and an optional lane is never demanded
+- Two or more ports matching one interface vocabulary without a port-group raise the info-severity interface_naming lint
+- The interface naming lint stays silent for a declared port group and for a single matching port
 
 ## eval/power_budget
 
@@ -5486,6 +5789,31 @@ Public functions: analyze
 - Flags enable that never resolves to a known rail
 - Routes enable through PG signal to source rail
 
+## eval/connect
+
+- a (connect …) with no (name …) derives its net name from the AUTHORED end tokens, so ref-des renumbering cannot move it
+- a generated net name is byte-identical across two evaluations of the same source
+- a generated net name reaches the KiCad netlist unescaped and cannot collide with an authored net
+- a chain over a module picks the module's unique in/out signal pair even when a bias pin is also an input
+- a sub-block port a connect wires satisfies the required-port ERC exactly as a bridge does
+- wiring a pad that already carries an authored net is refused instead of silently merging the two
+- a sub-block port wired by both a bridge and a connect is refused, naming where the bridge was written
+- a bare chain item with more than two pads is refused with the explicit spelling in the message
+- a chain item naming no placed part or sub-block is refused rather than inventing a net
+- a sub-block with no unique signal path is refused with its candidate ports listed
+- an end that names an ordinary net joins that net instead of generating a second name for the same node
+- two connects that would generate the same name get distinct nets rather than silently merging
+- a form with too few ends, or an empty end token, is refused rather than producing a nameless net
+- large inputs — a connect with many ends collapses to one short, legal, deterministic net name
+- a malformed or non-ASCII end token still yields a name legal in every URL, JSON and KiCad surface
+- panic-free — every malformed end spelling is reported with a message, never crashed on
+- a (class …) on a connect or a chain adds every net it makes to that net-class
+- a class naming no declared net-class warns rather than silently dropping the intent
+- completeness-waiver: unauthorized access (a language form over an in-memory design block; it opens nothing and checks no identity)
+- completeness-waiver: i/o failure (resolution reads only the already-materialized block and the pinout maps the evaluator had already cached)
+- completeness-waiver: concurrent access (runs inline on the single evaluation thread that built the block, before the block is published)
+- completeness-waiver: integer overflow (no arithmetic on design-supplied numbers; the only counter is the 1..1000-bounded name-disambiguation ordinal)
+
 ## eval/design_block
 
 - two instances authored with one ref-des are an error naming both source locations
@@ -5493,6 +5821,7 @@ Public functions: analyze
 - shorthand-generated ref-des never collide with each other or with authored ones
 - each sub-block is its own ref-des namespace so two modules may both name R1
 - module-policy form pins the placement class of named nets on the design block
+- placement-class is the documented module-policy child and net-class is a deprecated alias for it
 - design-rules captures an optional ground-via maximum distance for SMD ground-pad plane stitching
 - design-rules captures an optional finished via-wall plating thickness for power-capacity analysis
 
@@ -5530,9 +5859,12 @@ Public functions: analyze
 - a section-scope diff-port expands two section ports typed differential
 - a diff-port missing its direction is an arity error naming the form
 - buildPort reads a bare trailing number as the port nominal voltage with an explicit nominal form overriding it
+- a section port reads role protocol class and nominal as sub-forms with the bare spellings kept as deprecated aliases
+- a design-block port accepts the metadata sub-forms without warning and deprecates the bare keyword pair
 - kicad-pcb form captures the literal path on the design block
 - stackup form captures layer count and plane assignments on the design block
 - net-envelope form publishes an authored voltage envelope on the design block
+- net-envelope rated bounds are evaluated so a module can express them from its own parameters
 - pdn form captures an explicit AC-domain target and source model
 - stackup captures per-layer copper foil and core/prepreg construction details
 - stackup process entries capture stepped soldermask and per-layer trapezoidal etch geometry
@@ -5597,6 +5929,36 @@ Public functions: analyze
 - a bus-port index range whose lane span would overflow the i64 subtraction is diagnosed and expands nothing
 - a zero-based bus-port range still expands and the lane cap admits a span of exactly 4095
 - a frequency-plan declaration is collected during the block body and evaluated after it, publishing its typed report on the evaluator beside the loop-filter ones
+- Project board map keys on the design source file stem
+- a project kicad-projects.sexp entry overrides the design's own kicad-pcb path and supplies one when the source declares none
+
+## eval/deprecations
+
+Public functions: note
+
+- Deprecation records dedupe by source position so a reused module reports once
+- completeness-waiver: empty inputs (a record with an empty file or message still lands and prints; only the dedupe key needs to be well-formed, and it always is because the span supplies it)
+- completeness-waiver: large inputs (the log holds one entry per distinct source position of a deprecated form, so it is bounded by the size of the design's own source)
+- completeness-waiver: unauthorized access (an in-process log over already-parsed source the evaluator was handed; it grants no file, network, or user capability)
+- completeness-waiver: i/o failure (recording performs no I/O — the caller has already read the source, and rendering the log is ERC's job)
+- completeness-waiver: concurrent access (each evaluator owns its own log for the duration of one single-threaded build; nothing is shared between builds)
+- completeness-waiver: malformed encoding (messages are compile-time format strings filled with slices out of the source the parser already accepted)
+- completeness-waiver: integer overflow (the only arithmetic is the list append the allocator bounds; line and column come from spans the tokenizer already produced)
+- completeness-waiver: panic-free (both allocations are `catch return` — a failed record drops the finding, never the build, which is the whole point of keeping deprecations out of the warning list)
+
+## eval/project_boards
+
+Public functions: lookup
+
+- Project board map resolves a design name to its KiCad board path
+- Project board map skips malformed entries instead of failing the build
+- completeness-waiver: empty inputs (an empty design name resolves to no override, and an absent or empty mapping file leaves every design on whatever its own source declares)
+- completeness-waiver: large inputs (the file holds one short line per design and is read through the evaluator's capped, cached file loader, so a design with fifty sub-blocks parses it once)
+- completeness-waiver: unauthorized access (a project-local file the same process already reads designs from; it names a board path and grants nothing on its own — the KiCad sync route keeps its own authorization)
+- completeness-waiver: i/o failure (a missing or unreadable file resolves to no override rather than failing a build, because a file of machine-local paths must never break a machine that has none)
+- completeness-waiver: concurrent access (read-only, and read through the evaluator's per-build file cache; nothing here writes)
+- completeness-waiver: integer overflow (no arithmetic — the grammar is a linear scan over parsed nodes comparing two strings)
+- completeness-waiver: panic-free (every shape mismatch is an `orelse return null`; a short form, an unquoted name and a foreign head are each skipped rather than indexed into)
 
 ## eval/test_point
 
@@ -5610,6 +5972,7 @@ Public functions: parse
 - Parses (virtual) as an explicit marker-only test point
 - Materializes a physical testpoint instance and pin-1 net by default
 - Keeps (virtual) test points marker-only with no physical instance or pad net
+- The (virtual) marker keeps its own meaning and is not reported as a deprecated spelling
 - Materializes test points inside sections and preserves section membership
 - Materializes test points inside nested sections and preserves nested membership
 
@@ -5661,9 +6024,26 @@ Public functions: isActiveSemiconductor, isPassThroughConnector
 - completeness-waiver: malformed encoding (descriptions are matched byte-wise with ASCII case folding, so non-UTF-8 bytes simply fail to match rather than being decoded)
 - completeness-waiver: integer overflow (the only arithmetic is a saturating pad count made at build time and compared, never summed)
 - completeness-waiver: panic-free (every path is a bounded slice comparison over caller-owned memory with no indexing beyond a length-checked loop)
+## eval/net-envelope-rules
+
+Public functions: collect
+
+- A feedback-divider requirement bounds its FB pin at the declared reference
+- A set-resistor-output requirement bounds its SET pin at the programmed voltage
+- Two resistors in parallel on a SET node are ambiguous and seed nothing
+- A library pin max-voltage is lifted to the flat net that pin sits on
+- completeness-waiver: empty inputs (a block with no instances and no sub-blocks returns both slices empty, the covered nothing-declared case)
+- completeness-waiver: large inputs (one walk of the design tree, one pinout lookup per declared pin, on an already-evaluated block)
+- completeness-waiver: unauthorized access (reads an evaluated block and the evaluator's own pinout cache; opens no file and reaches no network)
+- completeness-waiver: i/o failure (no I/O — every component file was read during evaluation)
+- completeness-waiver: concurrent access (single-threaded inside design evaluation, reading an immutable block)
+- completeness-waiver: malformed encoding (names arrive as evaluated slices and are compared bytewise; nothing here parses an external encoding)
+- completeness-waiver: integer overflow (voltages and resistances stay in f64; the only integers are slice lengths the allocator already bounds)
+- completeness-waiver: panic-free (every lookup is an optional consulted with orelse, and a non-positive current or resistance seeds nothing)
+
 ## eval/net-envelopes
 
-Public functions: build
+Public functions: build, ferriteBridges, lookup, lookupIn
 
 - Derives a voltage envelope for a sub-block-internal net across a module-internal ferrite bead
 - An internal input port's rated range is a pin tolerance and does not widen the net it sits on
@@ -5674,9 +6054,16 @@ Public functions: build
 - An inductor bias feed derives its bias node from the rail it taps
 - A device pin on a derived domain widens it to the device's own known supplies
 - A device with no envelope-known net anywhere poisons the domain it drives
-- A divider tap anchored by two different known nets is refused rather than guessed
+- A divider tap between two bounded nets is derived from the leg ratio
+- A resistor ladder with more than one unknown node is refused rather than approximated by a two-leg ratio
+- A library-declared node potential fills a net the topology cannot bound and never overwrites one it can
+- A device pin's declared max-voltage bounds the domain it drives more tightly than the part's supplies
+- A bypassed bias node no conductor reaches is bounded by its pin's declared maximum
 - A DNP series resistor is absent copper and derives nothing
 - An inductor between two unknown nets is a switching coil and merges nothing
+- A module's own net-envelope declaration applies to the flattened sub-block/NET name
+- A board declaration narrower than the module's own claim about the same net is a contradiction
+- lookup reads a net's proven potential from rails, ground-class names and the envelope table alike
 - completeness-waiver: empty inputs (a design with no sub-blocks, no rated ports and no declarations returns both slices empty, which is the covered no-envelopes-proven case)
 - completeness-waiver: large inputs (one flatten plus a near-linear union-find over its nets, the same pass the netlist exporter already runs on every board)
 - completeness-waiver: unauthorized access (a pure derivation over an already-evaluated block; it opens no file, reaches no network, and consults no external state)
@@ -5842,6 +6229,7 @@ red at all, and the other three channels are what carry the hot end.
 Public functions: renderToMarkdown
 
 - emits markdown header for design name
+- the markdown review lists design-owned rules in their own section, per target, distinct from the per-IC library requirements
 - the markdown Thermal section carries the verdict sentence, the ambient range, one row per screened part, and the coverage line
 - the markdown Thermal section carries the cooling-scenario table with one row per scenario, and prints the missing-layout reason when there is no ladder
 
@@ -5938,6 +6326,21 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - a saved review document makes the prior dossier load immediately with a stale notice instead of deleting it or automatically recomposing it
 - the dossier's board-free refusals are decided without starting a composition, so a broken workspace is refused on the first request
 - the dossier status endpoint reports composition state, staleness, and freshness without starting or serving a composition
+- the (system …) source parses to the same strict v1 spec the JSON manifest produces, deriving the canonical-net aliases the schema requires
+- an (auto) interface derives every contact from the two connectors' pad tables by contact number, and an explicit signal overrides one of them
+- a (system …) source is refused with an actionable diagnostic for a syntax error, an unknown form, a missing field, an oversized source, a contact neither connector carries and an unresolvable auto endpoint
+- a JSON manifest converted to (system …) and parsed back yields the identical canonical spec, so the converter is a migration rather than a rewrite
+- convert-system-manifest is a read-only registered tool whose printed source re-parses to the manifest it was given
+- contact identifiers compare numerically across the pinout's zero-padded spelling and the netlist's bare one
+- the generated language reference documents exactly the head atoms a (system …) source accepts, in both directions
+- a system.sexp beside a system.json is the contract the readiness gate reads, and the shadowed JSON is reported rather than silently ignored
+- a contract whose contacts all mate reports no interface mismatch, and two differing net NAMES across the joint are never one
+- a contact wired on one side and unconnected or floating on the other is an error-severity interface mismatch
+- a required signal joining two supplies or grounds at different declared potentials is an error-severity interface mismatch, and an undeclared potential is not guessed
+- a signal naming a pin its connector does not carry, a contract claiming more contacts than the connector has pads, and two signals claiming one contact are error-severity interface mismatches
+- surplus connector pads and an unreadable connector pad table are reported without blocking, because neither names a defect
+- every interface finding renders its class, kind, severity and locating fields into the readiness document
+- an (auto) interface resolves its contact table by evaluating both boards for real, and a connector that cannot supply a declared contact is refused rather than truncated
 - a stale dossier offers authenticated writers an explicit regenerate action while continuing to serve the old results until the single background replacement finishes
 - the dossier loader waits and reloads rather than polling, so a composition in flight is not destabilised by its own progress page
 - a dossier composition that lost its input closure to concurrent server work is composed again within a bounded number of attempts
@@ -6021,6 +6424,7 @@ Public functions: evalCapRating, evalMaxDistance, evalSequence, resolveDistanceR
 
 - an append allocation failure releases the already-owned finding message
 - authoring warns for pending requirements while strict preflight fails them
+- design-owned rules are gated exactly like library requirements and satisfy the release profile's cited-requirement demand
 - the release profile fails profile gaps and unknown sub-forms that preflight only warns about
 - complete reviews require every category or a reasoned N/A
 - digest identity uses canonical lowercase SHA-256 text
@@ -6043,6 +6447,20 @@ ladder, the ladder needs the saved layouts, and the schematic page these fragmen
 embed reads nothing but the design's own `.sexp`. Thermal is served by
 `serve/thermal_page.zig` at `/thermal/:name` and by `serve/thermal_api.zig` at
 `/api/thermal/:name`, both of which opt into the layout read deliberately.
+
+## query
+
+- instancesJson returns an unresolved design as a failed listing rather than exiting
+- The designs listing reads every declared assembly variant name out of the source text in order
+- The instances subcommand takes --variant as a value flag so the design name stays the positional
+- completeness-waiver: empty inputs (a missing design name exits with the subcommand's usage line, and a project with no src/ directory lists no designs)
+- completeness-waiver: large inputs (each design source is read under the shared 4 MiB cap and the listings stream straight to one allocating writer)
+- completeness-waiver: unauthorized access (the CLI runs with the invoking user's filesystem authority; there is no user or permission surface)
+- completeness-waiver: i/o failure (an unreadable or unresolvable design is skipped or reported as a failed listing, never a crash)
+- completeness-waiver: concurrent access (each process owns its evaluator and output buffer and shares no mutable state)
+- completeness-waiver: malformed encoding (a title or variant name that is not a quoted string is reported as absent rather than guessed at)
+- completeness-waiver: integer overflow (the only arithmetic is bounds-checked slice indexing over the source text)
+- completeness-waiver: panic-free (every scan is a bounds-checked slice walk and every fallible call is either handled or propagated)
 
 ## tool_cli
 
@@ -7583,6 +8001,7 @@ is what makes the predicate exact rather than approximately right.
 - the schematic page serves an embedded pane variant that drops the navbar, page header, and sidebar
 - the schematic layout's deep semantic-zoom layer reuses existing inset SVGs through references instead of cloning their full DOM during a wheel gesture
 - the schematic page HTML cache keys the embedded pane apart from the full page
+- the schematic page HTML cache keys each assembly variant apart
 - each assembly rework guide takes its title from its first Markdown H1 and falls back to its filename slug
 - the assembly guide panel opens as a clickable list of guide titles, renders one guide at a time, and returns to that list from any guide
 - PCB trace selection preserves layer color and component drags ignore click jitter
@@ -7760,6 +8179,7 @@ is what makes the predicate exact rather than approximately right.
 - Design Settings edits board-level numeric rules in the GUI, preserves unrelated source forms, rebuilds, and reloads the shown layout
 - Design Settings renders validated numeric rule inputs with save-and-rebuild feedback
 - Design Settings creates a design-rules source form when a board previously relied entirely on defaults
+- Design Settings refuses to author a second copy of a rule form the design keeps in its .layout.sexp sidecar
 - Design Settings adds, edits, and deletes whole-layer copper planes without replacing physical stackup construction or comments
 - Saving plane controls on an implicit board authors the visible copper count and supports an explicitly plane-free stack
 - Design Settings exposes whole-layer copper assignments with add, edit, delete, validated save, and read-only states
@@ -7832,7 +8252,7 @@ is what makes the predicate exact rather than approximately right.
 - The compare_layout_to_starred MCP tool and the layout-match endpoint share one scorer, so both report the same agreement against the starred layout
 - The list_history MCP tool and the history endpoint write one snapshot list through one serializer, so a snapshot with no note reads the same on both
 - The save_pcb_layout MCP tool and the pcb-layouts save endpoint persist the same board, so a layout saved through either surface carries identical poses and copper
-- The designs CLI listing, the designs endpoint and the list_designs MCP tool name the same designs with the same titles, and all three skip a design's sidecar .sexp files
+- The designs CLI listing, the designs endpoint and the list_designs MCP tool name the same designs with the same titles, and all three skip a design's autoloaded sidecar .sexp files
 - The instances CLI subcommand and the list_instances MCP tool emit one payload at one default scope, so a flattened or top-level listing reads the same on both
 - The check CLI subcommand, the erc endpoint and the run_checks MCP tool run one electrical-rule check over one design, so all three report the same violations in the same order
 - The export-kicad-sch CLI subcommand, the kicad-sch endpoint and the export_kicad_sch MCP tool run one exporter, so all three produce the same sheet files byte for byte

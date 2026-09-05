@@ -24,11 +24,16 @@ const collect = @import("diagram/collect.zig");
 const lod = @import("diagram/lod.zig");
 const membership = @import("diagram/membership.zig");
 const component_classification = @import("component_classification.zig");
+const block_types = @import("render_block_types.zig");
 const canonical_module_check = @import("canonical_module_check.zig");
+const erc_interface = @import("erc_interface.zig");
+const attrs_mod = @import("eval/attrs.zig");
+const parts_mod = @import("parts.zig");
 const lib_limits = @import("lib_limits.zig");
 const stdlib = @import("stdlib.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
+const Property = env_mod.Property;
 const Net = env_mod.Net;
 
 pub const Severity = checks.Severity;
@@ -82,9 +87,14 @@ pub const ViolationKind = enum {
     direct_component_implementation,
     module_metadata_incomplete,
     layout_class_inferred,
+    section_category_inferred,
+    deprecated_form,
     components_not_grouped,
     verification_orphaned,
     diff_pair_half_connected,
+    interface_half_connected,
+    interface_naming,
+    attribute_row_mismatch,
 };
 
 /// One electrical-rule-check finding. `kind` selects the rule, `severity`
@@ -111,7 +121,9 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkFloatingNets(allocator, block, &violations);
     try checkUnconnectedPorts(allocator, block, &violations);
     try checkDiffPortPairs(allocator, block, &violations);
+    try checkInterfaceGroups(allocator, block, &violations);
     try checkMissingValues(allocator, block, &violations);
+    try checkTypedAttributeMismatch(allocator, block, project_dir, &violations);
     try checkMissingFootprints(allocator, block, &violations);
     try checkMissingDecoupling(allocator, block, &violations);
     try checkDecouplingBindingValidity(allocator, block, &violations);
@@ -140,6 +152,8 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
         });
     }
     try checkLayoutClasses(allocator, block, &violations);
+    try checkSectionCategories(allocator, block, &violations);
+    try checkDeprecatedForms(allocator, block, &violations);
     try checkComponentGrouping(allocator, block, &violations);
     try checkOrphanedVerifications(allocator, block, &violations);
     if (project_dir.len > 0) try checkPinFunctions(allocator, block, project_dir, &violations);
@@ -233,6 +247,87 @@ fn checkLayoutClasses(
             .severity = .info,
             .message = msg,
             .net = net.name,
+        });
+    }
+}
+
+/// Surface every section whose diagram category was GUESSED from a keyword in
+/// its name, so the author can pin the decision with `(category …)` instead of
+/// having to keep a magic word in the title. The twin of `checkLayoutClasses`:
+/// `info` only, one row per section, silent as soon as the section declares a
+/// recognised `(category …)`. Sections that fall through to the ref-des /
+/// `.peripheral` default are silent too — there is no keyword to lose there.
+fn checkSectionCategories(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayList(Violation),
+) !void {
+    // Deduped by section NAME: the fix is one `(category …)` edit at the
+    // section's source, so a module used twice must not report twice.
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(allocator);
+    try collectSectionCategories(allocator, block, &seen, violations);
+}
+
+fn collectSectionCategories(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    seen: *std.StringHashMapUnmanaged(void),
+    violations: *std.ArrayList(Violation),
+) std.mem.Allocator.Error!void {
+    try collectSectionCategoryRows(allocator, block.sections, seen, violations);
+    for (block.sub_blocks) |sb| try collectSectionCategories(allocator, sb.block, seen, violations);
+}
+
+fn collectSectionCategoryRows(
+    allocator: std.mem.Allocator,
+    sections: []const env_mod.Section,
+    seen: *std.StringHashMapUnmanaged(void),
+    violations: *std.ArrayList(Violation),
+) std.mem.Allocator.Error!void {
+    for (sections) |sec| {
+        try collectSectionCategoryRows(allocator, sec.sub_sections, seen, violations);
+        if (block_types.category_keys.get(sec.category) != null) continue;
+        const guessed = block_types.nameKeywordCategory(sec.name) orelse continue;
+        const gop = try seen.getOrPut(allocator, sec.name);
+        if (gop.found_existing) continue;
+        const msg = std.fmt.allocPrint(
+            allocator,
+            "Section \"{s}\" is categorised {s} for the system overview because its NAME contains a " ++
+                "classifier keyword — pin the decision with (category {s}) so a rename cannot move it",
+            .{ sec.name, @tagName(guessed), @tagName(guessed) },
+        ) catch return;
+        try violations.append(allocator, .{
+            .kind = .section_category_inferred,
+            .severity = .info,
+            .message = msg,
+        });
+    }
+}
+
+/// Report the superseded spellings the evaluator met, each with the
+/// `file:line:col` of the form and the spelling that replaces it.
+///
+/// These are deliberately **info**, never evaluator warnings: the release
+/// profile promotes evaluator warnings to errors, and every deprecated
+/// spelling here keeps working. Only the block the evaluator handed the whole
+/// design's range (the root) is read — nested blocks carry overlapping
+/// sub-ranges, so recursing would double-count.
+fn checkDeprecatedForms(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayList(Violation),
+) !void {
+    for (block.deprecations) |dep| {
+        const msg = std.fmt.allocPrint(
+            allocator,
+            "{s}:{d}:{d}: {s}",
+            .{ dep.file, dep.line, dep.col, dep.message },
+        ) catch return;
+        try violations.append(allocator, .{
+            .kind = .deprecated_form,
+            .severity = .info,
+            .message = msg,
         });
     }
 }
@@ -1135,6 +1230,25 @@ fn collectConnectedPortNets(
     }
 }
 
+/// The two `(port-group …)` rules, from `erc_interface.zig`: the bundle's
+/// both-or-neither connection contract, and the info-severity advisory that
+/// names an interface a module spelled out port by port. Kept in their own
+/// module so this file does not also carry the signal-naming vocabulary.
+fn checkInterfaceGroups(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    violations: *std.ArrayList(Violation),
+) !void {
+    const findings = try erc_interface.run(allocator, block);
+    defer if (findings.len > 0) allocator.free(findings);
+    for (findings) |finding| try violations.append(allocator, .{
+        .kind = if (finding.naming) .interface_naming else .interface_half_connected,
+        .severity = finding.severity,
+        .message = finding.message,
+        .net = finding.net,
+    });
+}
+
 /// `(diff-port …)` states a both-or-neither contract: wiring one lane of a
 /// declared differential pair and leaving its twin open is a half-finished
 /// edit, not a deliberate connection, and the required-port rule alone cannot
@@ -1268,6 +1382,68 @@ fn checkMissingValues(
             });
         }
     }
+}
+
+/// Report every typed attribute the design authored that the part actually
+/// selected from `lib/parts/` fails to meet.
+///
+/// `(cap-0402 "1uF" (rating 25V))` is a requirement: this placement needs a
+/// 25 V part. The parts table narrows on that attribute, but its lookup is
+/// deliberately lenient — when no row carries the requested rating it falls
+/// back to a value-only match, and the selected row's own `(voltage …)` then
+/// overwrites the authored one in `properties` (the BOM wins by design; the
+/// row is the physical part). Until this check, that substitution was
+/// invisible: the design asked for 25 V, the board got whatever the table had,
+/// and every downstream rating check read the substituted number.
+///
+/// A row is allowed to be BETTER than what was asked (`attrs.satisfies`), so a
+/// 50 V part where 25 V was asked is silent; only a substitution that fails
+/// the requirement is reported. A `warning`, not an `error`: the board is
+/// still buildable, and the author is the one who decides whether to add a row
+/// or relax the attribute.
+fn checkTypedAttributeMismatch(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    violations: *std.ArrayList(Violation),
+) !void {
+    if (project_dir.len == 0) return;
+    var parts_db = parts_mod.PartsDb.init(allocator, project_dir);
+    defer parts_db.deinit();
+    const all_instances = try collectAllInstances(allocator, block);
+    defer allocator.free(all_instances);
+    for (all_instances) |inst| {
+        if (inst.typed_attrs.len == 0) continue;
+        const part = parts_db.lookup(inst.component, inst.value, inst.attrs) orelse continue;
+        for (inst.typed_attrs) |authored| {
+            const slot = attrs_mod.slotForKey(authored.key) orelse continue;
+            const selected = rowRating(part, slot) orelse continue;
+            if (attrs_mod.satisfies(slot, authored.value, selected)) continue;
+            const msg = std.fmt.allocPrint(
+                allocator,
+                "{s}: design authors {s} {s} but the selected part {s} is {s}, which does not meet it — add a matching row to lib/parts/{s}.sexp or change the authored attribute",
+                .{ inst.ref_des, authored.key, authored.value, part.mpn, selected, inst.component },
+            ) catch continue;
+            try violations.append(allocator, .{
+                .kind = .attribute_row_mismatch,
+                .severity = .warning,
+                .message = msg,
+                .ref_des = inst.ref_des,
+            });
+        }
+    }
+}
+
+/// The selected row's own value for a slot, under any of the column spellings
+/// the library uses for it. Null when the row says nothing about that rating,
+/// which is silence rather than disagreement.
+fn rowRating(part: *const parts_mod.PartEntry, slot: attrs_mod.Slot) ?[]const u8 {
+    for (attrs_mod.rowColumns(slot)) |column| {
+        for (part.attrs) |attribute| {
+            if (std.ascii.eqlIgnoreCase(attribute.key, column)) return attribute.value;
+        }
+    }
+    return null;
 }
 
 /// True when the instance carries a component property `key` with a
@@ -2135,6 +2311,49 @@ fn reqsFor(
 }
 
 // ── config-strap direct-tie tests ────────────────────────────────────
+
+// spec: erc - a parts row that fails an authored typed attribute is reported instead of substituted in silence
+test "a selected part that contradicts an authored rating is reported" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/parts");
+    const row =
+        "(parts \"cap-0402\"\n" ++
+        "  (part \"1uF\" (dielectric \"x5r\") (voltage \"16V\")\n" ++
+        "    (manufacturer \"M\") (mpn \"ROW-1uF\") (preferred)))\n";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/parts/cap-0402.sexp", .data = row });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    // C1 asks for x7r at 25 V; the only row is an x5r at 16 V, and the lenient
+    // lookup takes it. C2 asks for exactly what the row carries.
+    const authored = [_]Property{ .{ .key = "dielectric", .value = "x7r" }, .{ .key = "voltage", .value = "25V" } };
+    const matching = [_]Property{.{ .key = "dielectric", .value = "x5r" }};
+    const instances = [_]Instance{
+        .{ .ref_des = "C1", .component = "cap-0402", .value = "1uF", .footprint = "c-0402", .symbol = "", .typed_attrs = &authored },
+        .{ .ref_des = "C2", .component = "cap-0402", .value = "1uF", .footprint = "c-0402", .symbol = "", .typed_attrs = &matching },
+    };
+    const block = DesignBlock{
+        .name = "probe",
+        .instances = &instances,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkTypedAttributeMismatch(alloc, &block, project, &violations);
+    try std.testing.expectEqual(@as(usize, 2), violations.items.len);
+    for (violations.items) |violation| try std.testing.expectEqualStrings("C1", violation.ref_des);
+    try std.testing.expect(std.mem.indexOf(u8, violations.items[0].message, "authors dielectric x7r") != null);
+    try std.testing.expect(std.mem.indexOf(u8, violations.items[0].message, "ROW-1uF is x5r") != null);
+    try std.testing.expect(std.mem.indexOf(u8, violations.items[0].message, "does not meet it") != null);
+    try std.testing.expect(std.mem.indexOf(u8, violations.items[1].message, "authors voltage 25V") != null);
+}
 
 // spec: erc - a config strap tied directly to a rail is an error unless pulled through a resistor or blessed
 test "config strap tied directly to a rail requires a pull resistor or a blessing" {
@@ -4869,6 +5088,94 @@ test "missing requirements recurses sub-blocks and dedups by component" {
         violations.deinit(std.testing.allocator);
     }
     try std.testing.expectEqual(@as(usize, 1), violations.items.len);
+}
+
+// spec: erc - reports a section whose diagram category came from a name keyword, and stays silent once (category ...) pins it
+test "section category inferred fires only on a name-keyword guess" {
+    const sections = [_]env_mod.Section{
+        // Name keyword "Buck" decides this one — reportable.
+        .{ .name = "3V3 Buck" },
+        // Pinned: the explicit key wins, whatever the name says.
+        .{ .name = "5V Regulator", .category = "connector" },
+        // No keyword matches; the fallback has no magic word to lose.
+        .{ .name = "Widget Farm" },
+    };
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .sections = &sections,
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkSectionCategories(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), violations.items.len);
+    try std.testing.expectEqual(ViolationKind.section_category_inferred, violations.items[0].kind);
+    try std.testing.expectEqual(Severity.info, violations.items[0].severity);
+    try std.testing.expect(std.mem.indexOf(u8, violations.items[0].message, "(category power)") != null);
+}
+
+// spec: erc - one section name reports its inferred category once however many sub-blocks carry it
+test "section category inferred dedupes a module used twice" {
+    const sections = [_]env_mod.Section{.{ .name = "3V3 Buck" }};
+    var sub_a: DesignBlock = .{ .name = "p1", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{}, .sections = &sections };
+    var sub_b: DesignBlock = .{ .name = "p2", .instances = &.{}, .nets = &.{}, .ports = &.{}, .notes = &.{}, .groups = &.{}, .sub_blocks = &.{}, .sections = &sections };
+    const sbs = [_]env_mod.SubBlock{ .{ .name = "p1", .block = &sub_a }, .{ .name = "p2", .block = &sub_b } };
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &sbs,
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkSectionCategories(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), violations.items.len);
+}
+
+// spec: erc - a deprecated spelling is an info finding carrying file:line:col and its replacement, never an error or a warning
+test "deprecated form findings are info rows with a source position" {
+    const deps = [_]env_mod.DeprecatedForm{
+        .{ .file = "lib/modules/x.sexp", .line = 12, .col = 3, .message = "old spelling — write (new)" },
+    };
+    const block: DesignBlock = .{
+        .name = "demo",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .deprecations = &deps,
+    };
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkDeprecatedForms(std.testing.allocator, &block, &violations);
+    defer {
+        for (violations.items) |v| std.testing.allocator.free(v.message);
+        violations.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), violations.items.len);
+    try std.testing.expectEqual(ViolationKind.deprecated_form, violations.items[0].kind);
+    // Info, not warning: the release profile promotes warnings to errors and
+    // every deprecated spelling in this wave still works.
+    try std.testing.expectEqual(Severity.info, violations.items[0].severity);
+    try std.testing.expectEqualStrings(
+        "lib/modules/x.sexp:12:3: old spelling — write (new)",
+        violations.items[0].message,
+    );
 }
 
 // spec: erc - surfaces layout-critical net classes as info rows, staying silent on ground/power/plain-signal nets

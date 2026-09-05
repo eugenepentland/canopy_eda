@@ -111,7 +111,7 @@ fn chargerBlock(instances: []const env.Instance, envelopes: []const env.NetEnvel
         .notes = &.{},
         .groups = &.{},
         .sub_blocks = &.{},
-        .net_envelopes = envelopes,
+        .envelopes = .{ .published = envelopes },
     };
 }
 

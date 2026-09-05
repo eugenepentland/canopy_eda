@@ -70,7 +70,11 @@ pub const shards: []const []const []const u8 = &.{
         "power_flow_cli.test.",
         "gerber_dump.test.",
         "netlist_dump.test.",
+        "export_names.test.",
+        "export_pinmap.test.",
+        "export_spice.test.",
         "pins_by_name.test.",
+        "split_design.test.",
         "drc_reconcile.test.",
         "drc_sweep.test.",
         "placement.drc_compose.test.",
@@ -158,6 +162,7 @@ pub const shards: []const []const []const u8 = &.{
         "render_order.test.",
         "render_svg.section_inset.test.",
         "req_checks_cases.test.",
+        "req_design_rules.test.",
         "req_physical_checks_cases.test.",
         "serve.diag_format.test.",
         "serve.gzip_cache.test.",
@@ -255,6 +260,7 @@ pub const shards: []const []const []const u8 = &.{
     // shard 3
     &.{
         "bench_route.test.",
+        "eval.authored_rules.test.",
         "eval.check_grammar.test.",
         "eval.evaluator.test.",
         "eval.forms.test.",
@@ -346,6 +352,7 @@ pub const shards: []const []const []const u8 = &.{
         "diagram.classify.test.",
         "diagram.lod.test.",
         "docgen.test.",
+        "eval.connect.test.",
         "eval.micro_forms.test.",
         "eval.power_sequencing.test.",
         "eval.stackup_presets.test.",
@@ -421,9 +428,14 @@ pub const shards: []const []const []const u8 = &.{
         "eval.board_role_cases.test.",
         "eval.board_keepout.test.",
         "eval.builders.test.",
+        "eval.interfaces.test.",
         "eval.section_maturity.test.",
+        "eval.scope_control.test.",
+        "eval.sidecars.test.",
         "eval.power_budget.test.",
         "eval.test_point.test.",
+        "eval.deprecations.test.",
+        "eval.project_boards.test.",
         "eval.thermal.test.",
         "export_fab.test.",
         "export_gerber.test.",
@@ -565,11 +577,16 @@ pub const shards: []const []const []const u8 = &.{
         "uuid.test.",
         "bom.test.",
         "erc.test.",
+        "erc_interface.test.",
         "eval.net_envelopes.test.",
+        "eval.net_envelope_rules.test.",
         "eval.rails.test.",
         "eval.net_suggest.test.",
         "eval.suggest.test.",
         "eval.value_kind.test.",
+        "eval.attrs.test.",
+        "eval.variants.test.",
+        "query.test.",
         "eval.footprint_pads.test.",
         "export_kicad.test.",
         "export_kicad_sch.test.",
@@ -619,6 +636,8 @@ pub const shards: []const []const []const u8 = &.{
         "req_derived_checks.test.",
         "review_md.test.",
         "system_review_assets.test.",
+        "system_sexp.test.",
+        "system_interface_check.test.",
         "system_review_html.test.",
         "system_review_md.test.",
         "system_review_package.test.",
@@ -654,6 +673,17 @@ test {
     try std.testing.expectEqualStrings("serve.pcb_step_export.test.", shards[0][3]);
 }
 
+// spec: Development pipeline - The anonymous-wiring tests remain claimed by exactly one shard
+test {
+    var claims: usize = 0;
+    for (shards) |shard| {
+        for (shard) |filter| {
+            if (std.mem.eql(u8, filter, "eval.connect.test.")) claims += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), claims);
+}
+
 // spec: Development pipeline - Panelization export tests remain claimed by the shard manifest
 test {
     var claimed = false;
@@ -679,6 +709,17 @@ test {
         if (std.mem.eql(u8, filter, "serve.pcb_subseeds.test.")) claimed = true;
     }
     try std.testing.expect(claimed);
+}
+
+// spec: Development pipeline - The library-fact envelope rules remain claimed by the shard manifest
+test {
+    var claims: usize = 0;
+    for (shards) |shard| {
+        for (shard) |filter| {
+            if (std.mem.eql(u8, filter, "eval.net_envelope_rules.test.")) claims += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), claims);
 }
 
 // spec: Development pipeline - The saved-pose identity tests remain claimed by the shard manifest

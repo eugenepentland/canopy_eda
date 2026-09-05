@@ -25,8 +25,10 @@ const infra_fs = @import("infra/fs.zig");
 const forms = @import("eval/forms.zig");
 const fmt_mod = @import("eval/fmt.zig");
 const tokenizer_mod = @import("sexpr/tokenizer.zig");
+const attrs_mod = @import("eval/attrs.zig");
 const block_types = @import("render_block_types.zig");
 const check_grammar = @import("eval/check_grammar.zig");
+const authored_rules = @import("eval/authored_rules.zig");
 const thermal = @import("eval/thermal.zig");
 const numeric = @import("numeric.zig");
 const preflight = @import("preflight.zig");
@@ -52,7 +54,7 @@ fn renderTo(writer: anytype) !void {
         \\Every special form, builtin operator, fmt directive, numeric-literal
         \\suffix, and design-scope form the toolchain recognises, with arity
         \\contracts and one-line summaries. The hand-written prose lives in
-        \\[`sexp-language.md`](sexp-language.md); this file is the
+        \\[`sexpr-language.md`](sexpr-language.md); this file is the
         \\machine-checked grammar surface.
         \\
         \\## Special forms
@@ -73,6 +75,8 @@ fn renderTo(writer: anytype) !void {
         try writeCell(writer, doc.summary);
         try writer.writeAll(" |\n");
     }
+
+    try renderStructuralForms(writer);
 
     try writer.writeAll(
         \\
@@ -143,7 +147,23 @@ fn renderTo(writer: anytype) !void {
         if (i > 0) try writer.writeAll(", ");
         try writer.print("`{c}`", .{u});
     }
-    try writer.writeAll(".\n");
+    try writer.print(
+        ". A trailing `{c}` closes a literal the same way (`10%`, `0.1%`) and " ++
+            "likewise carries no scale — `10%` is the number 10 that remembers " ++
+            "its spelling, not 0.1.\n",
+        .{tokenizer_mod.percent_sign},
+    );
+    try writer.writeAll(
+        \\
+        \\A suffixed literal keeps its source text. The value is still a plain
+        \\number in arithmetic, but anywhere it is written back out as a part
+        \\value it renders by its unit: `(pullup "SDA" 4.7k …)` is a 4.7k
+        \\resistor, not a `4700` one, and `(cap-0402 100nF)` is the same as
+        \\`(cap-0402 "100nF")` rather than `0.0000001`.
+        \\
+    );
+
+    try renderTypedAttributes(writer);
 
     try renderScopeForms(writer);
 
@@ -152,6 +172,86 @@ fn renderTo(writer: anytype) !void {
     try renderClassifierKeywords(writer);
 
     try renderReferenceAppendices(writer);
+}
+
+/// Render the "Structural control flow" section from
+/// `forms.structural_form_docs`: the special forms that are ALSO design-scope
+/// statements, with the same D/S/s scope column the design-scope table uses.
+fn renderStructuralForms(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Structural control flow
+        \\
+        \\The special forms above that are also design-scope STATEMENTS: their
+        \\body holds whatever the enclosing scope accepts, so a whole
+        \\sub-circuit can be conditional or repeated. The scope column reads
+        \\as it does for design-scope forms: **D** = design-block top level,
+        \\**S** = section, **s** = sub-section. A body form illegal in the
+        \\enclosing scope is reported at its own source location, exactly as a
+        \\hand-written sibling would be.
+        \\
+        \\Identity: the OUTERMOST structural form owns one source-resident
+        \\`(id …)` anchor, minted by the build when missing. Every child it
+        \\emits derives its id from that anchor, the child's own stable origin
+        \\key, and the accumulated key path of the enclosing branches and
+        \\iterations — so nesting composes and a condition flip cannot alias a
+        \\then-child with an else-child. An `(ids ("origin@key" hex8)…)`
+        \\sidecar on the anchor form pins migrated identities.
+        \\
+        \\| Form | Scope | Identity |
+        \\| --- | --- | --- |
+        \\
+    );
+    for (forms.structural_form_docs) |row| {
+        const doc = forms.special_form_docs[@backingInt(row.form)];
+        try writer.writeAll("| `");
+        try writeCell(writer, doc.syntax);
+        try writer.writeAll("` | ");
+        if (row.scope.design_block) try writer.writeAll("D") else try writer.writeAll("·");
+        if (row.scope.section) try writer.writeAll("S") else try writer.writeAll("·");
+        if (row.scope.sub_section) try writer.writeAll("s") else try writer.writeAll("·");
+        try writer.writeAll(" | ");
+        try writeCell(writer, row.identity);
+        try writer.writeAll(" |\n");
+    }
+}
+
+/// Render the "Typed attributes" section from `eval/attrs.zig`'s slot table —
+/// the same table evaluation classifies against, so a new slot cannot reach
+/// the language without reaching its reference.
+fn renderTypedAttributes(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Typed attributes on a family instantiation
+        \\
+        \\A component-family call takes a value and then any number of
+        \\attributes, written bare or keyed — `(cap-0402 "1uF" x7r "10%" "25V")`
+        \\and `(cap-0402 "1uF" (dielectric x7r) (tolerance 10%) (rating 25V))`
+        \\mean exactly the same thing. Each attribute that can be placed lands
+        \\on the instance as the property below, which is the one source the
+        \\BOM, `lib/parts/` row selection, the rating checks, the PDN screen and
+        \\the KiCad export read. An unknown keyed attribute is an error with a
+        \\did-you-mean; a repeated one is an error. A bare attribute that fits
+        \\no slot (`DNP`, `green`, `jumper`, `600R@100MHz`) stays a raw
+        \\attribute, untouched.
+        \\
+        \\| Keys | Property | Selects a parts row |
+        \\| --- | --- | --- |
+        \\
+    );
+    inline for (@typeInfo(attrs_mod.Slot).@"enum".field_names, 0..) |_, index| {
+        const slot: attrs_mod.Slot = @fromBackingInt(@intCast(index));
+        var first = true;
+        for (attrs_mod.keyed_spellings) |spelling| {
+            if (spelling.slot != slot) continue;
+            try writer.print("{s}`{s}`", .{ if (first) "| " else ", ", spelling.key });
+            first = false;
+        }
+        try writer.print(" | `{s}` | {s} |\n", .{
+            slot.propertyKey(),
+            if (slot.isSelectionColumn()) "yes" else "no — an analysis override",
+        });
+    }
 }
 
 /// Render the "Design-scope forms" section from `forms.scope_form_docs`, the
@@ -203,14 +303,17 @@ fn renderSubFormTable(writer: anytype, table: []const forms.SubFormDoc) !void {
 fn renderSubFormSections(writer: anytype) !void {
     try renderInstanceSubForms(writer);
     try renderSubBlockSubForms(writer);
+    try renderInterfaceSubForms(writer);
     try renderPortSubForms(writer);
     try renderMarkerForms(writer);
 }
 
 fn renderReferenceAppendices(writer: anytype) !void {
+    try renderSystemForms(writer);
     try renderComponentFields(writer);
     try renderThermalForms(writer);
     try renderRequirementChecks(writer);
+    try renderNetRulePredicates(writer);
     try renderDatasheetReview(writer);
 }
 
@@ -268,6 +371,44 @@ fn renderSubBlockSubForms(writer: anytype) !void {
     try renderSubFormTable(writer, forms.sub_block_form_docs);
 }
 
+/// Render the interface-bundle grammars — the definition, the module-side
+/// `(port-group …)` options, and the board-side `(bridge-interface …)`
+/// children.
+fn renderInterfaceSubForms(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Interface sub-forms
+        \\
+        \\`bus-port`/`bus-net` write a bus whose lanes are NUMBERED. SPI, I²C,
+        \\UART, SWD and JTAG lanes are NAMED, and the names have variants
+        \\(`SCK`/`SCLK`, `MOSI`/`SDI`, `CS`/`CSN`/`NCS`/`SS`). An
+        \\`(interface …)` definition states one vocabulary once. Its body:
+        \\
+    );
+    try renderSubFormTable(writer, forms.interface_form_docs);
+    try writer.writeAll(
+        \\
+        \\`spi`, `i2c`, `uart`, `swd` and `jtag` ship with the binary under
+        \\`stdlib/interfaces/`; a project shadows one by writing its own
+        \\`lib/interfaces/<name>.sexp`, and an `(interface …)` at the top level
+        \\of a design or module file needs no file at all.
+        \\
+        \\A module declares its side of the bus with `(port-group …)`, which
+        \\expands to one `(port …)` per signal and records the bundle. Its
+        \\options:
+        \\
+    );
+    try renderSubFormTable(writer, forms.port_group_form_docs);
+    try writer.writeAll(
+        \\
+        \\A board wires the whole bundle with one `(bridge-interface …)` inside
+        \\the `(sub-block …)`, in place of one `(bridge … (rename …))` per
+        \\signal. Its children:
+        \\
+    );
+    try renderSubFormTable(writer, forms.bridge_interface_form_docs);
+}
+
 /// Render the `(port …)` option grammar.
 fn renderPortSubForms(writer: anytype) !void {
     try writer.writeAll(
@@ -276,11 +417,13 @@ fn renderPortSubForms(writer: anytype) !void {
         \\
         \\Parenthesised options of a `(port …)` declaration, in any order after
         \\the direction. Bare-token options sit alongside them: `optional`
-        \\marks the port as not required by the module contract, a
-        \\signal-type keyword (`power`, `clock`, `rf`, …) sets the port kind,
-        \\`role R` / `protocol P` / `class C` each consume the following token
-        \\as metadata, and a bare number is the nominal voltage. An
-        \\unrecognised option warns.
+        \\marks the port as not required by the module contract, and a
+        \\signal-type keyword (`power`, `clock`, `rf`, …) sets the port kind.
+        \\Two older bare-token spellings still work and each record a
+        \\`deprecated_form` info: `role R` / `protocol P` / `class C` consume
+        \\the following token as metadata (write `(role R)` …), and a bare
+        \\number is the nominal voltage (write `(nominal V)`). An unrecognised
+        \\option warns.
         \\
     );
     try renderSubFormTable(writer, forms.port_form_docs);
@@ -299,6 +442,31 @@ fn renderMarkerForms(writer: anytype) !void {
         \\
     );
     try renderSubFormTable(writer, forms.marker_form_docs);
+}
+
+/// Render the system-contract grammar from the same registry
+/// `src/system_sexp.zig` proves its accepted head atoms against. These forms
+/// live in their own section because they are not evaluator forms: they belong
+/// to `src/systems/<name>/system.sexp`, never to a design.
+fn renderSystemForms(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## System contract forms
+        \\
+        \\The body grammar of `src/systems/<name>/system.sexp` — the contract
+        \\`netlisp system-check`, the readiness gate and the `/systems` pages
+        \\read. It parses into the same strict `netlisp-system-review-v1` spec
+        \\the older hand-maintained `system.json` parses to; where both files
+        \\exist the `.sexp` is the contract and readiness reports the JSON as
+        \\shadowed. `netlisp tool convert-system-manifest` prints the
+        \\equivalent source for an existing JSON manifest.
+        \\
+        \\These forms are never evaluated, so none of them is valid in a
+        \\design source. Rows written inside a sibling form show that nesting
+        \\in their template.
+        \\
+    );
+    try renderSubFormTable(writer, forms.system_form_docs);
 }
 
 /// Render the `(component …)` / `(component-family …)` library-definition
@@ -326,12 +494,14 @@ fn renderClassifierKeywords(writer: anytype) !void {
         \\
         \\## Section-name classifier keywords
         \\
-        \\The system-overview SVG picks each section's column + colour by
-        \\case-insensitive keyword match on the section **name**, walking
-        \\these rules in priority order (first hit wins). A section matching
-        \\no rule falls back to **connector** when it contains a J/P-prefixed
-        \\instance, else **peripheral**. An explicit `(category <key>)`
-        \\declaration overrides the heuristic.
+        \\An explicit `(category <key>)` in the section body is the source of
+        \\truth. Only a section without one is classified by these rules:
+        \\case-insensitive keyword match on the section **name**, walked in
+        \\priority order (first hit wins), falling back to **connector** when
+        \\the section contains a J/P-prefixed instance, else **peripheral**.
+        \\A section a NAME keyword classified is reported as a
+        \\`section_category_inferred` ERC info naming the `(category …)` line
+        \\that would pin it.
         \\
         \\| Category | Name keywords |
         \\| --- | --- |
@@ -414,6 +584,37 @@ fn renderRequirementChecks(writer: anytype) !void {
         \\
     );
     for (check_grammar.check_docs) |d| {
+        try writer.writeAll("| `");
+        try writeCell(writer, d.syntax);
+        try writer.writeAll("` | ");
+        try writeCell(writer, d.summary);
+        try writer.writeAll(" |\n");
+    }
+}
+
+/// Render the "Net-rule predicates" section from
+/// `eval/authored_rules.predicate_docs` — the same table `parsePredicate`
+/// dispatches on, so a design-owned net rule's vocabulary cannot drift from
+/// the reference the way a hand-written list would.
+fn renderNetRulePredicates(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Net-rule predicates
+        \\
+        \\Assertions a design-owned `(net-rule "text" (nets GLOB…) …)` makes
+        \\about each net its globs match. Unlike a `(check …)`, which is aimed
+        \\at one placement of a part, these are properties of the net itself,
+        \\so they need no pinout and no `(on …)` target. A rule may carry
+        \\several: the net must satisfy every one of them. See
+        \\“Design-owned rules” in the language guide for the
+        \\glob syntax, the scopes the form is accepted at, and how the results
+        \\reach `netlisp check`.
+        \\
+        \\| Predicate | Asserts (per matched net) |
+        \\| --- | --- |
+        \\
+    );
+    for (authored_rules.predicate_docs) |d| {
         try writer.writeAll("| `");
         try writeCell(writer, d.syntax);
         try writer.writeAll("` | ");
@@ -629,6 +830,47 @@ test "category keys section covers the classifier map" {
     for (block_types.category_keys.keys()) |key| {
         try std.testing.expect(std.meta.stringToEnum(block_types.Category, key) != null);
     }
+}
+
+// spec: docgen - Every document the generated reference links to exists in docs/
+test "the reference links only to documents that exist" {
+    const alloc = std.testing.allocator;
+    const doc = try renderLanguageReference(alloc);
+    defer alloc.free(doc);
+
+    // Sibling-document links are written as `](<name>.md)`; each must name a
+    // file still in docs/. The header pointed at a deleted second grammar for
+    // months, and nothing noticed.
+    var i: usize = 0;
+    var checked: usize = 0;
+    while (std.mem.indexOfPos(u8, doc, i, "](")) |open| {
+        const close = std.mem.indexOfPos(u8, doc, open, ")") orelse break;
+        i = close + 1;
+        const target = doc[open + 2 .. close];
+        if (!std.mem.endsWith(u8, target, ".md")) continue;
+        if (std.mem.indexOfScalar(u8, target, '/') != null) continue; // not a sibling
+        const path = try std.fmt.allocPrint(alloc, "docs/{s}", .{target});
+        defer alloc.free(path);
+        infra_fs.cwd().access(path, .{}) catch |err| {
+            std.debug.print("generated reference links to missing docs/{s}: {s}\n", .{ target, @errorName(err) });
+            return error.TestUnexpectedResult;
+        };
+        checked += 1;
+    }
+    try std.testing.expect(checked >= 1);
+}
+
+// spec: docgen - The section-classifier reference states that an explicit (category …) is the source of truth
+test "classifier section names (category …) as authoritative" {
+    const alloc = std.testing.allocator;
+    const doc = try renderLanguageReference(alloc);
+    defer alloc.free(doc);
+
+    const sec = extractSection(doc, "Section-name classifier keywords").?;
+    // The name keywords are the FALLBACK; a reader must not come away thinking
+    // the section title is what decides the category.
+    try std.testing.expect(std.mem.indexOf(u8, sec, "source of\ntruth") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sec, "section_category_inferred") != null);
 }
 
 // spec: docgen - The generated reference has a Requirement checks section rendered from the checker's check_docs table

@@ -1099,6 +1099,11 @@ allow = [
     "src/eval/fmt.zig",
     "src/sexpr/printer.zig",
     "src/req_checks.zig",
+    # Not a net name: `(connect …)` splits an END token `"REF.PAD"` at its first
+    # dot to separate the ref-des from the pad/function. A ref-des never
+    # contains a dot, and the token is a WIRING address, not a net — the
+    # bypass-stub collapse would be the wrong operation here.
+    "src/eval/connect.zig",
 ]
 reason = "first-dot bypass-stub collapse - 11 naive copies of the +5.0V->+5 corruption class; the structural fold is kicad_sch/stub.zig, the display collapse is net_analysis.baseNetName"
 

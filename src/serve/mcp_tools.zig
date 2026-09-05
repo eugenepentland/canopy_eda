@@ -9,6 +9,7 @@ const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
 const paths = @import("../paths.zig");
+const sidecars = @import("../eval/sidecars.zig");
 const edit = @import("edit.zig");
 const diag_format = @import("diag_format.zig");
 const vfs = @import("vfs.zig");
@@ -60,6 +61,10 @@ const docgen = @import("../docgen.zig");
 const page_cache = @import("page_cache.zig");
 const mcp_flatten = @import("mcp_flatten.zig");
 const pins_by_name = @import("../pins_by_name.zig");
+const export_pinmap = @import("../export_pinmap.zig");
+const export_spice = @import("../export_spice.zig");
+const split_design = @import("../split_design.zig");
+const system_sexp = @import("../system_sexp.zig");
 const mcp_checks = @import("mcp_checks.zig");
 const schematic_view = @import("mcp_schematic_view.zig");
 const mcp_build = @import("mcp_build.zig");
@@ -260,6 +265,28 @@ const tools = [_]ToolEntry{
     // write is refused unless the ORIGINAL and REWRITTEN sources flatten to the
     // identical netlist and bindings.
     .{ .name = "rewrite-pins-by-name", .is_mutation = true },
+    // The two hand-off exporters. Both READ-ONLY — they return the exported
+    // file TEXT rather than a JSON envelope, so `netlisp tool … --output` writes
+    // a usable header or deck — and neither touches a project file, which is
+    // why they are not mutations even though the CLI twins accept `--output`.
+    // export_pinmap: the firmware pin map (pad, pinout function, (as …)/(alt …)
+    // alternates, net, pin group, section) as a C header or as JSON.
+    // export_spice: a flattened SPICE deck — R/C/L/bead/diode/transistor element
+    // lines plus one empty .subckt stub per IC, ground on node 0.
+    .{ .name = "export_pinmap", .is_mutation = false },
+    .{ .name = "export_spice", .is_mutation = false },
+    // Move a design's physical/diagram declarations out of its `.sexp` into the
+    // autoloaded `<name>.layout.sexp` / `<name>.diagram.sexp` sidecars — lifted
+    // at their parser spans with the comment block above each, so the forms move
+    // byte for byte. `write:false` (the default) returns the three unified
+    // diffs; a write is refused unless the ORIGINAL and SPLIT trees flatten to
+    // the identical netlist AND the identical design-scope form set.
+    .{ .name = "split-design", .is_mutation = true },
+    // Print the `(system …)` contract equivalent to an existing
+    // src/systems/<name>/system.json. Read-only: it emits the source to the
+    // caller and never writes into the project, so a migration is reviewed as
+    // a diff before the workspace changes hands.
+    .{ .name = "convert-system-manifest", .is_mutation = false },
     // Search Component Search Engine and return candidate parts (read-only).
     // Pairs with download_footprint / download_datasheet to import a chosen one.
     .{ .name = "search_components", .is_mutation = false },
@@ -717,7 +744,10 @@ fn toolListInstances(allocator: std.mem.Allocator, project_dir: []const u8, args
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);
     defer out.* = aw.toArrayList();
-    return listInstances(allocator, project_dir, name, scopeArg(args_val), &aw.writer);
+    return listInstances(allocator, project_dir, name, .{
+        .scope = scopeArg(args_val),
+        .variant = optionalString(args_val, "variant"),
+    }, &aw.writer);
 }
 
 fn toolListFreePins(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
@@ -1115,6 +1145,10 @@ fn dispatchVfs(
     if (std.mem.eql(u8, tool_name, "fetch_datasheet")) return try mcp_parts_tools.toolFetchDatasheet(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "attach_datasheet")) return try toolAttachDatasheet(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "rewrite-pins-by-name")) return try pins_by_name.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "export_pinmap")) return try export_pinmap.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "export_spice")) return try export_spice.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "split-design")) return try split_design.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "convert-system-manifest")) return try system_sexp.convertTool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     return null;
 }
 
@@ -1457,14 +1491,24 @@ pub const FreePinOpts = struct { filter: ?[]const u8 = null, scope: Scope = .fla
 /// Return a pointer to the evaluated DesignBlock for `name`, or an error string
 /// written to `w` and null return. Caller must call `eval.deinit()` on the
 /// returned evaluator pointer's memory arena (via `defer` in the caller).
+/// What an instances listing is asked for: which scope, and which assembly
+/// variant to evaluate the design in. One struct rather than two parameters so
+/// the CLI, the HTTP surface and the tool all pass the same shape.
+pub const InstanceOpts = struct {
+    scope: Scope = .flat,
+    /// Null selects the design's `(default)` variant, else the base.
+    variant: ?[]const u8 = null,
+};
+
 pub fn listInstances(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
-    scope: Scope,
+    opts: InstanceOpts,
     w: anytype,
 ) !bool {
     var eval = Evaluator.init(allocator, project_dir);
+    eval.variants.requested = opts.variant;
     defer eval.deinit();
     const nb = evalNamedBlock(allocator, project_dir, name, &eval) catch |e| switch (e) {
         error.NotADesign => {
@@ -1477,9 +1521,11 @@ pub fn listInstances(
         },
     };
     const block = nb.block;
-    if (scope == .flat) return mcp_flatten.listInstancesFlat(allocator, &eval, block, w);
+    if (opts.scope == .flat) return mcp_flatten.listInstancesFlat(allocator, &eval, block, w);
 
-    try w.writeAll("{\"instances\":[");
+    try w.writeAll("{");
+    try mcp_flatten.writeVariantHeader(w, block);
+    try w.writeAll("\"instances\":[");
     for (block.instances, 0..) |inst, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll(ref_des_field_prefix);
@@ -1494,7 +1540,9 @@ pub fn listInstances(
         try json_writer.writeString(w, inst.value);
 
         const pin_count = mcp_flatten.instancePinCount(&eval, inst.component, inst.symbol, inst.parts);
-        try w.print(",\"pin_count\":{d}}}", .{pin_count});
+        try w.print(",\"pin_count\":{d}", .{pin_count});
+        try mcp_flatten.writePopulatedIn(w, block, inst.variants, inst.dnp);
+        try w.writeAll("}");
     }
     try w.writeAll("]}");
     return true;
@@ -1646,6 +1694,7 @@ pub fn getNet(
 
     try w.writeAll(name_field_prefix);
     try json_writer.writeString(w, net.name);
+    try mcp_flatten.writeNetEnvelope(w, block, net.name);
     try w.writeAll(",\"pins\":[");
 
     var passive_refs: std.StringHashMapUnmanaged(void) = .empty;
@@ -1761,8 +1810,9 @@ pub fn optionalBool(args_val: ?std.json.Value, key: []const u8) ?bool {
 /// Write `s` as a JSON string literal (with escapes) to `w`.
 /// Scan `{project_dir}/src/` recursively and return the basename of every
 /// file whose top-level form is a `(design-block …)`. Helper for the CLI
-/// `list_designs` tool and the index page's design list. Sibling
-/// `<name>.checks.sexp` files (autoloaded verifications) are skipped.
+/// `list_designs` tool and the index page's design list. The autoloaded
+/// sidecars (`<name>.checks.sexp`, `<name>.layout.sexp`, `<name>.diagram.sexp`)
+/// are skipped — they are part of a design, not designs of their own.
 pub fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) ToolError![][]const u8 {
     const src_path = try std.fmt.allocPrint(allocator, "{s}/src", .{project_dir});
     defer allocator.free(src_path);
@@ -1776,7 +1826,7 @@ pub fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) To
     while (try walker.next()) |entry| {
         if (entry.kind != .file and entry.kind != .sym_link) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".sexp")) continue;
-        if (std.mem.endsWith(u8, entry.basename, ".checks.sexp")) continue;
+        if (sidecars.kindOfPath(entry.basename) != null) continue;
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src_path, entry.path });
         defer allocator.free(full_path);
         if (!hasTopLevelDesignBlock(allocator, full_path)) continue;
@@ -2230,7 +2280,7 @@ pub fn listDesignSummaries(
     while (try walker.next()) |entry| {
         if (entry.kind != .file and entry.kind != .sym_link) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".sexp")) continue;
-        if (std.mem.endsWith(u8, entry.basename, ".checks.sexp")) continue;
+        if (sidecars.kindOfPath(entry.basename) != null) continue;
         const base = try allocator.dupe(u8, entry.basename[0 .. entry.basename.len - ".sexp".len]);
         var mtime_sec: i64 = 0;
         var size: u64 = 0;
@@ -2557,7 +2607,7 @@ test "read tools reuse build's stable refdes assignments after insertion" {
     }
 
     var instances_out: std.Io.Writer.Allocating = .init(alloc);
-    try std.testing.expect(try listInstances(alloc, project, "board", .flat, &instances_out.writer));
+    try std.testing.expect(try listInstances(alloc, project, "board", .{}, &instances_out.writer));
     try std.testing.expect(std.mem.indexOf(u8, instances_out.written(), "\"ref_des\":\"U3\",\"origin\":\"NEW\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, instances_out.written(), "\"ref_des\":\"U1\",\"origin\":\"OLD_A\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, instances_out.written(), "\"ref_des\":\"U2\",\"origin\":\"OLD_B\"") != null);

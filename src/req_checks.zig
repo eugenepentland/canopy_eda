@@ -211,7 +211,13 @@ fn walkInstances(
     for (block.sub_blocks) |sb| try walkInstances(allocator, eval, sb.block, out);
 }
 
-fn evalCheck(
+/// Evaluate one `(check …)` primitive against `inst` as placed in `block` —
+/// the containing-block contract every check is judged under. Exported so
+/// `req_design_rules.zig` can run the identical primitive set for a
+/// design-owned `(requirement … (on "REF") (check …))` rule: the two rule
+/// sources must not be able to reach different verdicts from the same clause.
+/// The returned `message` is owned by `allocator`.
+pub fn evalCheck(
     allocator: std.mem.Allocator,
     eval: *Evaluator,
     block: *const DesignBlock,

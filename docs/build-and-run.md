@@ -47,6 +47,19 @@ zig build run -- build --project-dir projects/designs --push <design-name>
 # read tools — deliberately never write: after one build or save the ids are
 # already in the file, so there is nothing left for a read to mint.
 
+# ASSEMBLY VARIANTS. A design that declares `(variant "NAME" …)` forms builds
+# as one of them: `--variant NAME` on `build`, `check`, `instances`,
+# `export-kicad`, `export-kicad-sch` and `export-pdf`. Omitted, the design's
+# `(default)` variant is selected, and failing that the base (implicit) one; a
+# name the design never declared is a build error with a did-you-mean, never a
+# silent fallback. The selection sets each part's DNP flag and value before ERC,
+# the BOM and the exports read them — same copper, same netlist, same
+# footprints, different population. The `.bom` sidecar stays the BASE assembly's
+# identity ledger (every variant's parts, the authored values), so building a
+# non-default variant cannot disturb the MPN selections it carries.
+# See docs/sexpr-language.md → "Assembly variants".
+zig build run -- check --project-dir projects/designs --variant Lite <design-name>
+
 # Export KiCad netlist + footprints (handoff to KiCad's PCB editor).
 # --with-schematic ALSO writes the .kicad_sch hierarchy + project sidecars, so
 # the output directory opens in KiCad as a complete project (netlist,
@@ -243,8 +256,36 @@ zig build run -- export-kicad --project-dir projects/designs --output-dir <dir> 
 # netlisp's own netlist + file-based sync stay the board authority.
 zig build run -- export-kicad-sch --project-dir projects/designs <design> [--output <root.kicad_sch>] [--output-dir <dir>] [--flat] [--no-vendor-symbols]
 
+# WHERE THE BOARD PATH COMES FROM. Both the board sync and the schematic push
+# below write into the KiCad project directory named by the design's board
+# path. That path resolves in two places, project-level first:
+#
+#   1. <project-dir>/kicad-projects.sexp — a flat list of one entry per design,
+#      `(kicad-pcb "<design-name>" "<absolute path to .kicad_pcb>")`. The design
+#      name is the SOURCE FILE STEM, the same token `netlisp designs` prints and
+#      every command takes, so `src/boards/barracuda/barracuda.sexp` keys on
+#      "barracuda".
+#   2. The design's own top-level `(kicad-pcb "<path>")` form.
+#
+# An entry in the file WINS over the in-source form, and supplies the target
+# when the source declares none — which is the point: a machine path
+# (/mnt/nas/kicad/…) is a property of this checkout, not of the schematic, so it
+# can live outside the design and the source form can be dropped entirely. The
+# in-source form keeps working unchanged and is still fine for a board whose
+# path is stable everywhere the design is opened.
+#
+# The file is optional and fail-open: absent, unreadable, or holding a malformed
+# entry, every design keeps whatever its own source declares. A file of
+# machine-local paths must never be able to fail a build on a machine that does
+# not have one. Keep it out of version control (or commit it deliberately, if
+# every checkout really does share the paths).
+#
+#   ;; projects/designs/kicad-projects.sexp
+#   (kicad-pcb "barracuda" "/mnt/nas/kicad/barracuda/barracuda.kicad_pcb")
+#   (kicad-pcb "rds3"      "/mnt/nas/kicad/rds3/rds3.kicad_pcb")
+
 # Push that same schematic INTO the LIVE KiCad project directory the design's
-# (kicad-pcb "<path>") form names, so the KiCad project carries board AND
+# board path names, so the KiCad project carries board AND
 # schematic instead of the empty eeschema stub KiCad ships every new project
 # with. The sheets are named after the KiCad PROJECT, not the netlisp design:
 # `Cyclops Digital.kicad_pcb` gives `Cyclops Digital.kicad_sch` (what KiCad
@@ -301,6 +342,77 @@ zig build run -- sync-kicad-sch --project-dir projects/designs <design> [--dry-r
 # dark screen theme (dark page background included); `--theme light` swaps to the
 # print palette for paper. Self-checks the composed bytes before writing.
 zig build run -- export-pdf --project-dir projects/designs <design> [--output <file.pdf>] [--theme light]
+
+# Export the FIRMWARE PIN MAP — the pad/function/net/group table a firmware
+# project otherwise re-types by hand off a datasheet PDF, where a pin move the
+# schematic, the netlist, the PCB and the ERC all agree on stays invisible.
+#
+# One row per CONNECTED pad of each selected part (a pad with no net is not a
+# firmware pin), carrying: the pad id, the pinout's function name for that pad,
+# the alternates (the pinout's own `(alt …)` list unioned with the functions the
+# design asserted with `(as …)`), the flattened net, the `(pins … (group "…"))`
+# label the pad was declared under, and the enclosing `(section …)` with its
+# `(role …)` word and `(protocol …)` words. Selected parts are the hub classes
+# U/J/P/X/Q that carry a lib/pinouts entry — a part with no pinout has no
+# function names to export. `--ref` overrides that and names parts exactly,
+# matching the flattened ref-des, its leaf, or the instance's source name, so
+# `(instance "stm32" …)` is reachable as `--ref stm32`.
+#
+# `--format c` (the default) writes an include-guarded C99 header: one
+# `#define <REF>_<NET>_PIN "<pad>"` per row and a
+# `static const struct { const char *pad, *function, *net, *group; } <ref>_pinmap[]`
+# table per part, with the section / role / protocol / alternates in a trailing
+# comment on each row. SANITISING: every byte outside [A-Za-z0-9_] becomes '_',
+# runs collapse, ends are trimmed, an empty fold becomes 'X', and a leading digit
+# is prefixed with 'N' (net `3V3` -> `N3V3`); macros are upper-cased and table
+# identifiers lower-cased. Folding is many-to-one, so two names that land on one
+# spelling (`usb/DP` and `usb.DP`) are separated by a `_2` / `_3` suffix rather
+# than one silently redefining the other, and every macro quotes the design net
+# it came from so any such fold is visible. `--format json` carries the same rows
+# with the alternates as an array.
+#
+# READ-ONLY: it resolves the design through the same seam the PCB page reads,
+# mints no id and edits no source. Deterministic — parts sort by ref-des and pads
+# in natural order — so the only per-run value is the build id:
+#   diff -I '^\*#' base.h cand.h            # C
+#   diff -I '"build_id"' base.json cand.json
+zig build run -- export-pinmap --project-dir projects/designs <design> [--ref REF]… [--format c|json] [--output <file>]
+
+# Export a flattened SPICE NETLIST. Every connection a simulator needs is
+# already on the board; this writes the deck so it does not have to be
+# transcribed by hand.
+#
+# R/C/L become R/C/L element lines carrying the value parsed out of the authored
+# string by `req_checks.parseValueFor` — the project's one reader of those
+# spellings, and the text can never be passed through verbatim because SPICE
+# reads `1M` as a MILLI. A capacitance and an inductance keep the micro unit
+# that reader works in and take SPICE's own `u` scale factor, so `10uF` is `10u`
+# rather than the 9.999999999999999e-6 a multiply into farads produces. A value
+# carrying a rating after its magnitude (`1nF 2kV`) is read as its first word.
+# A ferrite bead is a DC short, so it becomes an `R` at the `dcr-max` its BOM
+# part declares — its own `600R@100MHz` value is an impedance at a test
+# frequency, not a DC element — or a commented placeholder when nothing declares
+# one. Diodes and transistors emit D/Q/M lines naming a `<MPN>_MODEL`
+# placeholder whose `.model` card is written as a COMMENT (the device type is a
+# guess the design does not carry). Every IC and connector becomes an `X` line
+# into an EMPTY `.subckt` stub whose port list is the pads this design wires, in
+# pad order. Ground-class nets (`net_analysis.isGroundName`, over the base name,
+# so a per-pin bypass stub `GND.U1.A3` is still ground) map to node 0; every
+# other net name is folded to [A-Z0-9_], with a fold collision separated by a
+# `_2`/`_3` suffix and reported as a `* net renamed:` line rather than silently
+# shorted. DNP parts are written as comments, and a value the reader could not
+# parse becomes a `{<REF>_VALUE}` parameter with the authored string beside it.
+#
+# LIMITS, restated in the deck's own header so the file says them too: no device
+# models, no bodies for the IC stubs, and no parasitics of any kind — no trace
+# R/L/C, no pad capacitance, no coupling, and an ideal capacitor with no ESR or
+# ESL. The deck therefore LOADS in ngspice once models and bodies are supplied
+# and does not simulate before that.
+#
+# READ-ONLY, and deterministic the same way: nets, parts and stubs are all
+# sorted before any name is assigned, so `diff -I '^\*#' base.cir cand.cir`
+# compares the netlist alone.
+zig build run -- export-spice --project-dir projects/designs <design> [--output <file.cir>]
 
 # Migrate an existing KiCad board INTO netlisp (reverse direction). Reads the
 # .kicad_pcb alone — modern KiCad embeds the netlist (per-pad nets), pin names

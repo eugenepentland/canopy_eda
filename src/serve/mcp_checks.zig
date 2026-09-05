@@ -86,6 +86,24 @@ pub fn writePreflightFindingJson(w: anytype, finding: preflight.Finding) !void {
         try json_writer.writeString(w, finding.requirement.id);
         try w.writeAll(",\"requirement_text\":");
         try json_writer.writeString(w, finding.requirement.text);
+        // Which authority wrote the rule. Emitted alongside every requirement
+        // finding — not only design ones — so a consumer never has to infer
+        // "library" from the ABSENCE of a field.
+        try w.print(",\"requirement_source\":\"{s}\"", .{@tagName(finding.requirement.source)});
+    }
+    if (finding.requirement.target.len > 0) {
+        // What a design rule judged: the matched net, the glob that matched
+        // nothing, or the `(on "REF")` target.
+        try w.writeAll(",\"requirement_target\":");
+        try json_writer.writeString(w, finding.requirement.target);
+        if (finding.requirement.block_path.len > 0) {
+            try w.writeAll(",\"requirement_block\":");
+            try json_writer.writeString(w, finding.requirement.block_path);
+        }
+        if (finding.requirement.scope.len > 0) {
+            try w.writeAll(",\"requirement_scope\":");
+            try json_writer.writeString(w, finding.requirement.scope);
+        }
     }
     if (finding.requirement.datasheet.len > 0) {
         try w.writeAll(",\"datasheet\":");
@@ -125,6 +143,7 @@ pub fn toolRunChecks(
         .severity = severity,
         .changed_since = changed_since,
         .profile = profile,
+        .variant = optionalString(args_val, "variant"),
     }, w);
 }
 
@@ -134,6 +153,10 @@ const RunChecksArgs = struct {
     severity: ?[]const u8,
     changed_since: ?[]const u8,
     profile: preflight.Profile,
+    /// Which assembly variant to evaluate the design in. Null selects the
+    /// design's `(default)` variant, else the base — so the checks answer for
+    /// the assembly the board is built as unless another is asked for.
+    variant: ?[]const u8 = null,
 };
 
 const ChangeFilter = struct {
@@ -305,6 +328,7 @@ fn writeFindings(
 
 fn runChecks(allocator: std.mem.Allocator, args: RunChecksArgs, w: anytype) !bool {
     var eval = Evaluator.init(allocator, args.project_dir);
+    eval.variants.requested = args.variant;
     defer eval.deinit();
     const nb = (try loadNamedBlock(allocator, args, &eval, w)) orelse return false;
     try resolveBom(allocator, args, nb);

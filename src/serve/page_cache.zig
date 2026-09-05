@@ -20,6 +20,7 @@ const infra_fs = @import("../infra/fs.zig");
 const process_alloc = @import("../infra/process_alloc.zig");
 const paths = @import("../paths.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
+const sidecars = @import("../eval/sidecars.zig");
 
 /// All cross-request cache state is pinned to the process page allocator so it
 /// outlives the per-request arenas that produced it.
@@ -28,9 +29,10 @@ const page = process_alloc.durable;
 /// Sibling extensions (next to the design `.sexp`) whose contents feed a
 /// rendered page or summary even though the evaluator itself doesn't parse
 /// them: `.bom` (identity resolution), `.refdes.json` (grouped ref-des), and
-/// `.checks.sexp` (spliced verification forms — already in the read-set when
-/// it exists, listed here so its *creation* also invalidates).
-const sibling_exts = [_][]const u8{ ".bom", ".refdes.json", ".checks.sexp" };
+/// every autoloaded sidecar (`.checks.sexp`, `.layout.sexp`, `.diagram.sexp` —
+/// spliced into the design body, so already in the read-set when they exist,
+/// listed here so their *creation* also invalidates).
+const sibling_exts = [_][]const u8{ ".bom", ".refdes.json" } ++ sidecars.exts;
 
 /// One file a cached result derived from. `present` records whether the file
 /// existed at capture time, so a later appearance (e.g. a first-time `.bom`)

@@ -35,6 +35,7 @@ const render_schematic_png = @import("render_schematic_png.zig");
 const pdf_mod = @import("pdf.zig");
 const review_mod = @import("review.zig");
 const req_checks = @import("req_checks.zig");
+const req_design_rules = @import("req_design_rules.zig");
 const notes = @import("serve/notes.zig");
 const thermal_api = @import("serve/thermal_api.zig");
 const system_review_package = @import("system_review_package.zig");
@@ -44,6 +45,10 @@ const InspectCommandError = std.mem.Allocator.Error || std.Io.Writer.Error;
 // ── Constants ─────────────────────────────────────────────────────
 const project_dir_flag = "--project-dir";
 const output_dir_flag = "--output-dir";
+/// Which assembly variant a command builds the design in. Every command that
+/// reads a design accepts it; omitted, the design's `(default)` variant is
+/// selected, and failing that the base variant.
+const variant_flag = "--variant";
 const out_of_memory_msg = "Out of memory\n";
 const build_error_fmt = "Build error: {}\n";
 const diag_error_fmt = "{s}:{d}:{d}: error: {s}\n";
@@ -57,17 +62,17 @@ const identity_resolution_error_fmt = "Identity resolution error: {}\n";
 const wrote_bytes_fmt = "Wrote {s} ({d} bytes)\n";
 const check_usage =
     "Usage: netlisp check [--project-dir <d>] [--severity error|warning|info] " ++
-    "[--profile authoring|preflight|release] <design-name>\n";
+    "[--profile authoring|preflight|release] [--variant <name>] <design-name>\n";
 const export_pdf_usage =
     "Usage: netlisp export-pdf [--project-dir <d>] <design-name> " ++
-    "[--output <file.pdf>] [--theme light|dark]\n";
+    "[--output <file.pdf>] [--theme light|dark] [--variant <name>]\n";
 const export_schematic_png_usage =
     "Usage: netlisp export-schematic-png [--project-dir <d>] <design-name> " ++
     "[--sub <slug>|--ref <hub>] [--view sequential|functional] " ++
     "[--theme light|dark] [--width <px>] [--output <file.png>]\n";
 const export_sch_usage =
     "Usage: netlisp export-kicad-sch [--project-dir <d>] <design-name> " ++
-    "[--output <root.kicad_sch>] [--output-dir <dir>] [--flat] [--no-vendor-symbols]\n" ++
+    "[--output <root.kicad_sch>] [--output-dir <dir>] [--flat] [--no-vendor-symbols] [--variant <name>]\n" ++
     "Child sheets are written beside the root under the names it links to, along\n" ++
     "with the project sidecars (sym-lib-table, fp-lib-table, <design>.kicad_pro,\n" ++
     "netlisp.kicad_sym); an existing sidecar is kept, never overwritten.\n";
@@ -79,11 +84,15 @@ const sync_sch_usage =
     "anything else refuses the whole push unless --force. A KiCad lock on the\n" ++
     "project refuses even with --force. Replaced files roll into backups/.\n";
 const export_kicad_usage =
-    "Usage: netlisp export-kicad --project-dir <d> --output-dir <out> [--with-schematic] <design-name>\n" ++
+    "Usage: netlisp export-kicad --project-dir <d> --output-dir <out> [--with-schematic] [--variant <name>] <design-name>\n" ++
     "--with-schematic also writes the .kicad_sch hierarchy + project sidecars, so\n" ++
     "the output directory opens in KiCad as a complete project.\n";
 const system_check_usage =
-    "Usage: netlisp system-check [--project-dir <d>] <system-name>\n";
+    "Usage: netlisp system-check [--project-dir <d>] <system-name>\n" ++
+    "Reads the contract from src/systems/<name>/system.sexp when it exists, else\n" ++
+    "system.json; when both exist the .sexp wins and the JSON is reported shadowed.\n" ++
+    "Prints the readiness document, whose findings[] carries the interface_mismatch\n" ++
+    "class. Exits non-zero while any gate blocks.\n";
 const export_system_review_usage =
     "Usage: netlisp export-system-review [--project-dir <d>] <system-name> [--output <file.zip>]\n";
 const review_audit_usage =
@@ -199,6 +208,8 @@ const CheckArgs = struct {
     design: []const u8,
     severity: ?[]const u8 = null,
     profile: preflight.Profile = .authoring,
+    /// `--variant NAME`; null selects the design's `(default)` variant.
+    variant: ?[]const u8 = null,
 };
 
 fn parseCheckArgs(args: []const []const u8) CheckArgs {
@@ -210,6 +221,9 @@ fn parseCheckArgs(args: []const []const u8) CheckArgs {
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--severity") and i + 1 < args.len) {
             parsed.severity = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], variant_flag) and i + 1 < args.len) {
+            parsed.variant = args[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--profile") and i + 1 < args.len) {
             parsed.profile = preflight.parseProfile(args[i + 1]) orelse {
@@ -331,6 +345,7 @@ pub fn checkReport(allocator: std.mem.Allocator, args: []const []const u8) Comma
     defer allocator.free(board_path);
 
     var eval = Evaluator.init(allocator, parsed.project_dir);
+    eval.variants.requested = parsed.variant;
     defer eval.deinit();
     const block = evalCheckBlock(&eval, board_path, parsed.design);
 
@@ -442,6 +457,8 @@ const BuildArgs = struct {
     server_url: []const u8 = "http://localhost:7050",
     design: ?[]const u8 = null,
     want_push: bool = false,
+    /// `--variant NAME`; null selects the design's `(default)` variant.
+    variant: ?[]const u8 = null,
 };
 
 /// Parse `netlisp build` arguments. `--push` may be a bare flag (push the
@@ -470,6 +487,9 @@ fn parseBuildArgs(args: []const []const u8) BuildArgs {
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--server") and i + 1 < args.len) {
             out.server_url = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], variant_flag) and i + 1 < args.len) {
+            out.variant = args[i + 1];
             i += 1;
         } else if (!std.mem.startsWith(u8, args[i], "--")) {
             positional_name = args[i];
@@ -503,6 +523,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
     defer allocator.free(board_path);
 
     var eval = Evaluator.init(allocator, project_dir);
+    eval.variants.requested = parsed.variant;
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch |err| {
@@ -622,6 +643,7 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
     var output_dir: ?[]const u8 = null;
     var design_name: ?[]const u8 = null;
     var bundle: export_kicad.BundleOptions = .{};
+    var variant: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], project_dir_flag) and i + 1 < args.len) {
@@ -632,6 +654,9 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--with-schematic")) {
             bundle.schematic = true;
+        } else if (std.mem.eql(u8, args[i], variant_flag) and i + 1 < args.len) {
+            variant = args[i + 1];
+            i += 1;
         } else if (!std.mem.startsWith(u8, args[i], "--")) {
             design_name = args[i];
         }
@@ -650,6 +675,7 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
     defer allocator.free(board_path);
 
     var eval = Evaluator.init(allocator, project_dir);
+    eval.variants.requested = variant;
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch |err| {
@@ -722,6 +748,8 @@ const ExportSchArgs = struct {
     /// Draw parts from their original `lib/sources/*.kicad_sym` when one
     /// exists. `--no-vendor-symbols` forces the synthesised box everywhere.
     vendor: bool = true,
+    /// `--variant NAME`; null selects the design's `(default)` variant.
+    variant: ?[]const u8 = null,
 };
 
 fn parseExportSchArgs(args: []const []const u8) ExportSchArgs {
@@ -741,6 +769,9 @@ fn parseExportSchArgs(args: []const []const u8) ExportSchArgs {
             parsed.flat = true;
         } else if (std.mem.eql(u8, args[i], "--no-vendor-symbols")) {
             parsed.vendor = false;
+        } else if (std.mem.eql(u8, args[i], variant_flag) and i + 1 < args.len) {
+            parsed.variant = args[i + 1];
+            i += 1;
         } else if (!std.mem.startsWith(u8, args[i], "--")) {
             parsed.design = args[i];
         }
@@ -809,6 +840,7 @@ pub fn cmdExportKicadSch(allocator: std.mem.Allocator, args: []const []const u8)
     if (parsed.design.len == 0) exit.fatal(export_sch_usage, .{});
 
     var eval = Evaluator.init(allocator, parsed.project_dir);
+    eval.variants.requested = parsed.variant;
     defer eval.deinit();
     const block = evalForExport(allocator, &eval, parsed.project_dir, parsed.design);
 
@@ -949,6 +981,8 @@ const ExportPdfArgs = struct {
     output: ?[]const u8 = null,
     /// `light` resolves the print palette (white page); `dark` keeps the web look.
     theme: export_pdf.Options = .{},
+    /// `--variant NAME`; null selects the design's `(default)` variant.
+    variant: ?[]const u8 = null,
 };
 
 fn parseExportPdfArgs(args: []const []const u8) ExportPdfArgs {
@@ -963,6 +997,9 @@ fn parseExportPdfArgs(args: []const []const u8) ExportPdfArgs {
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--theme") and i + 1 < args.len) {
             if (std.mem.eql(u8, args[i + 1], "light")) parsed.theme.theme = .print;
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], variant_flag) and i + 1 < args.len) {
+            parsed.variant = args[i + 1];
             i += 1;
         } else if (!std.mem.startsWith(u8, args[i], "--")) {
             parsed.design = args[i];
@@ -981,6 +1018,7 @@ pub fn cmdExportPdf(allocator: std.mem.Allocator, args: []const []const u8) Comm
     if (parsed.design.len == 0) exit.fatal(export_pdf_usage, .{});
 
     var eval = Evaluator.init(allocator, parsed.project_dir);
+    eval.variants.requested = parsed.variant;
     defer eval.deinit();
     const block = evalForExport(allocator, &eval, parsed.project_dir, parsed.design);
 
@@ -1173,7 +1211,11 @@ fn buildReviewFor(
     var results = req_checks.runChecks(allocator, eval, block) catch
         std.StringHashMapUnmanaged([]req_checks.Result).empty;
     req_checks.applyVerifications(&results, block, block.instances);
-    var doc = review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &results) catch {
+    const design_rules = req_design_rules.runVerified(allocator, eval, block);
+    var doc = review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, .{
+        .checks = &results,
+        .design_rules = design_rules,
+    }) catch {
         exit.fatal("Review build error\n", .{});
     };
     // `buildReview` reads the block alone; the cooling-scenario ladder needs the

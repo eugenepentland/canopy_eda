@@ -28,6 +28,7 @@ const review_mod = @import("../review.zig");
 const thermal_api = @import("thermal_api.zig");
 const review_md_mod = @import("../review_md.zig");
 const req_checks = @import("../req_checks.zig");
+const req_design_rules = @import("../req_design_rules.zig");
 const edit_mod = @import("edit.zig");
 const diag_format = @import("diag_format.zig");
 const urlcodec = @import("urlcodec.zig");
@@ -566,6 +567,18 @@ fn evalDesignForExport(
     const board_path = try paths.designSourcePath(ctx.allocator, ctx.project_dir, name);
     defer ctx.allocator.free(board_path);
 
+    // `?variant=NAME` selects one of the design's `(variant …)` assemblies for
+    // every export that comes through this seam: same copper and the same
+    // netlist, different population and values. Omitted, the design's
+    // `(default)` variant is built. An undeclared name fails the evaluation
+    // rather than silently exporting a different assembly than the caller asked
+    // for.
+    if (req.query()) |q| {
+        if (q.get("variant")) |v| {
+            if (v.len > 0) eval.variants.requested = v;
+        }
+    } else |_| {}
+
     const result = eval.evalFile(board_path) catch {
         res.status = http_internal_error;
         res.body = err_build;
@@ -744,7 +757,11 @@ pub fn exportReviewPackageApi(ctx: *Server, req: *httpz.Request, res: *httpz.Res
         std.StringHashMapUnmanaged([]req_checks.Result).empty;
     req_checks.applyVerifications(&check_results, block, block.instances);
 
-    var doc = review_mod.buildReview(ctx.allocator, name, block, eval.assertions.items, violations, &check_results) catch {
+    const design_rules = req_design_rules.runVerified(ctx.allocator, &eval, block);
+    var doc = review_mod.buildReview(ctx.allocator, name, block, eval.assertions.items, violations, .{
+        .checks = &check_results,
+        .design_rules = design_rules,
+    }) catch {
         res.status = http_internal_error;
         res.body = err_build;
         return;

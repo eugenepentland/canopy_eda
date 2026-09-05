@@ -17,6 +17,7 @@ const env_mod = @import("eval/env.zig");
 const erc_mod = @import("erc.zig");
 const review = @import("review.zig");
 const req_checks = @import("req_checks.zig");
+const req_design_rules = @import("req_design_rules.zig");
 const power_budget = @import("eval/power_budget.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const review_thermal = @import("review_thermal.zig");
@@ -98,6 +99,7 @@ pub fn renderToMarkdown(
     try writeErc(w, doc.unresolved);
     try writeAssertions(w, doc.assertions);
     try writeRequirementChecklist(allocator, w, doc);
+    try writeDesignRules(w, doc.design_rules);
     try writePowerBudget(w, doc.power.budget);
     try writePowerSequence(w, doc.power.sequence);
     try writeThermal(allocator, w, doc.power.thermal, doc.power.scenarios);
@@ -601,6 +603,52 @@ fn writeRequirementChecklist(allocator: Allocator, w: anytype, doc: review.Revie
     if (!emitted) try w.writeAll("*No requirement-bearing components in this design.*\n\n");
 }
 
+/// Design-owned rules, kept in their OWN section rather than mixed into the
+/// per-IC checklist above. Those rules are inherited from a component library
+/// and every design placing the part gets them; these are obligations this
+/// board's author wrote for this board, and a reviewer needs to see which is
+/// which — a failing library rule means "the part is used wrong", a failing
+/// design rule means "the design broke its own contract".
+fn writeDesignRules(w: anytype, rules: []const req_design_rules.Outcome) !void {
+    if (rules.len == 0) return;
+    try w.writeAll("### Design-Owned Rules\n\n");
+    try w.writeAll("Rules this design declares about itself — `(requirement … (on \"REF\") (check …))` " ++
+        "and `(net-rule …)`. Gated exactly like the library requirements above.\n\n");
+    for (rules) |rule| {
+        try w.print("- {s} — ", .{statusBadge(rule.status, rule.verification != null)});
+        try writeMdEscaped(w, rule.rule.text);
+        try w.print(" *({s}", .{if (rule.netScoped()) "net-rule" else "on"});
+        if (!rule.netScoped() and rule.targets.len > 0) try w.print(" {s}", .{rule.targets[0].name});
+        if (rule.block_path.len > 0) try w.print(", in {s}", .{rule.block_path});
+        if (rule.rule.scope.len > 0) try w.print(", section {s}", .{rule.rule.scope});
+        try w.print(", id {s})*\n", .{rule.rule.id});
+        for (rule.targets) |target| {
+            try w.print("  - `{s}` — {s}: ", .{ target.name, @tagName(target.status) });
+            try writeMdEscaped(w, target.message);
+            try w.writeAll("\n");
+        }
+        if (rule.verification) |v| {
+            try w.writeAll("  - sign-off: ");
+            try writeMdEscaped(w, v.rationale);
+            try w.writeAll("\n");
+        }
+    }
+    try w.writeAll("\n");
+}
+
+/// The status badge shared by the per-IC checklist and the design-rule list, so
+/// one status can never render two different ways in one document.
+fn statusBadge(status: req_checks.Status, overridden: bool) []const u8 {
+    return switch (status) {
+        .pass => "✓ **PASS**",
+        .verified => "✓ **VERIFIED**",
+        .na => "⚠ **PENDING**",
+        .unproven => "⚠ **UNPROVEN**",
+        .layout_deferred => "⋯ **LAYOUT**",
+        .fail => if (overridden) "✗ **FAIL** *(overridden)*" else "✗ **FAIL**",
+    };
+}
+
 /// One component's requirement block. Returns false (emitting nothing) when the
 /// component declares no requirements.
 fn writeRequirementEntry(allocator: Allocator, w: anytype, entry: review.ComponentRequirementEntry) !bool {
@@ -631,14 +679,7 @@ fn writeRequirementEntry(allocator: Allocator, w: anytype, entry: review.Compone
         const msg: []const u8 = if (i < entry.req_results.len) entry.req_results[i].message else "";
         const verification: ?env_mod.Verification = if (i < entry.req_results.len) entry.req_results[i].verification else null;
 
-        const badge: []const u8 = switch (status) {
-            .pass => "✓ **PASS**",
-            .verified => "✓ **VERIFIED**",
-            .na => "⚠ **PENDING**",
-            .unproven => "⚠ **UNPROVEN**",
-            .layout_deferred => "⋯ **LAYOUT**",
-            .fail => if (verification != null) "✗ **FAIL** *(overridden)*" else "✗ **FAIL**",
-        };
+        const badge = statusBadge(status, verification != null);
         try w.print("- {s} — ", .{badge});
         try writeMdEscaped(w, r.text);
         if (r.ref) |ref| {
@@ -862,4 +903,40 @@ test "the markdown thermal section carries the cooling-scenario table" {
     try writeThermal(alloc, &without.writer, bt, .{});
     try std.testing.expect(std.mem.indexOf(u8, without.written(), "### Cooling scenarios") == null);
     try std.testing.expect(std.mem.indexOf(u8, without.written(), "layout") != null);
+}
+
+// spec: review_md - the markdown review lists design-owned rules in their own section, per target, distinct from the per-IC library requirements
+test "writeDesignRules separates design-owned rules from library requirements" {
+    const alloc = std.testing.allocator;
+    const targets = [_]req_design_rules.TargetResult{
+        .{ .name = "V_3V3", .status = .pass, .message = "bulk to ground, µF: 10.000" },
+        .{ .name = "V_5V0", .status = .fail, .message = "bulk to ground below the floor, µF: 0.000" },
+    };
+    const outcomes = [_]req_design_rules.Outcome{.{
+        .rule = .{
+            .text = "Every board rail is reservoired",
+            .id = "abcd1234",
+            .scope = "Power",
+            .body = .{ .net_scoped = .{ .globs = &.{"V_*"}, .predicates = &.{} } },
+        },
+        .targets = &targets,
+        .status = .fail,
+    }};
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
+    try writeDesignRules(&aw.writer, &outcomes);
+    const out = aw.written();
+    // Its own section, not folded into "Requirement Checks (per IC)": the
+    // reviewer has to be able to tell an inherited datasheet obligation from a
+    // rule this board wrote for itself.
+    try std.testing.expect(std.mem.indexOf(u8, out, "### Design-Owned Rules") != null);
+    // The rolled-up verdict, then one line per judged net — a failure that did
+    // not name the net would be unactionable.
+    try std.testing.expect(std.mem.indexOf(u8, out, "**FAIL** — Every board rail is reservoired") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "`V_3V3` — pass") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "`V_5V0` — fail") != null);
+    // Provenance the reader needs to find the rule again in the source.
+    try std.testing.expect(std.mem.indexOf(u8, out, "net-rule") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "section Power") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "id abcd1234") != null);
 }

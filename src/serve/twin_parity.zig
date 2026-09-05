@@ -743,7 +743,7 @@ test "save_pcb_layout persists the same board as the pcb-layouts save endpoint" 
     try testing.expectEqual(@as(i64, 3), copperCount(from_tool, "tracks"));
 }
 
-// spec: Web Server - The designs CLI listing, the designs endpoint and the list_designs MCP tool name the same designs with the same titles, and all three skip a design's sidecar .sexp files
+// spec: Web Server - The designs CLI listing, the designs endpoint and the list_designs MCP tool name the same designs with the same titles, and all three skip a design's autoloaded sidecar .sexp files
 test "the three design listings agree on which designs exist and what they are called" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -753,11 +753,19 @@ test "the three design listings agree on which designs exist and what they are c
     defer tmp.cleanup();
     const project = try fixtureProject(alloc, &tmp, .routed);
     // A sidecar .sexp beside the design: the CLI skips any stem containing a
-    // dot, the summaries skip `.checks.sexp` by name. Two different rules for
-    // one expectation, so the fixture has to carry the file that exercises it.
+    // dot, the summaries skip a path `eval/sidecars` recognises. Two different
+    // rules for one expectation, so the fixture has to carry the file that
+    // exercises it. The `.layout.sexp` beside it is the autoloaded case that
+    // actually evaluates — it is spliced into the design, so a listing that
+    // treated it as a design of its own, or a splice that cost the design its
+    // title, shows up here as a changed count or a missing name.
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "src/twinfx.checks.sexp",
         .data = "(design-block \"Not A Design\")",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/twinfx.layout.sexp",
+        .data = "(stackup 4 (thickness 1.6))",
     });
 
     const cli = try designTitles(alloc, try std.json.parseFromSliceLeaky(std.json.Value, alloc, try query_cli.designsJson(alloc, project), .{}));
@@ -792,13 +800,13 @@ test "the instances CLI and list_instances emit the same payload at the same sco
     // asking it for a different scope — which is exactly what an argv default
     // and a JSON-argument default are free to do independently.
     var flat: std.Io.Writer.Allocating = .init(alloc);
-    try testing.expect(try mcp_tools.listInstances(alloc, project, "twinfx", query_cli.scopeOf(&.{}), &flat.writer));
+    try testing.expect(try mcp_tools.listInstances(alloc, project, "twinfx", .{ .scope = query_cli.scopeOf(&.{}) }, &flat.writer));
     const flat_tool = try mcpCall(alloc, project, "list_instances", "{\"name\":\"twinfx\"}");
     try testing.expect(flat_tool.ok);
     try testing.expectEqualStrings(flat.written(), flat_tool.body);
 
     var top: std.Io.Writer.Allocating = .init(alloc);
-    try testing.expect(try mcp_tools.listInstances(alloc, project, "twinfx", query_cli.scopeOf(&.{"--top-level"}), &top.writer));
+    try testing.expect(try mcp_tools.listInstances(alloc, project, "twinfx", .{ .scope = query_cli.scopeOf(&.{"--top-level"}) }, &top.writer));
     const top_tool = try mcpCall(alloc, project, "list_instances", "{\"name\":\"twinfx\",\"flatten\":false}");
     try testing.expect(top_tool.ok);
     try testing.expectEqualStrings(top.written(), top_tool.body);

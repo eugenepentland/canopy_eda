@@ -36,9 +36,13 @@ conventions and idiomatic usage only.
 ```
 
 Test points (`(instance "TP_X" testpoint (pin 1 "NET"))`) are first-class
-inside `(defmodule …)` sub-blocks: they take a renumber-safe `TP` ref-des and
-are exempt from the `IC has no ground` ERC. A bare `(test-point "TP" "NET")`
-stays a schematic-only marker (no exported pad).
+inside `(block …)` sub-blocks: they take a renumber-safe `TP` ref-des and
+are exempt from the `IC has no ground` ERC. That instance spelling is the
+recommended one. A bare `(test-point "TP" "NET")` places **the same physical
+pad** — it is a second spelling for the same part, plus its `(purpose …)` /
+`(required-for …)` metadata, and it carries a `deprecated_form` info saying
+so. Only `(test-point "TP" "NET" (virtual))` is the schematic-only marker with
+no exported pad, and that form has no alias and is not deprecated.
 
 ### Pin function names, and `rewrite-pins-by-name`
 
@@ -167,13 +171,19 @@ Both feed the schematic header's system-overview SVG: the renderer in
 matching on the **name** to pick the section's column + color, then prints
 the **subtitle** as the chip caption.
 
-- **Name** — 1–4 words, capitalized, functional role first. Pick at least
-  one keyword the classifier recognizes so the chip lands in the right
-  column instead of falling through to the generic peripheral bucket. The
-  authoritative keyword→category table is auto-generated into
-  [docs/language-forms.md § Section-name classifier keywords](docs/language-forms.md)
-  from the same `name_rules` table `classifyByName` walks (don't copy it
-  here — it would drift).
+- **Name** — 1–4 words, capitalized, functional role first. Name it for the
+  reader, not for the classifier: **pin the column with `(category <key>)`**
+  in the section body and the name is free to say whatever is clearest.
+  `(category …)` is the source of truth — `classifySection` consults it
+  first, and only a section without one falls back to case-insensitive
+  keyword matching on the name. That fallback is a guess, so it announces
+  itself: a section categorised by a name keyword gets a
+  `section_category_inferred` **info** from `netlisp check` naming the
+  category it landed in and the `(category …)` line that would pin it. The
+  valid keys and the fallback keyword→category table are both auto-generated
+  into [docs/language-forms.md § Section-name classifier keywords](docs/language-forms.md)
+  from the same tables the classifier walks (don't copy them here — they
+  would drift).
 - **Subtitle** — one-line technical summary: part number, key spec
   (voltage / frequency / current), and any "chip details sealed in
   `<module>` module" pointer for sub-blocks. This is the caption that
@@ -201,10 +211,35 @@ the **subtitle** as the chip caption.
   (pin 4 9 16 21 "VBUS"))
 ```
 
+### `(block …)`: one word for a design and for a module
+
+`(block …)` is the primary spelling for both halves of the definition
+vocabulary, and which half it is comes from the name:
+
+```scheme
+;; A quoted name is an eager design root — a whole board or a whole file.
+(block "Barracuda Signal Generator"
+  (instance "U1" …)
+  …)
+
+;; A bare atom plus a parameter list is a parameterized, embeddable
+;; definition, instantiated with (sub-block "pwr" (tpsm84338 …)).
+(block tpsm84338 (rfbt rfbb rled)
+  …)
+```
+
+`(design-block "name" …)` and `(defmodule name (params…) …)` are **permanent
+aliases**, routed to the same two handlers. They are not deprecated, they emit
+no info, and the corpus is full of them — a design written either way is
+identical in every output. Prefer `(block …)` in new work because the two
+things really are one thing (a module with no parameters and a design differ
+only in whether anything instantiates them), and keep the older spelling where
+a file already uses it consistently.
+
 ### Parameterized modules
 
 ```scheme
-(defmodule tpsm84338 (rfbt rfbb rled)
+(block tpsm84338 (rfbt rfbb rled)          ;; ≡ (defmodule tpsm84338 …)
   (let vout (* 0.6 (+ 1.0 (/ rfbt rfbb))))
   (assert-range vout 0.6 16.0 "VOUT")
   (design-block (fmt "~V Buck" vout)
@@ -219,8 +254,31 @@ the **subtitle** as the chip caption.
 ;; A (param default) pair makes the argument optional — the default
 ;; evaluates at call time (later defaults may reference earlier params).
 ;; A fully-defaulted module renders standalone everywhere a design does.
-(defmodule tpsm84338 ((rfbt 220k) (rfbb 47k) (rled 1k)) …)
+(block tpsm84338 ((rfbt 220k) (rfbb 47k) (rled 1k)) …)
 ```
+
+**A parameter may be a component, not just a number.** Module arguments are
+ordinary values, and a component family call like `(cap-0402 "100nF")` is one
+of them — so a module can take *the part itself* as a parameter and place it
+with `(instance "C1" bypass …)`. That is how one filter module serves a board
+that wants an 0402 100 nF bypass and another that wants an 0603 1 µF:
+
+```scheme
+(block filt ((bypass (cap-0402 "100nF")))     ;; default part, overridable
+  (design-block "Filter"
+    (instance "C1" bypass (pin 1 "OUT") (pin 2 "GND"))
+    (instance "R1" (res-0402 "10k") (pin 1 "IN") (pin 2 "OUT"))
+    (port "IN" in) (port "OUT" out) (port "GND" bidi)))
+
+(sub-block "a" (filt))                        ;; a/C… is cap-0402 100nF
+(sub-block "b" (filt (bypass (cap-0603 "1uF")))) ;; b/C… is cap-0603 1uF
+```
+
+Both the footprint and the value follow the argument — the emitted design
+carries `"cap-0402" "100nF"` for the first and `"cap-0603" "1uF"` for the
+second — so this is a real part substitution, not a value override. The
+default in the parameter list evaluates at call time like any other, so the
+module still renders standalone with no arguments.
 
 **Modules are first-class on every read surface.** A `lib/modules/` name
 works wherever a design name does: `GET /` lists modules with their
@@ -239,6 +297,91 @@ Bare numbers accept SI scale suffixes and an optional unit letter:
 `220k` = 220000, `4.7k`, `1M`, `100n` = `100nF` = 1e-7, `10p`, `3.3V` = 3.3,
 `0.5A`, `100mV` = 0.1 (milli only with a unit letter — `mm`/`mil` stay
 dimension tokens). Unknown trailing text (`100kHz`) still parses as an atom.
+
+A trailing `%` closes a literal the same way a unit letter does: `10%`, `0.1%`.
+Like `V` and `F`, the sign carries **no scale** — `10%` is the number `10` that
+remembers it was written as a percentage, not `0.1`. Tolerances are authored,
+compared and printed in percent everywhere in this language (`(expect 2.105
+5%)`, `(tolerance "10%")`, the parts-table `(tolerance …)` column), so the
+magnitude you wrote is the magnitude every consumer reads. The sign is only a
+literal when it ENDS the token, which leaves `(% a b)` untouched.
+
+**A suffixed literal keeps its spelling.** The number is still a plain `f64` in
+arithmetic — `(let x 100nF)` then `(* x 2)` is 2e-7 as before — but the source
+text travels with it, so anywhere a number is written back out as a *part
+value* it renders by its unit rather than by its magnitude:
+
+```lisp
+(pullup "SDA" 4.7k "V_3V3")      ; the resistor's value is 4.7k, not 4700
+(pullup "SDA" 100nF "V_3V3")     ; rejected: 100nF is not a resistance value
+(cap-0402 100nF)                 ; same as (cap-0402 "100nF")
+```
+
+Before this, `100nF` reached the BOM as the number `1e-7` rendered `0.0000001`
+— a value no parts row matches and that the declared-kind check could not tell
+from a resistance. Every shorthand that takes a value (`pullup`, `pulldown`,
+`divider`, `led`'s `(r …)`) and every component-family call reads the spelling.
+
+### Typed attributes on a family instantiation
+
+A component-family call takes a value and then any number of attributes. They
+may be written bare or keyed, and the two mean exactly the same thing:
+
+```lisp
+(cap-0402 "1uF" x7r "10%" "25V")
+(cap-0402 "1uF" (dielectric x7r) (tolerance 10%) (rating 25V))
+(res-0402-0p1 rset-str (tolerance 0.1%) (power 0.063W) (rating 50V) (tempco 25ppm/C))
+(cap-0402 "100nF" (esr 10mR) (esl 0.4nH))
+```
+
+Each attribute that can be *placed* lands on the instance as a property, and
+that property is the one source every consumer reads — the BOM, `lib/parts/`
+row selection, the capacitor-rating check, the PDN impedance screen, and the
+KiCad export. Consumers keep their old attribute-text scan only as a fallback
+for attributes nothing can place.
+
+| Key | Property | Example | Also selects a `lib/parts/` row |
+| --- | --- | --- | --- |
+| `rating`, `voltage` | `voltage` | `(rating 25V)` | yes |
+| `dielectric` | `dielectric` | `(dielectric x7r)` | yes |
+| `tolerance` | `tolerance` | `(tolerance 10%)` | yes |
+| `power` | `power` | `(power 0.063W)` | yes |
+| `current` | `current` | `(current 1A)` | yes |
+| `tempco`, `tcr` | `tempco` | `(tempco 25ppm/C)` | yes |
+| `esr` | `esr` (+ `pdn-esr-ohm`) | `(esr 10mR)` | no |
+| `esl` | `esl` (+ `pdn-esl-h`) | `(esl 0.4nH)` | no |
+
+`esr` and `esl` are analysis overrides, not selection columns: no parts row is
+keyed by them, so adding them to the row-matching attribute list would make the
+release-gate lookup reject every row. They additionally decode into the
+`pdn-esr-ohm` / `pdn-esl-h` numbers the PDN screen already reads.
+
+**A keyed attribute is checked.** An unknown key is an error with a
+did-you-mean, and setting the same key twice is an error. That strictness is
+safe because keyed attributes are new syntax with no existing spellings to
+protect.
+
+**A bare attribute is classified, never rejected.** `"25V"` → `voltage`,
+`"10%"`/`"0.1%"`/`"±15%"` → `tolerance`, `x5r`/`x7r`/`np0`/`c0g`/`x6s`/`y5v` →
+`dielectric`, `"0.063W"` → `power`, `"1A"` → `current`, `"25ppm/C"` → `tempco`.
+Anything else — `DNP`, `green`, `jumper`, `tantalum`, a bead's `600R@100MHz` —
+stays a raw attribute and reaches the schematic and the parts table exactly as
+it did before. When two bare attributes claim one slot the first wins, silently,
+because a design that evaluated yesterday must evaluate today.
+
+**When the selected part does not meet the request.** The parts lookup is
+deliberately lenient: if no row carries the requested rating it falls back to a
+value-only match, and the row's own `(voltage …)` then overrides the authored
+one (the row is the physical part). `netlisp check` reports that substitution
+as an `attribute_row_mismatch` warning naming both values.
+
+A row is allowed to be **better** than what was asked, and those are silent: a
+50 V part where 25 V was asked, a 1% resistor where 5% was asked, a 0.1 W part
+where 0.063 W was asked. Headroom ratings (`voltage`, `power`, `current`) must
+be at least the authored one; deviation budgets (`tolerance`, `tempco`) must be
+no wider. `dielectric` is categorical — an x5r is not a worse x7r, it is a
+different part with a different capacitance-versus-bias curve — so any
+difference is reported.
 
 ### Component datasheet link: `(datasheet "file.pdf")`
 
@@ -332,6 +475,110 @@ extra categories, a missing `(thermal …)` on a dissipating class, and a
 least one cited `(requirement …)` on every active part and surfaces the
 evaluator's own warnings (an unknown sub-form is an error).
 
+### Design-owned rules
+
+Everything above is a rule a **component library** hands the design: the
+datasheet says the part needs it, so every board placing the part inherits it.
+The rules a board's own author writes down had nowhere to live — they ended up
+as `(note …)` prose nothing checks, or as a `(requirement …)` bolted onto a
+library file that other designs then inherited by accident.
+
+Two forms fix that, accepted at **design-block, section, sub-section and module
+scope** (a `(defmodule …)` body is a block, so a module can carry rules about
+itself and every instantiation is judged separately):
+
+```lisp
+(requirement "text" (on "REF") (check …) [(ref "file.pdf" (page N))] [(id "…")])
+(net-rule    "text" (nets GLOB…) predicate… [(id "…")])
+```
+
+They are **gated exactly like library requirements** — same `Status` set, same
+`requirementSeverity` mapping, same `netlisp check` findings, same review
+table, same `run_checks` output — and carry `source: design` so a reviewer can
+tell "you used the part wrong" from "you broke your own contract". The release
+profile's demand for at least one cited requirement on every active part is
+satisfied by an `(on "REF")` rule naming that part, and the `.checks.sexp`
+sign-off mechanism reaches them through a `design-rule` target:
+
+```lisp
+(verifies (req design-rule "deadbeef") "5 V comes in from the bench supply")
+```
+
+**Ids.** An explicit `(id "…")` wins; otherwise the id is the CRC32 of the
+rule's own text, the identical derivation `Requirement.id` uses for library
+rules. Editing anything except that sentence — retargeting the rule, adding a
+predicate, moving it into a section — leaves the id, and therefore every
+sign-off, attached.
+
+#### `(requirement … (on "REF") (check …))`
+
+`(on "REF")` names an instance of the **containing block**, and the check is
+evaluated against that block — the same contract a library requirement on the
+same part gets, so `(pin "VIN")` resolves through that instance's pinout and
+against that block's nets. `"sub/REF"` reaches a part inside a sub-block and is
+judged **in the sub-block's block**, not the parent's. Every `(check …)`
+primitive works unchanged:
+
+```lisp
+;; Barracuda: the LO synthesizer's charge-pump rail is the board's own rule,
+;; not the LMX2820's — the datasheet allows 3.3 V, the board committed to a
+;; quiet 3.3 V LDO and the rest of the loop analysis assumes it.
+(requirement "VCC_CP runs from the quiet LDO, never the switcher"
+  (on "U_LO")
+  (check (tied-to-net (pin "VCC_CP") (net "V_3V3_ANA"))))
+
+;; Reuse a library primitive on a part whose library file carries no rule:
+(requirement "U1 keeps a local 1 uF bypass at VIN"
+  (ref "bench-notes.pdf" (page 2) (quote "1 uF at every LDO input"))
+  (on "U1")
+  (check (decoupling (pin "VIN") (pin "GND") (min-uf 0.9))))
+```
+
+A target naming no instance **fails** naming itself — a renamed part must not
+quietly retire the rule about it. Because a sub-block's parts are renumbered
+into the board's global ref-des space, `"sub/REF"` also matches the part's
+authored source name, so a module's author can write the `U9` they see in
+their own file.
+
+#### `(net-rule … (nets GLOB…) predicate…)`
+
+A rule about **nets** rather than parts: no pinout, no `(on …)`, nothing to
+place. Globs match flattened net names — `V_*`, `*_RF`, `sub/*`, or an exact
+name — case-insensitively, where `*` matches any run of characters. A glob is
+matched against the net's name as the rule's own block sees it **and** against
+its full flattened name, so a module author writes `(nets "VOUT")` and the
+board that instantiates it writes `(nets "buck/*")` for the same copper.
+Per-pin bypass stubs (`VDD.U1.5`) are excluded, so `V_*` does not report one
+result per decoupling capacitor.
+
+The predicates are generated into the **"Net-rule predicates"** table of
+`docs/language-forms.md`: `(min-bulk-uf F)`, `(declared-envelope)`,
+`(in-net-class)` and `(max-fanout N)`. A rule may carry several; the net must
+satisfy every one.
+
+```lisp
+;; Barracuda-style rail rule: every board rail carries a reservoir, has a
+;; provable DC envelope for the release rating checks, and is claimed by a
+;; net class so the router does not fall back to the board default width.
+(net-rule "Every board rail is reservoired, bounded and classed"
+  (nets "V_*")
+  (min-bulk-uf 4.7)
+  (declared-envelope)
+  (in-net-class))
+```
+
+**Results.** A net rule produces **one result per matched net**, plus the
+rule's rolled-up verdict (the worst of them). Both halves are load-bearing:
+the per-net results are what `netlisp check` emits as findings, because a
+failure has to name the net; the rollup is the rule's single identity, which is
+what a `(verifies …)` addresses and what the review document shows one row
+for. A glob matching **zero** nets is a **failed** result naming the glob —
+never a silent pass, because the overwhelmingly likely cause is a net that was
+renamed or never existed, which is exactly what the rule was written to catch.
+`(declared-envelope)` on a net with no derivable envelope is **unproven**
+rather than failed, matching how the library rating checks treat the same
+missing evidence.
+
 ### Physical requirement checks: `cap-rating`, `max-distance`, `sequence`
 
 Most of the library's `(requirement "…")` prose is reviewer-judged. Three
@@ -365,7 +612,55 @@ pass, because nothing was measured; author the rating
 (`(cap-0402 "1uF" x7r "10%" "16V")`) and it decides. A net whose envelope the
 tool cannot derive is **unproven** too, naming the net: give the rail a
 `(port … (nominal …))` upstream, or state it outright with
-`(net-envelope "VBUS" (rated 0 5.5) "USB VBUS")`.
+`(net-envelope "VBUS" (rated 0 5.5) "USB VBUS")`. Before reaching for that,
+check what the library already says: a `(feedback-divider … (reference-v V))`
+requirement bounds its FB pin at the reference, a `(set-resistor-output …)` one
+bounds its SET pin at I_SET x R_SET, a divider tap between two bounded nets is
+solved by the leg ratio, and an `(electrical "PIN" … (max-voltage V))`
+declaration bounds the bypassed bias node behind that pin. `netlisp net
+<design> <net>` shows which rule answered, under `envelope.origin`.
+
+### Module-owned envelopes
+
+Most nets need no `(net-envelope …)` at all: a rail's envelope follows its own
+declaration and carries across ferrite beads and series resistors onto the
+nodes beyond them. The nets that *do* need one are usually a module's own
+internals — a regulator's SET or FB node, a bias pin behind its bypass cap —
+and those are a function of the module's parameters, not of the board. Writing
+them at board level means restating the same datasheet arithmetic once per
+instantiation, in the board file, about parts the board cannot see.
+
+So `(net-envelope …)` is a module form too. Inside a `(defmodule …)` /
+`(block …)` body the net name is **module-local**, and `LO`/`HI` are
+**evaluated expressions** of the module's own parameters:
+
+```lisp
+(defmodule bcuda-lt3045-ldo ((vout 3.3))
+  (design-block (fmt "~V LDO (LT3045)" vout)
+    (instance "U1" lt3045edd#pbf (pin 7 "SET") …)
+    (instance "R_SET" (res-0402-0p1 rset-str "0.1%") (pin 1 "SET") (pin 2 "GND"))
+
+    ;; Stated ONCE here, not once per board that instantiates this module.
+    (net-envelope "SET" (rated (* vout 0.97) (* vout 1.03))
+      "LT3045 SET sources 98/100/102 uA into R_SET = vout x 10k, so the node
+       sits within 3 % of the programmed output")))
+```
+
+On flatten the declaration lands on `sub-block/NET` at each instantiation's own
+numbers — `(sub-block "ldo_5v" (bcuda-lt3045-ldo (vout 5.0)) …)` gives
+`ldo_5v/SET` 4.85–5.15 V, and `(vout 3.3)` gives `ldo_3v3a/SET` 3.201–3.399 V —
+and it is reported as `declared in module ldo_5v`, so a reviewer can see which
+body made the claim.
+
+**Precedence.** A module-scope declaration is checked against what the parent's
+own topology derives; the board's own declarations are then checked against
+*that* result. So a board may restate or **widen** what a module claims about
+the module's insides, and a board declaration that **narrows** it is the same
+failed assertion an under-covering declaration always was — the module owns the
+node it owns, and two statements about one net cannot disagree. `netlisp net
+<design> <net>` reports the winning envelope, its `source`
+(`authored`/`derived`), the rule that established it and the ferrite-class root
+it was resolved on.
 
 **`(max-distance (pin "P") (kind C|R|L|any) (mm D) [(min-value X)] [(max-value Y)])`**
 — the nearest matching passive on pin P's net must sit within D mm of that pad
@@ -424,11 +719,32 @@ own pill in the review UI and as their own status in `netlisp check`; run with
 
 ### Decoupling shorthand
 
+`(decouple "NET" …)` has two grammars on one head. The **sub-form** one is the
+documented spelling:
+
+```scheme
+(decouple "VDD3V3"
+  (per-pin (cap-0402 "100nF") VDD_1 VDD_2 VDD_3)   ;; one bypass per named pin function
+  (bulk (cap-0805 "10uF") 2))                      ;; shared rail reservoir
+```
+
+The **positional** one — `(decouple "VDD" (comp "val") COUNT per-pin REF
+PIN…)` — is the older shape and still works everywhere; it records a
+`deprecated_form` info naming the sub-form spelling. Both emit the same parts
+with the same structural ids, so rewriting one does not re-stamp a board.
+
 `(decouple "VDD" 1 per-pin auto)` expands to every pin already declared on the
 net using the `(decouple-defaults (ic …))` ref (the `(pins …)` declarations
 must appear first); a literal `REF PIN…` list spells the pins out instead. The
 `(decouple-defaults … (bypass …))` component (not the ic) cascades into
 sub-block modules that don't set their own.
+
+`(decouple-defaults …)` itself is deprecated (info, still working). The
+defaults it supplies are exactly what makes a `(decouple …)` line unreadable
+on its own — you cannot tell from `(decouple "VDD" 1 per-pin J14 K14)` which
+part is placed or which IC hosts it without scrolling back to the defaults
+form, and with a default IC set, a leading `REF` token is silently reinterpreted
+as a *pin*. Spell the host and the part at each site instead.
 
 ### Per-pin decoupling binding: `(decouples "IC" PIN)`
 
@@ -742,7 +1058,7 @@ schematic.
   `/schematics/<name>`, eyeball the Layout tab at full zoom-out, and treat a
   stale or scattered diagram as part of the change still to finish.
 
-### Placement class pins: `(module-policy …)`
+### Placement class pins: `(module-policy (placement-class …))`
 
 The placer, the routing order and the `layout_class_inferred` ERC info all
 classify nets by name (`input_rail`, `switch_node`, `clock`, `rf`, `feedback`,
@@ -751,15 +1067,110 @@ when you want the decision recorded so the info stops appearing, pin it:
 
 ```lisp
 (module-policy
-  (net-class "V_24V_CLEAN" power)      ;; a clean post-LDO rail, not an input rail
-  (net-class "REF_ADF" clock)
-  (net-class "BOOST25_SW" switch_node)) ;; a bare leaf reaches the module-local net
+  (placement-class "V_24V_CLEAN" power)      ;; a clean post-LDO rail, not an input rail
+  (placement-class "REF_ADF" clock)
+  (placement-class "BOOST25_SW" switch_node)) ;; a bare leaf reaches the module-local net
 ```
+
+**`placement-class`, not `net-class`.** The two words meant different things:
+this one is *placement criticality* — how tightly the placer packs a net's
+loop and how early the router claims its path — while the **top-level**
+`(net-class …)` form is *routing geometry*: trace width, clearance, via size,
+impedance. They never interacted, and sharing the word made every reading of
+either one a guess. `(module-policy (net-class …))` is a permanent alias that
+still works; it reports a `deprecated_form` info naming this spelling, and
+nothing about the design changes when you leave it alone.
 
 Design-block scope only. The net is the flattened name, or a bare leaf that
 matches every module-local net of that name. A pinned class is final — the
 hub-plus-inductor switch-node upgrade does not apply — and a pinned net is no
 longer reported as inferred. Unknown class atoms are warned and dropped.
+
+### Assembly variants: `(variant …)`, `(only-in …)`, `(dnp-in …)`, `(value-in …)`
+
+One PCB, one netlist, one set of footprints — several build configurations
+differing only in **which parts are populated** and **what value a populated
+part carries**. Declare the variant space at design-block scope:
+
+```lisp
+(design-block "Sensor Node"
+  (variant "Lite" "no radio, cost-reduced")
+  (variant "Pro"  "full feature set" (default))
+  …)
+```
+
+`(variant …)` is repeatable, at most one may carry `(default)`, and the name is
+a literal quoted string (like `(revision "A")` — it is the identity the CLI, the
+URL and the BOM spell out, so it is read straight off the source). A design with
+no declaration has exactly one implicit **base** variant.
+
+Each instance opts in with one or more clauses in its body:
+
+```lisp
+(instance "U7" (sx1262)                 (only-in "Pro"))      ;; Pro only; DNP elsewhere
+(instance "R14" (res-0402 "0R")         (dnp-in "Lite"))      ;; populated everywhere but Lite
+(instance "R9" (res-0402 "10k")
+  (value-in "Pro" "4.7k"))                                    ;; different value in Pro
+```
+
+* `(only-in "V"…)` — populated **only** in the listed variants; every other
+  variant, the base included, leaves it Do Not Populate.
+* `(dnp-in "V"…)` — Do Not Populate in the listed variants, populated in the rest.
+* `(value-in "V" "VALUE")` — value override in that variant; repeat the form
+  once per variant. The family's declared value-kind applies to the override
+  exactly as it applies to the authored value, so `(value-in "Pro" "4.7k")` on a
+  `cap-0402` is still rejected.
+
+Unlike the declaration, these arguments are evaluated, so a `let`-bound name or
+an `(fmt …)` works.
+
+**Only assembly differences are expressible.** The footprint and its pads stay
+on the board in every variant — `(only-in …)` stops the pick-and-place, not the
+copper. A difference that changes the netlist or the footprints is a different
+board, not a variant.
+
+**Variants are design-level.** A module is a circuit, not an assembly: the same
+regulator module is embedded in boards whose variant names have nothing in
+common. So a `(variant …)` inside a module body is an error, while an instance
+inside a `(sub-block …)` names the **root design's** variants directly:
+
+```lisp
+(defmodule radio-front-end ()
+  (design-block "Radio Front End"
+    (instance "U1" (sx1262) (only-in "Pro"))))   ;; "Pro" is the ROOT design's variant
+```
+
+A variant name the root design never declared is a build error naming the
+module's own file and line, with a did-you-mean.
+
+**Errors.** `(dnp)` is unconditional, so combining it with `(only-in …)` or
+`(dnp-in …)` is an error; so is naming one variant in both `(only-in …)` and
+`(dnp-in …)` on the same part; so is a second `(default)`, a duplicate variant
+name, and a duplicate `(value-in …)` for one variant. The shorthand-generated
+parts (`decouple` / `series` / `pullup` / `divider`) take no variant clauses.
+
+**Selecting one.** `--variant NAME` on `netlisp build`, `check`, `instances`,
+`export-kicad`, `export-kicad-sch` and `export-pdf`; `?variant=NAME` on the
+schematic page and the export endpoints; a `variant` argument on the
+`list_instances` and `run_checks` structured tools. Omitted, the `(default)`
+variant is selected, and failing that the base. The selection lands on each
+part's `dnp` flag and `value` **before** ERC, the BOM, the exports and the
+views read them, so everything the unconditional `(dnp)` already drives — the
+BOM badge and CSV, the KiCad `dnp` / `exclude_from_bom` attributes, the ERC
+exemptions, the schematic strike-through — follows the selected variant.
+
+`netlisp instances` reports the declared variants, the selected one, and each
+part's `populated_in` list; `netlisp designs` lists the names each design
+declares. The BOM CSV gains a `Populated In` column listing, per rolled-up line,
+which variants stuff that part — and two otherwise identical parts populated in
+different variants become two lines, because they are two purchase decisions.
+Both are omitted for a design that declares no variants, so a single-assembly
+BOM keeps exactly the columns it has always had.
+
+The `.bom` sidecar is the identity ledger for the **base** assembly:
+every variant's parts are in it and it records the authored value, never a
+`(value-in …)` override, so building a non-default variant cannot disturb the
+MPN selections the base assembly's rows carry.
 
 ### Lint warnings and authoring errors
 
@@ -816,8 +1227,70 @@ lib/modules/probe-ldo.sexp:5:17: error: (port …) expects a direction or net af
   in module 'probe-ldo' (called at 4:21)
 ```
 
-(Forms spliced in from a sibling `<design>.checks.sexp` are the one exception:
-they still report against the design path.)
+Forms spliced in from a sibling sidecar (`<design>.checks.sexp`,
+`<design>.layout.sexp`, `<design>.diagram.sexp`) report against the **sidecar's**
+own path and line, not the design's — see "Sidecar files" below.
+
+### Sidecar files
+
+A design may be split across up to four files that all live next to each other
+under `src/`. Every sidecar is **optional** and is autoloaded by basename: when
+`src/…/<name>.sexp` is evaluated, each sibling that exists is parsed and its
+top-level forms are spliced onto the end of that design's `(design-block …)`
+body. There is nothing to import and nothing to declare — the forms behave
+exactly as if they had been written inline.
+
+| File | Holds |
+|---|---|
+| `<name>.sexp` | the circuit: `section`, `instance`, `net`, `sub-block`, `port`, the shorthands — plus `board-role`, `hierarchical-ids`, `revision` |
+| `<name>.checks.sexp` | verification forms (`verifies`, `assert`, …). Historical and deliberately unrestricted |
+| `<name>.layout.sexp` | `board`, `stackup`, `net-class`, `pcb-plan`, `design-rules`, `pdn`, `module-policy`, `net-envelope`, `power-plane`, `rough`, `fabrication-layer`, `kicad-pcb` |
+| `<name>.diagram.sexp` | `diagram-layout`, the design-scope `(group "name" ("R1" …))`, `function` |
+
+`board-role` and `hierarchical-ids` stay in the design file on purpose: they
+change what the design *is* — its identity and its place in a system — rather
+than how it is laid out.
+
+Two rules keep the split honest:
+
+- **A form of the wrong kind is an error**, and the message names the file that
+  should hold it. A `(section …)` cannot hide in the layout sidecar, and a
+  `(diagram-layout …)` there is told to move next door.
+- **A singleton form declared in two of the files is an error** naming both
+  locations. `stackup`, `board`, `pcb-plan`, `design-rules` and `diagram-layout`
+  may each be declared once per design; because the splice appends, a second
+  copy would otherwise be resolved by file order rather than by you.
+
+```text
+src/boards/x.layout.sexp:9:1: error: (diagram-layout …) belongs in the .diagram.sexp sidecar, not x.layout.sexp
+src/boards/x.layout.sexp:2:1: error: (stackup …) is declared twice: here and at x.sexp:5 — a design may declare it once
+```
+
+Sidecars are part of the design in every sense that matters downstream: they are
+in the evaluator read-set, so the served page refreshes when one is edited; they
+are in the fabrication gate's provable closure, the release source closure, the
+design archive and the system-review package; and an `(id …)` minted by a form
+that lives in a sidecar is written back **into that sidecar**, never into the
+design file at a foreign byte offset.
+
+#### Splitting an existing design
+
+`split-design` does the move for you, and proves it:
+
+```bash
+netlisp tool split-design --project-dir projects/designs \
+  --args '{"design":"barracuda"}'                 # dry run: the three diffs
+netlisp tool split-design --project-dir projects/designs \
+  --args '{"design":"barracuda","write":true}'    # apply
+```
+
+Every eligible top-level form is lifted at its parser span **byte for byte**,
+together with the comment block written directly above it, and appended to the
+matching sidecar (an existing sidecar is appended to, never overwritten). The
+circuit, the file banner, `board-role`, `hierarchical-ids` and every `(id …)`
+stay where they are. The write is refused unless the original and split trees
+evaluate to the same design — the flattened netlist *and* the evaluated
+design-scope form set, compared field for field.
 
 ### Duplicate ref-des
 
@@ -885,6 +1358,31 @@ The two schemes coexist per-design. Switching an existing design to
 `(hierarchical-ids)` changes its child ids (different derivation), so it is a
 one-time board re-stamp — adopt deliberately, not casually.
 
+### KiCad board target: `(kicad-pcb …)` and `kicad-projects.sexp`
+
+`(kicad-pcb "/abs/path/board.kicad_pcb")` names the board file the file-based
+KiCad sync writes to. It is the one form in the language whose value is a
+property of the **machine**, not of the circuit — so it also resolves from
+outside the source:
+
+```lisp
+;; projects/designs/kicad-projects.sexp — one entry per design, the design name
+;; being the SOURCE FILE STEM (`netlisp designs` prints exactly these tokens).
+(kicad-pcb "barracuda" "/mnt/nas/kicad/barracuda/barracuda.kicad_pcb")
+(kicad-pcb "rds3"      "/mnt/nas/kicad/rds3/rds3.kicad_pcb")
+```
+
+An entry there **overrides** the design's own `(kicad-pcb …)` form and
+**supplies** the target when the design declares none, so a shared design file
+need carry no absolute path at all. The in-source form still works and is the
+right choice when the path is genuinely the same everywhere the design is
+opened.
+
+The file is optional and fail-open: absent, unreadable, or with a malformed
+entry, every design falls back to whatever its own source declares — a file of
+machine-local paths must never fail a build on a machine that has none. Full
+resolution rules: [docs/build-and-run.md](build-and-run.md).
+
 ### Board keepout regions
 
 `(board … (keepout "NAME" …))` reserves a rectangle of board. It is the
@@ -930,11 +1428,15 @@ obstructions.
   a silently dropped authored region reads on every surface exactly like a
   board that never reserved the space.
 
-The motivating case is the Barracuda RF board, whose bottom frontend face
-carries a conduction plate. Its outline is 81.0 × 24.8 mm, and the plate
-occupies `x = 174.0 … 189.0`, `y = 89.6 … 98.5` in that board's layout frame
-(outline `x 126.5 … 207.5`, `y 89.6 … 114.4`) — board-local `x = 47.5`,
-`y = 0`, `w = 15.0`, `h = 8.9`:
+The motivating case — **illustrative, not a transcript of the corpus** — is
+the Barracuda RF board's bottom frontend reserve. That board still records the
+region as a prose comment marked "NOT machine-checked" and declares no
+`(keepout …)` form; adopting one is a board edit nobody has made. The worked
+example below is what adopting it *would* look like, and it is the right shape
+to copy. Its outline is 81.0 × 24.8 mm, and the reserved rectangle occupies
+`x = 174.0 … 189.0`, `y = 89.6 … 98.5` in that board's layout frame (outline
+`x 126.5 … 207.5`, `y 89.6 … 114.4`) — board-local `x = 47.5`, `y = 0`,
+`w = 15.0`, `h = 8.9`:
 
 ```scheme
 (board
@@ -957,6 +1459,33 @@ occupies `x = 174.0 … 189.0`, `y = 89.6 … 98.5` in that board's layout frame
 ;; Long form when net differs from name:
 (port "VOUT" vout-str  out  (rated 0.6 16.0))
 ```
+
+Everything after the direction is an option, in any order. Two of them are
+bare words with no parentheses and stay that way: `optional`, and a
+signal-type word (`power`, `clock`, `rf`, `data`, `differential`, `signal`).
+Everything else is a sub-form — see
+[language-forms.md § Port sub-forms](language-forms.md) for the full table:
+
+```scheme
+(port "SPI_SCK" out clock
+  (role "bus-clock")            ;; what this port does in its interface
+  (protocol "SPI")              ;; the standard it speaks
+  (class "fast")                ;; a free classification key
+  (nominal 3.3))                ;; nominal voltage
+```
+
+Two older spellings still work and always will, each recording a
+`deprecated_form` info that names its replacement:
+
+| Old | Write instead |
+| --- | --- |
+| `role R` / `protocol P` / `class C` — a bare keyword that swallows the next token | `(role R)` / `(protocol P)` / `(class C)` |
+| a bare trailing number | `(nominal V)` |
+
+The keyword pairs read as two unrelated options to anyone scanning the line,
+and a bare number is indistinguishable from a positional argument the form
+does not have. Both forms parse identically to the sub-forms; rewriting one is
+a pure spelling change.
 
 ### Differential port pairs: `(diff-port …)`
 
@@ -1005,37 +1534,247 @@ Two spellings beyond the default:
 An explicit signal-type word (`rf`, `clock`, …) wins over the `differential`
 default; the pairing lives in its own field, not in that word.
 
-### Iterating a list: `(for name (item…) body…)`
+### Interface bundles: `(interface …)`, `(port-group …)`, `(bridge-interface …)`
 
-`(repeat name start end body…)` counts integers. `(for …)` walks a literal
-list, so a loop variable can be a channel letter, a lane suffix, or any
-expression — including `(let …)`-bound values. Each item is evaluated in the
-enclosing scope, then bound in a fresh child scope for one pass over the body.
-Both forms work in expression position and in a `(design-block …)` body.
+`(bus-port …)` writes a bus whose lanes are **numbered**. SPI, I²C, UART, SWD
+and JTAG lanes are **named**, and the names vary: across `lib/modules` the SPI
+clock is spelled `SCK`, `SCLK`, `SPI_SCK` and `RF_SPI_SCK`; data-out is `MOSI`,
+`SDI`, `SPI_SDI`, `SPI_MOSI`; select is `CS`, `CSN`, `SPI_CS`, `SPI_CSN`,
+`SPI_LMX_CSN`. The boards then carry 269 `(rename …)` forms to tie those
+spellings together, 36 of them for SPI/I²C alone.
+
+An `(interface …)` states one vocabulary once. Direction is always written from
+the **peripheral's** point of view — a peripheral is clocked, is selected,
+receives on `MOSI` and answers on `MISO`:
 
 ```scheme
-;; The anti-alias filter block of lib/modules/ad7380-channel.sexp — sixteen
-;; hand-copied instance lines, four per channel — as one loop nest:
-(for ch ("A" "B" "C" "D")
-  (for leg ("P" "N")
-    (instance (fmt "R_F~a~a" ch leg) (res-0201 "33R")
-      (pin 1 (fmt "AIN~a_EXT_~a" ch leg)) (pin 2 (fmt "AIN~a_~a" ch leg)))
-    (instance (fmt "C_F~a~a" ch leg) (cap-0201 "68pF")
-      (pin 1 (fmt "AIN~a_~a" ch leg)) (pin 2 "GND"))))
-
-;; A string item composes ref-des names through (fmt …) and drops straight
-;; into a net name:
-(for ch ("A" "B" "C" "D")
-  (instance (fmt "R_SD~a" ch) (res-0201 "100R")
-    (pin 1 (fmt "SDO~a_RAW" ch)) (pin 2 (fmt "SDO~a" ch))))
+;; stdlib/interfaces/spi.sexp, bundled into the binary
+(interface spi "Four-wire SPI (controller/peripheral), peripheral perspective"
+  (signal SCK  in  clock)
+  (signal MOSI in  data)
+  (signal MISO out data)
+  (signal CS   in))
 ```
 
-Identity works exactly as it does for `repeat`: the `(for …)` form owns one
-source-resident `(id …)` anchor, and each generated child's id derives from
-that anchor plus its `origin_key` and the item's **0-based ordinal**, so ids
-are stable across rebuilds without minting an impossible `(id …)` per
-iteration. A `(ids ("R_FAP@0" <hex8>) …)` sidecar on the loop form pins
-migrated identities when a hand-unrolled block is folded into a `for`.
+`spi`, `i2c`, `uart`, `swd` and `jtag` ship with the binary. A project shadows
+one by name with its own `lib/interfaces/<name>.sexp` — the same
+project → `--lib-dir` → `NETLISP_STDLIB_DIR` → bundle order every library file
+resolves through (see [docs/standard-library.md](standard-library.md)) — and an
+`(interface …)` written at the top level of a design or module file needs no
+file at all.
+
+#### The module side: `(port-group …)`
+
+`(port-group "PREFIX" iface …)` expands to one `(port …)` per signal, named
+`PREFIX_SIGNAL` (one underscore, however the prefix is spelled: `"IMU"` and
+`"IMU_"` both give `IMU_SCK`). An empty prefix gives bare signal names. Every
+trailing modifier — `(rated …)`, `(side …)`, `(electrical …)`, `optional` — is
+replayed onto each lane exactly the way `(diff-port …)` replays them onto both
+of its.
+
+```scheme
+;; lib/modules/bno08x-imu.sexp declares its SPI boundary as four lines:
+(port "SCK"  in)
+(port "MOSI" in)
+(port "MISO" out)
+(port "CS"   in)
+
+;; The same boundary as one bundle — and the lanes now carry the signal types
+;; the vocabulary states (`SCK` clock, `MOSI`/`MISO` data):
+(port-group "" spi)
+```
+
+Three options shape the expansion:
+
+- `(role controller)` mirrors every direction, so an MCU declares the same
+  bundle as the peripheral it drives. A bidirectional lane — I²C's two
+  open-drain lines, SWD's `SWDIO` — is its own mirror and never flips.
+- `(rename SIGNAL "PORTNAME")` names one lane outright, for a part whose
+  datasheet spells chip-select `CSN`.
+- `(omit SIGNAL…)` drops lanes the part has no pin for.
+
+```scheme
+;; lib/modules/bcuda-dsa-hmc1119.sexp — a write-only three-wire attenuator:
+(port "SPI_DSA_SCK" in)
+(port "SPI_DSA_SDI" in)
+(port "SPI_DSA_CSN" in)
+
+;; …as one bundle that still keeps the datasheet's spellings:
+(port-group "SPI_DSA" spi (rename MOSI "SPI_DSA_SDI") (rename CS "SPI_DSA_CSN")
+                          (omit MISO))
+```
+
+The expansion also **records the bundle** on the block, which four hand-written
+ports cannot. A group is addressed by its prefix — by the interface name when
+the prefix is empty, so the `(port-group "" spi)` above is the group `"spi"`.
+
+#### The board side: `(bridge-interface …)`
+
+Inside a `(sub-block …)`, `(bridge-interface "GROUP" (to "NET_PREFIX"))` ties
+every member port of that group to board net `NET_PREFIX_SIGNAL`. It is exactly
+equivalent to the `(bridge …)` lines it replaces — same net ties, in the same
+order:
+
+```scheme
+;; src/boards/cyclops/stm32n6.sexp, today:
+(sub-block "imu" (bno08x-imu)
+  (bridge "IMU_" SCK MOSI MISO INT NRST WAKE (rename CS NCS)) (id d444ddf5))
+
+;; …with the bus named once and the three loose signals left as they were:
+(sub-block "imu" (bno08x-imu)
+  (bridge-interface "spi" (to "IMU") (rename CS "IMU_NCS"))
+  (bridge "IMU_" INT NRST WAKE) (id d444ddf5))
+```
+
+```scheme
+;; src/boards/barracuda/barracuda.sexp, today — five of the seven bridged
+;; ports are the SPI bus, spelled out one (rename …) at a time:
+(sub-block "dsa" (bcuda-dsa-hmc1119)
+  (bridge "" (rename LPF_RF IF1_LNA) (rename DSA_RF IF1_DSA) V_3V3A
+             (rename SPI_DSA_SCK SPI_SCK) (rename SPI_DSA_SDI SPI_MOSI)
+             SPI_DSA_CSN GND)
+  (id a625bd1e))
+
+;; …with the module declaring (port-group "SPI_DSA" spi …) as above:
+(sub-block "dsa" (bcuda-dsa-hmc1119)
+  (bridge-interface "SPI_DSA" (to "SPI") (rename CS "SPI_DSA_CSN"))
+  (bridge "" (rename LPF_RF IF1_LNA) (rename DSA_RF IF1_DSA) V_3V3A GND)
+  (id a625bd1e))
+```
+
+A board that carries a bus straight through to its own boundary declares a
+`(port-group …)` of its own and ties the sub-block to it by name:
+
+```scheme
+(port-group "EXT" spi (role controller))
+(sub-block "imu" (bno08x-imu)
+  (bridge-interface "spi" (to-group "EXT")))
+;;   →  (net "EXT_SCK"  "imu/SCK")   (net "EXT_MOSI" "imu/MOSI")
+;;      (net "EXT_MISO" "imu/MISO")  (net "EXT_CS"   "imu/CS")
+```
+
+A `(rename SIGNAL "NET")` on the `(bridge-interface …)` overrides one lane's
+board net whichever destination form is used, and a signal a `(to-group …)`
+peer does not carry is simply not tied.
+
+#### What ERC does with a group
+
+A `(port-group …)` is a **both-or-neither** bundle, like `(diff-port …)`:
+wiring `SCK` and `MOSI` while leaving `CS` open is reported as
+`interface_half_connected`, inside the module or from a parent that bridges
+only part of the bus. Lanes the vocabulary marks `optional` (UART's `CTS`/`RTS`,
+JTAG's `TRST`, SWD's `SWO`/`NRST`) are never demanded, and a group with nothing
+wired at all is left to the ordinary required-port rule.
+
+Separately, `interface_naming` is an **info**-severity advisory — never a
+warning, so it cannot fail a release build. A module that declares two or more
+ports out of one interface's naming vocabulary (`SCLK`, `SDI`, `SDO`, `CSN`,
+`NCS`, `SS`, … all count) without a `(port-group …)` gets one row naming the
+interface and the exact line that would replace those ports:
+
+```
+info  interface_naming — 'bcuda-dsa-hmc1119' declares SPI_DSA_SCK, SPI_DSA_SDI,
+      SPI_DSA_CSN — the spi signal vocabulary — as loose ports; declare the
+      bundle instead: (port-group "SPI_DSA" spi (rename MOSI "SPI_DSA_SDI")
+      (rename CS "SPI_DSA_CSN") (omit MISO))
+```
+
+### Structural control flow: `when` / `unless` / `if` / `for` / `repeat`
+
+Five forms are *statements* as well as expressions: written directly in a
+design scope, their body holds whatever that scope accepts — instances,
+ports, nets, `pins`, `decouple`/`series`, sub-blocks, notes, sections, and
+each other. All five are legal at **design-block top level, inside a
+`(section …)`, and inside a nested sub-section**; the generated forms are
+indistinguishable from the same lines written out by hand, so a section
+records its hosted instances, pin groups and notes exactly as before.
+
+| Form | Body | Runs when |
+| --- | --- | --- |
+| `(when cond form…)` | any number of forms | `cond` is true |
+| `(unless cond form…)` | any number of forms | `cond` is false |
+| `(if cond then else)` | exactly one form per branch | always — one branch |
+| `(for name (item…) body…)` | any number of forms | once per item |
+| `(repeat name start end body…)` | any number of forms | once per integer, inclusive |
+
+The condition is any expression that evaluates to a **boolean**:
+`(== variant "A")`, `(> vout 5.0)`, a `(let …)`-bound comparison, a module
+parameter compared against a value. A number or a string is rejected with an
+error naming the form — in design scope a silently-taken branch would add or
+drop real parts, so truthiness is not guessed. `(if …)` in *expression*
+position (`(let rail (if (== ratio 1) "GND" "VCC"))`) keeps its ordinary
+Lisp behaviour, truthiness included.
+
+```scheme
+;; Assembly options, at design-block top level.
+(design-block "Regulator"
+  (let precision (== grade "A"))
+  (when precision
+    (instance "R_SET" (res-0402 "49.9k" "0.1%") (pin 1 "VOUT") (pin 2 "SET")))
+  (unless precision
+    (instance "R_SET" (res-0402 "49.9k" "1%") (pin 1 "VOUT") (pin 2 "SET")))
+  …)
+
+;; The same choice as one-form-per-branch sugar.
+(if precision
+  (instance "C_REF" (cap-0402 "10nF" np0) (pin 1 "SET") (pin 2 "GND"))
+  (instance "C_REF" (cap-0402 "10nF" x7r) (pin 1 "SET") (pin 2 "GND")))
+```
+
+```scheme
+;; Loops inside a section — the four filters land in the section, and the
+;; section's hosted-instance list, status and diagram read as if the sixteen
+;; lines had been typed out.
+(section "Anti-alias filters"
+  (for ch ("A" "B" "C" "D")
+    (for leg ("P" "N")
+      (instance (fmt "R_F~a~a" ch leg) (res-0201 "33R")
+        (pin 1 (fmt "AIN~a_EXT_~a" ch leg)) (pin 2 (fmt "AIN~a_~a" ch leg)))
+      (instance (fmt "C_F~a~a" ch leg) (cap-0201 "68pF")
+        (pin 1 (fmt "AIN~a_~a" ch leg)) (pin 2 "GND")))))
+
+;; Nesting composes: a loop inside a conditional inside a section.
+(section "Calibration"
+  (when cal-fitted
+    (for ch ("A" "B")
+      (instance (fmt "R_CAL~a" ch) (res-0402 "1k")
+        (pin 1 (fmt "CAL~a" ch)) (pin 2 "GND")))))
+```
+
+`(repeat …)` counts integers; `(for …)` walks a literal list, so a loop
+variable can be a channel letter, a lane suffix, or any expression —
+including `(let …)`-bound values. Each item is evaluated in the enclosing
+scope, then bound in a fresh child scope for one pass over the body, so a
+body-local `(let …)` never leaks sideways into the next iteration.
+
+**Identity.** The **outermost** structural form owns one source-resident
+`(id …)` anchor, which the build mints into the file when it is missing —
+one anchor per nest, never one per generated child (they all share a single
+source location, so per-child `(id …)` insertion is impossible). Every child
+derives its id from that anchor, its own stable `origin_key`, and the
+accumulated **key path** of the branches and iterations it sits inside:
+
+- a taken `when`/`unless` body, and an `(if …)` then-branch, contribute `@t`;
+- an `(if …)` else-branch contributes `@f`;
+- a `for`/`repeat` iteration contributes `@<0-based ordinal>` / `@<index>`.
+
+So a child of `(for …)` alone keys as `R_FAP@0`, and one inside
+`(when …)` → `(for …)` keys as `R_CALA@t@0`. Two consequences worth stating:
+flipping a condition **re-derives** rather than re-uses — an else-branch part
+can never inherit the id of the then-branch part it replaces, even when both
+carry the same ref-des — and nesting composes instead of the outer form
+flattening the inner one's distinctions.
+
+An `(ids ("R_FAP@0" <hex8>) …)` sidecar on the anchor form pins migrated
+identities, which is how a hand-unrolled block is folded into a loop or a
+conditional without changing its established PCB UUIDs. Wrapping existing
+instances in a control form otherwise re-derives their ids, exactly as
+folding them into a `for` does.
+
+**Errors.** A body form that the enclosing scope does not accept is reported
+at **its own** `file:line:col`, with the same message a hand-written sibling
+would draw — `(stackup …) is top-level-only — ignored inside (section …)`
+points at the `(stackup …)`, not at the `(when …)` around it.
 
 ### Sub-block port wiring: `(bridge …)`
 
@@ -1082,6 +1821,158 @@ A `(sub-block …)` accepts only `(bridge …)`, `(id …)`, `(ids …)` and
 `(reflow)` as trailing children; anything else warns. See
 [docs/language-forms.md § Sub-block sub-forms](language-forms.md).
 
+### Anonymous wiring: `(connect …)` and `(chain …)`
+
+Most nets in a signal chain exist only to have a name. On `barracuda.sexp`,
+`IF1_PAD`, `IF1_LNA`, `IF1_MIX`, `LO1_PAD`, `LO1_DRIVE`, `LO1_FILTERED` and
+`LO1_SYNTH` each name one node between two adjacent parts and nothing else,
+and every one of them also costs a `(rename …)` on each bridge that touches it.
+`(connect …)` states such a node by naming its **ends**; `(chain …)` states a
+whole cascade by naming the parts in order.
+
+Both lower to exactly the pin-net and net-tie records `(pin …)`, `(net …)` and
+`(bridge …)` already produce, so ERC, `(decouples …)`/`(near …)`, net classes,
+`(net-envelope …)`, the KiCad exports and every PCB tool see an ordinary net.
+
+```scheme
+;; One node, four ends, no invented name:
+(connect "U1.SCK" "flash/SCK" "hdr.4")
+
+;; The same node with a name you can reference elsewhere:
+(connect "U1.SCK" "flash/SCK" (name "SPI_SCK") (class "spi-fast"))
+```
+
+An **END** is one of four spellings:
+
+| Spelling | Means |
+| --- | --- |
+| `"REF.PAD"` | A physical pad on a placed part. |
+| `"REF.FN"` | A pinout **function name**, resolved through the part's `lib/pinouts/<name>.sexp` exactly as `(pin FN …)` does. |
+| `"sub/PORT"` | A declared port of a sub-block — the same record a `(bridge …)` writes, so `checkUnconnectedPorts` counts the port as wired. |
+| `"PORT"` / `"NET"` | A port of the enclosing block, or any ordinary net name. |
+
+Resolution is deferred until the whole block is built, so an end may name a
+part or a sub-block written **below** the `(connect …)`.
+
+**No silent merges.** Wiring a pad that already carries a different net is an
+error naming both nets; wiring a sub-block port a `(bridge …)` or `(net …)`
+already wired is an error naming the line that wired it. Only two *anonymous*
+nodes landing on one pad merge — they are the same node stated twice — and that
+merge is reported as a warning, because nothing in the source spells it out.
+
+#### The generated name
+
+Without `(name …)`, and with no end that is already an ordinary net, the net is
+named from the **authored end tokens**:
+
+```
+n~lpf4-OUTPUT~lpf_if_1-RF_IN
+n~pad1-RF-OUT~lna-RF_IN
+```
+
+- `n~` is the reserved prefix. `~` is an RFC 3986 *unreserved* character, so
+  the name needs no escaping in any URL; it is not `.` (the per-pin
+  bypass-stub separator) and not `/` (the hierarchy separator); it survives the
+  KiCad netlist and `.kicad_sch` export verbatim; and the leading letter keeps
+  a shell from tilde-expanding it. Every generated name is nevertheless checked
+  against the block's own net names, so a collision is impossible rather than
+  merely unlikely.
+- Identity comes from what the **source** says — `lpf4`, `pad1`, `lna/RF_IN` —
+  never from a post-flatten ref-des, so the board's auto ref-des pass and a
+  sub-block renumber both leave the name alone. A bare two-terminal chain item
+  is spelled by its pinout function names for the same reason.
+- Ends beyond a 60-character name collapse to the first end plus a hash of the
+  full key, and a name already in use takes a `~2`, `~3`, … ordinal rather than
+  merging two nodes.
+- `(name "NET")` gives an authored name instead — which is how a net-class
+  `(nets …)` list or a `(net-envelope …)` reaches the node. Both also accept
+  the generated name as written.
+
+#### `(chain …)`: a cascade in one line
+
+`(chain "NET_A" ITEM… "NET_B")` wires two-port items in order, with one
+anonymous net per gap. The first and last tokens are ordinary `(connect …)`
+ends; each ITEM is:
+
+| Spelling | Means |
+| --- | --- |
+| `"REF"` | A two-terminal part: in on its first pad, out on its second (pinout order, or `1`/`2` for a part with no pinout). A part with more pads is an error saying so. |
+| `"sub"` | A sub-block whose module declares exactly one signal `out` port and, among the ports sharing that output's kind, exactly one `in`. Power, ground/bidi and `optional` ports are never candidates. Anything less definite is an error listing them. |
+| `"REF/IN>OUT"` | The two terminals named explicitly — pad ids or pinout function names for a part, port names for a sub-block. |
+
+Barracuda's IF chain — mixer → LFCW-6000+ → 2× LFCN-1575D+ → YAT-1A+ → LNA →
+DSA — is seven nets and six `(rename …)` lines as it stands:
+
+```scheme
+(sub-block "mixer" (bcuda-mixer-mm1)
+  (bridge "" GND (rename RF RF1_PAD) (rename LO LO1_FILTERED) (rename IF IF1_MIX)))
+(instance "lpf4"     lfcw-6000+  (pin 1 "IF1_MIX")       (pin 3 "IF1_LPF2")      (pin 2 4 "GND"))
+(instance "lpf_if_1" lfcn-1575d+ (pin 1 "IF1_LPF2")      (pin 3 "IF1_LFCN_MID")  (pin 2 4 "GND"))
+(instance "lpf_if_2" lfcn-1575d+ (pin 1 "IF1_LFCN_MID")  (pin 3 "IF1_LFCN")      (pin 2 4 "GND"))
+(instance "pad1"     yat-1a+     (pin 2 "IF1_LFCN")      (pin 5 "IF1_PAD")       (pin 1 3 4 6 7 "GND"))
+(sub-block "lna" (tsy-83lnw-lna)
+  (bridge "" (rename RF_IN IF1_PAD) (rename RF_OUT IF1_LNA)
+             (rename VDD V_5VA) (rename VBYP LNA_VBYP) GND))
+(sub-block "dsa" (bcuda-dsa-hmc1119)
+  (bridge "" (rename LPF_RF IF1_LNA) (rename DSA_RF IF1_DSA) V_3V3A … GND))
+```
+
+The same chain, with only the two nets that are referenced elsewhere named:
+
+```scheme
+(sub-block "mixer" (bcuda-mixer-mm1)
+  (bridge "" GND (rename RF RF1_PAD) (rename LO LO1_FILTERED)))
+(instance "lpf4"     lfcw-6000+  (pin 2 4 "GND"))
+(instance "lpf_if_1" lfcn-1575d+ (pin 2 4 "GND"))
+(instance "lpf_if_2" lfcn-1575d+ (pin 2 4 "GND"))
+(instance "pad1"     yat-1a+     (pin 1 3 4 6 7 "GND"))
+(sub-block "lna" (tsy-83lnw-lna)
+  (bridge "" (rename VDD V_5VA) (rename VBYP LNA_VBYP) GND))
+(sub-block "dsa" (bcuda-dsa-hmc1119)
+  (bridge "" V_3V3A … GND))
+
+(chain "mixer/IF"
+       "lpf4/INPUT>OUTPUT"
+       "lpf_if_1/RF_IN>RF_OUT"
+       "lpf_if_2/RF_IN>RF_OUT"
+       "pad1/RF-IN>RF-OUT"
+       "lna"                     ;; RF_IN → RF_OUT; VBYP is an `in` too, but a
+       "dsa"                     ;;   different kind, so the rf pair is unique
+       "IF1_DSA"
+       (class "if-50"))
+```
+
+The four filters name their two terminals because each carries ground pads as
+well; `"lna"` and `"dsa"` do not, because each module declares exactly one rf
+input and one rf output. `mixer/IF` and `IF1_DSA` stay as they are — the first
+is a sub-block port, the second is named in the board's `(pcb-plan …)` wave
+lists — and the six nets between them become
+`n~mixer-IF~lpf4-INPUT`, `n~lpf4-OUTPUT~lpf_if_1-RF_IN`, and so on.
+
+### Bus ties: `(bus-net …)`
+
+`(bus-net "PREFIX" LO HI "SUB")` is the documented form: it expands to one
+`(net "PREFIX<i>" "SUB/PREFIX<i>")` tie per index in the inclusive range, so
+`(bus-net "FLASH_IO" 0 7 "flash")` replaces eight verbatim lines and nothing
+else.
+
+Two further grammars hang off the same head and each record a
+`deprecated_form` info:
+
+```scheme
+;; Strided: distribute a channel range sub-major across (over …) x (ports …).
+(bus-net "ADF_CH" 1 10 (suffixes P N) (over "adc1" "adc2") (ports AINA AINB))
+
+;; Mapped: one sub-block, a parent suffix, and an offset child-port family.
+(bus-net "DUT_A" 0 2 (suffix "_MCU") (over "shift" (port-base "B" 1)))
+```
+
+Both still work. Neither reads as the same operation the basic form performs —
+the index means a different thing in each — so what a `(bus-net …)` line does
+cannot be known from its head. Prefer the basic form per sub-block, or spell
+the ties out with `(net …)` / `(bridge …)`, generating them with `(for …)`
+when there are many.
+
 ### The four unrelated `(group …)` forms
 
 `group` is overloaded across four grammars that share nothing but the word:
@@ -1095,3 +1986,143 @@ A `(sub-block …)` accepts only `(bridge …)`, `(id …)`, `(ids …)` and
 
 The generated reference lists each in its own table; when in doubt, check
 the arity — a parenthesised member list means the design-scope form.
+
+### System contracts: `src/systems/<name>/system.sexp`
+
+A *system* is the layer above one board: which boards form the product, which
+exact connector contacts join them, and which review documents belong beside
+each fabrication archive. It is authored as ordinary netlisp source in
+`src/systems/<name>/system.sexp` and read by `netlisp system-check`, the
+readiness gate, the `/systems` pages and the release/dossier composers. The
+complete form table is in
+[docs/language-forms.md § System contract forms](language-forms.md).
+
+```lisp
+(system "barracuda"
+  (title "Barracuda OC-303-1-01")
+  (part-number "OC-303-1-01")
+  (revision "B3")
+
+  (board "barracuda"
+    (role rf)
+    (source "src/boards/barracuda/barracuda.sexp")
+    (part-number "BARRACUDA-RF")
+    (revision "B4")
+    (layout "Barracuda V2")
+    (dnp drop))
+
+  (interface "j1-board-to-board"
+    (mates "barracuda/J1" "barracuda-base/base-interface/J1")
+    (contact-count 40)
+    (signal "V_12V" (left 1 "V_12V") (right 1 "V_12V_RF"))
+    (signal "GND"   (left 9 "GND")   (right 9 "GND")))
+
+  (document "interface-control"
+    (title "Board-to-Board Interface Control")
+    (path "src/systems/barracuda/docs/interface-control.md")
+    (classification design)
+    (generated interface-matrix)))
+```
+
+A system contract is never *evaluated*. It is parsed straight into the strict
+`netlisp-system-review-v1` spec that the older hand-maintained
+`src/systems/<name>/system.json` also parses to, so none of these forms is
+valid inside a design source, and a design writing `(interface …)` gets the
+ordinary unknown-form warning.
+
+**The JSON manifest still loads.** Where only `system.json` exists nothing
+changes. Where both exist the `.sexp` is the contract, the JSON is inert, and
+readiness says so with a `manifest_shadowed` finding. To migrate:
+
+```bash
+netlisp tool convert-system-manifest --project-dir <d> --args '{"system":"barracuda"}' \
+  --output projects/designs/src/systems/barracuda/system.sexp
+```
+
+The converter is read-only — it prints the equivalent source and writes nothing
+into the project — and the printed contract re-parses to the identical
+canonical spec, so the migration is provably not a rewrite. It is safe to
+delete the JSON afterwards; note that the HTTP manifest-editing endpoints
+(`POST /api/systems/:name/attest` above all) still operate on `system.json`,
+so a workspace that attests through the browser should keep the JSON form for
+now.
+
+#### Endpoint handles
+
+`(mates "board/CONNECTOR" "board/CONNECTOR")` names the two mated connectors.
+The **board** is the first path segment; everything after it is the connector's
+stable source handle, which may itself be a sub-block path
+(`barracuda-base/base-interface/J1`). That handle is deliberately *not* a
+flattened ref-des: evaluator-wide numbering may turn a module-local `J1` into
+`U19`, and a contract must not drift when an unrelated part is inserted.
+
+#### Aliases are derived, not authored
+
+The strict schema requires exactly one board-local→canonical alias per contact
+whose endpoint-local net differs from the canonical name, and requires every
+alias to describe a real contact — so the derivable set is the only valid set.
+The sexp form therefore has no alias form: writing
+`(signal "V_12V" (left 1 "V_12V") (right 1 "V_12V_RF"))` *is* the declaration
+that `V_12V_RF` on the right board is the system's `V_12V`. One board-local net
+carrying two canonical names is refused.
+
+#### `(auto)`: derive the contact table from the boards
+
+```lisp
+(interface "j1-board-to-board"
+  (mates "barracuda/J1" "barracuda-base/base-interface/J1")
+  (auto)
+  (signal "IF1_DSA" (left 15) (right 15)))
+```
+
+`(auto)` walks the left connector's pad table, pairs each pad with the right
+connector's same-numbered pad, and reads the net each side reaches. Pad ids
+compare numerically, so a pinout file's `01` and a design source's `1` are one
+contact. A contact the right connector does not carry is an error, not a
+silently dropped row. A pad wired on one side only keeps the wired net as its
+canonical name and gives the dead side a synthetic no-net name, so a derived
+contract never invents a net that could collide with a real one.
+
+An explicit `(signal …)` inside an `(auto)` interface **overrides one derived
+contact** — its canonical name, its `optional` flag, and either endpoint net
+you choose to restate. It must name a contact both connectors carry, and two
+signals may not claim one contact.
+
+`(auto)` is for bring-up, where the contract is "whatever the boards currently
+say". A released product should carry the explicit table: that is what makes a
+later wiring change show up as a diff rather than as a silently updated
+contract.
+
+#### `interface_mismatch` findings
+
+Whatever the manifest's format, `netlisp system-check` and
+`GET /api/systems/:name/readiness` check the contract against both boards'
+evaluated netlists and connector pad tables. Error-severity findings clear the
+`interface_contract` readiness check and block a release:
+
+| Finding | Severity | Meaning |
+| --- | --- | --- |
+| `contact_unconnected_one_side` | error | The contact reaches a net on one side and nothing — no net, or a net the board's own rule checks call floating — on the other. |
+| `voltage_domain_mismatch` | error | A **required** signal joins two nets that are both supplies or grounds but sit at different *declared* nominal potentials (ground is 0 V by definition). Undeclared potentials are not guessed. |
+| `unknown_contact_pin` | error | A signal names a pad the connector's pinout does not carry. |
+| `contact_count_over_pads` | error | The contract claims more contacts than the connector has pads. |
+| `duplicate_contact_claim` | error | Two signal records claim one physical contact. |
+| `contacts_not_covered` | warning | The connector has more pads than the contract covers — shield, mounting and spare pads are normal. |
+| `connector_pinout_unavailable` | warning | The connector's pad table could not be read, so the pin-existence and pad-count checks did not run for that endpoint. Absent evidence is said out loud rather than passed silently. |
+
+Two differing net **names** across the joint are never a mismatch. Pairing
+`V_12V` with `V_12V_RF` is exactly what the canonical/alias layer is for; a
+check that flagged it would fire on every real contract.
+
+Where each is documented, all of it generated from the evaluator's own
+tables:
+
+| Where | Generated reference |
+| --- | --- |
+| Design-block scope | [language-forms.md § Design-scope forms](language-forms.md), row `(group …)` |
+| `(diagram-layout …)` | [language-forms.md § Design-scope forms](language-forms.md), inside the `(diagram-layout …)` row's syntax |
+| `(pins "REF" …)` | [language-forms.md § Instance sub-forms](language-forms.md), in the `(pins "REF" …)` children table at the end of that section |
+| `(rough …)` | [language-forms.md § Design-scope forms](language-forms.md), inside the `(rough …)` row's syntax |
+
+When in doubt, check the arity — a parenthesised member list means the
+design-scope form.

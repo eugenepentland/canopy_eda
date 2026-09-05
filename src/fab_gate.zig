@@ -19,6 +19,7 @@ const optimizer = @import("placement/optimizer.zig");
 const infra_fs = @import("infra/fs.zig");
 const stdlib = @import("stdlib.zig");
 const paths = @import("paths.zig");
+const sidecars = @import("eval/sidecars.zig");
 const pour = @import("placement/pour.zig");
 const router = @import("placement/router.zig");
 const drc_rules = @import("serve/drc_rules.zig");
@@ -268,8 +269,25 @@ fn evaluationReadSet(arena: std.mem.Allocator, evaluator: *Evaluator) ReadSet {
     return .{ .sha256 = std.fmt.bytesToHex(digest, .lower), .complete = names.items.len > 0 };
 }
 
+/// Every autoloaded sidecar that EXISTS beside the design must appear in the
+/// evaluator's read-set: a `.layout.sexp` holding the stackup and net classes
+/// is as much a release input as the design file, and a release whose read-set
+/// cannot prove it consumed one is not provable.
 fn checksSidecarLoaded(arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, evaluator: *Evaluator) bool {
-    const path = paths.designSiblingPath(arena, project_dir, name, ".checks.sexp") catch return false;
+    for (sidecars.kinds) |kind| {
+        if (!sidecarLoaded(arena, project_dir, name, kind, evaluator)) return false;
+    }
+    return true;
+}
+
+fn sidecarLoaded(
+    arena: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    kind: sidecars.Kind,
+    evaluator: *Evaluator,
+) bool {
+    const path = paths.designSiblingPath(arena, project_dir, name, kind.ext()) catch return false;
     infra_fs.cwd().access(path, .{}) catch |err| return err == error.FileNotFound;
     const wanted = infra_fs.canonicalPathAlloc(arena, path) catch return false;
     var iterator = evaluator.loaded_files.keyIterator();

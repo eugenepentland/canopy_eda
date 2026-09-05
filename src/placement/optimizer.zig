@@ -6608,7 +6608,7 @@ fn boardRulesWith(
             .rails = try power_budget.analyze(arena, block),
             .rail_model = .{
                 .specs = block.rails,
-                .net_envelopes = block.net_envelopes,
+                .net_envelopes = block.envelopes.published,
                 .branch_loads = try power_budget.branchLoads(arena, block),
                 .intents = block.pdn_intents,
             },

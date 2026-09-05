@@ -14,6 +14,13 @@ pub const Span = struct {
 pub const Node = struct {
     tag: Tag,
     span: Span,
+    /// The verbatim source spelling of a numeric literal that carried a unit
+    /// or scale suffix (`100nF`, `4.7k`, `33R`, `10uH`, `10%`), or null for
+    /// every other node. The `tag` still holds the plain f64, so arithmetic is
+    /// unchanged; this is only what a *renderer* writes back when the number
+    /// is used as a part value. Without it `(pullup "SDA" 100nF …)` reached the
+    /// BOM as `0.0000001`, having lost the F that says which quantity it is.
+    literal: ?[]const u8 = null,
 
     pub const Tag = union(enum) {
         list: []const Node,
@@ -43,6 +50,12 @@ pub const Node = struct {
 
     pub fn float(span: Span, value: f64) Node {
         return .{ .tag = .{ .float = value }, .span = span };
+    }
+
+    /// A numeric literal that keeps its source spelling: the same `.float`
+    /// node plus the `literal` text a value renderer prefers.
+    pub fn suffixedFloat(span: Span, value: f64, text: []const u8) Node {
+        return .{ .tag = .{ .float = value }, .span = span, .literal = text };
     }
 
     pub fn unitVal(span: Span, mm_value: f64) Node {
@@ -105,6 +118,16 @@ pub const Node = struct {
             .int => |v| std.fmt.allocPrint(arena, "{d}", .{v}) catch null,
             else => null,
         };
+    }
+
+    /// The source spelling of a suffixed numeric literal (`100nF`), else the
+    /// node's own text (a string or atom). Null for a plain number, a list, or
+    /// a dimension — callers that must still render one fall back themselves.
+    /// This is the single reader of `literal`, so the precedence between a
+    /// unit-bearing number and a quoted value cannot drift between callers.
+    pub fn valueText(self: Node) ?[]const u8 {
+        if (self.literal) |text| return text;
+        return self.asText();
     }
 
     /// Get numeric value as f64 (works for int, float, and unit_val).
