@@ -485,7 +485,7 @@ fn tryCoupledPair(run: router.CoupledRun, pair: diff_pairs.DiffPair) std.mem.All
     // Try it before an envelope search: a too-tight pair can sometimes route
     // an envelope by sending both escapes OUTSIDE the two pad pairs, but the
     // resulting copper doubles back through the first component. R2 -> C14/C15
-    // on straps-synth-lmx2595 is that exact geometry. When the forward pad-pair
+    // on board-d-synth-lmx2595 is that exact geometry. When the forward pad-pair
     // span cannot hold both tapers and a coupled stretch, the direct/fan shape
     // is the RF-honest answer even if a longer maze path happens to clear.
     if (try tryShortPair(run, pair, opts)) return true;
@@ -501,7 +501,7 @@ fn tryCoupledPair(run: router.CoupledRun, pair: diff_pairs.DiffPair) std.mem.All
 /// Every coupled option above declines when the pair's two ends sit closer
 /// together than their own pad exits need — the tapers alone eat the gap, and
 /// asking for one anyway makes the leg jog out past the coupled run's start and
-/// double back into its twin. On straps-synth-lmx2595 that is both declared
+/// double back into its twin. On board-d-synth-lmx2595 that is both declared
 /// pairs, and what shipped instead was two INDEPENDENT maze routes: 3-and-6
 /// segment legs hooking around each other, 0.163 mm and 0.888 mm of skew.
 ///
@@ -1228,7 +1228,7 @@ fn coupledPairFixture(
     return router.route(arena, placement, .{});
 }
 
-/// A too-short pair matching straps-synth-lmx2595's R2 -> C14/C15 geometry.
+/// A too-short pair matching board-d-synth-lmx2595's R2 -> C14/C15 geometry.
 /// The open board is intentional: an exterior envelope route CAN clear here,
 /// which proves the driver prefers the honest direct classification rather
 /// than accepting a longer loop merely because the maze found one.

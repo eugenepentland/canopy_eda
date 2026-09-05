@@ -110,7 +110,7 @@ const max_chamfer_halvings: usize = 4;
 /// leaves the maze as pad → axis escape → one perpendicular run → pad, three
 /// points whose single corner is adjacent to BOTH ends, so the square corner a
 /// reader sees on every short hookup was the one the chamfer could never reach
-/// (measured on straps-synth-lmx2595: 13 of its 16 right angles sat within
+/// (measured on board-d-synth-lmx2595: 13 of its 16 right angles sat within
 /// 0.35 mm of a pad).
 ///
 /// The reserve replaces that refusal with the rule a hand router follows — the

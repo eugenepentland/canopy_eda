@@ -32,7 +32,7 @@
 //!      the rail the stub claims to be part of is on the board.
 //!
 //! Rule 3 is the conservative one, and it costs a case: a rail whose *every*
-//! pad is bypassed keeps no trunk at all (stm32n6's `V08CAP`), so its lone stub
+//! pad is bypassed keeps no trunk at all (board-c's `V08CAP`), so its lone stub
 //! stays spelled in full rather than being renamed. That is a rename nothing
 //! would merge, so nothing is lost but tidiness; loosening it would mean
 //! trusting rules 1 and 2 alone to tell a stub from an author's own name.

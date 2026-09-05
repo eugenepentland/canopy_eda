@@ -6447,7 +6447,7 @@ Public functions: evalCapRating, evalMaxDistance, evalSequence, resolveDistanceR
 
 ## req_derived_checks
 
-- feedback-divider and SET-current checks reject the mismatched values used by straps
+- feedback-divider and SET-current checks reject the mismatched values used by board-d
 - rail-name fallback decodes common voltage conventions used by flat designs
 - a second resistor on one feedback leg is reported instead of silently replacing it
 - rail-name fallback decodes the imported underscore decimal and signed negative spellings

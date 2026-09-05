@@ -55,7 +55,7 @@ test "a stacked passive pair is chained pad to pad" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    // straps-synth-lmx2595's LMX_RFOUTAM in miniature: a hub pad facing east and
+    // board-d-synth-lmx2595's LMX_RFOUTAM in miniature: a hub pad facing east and
     // two passives stacked east of it, each presenting its WEST pad to the net,
     // so both pads' outward escape axis points away from their shared run.
     var parts = [_]optimizer.Part{

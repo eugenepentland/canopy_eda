@@ -29,7 +29,7 @@ const std = @import("std");
 /// A dirty list rather than a generation stamp on purpose: a stamp adds a third
 /// array to the hot relax loop, and at ~10 relaxations per expansion that extra
 /// cache line costs more than the memsets it saves on a board whose legs search
-/// wide (measured on black-canyon, 1.5 M expansions over 200 legs, where the
+/// wide (measured on board-e, 1.5 M expansions over 200 legs, where the
 /// stamped variant made the maze phase slower, not faster).
 pub const Search = struct {
     dist: []f64 = &.{},

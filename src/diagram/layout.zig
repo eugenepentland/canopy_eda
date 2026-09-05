@@ -2767,7 +2767,7 @@ test "computeFreeLayout places a block from two references" {
 // spec: diagram/layout - computeFreeLayout bumps a placement that resolves onto an occupied cell to the next free cell
 test "computeFreeLayout never stacks two placed blocks on one cell" {
     // d (below b) and e (right-of c) both resolve to cell (1,1) — the exact
-    // labstation failure (`UX & Indicators` under `USB-C Host Interface`).
+    // board-f failure (`UX & Indicators` under `USB-C Host Interface`).
     // The later directive must bump along its constraint direction instead of
     // silently rendering on top of the earlier block.
     var nodes = [_]types.Node{ mkKeyed("a"), mkKeyed("b"), mkKeyed("c"), mkKeyed("d"), mkKeyed("e") };

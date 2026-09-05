@@ -131,7 +131,7 @@ fn collectExternalSources(
 /// they leave on.
 ///
 /// `analyze` only ever runs on the design being built, so on a STANDALONE
-/// MODULE PAGE — `bcuda-lt3045-ldo` routed by itself rather than instantiated —
+/// MODULE PAGE — `board-a-lt3045-ldo` routed by itself rather than instantiated —
 /// the module IS the board, and `(port "VOUT" out power (current 0.5 0.5))` is
 /// the only statement anywhere on that page about how much current its output
 /// copper carries. Without this pass the page has no rail at all for VOUT, so

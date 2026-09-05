@@ -1892,7 +1892,7 @@ const pad_exit_mm: f64 = 0.25;
 /// end's centreline terminal must leave at least this much room between the pad
 /// pair and the terminal, or the jog lands PAST the coupled run's start and the
 /// leg has to double back into its twin — the shape that fails the clearance
-/// probe (measured on straps-synth-lmx2595, 2026-08-11). Pads already at or
+/// probe (measured on board-d-synth-lmx2595, 2026-08-11). Pads already at or
 /// inside the class gap need only the stub.
 pub fn padExitRun(outer: PadPair, off: f64) f64 {
     const pitch = std.math.hypot(outer.p.x - outer.n.x, outer.p.y - outer.n.y) / 2;

@@ -1335,7 +1335,7 @@ pub fn dirtyDesignsForPath(
             return out.toOwnedSlice(allocator);
         // Designs are discovered by file BASENAME regardless of nesting (see
         // listDesignNames' dir.walk), so a nested design like
-        // src/boards/straps/straps.sexp is the design "straps". Use the
+        // src/boards/board-d/board-d.sexp is the design "board-d". Use the
         // basename so nested edits report their own design as dirty.
         const base = std.fs.path.basename(stripped);
         if (base.len == 0) return out.toOwnedSlice(allocator);
@@ -1647,20 +1647,20 @@ test "writeFile append honours the CAS guard against the pre-append file" {
 test "dirtyDesignsForPath resolves a nested src design to its basename" {
     // spec: serve/vfs - dirtyDesignsForPath maps a nested src/**/<name>.sexp path to the design basename
     const alloc = std.testing.allocator;
-    const nested = try dirtyDesignsForPath(alloc, "/proj", "src/boards/straps/straps.sexp");
+    const nested = try dirtyDesignsForPath(alloc, "/proj", "src/boards/board-d/board-d.sexp");
     defer {
         for (nested) |d| alloc.free(d);
         alloc.free(nested);
     }
     try std.testing.expectEqual(@as(usize, 1), nested.len);
-    try std.testing.expectEqualStrings("straps", nested[0]);
+    try std.testing.expectEqualStrings("board-d", nested[0]);
 
     // A nested .bom edit resolves the same way.
-    const bom_dirty = try dirtyDesignsForPath(alloc, "/proj", "src/boards/straps/straps.bom");
+    const bom_dirty = try dirtyDesignsForPath(alloc, "/proj", "src/boards/board-d/board-d.bom");
     defer {
         for (bom_dirty) |d| alloc.free(d);
         alloc.free(bom_dirty);
     }
     try std.testing.expectEqual(@as(usize, 1), bom_dirty.len);
-    try std.testing.expectEqualStrings("straps", bom_dirty[0]);
+    try std.testing.expectEqualStrings("board-d", bom_dirty[0]);
 }

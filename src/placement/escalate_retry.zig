@@ -51,11 +51,11 @@
 //! `Policy.enabled` is **false**. A/B on the whole corpus (`bench-route`,
 //! ReleaseSafe, 2026-08-06, against `05e365c`): the tier fires on exactly the
 //! nets it was designed for — board-a's `SPI_MOSI`, `SPI_ADF_CSN`, the three
-//! `adf4159/*_1V8` lines, `V_12V`, `buck_6v/VIN_F`, plus black-canyon's and
-//! straps' residuals, 50 re-attempts corpus-wide — and **routes none of them**.
+//! `adf4159/*_1V8` lines, `V_12V`, `buck_6v/VIN_F`, plus board-e's and
+//! board-d's residuals, 50 re-attempts corpus-wide — and **routes none of them**.
 //! Completion is unchanged on every board (geomean 0.054367 → 0.054367) while
-//! wall time rises: stm32n6 +19.8 s (+6.2 %), straps +3.4 s (+11 %),
-//! board-a-base +3.6 s (+2.9 %), board-a +1.0 s (+8 %), black-canyon
+//! wall time rises: board-c +19.8 s (+6.2 %), board-d +3.4 s (+11 %),
+//! board-a-base +3.6 s (+2.9 %), board-a +1.0 s (+8 %), board-e
 //! +1.1 s (+9 %), board-b-xband-sip +1.3 s (+3 %).
 //!
 //! The trace says why, and it agrees with `joint_rescue`'s independent finding:

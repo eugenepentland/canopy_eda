@@ -4681,7 +4681,7 @@ test "stackup captures soldermask and copper etch profile" {
 /// The board path `<project-dir>/kicad-projects.sexp` maps this design to, if
 /// any. The design name is the SOURCE FILE STEM — the same token `netlisp
 /// designs` prints and every CLI command takes — so `src/board-a/board-a.sexp`
-/// and `src/labstation.sexp` both key on their own basename.
+/// and `src/board-f.sexp` both key on their own basename.
 fn projectBoardOverride(self: *Evaluator) ?[]const u8 {
     if (self.project_dir.len == 0) return null;
     const name = designNameFromFile(self.current_file) orelse return null;
@@ -4703,7 +4703,7 @@ fn designNameFromFile(path: []const u8) ?[]const u8 {
 // spec: eval/design_block - Project board map keys on the design source file stem
 test "design name comes from the source file stem" {
     try testing.expectEqualStrings("board-a", designNameFromFile("projects/designs/src/boards/board-a/board-a.sexp").?);
-    try testing.expectEqualStrings("labstation", designNameFromFile("labstation.sexp").?);
+    try testing.expectEqualStrings("board-f", designNameFromFile("board-f.sexp").?);
     try testing.expect(designNameFromFile("") == null);
     try testing.expect(designNameFromFile("lib/modules/adp7118-ldo.txt") == null);
 }

@@ -262,7 +262,7 @@ pub const RenderCtx = struct {
     /// scene graph's `port` flag; `.internal` does not. Keeping the two roles
     /// apart is load-bearing: a bridged sub-block port resolves to the PARENT's
     /// own net, which needs the filter escape but is ordinary internal wiring, and
-    /// calling it a port recoloured stm32n6's labels 53 → 288 as board
+    /// calling it a port recoloured board-c's labels 53 → 288 as board
     /// boundaries. Read through `rendersWhenAlone` / `isBoundaryPort`.
     lone_pin_nets: std.StringHashMapUnmanaged(LonePinRole),
     pin_canonical_nets: std.StringHashMapUnmanaged([]const u8),

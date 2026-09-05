@@ -40,7 +40,7 @@
 //! sweep — has no cheap object-level story, and holding one chain rigid while
 //! the copper around it moves is not conservative at all: it ships a board
 //! neither the frozen nor the free version would have produced, and on
-//! `bcuda-lt3045-ldo` that shape cost VIN its whole route to a `track_width`
+//! `board-a-lt3045-ldo` that shape cost VIN its whole route to a `track_width`
 //! finding. Those passes rewrite freely and then re-run this walk over the
 //! candidate copper — the very question `bypass_open.check` will ask the
 //! finished board — putting the net back verbatim when a bond that was closed
@@ -58,7 +58,7 @@
 //! no footprint pad (`bypass_open` skips the bond entirely, so it states no
 //! requirement at all). None of the three has copper whose loss would cost
 //! anything. Freezing the net there buys no exactness and costs every pass its
-//! gloss — measured on `bcuda-lt3045-ldo`, where BOTH authored bonds are open
+//! gloss — measured on `board-a-lt3045-ldo`, where BOTH authored bonds are open
 //! on the shipped board and the whole-net freeze bought two frozen rails for
 //! nothing.
 //!

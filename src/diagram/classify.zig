@@ -5,7 +5,7 @@
 //! Strategy (first match wins): an explicit `SectionPort.signal_type` of
 //! `.power`/`.clock` is authoritative (those are unambiguous and rarely left
 //! to default); everything else falls to name heuristics grounded in the real
-//! Board B Analog and STM32N6 net-naming conventions. The default `.signal`
+//! Board B Analog and Board C net-naming conventions. The default `.signal`
 //! signal-type is deliberately *not* treated as authoritative — that would
 //! shadow the RF name match for any port that simply didn't set a type.
 

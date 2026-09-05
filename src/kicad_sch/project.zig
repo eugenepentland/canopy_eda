@@ -10,7 +10,7 @@
 //! findings worth reading.
 //!
 //! Four files clear it, all deterministic and all written beside the root
-//! sheet (see `Sidecar` below). Measured on the exported `stm32n6` (22 sheets,
+//! sheet (see `Sidecar` below). Measured on the exported `board-c` (22 sheets,
 //! 232 parts): `kicad-cli sch erc --severity-all` goes from **730** violations
 //! to **2**, both `isolated_pin_label` on genuine one-pin nets, and 0 errors
 //! throughout.

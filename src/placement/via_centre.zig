@@ -58,7 +58,7 @@
 //! chain both of whose ends lie on ONE same-net land, and which everything else
 //! touches only ON that land, joins nothing the land does not already join. It
 //! is `pad_entry.whollyOnLand` asked topologically instead of vertex by vertex —
-//! which is what it takes to see straps-synth-lmx2595's `LMX_VTUNE` hairpin on
+//! which is what it takes to see board-d-synth-lmx2595's `LMX_VTUNE` hairpin on
 //! R4, a 0.367 mm out-and-back that pokes 0.06 mm past the land edge (so no
 //! vertex test catches it) and whose two ends are 0.011 mm apart on the land
 //! (so no loose-end test catches it either — both ends terminate on the pad).
@@ -673,7 +673,7 @@ test "a leg that ends on the barrel is re-anchored onto the new site" {
 test "an out-and-back hairpin on one land is redundant" {
     const pad = land0402(1);
     const land = shapeOf(pad);
-    // straps-synth-lmx2595's LMX_VTUNE hairpin on R4, translated to the origin:
+    // board-d-synth-lmx2595's LMX_VTUNE hairpin on R4, translated to the origin:
     // out past the land's edge and back, both ends on the land.
     const hairpin = [_][2]f64{ .{ 0, 0.15 }, .{ 0, 0.3835 }, .{ 0.0107, 0.1502 } };
     try testing.expect(land.pointDistTo(hairpin[0]) == 0);

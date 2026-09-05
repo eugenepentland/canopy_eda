@@ -53,9 +53,9 @@
 //! From zero (`bench-route`, ReleaseSafe, whole corpus, A/B against the same
 //! binary with `Limits.max_victims = 0`): **board-b-xband-sip 18 → 19**
 //! (`RxADV_1V8`, victim-first, three displaced blockers all restored),
-//! **straps 79 → 80** (`RF_AMP_OUT`, same shape), black-canyon closes one more
+//! **board-d 79 → 80** (`RF_AMP_OUT`, same shape), board-e closes one more
 //! net by the router's own count at an unchanged oracle count, and no board
-//! loses one. Wall cost 1.10x (board-a) to 1.27x (straps).
+//! loses one. Wall cost 1.10x (board-a) to 1.27x (board-d).
 //!
 //! **Board A is unchanged at 82/91, and the trace says why.** All seven of its
 //! residual nets form clusters and every attempt is rolled back: the victim

@@ -13,7 +13,7 @@
 //! copper between them, so the decoupling loop the placer spent its whole
 //! objective tightening — cap hugging its bound pad — was then routed DOWN to
 //! an inner layer and back up, and the board carried two barrels where one
-//! serves. Measured on straps-synth-lmx2595 (2026-08-11): all six `V_3V3`
+//! serves. Measured on board-d-synth-lmx2595 (2026-08-11): all six `V_3V3`
 //! bypass caps bound to `U1` by `(decouples …)` were joined only through In2,
 //! 15 rail vias for 15 rail pads, 30 ground vias for 30 ground pads.
 //!
@@ -69,7 +69,7 @@ const net_name = @import("../net_name.zig");
 /// plant both barrels on a pair it had just joined. The share walk charged each
 /// bond the length of the copper `emitDogleg` had just emitted, which still
 /// carries the entry laps INSIDE both lands that `pad_entry` deletes at the end
-/// of the finish. Measured on straps-synth-lmx2595's `C_VCCBUF` ↔ `U1` pad 21
+/// of the finish. Measured on board-d-synth-lmx2595's `C_VCCBUF` ↔ `U1` pad 21
 /// (2026-08-11, instrumented run): span 2.6712 mm — admitted — emitted 3.3781,
 /// so the walk saw 3.3781 + 0.1181 of via stub = 3.4961 and refused to share,
 /// while the copper that actually ships between the two lands is 2.6407 mm. The
@@ -92,8 +92,8 @@ const net_name = @import("../net_name.zig");
 /// 3.0 mm is that line, and it is the number this codebase already uses for a
 /// neighbourly hop — `net_topology.land_run_max_mm`, past two neighbouring
 /// 0402s (1.0–1.3 mm here) and well inside `direct_span_mm`. Measured against
-/// the corpus's bound cap→pin legs (straps-synth-lmx2595 1.37–2.67 mm,
-/// bcuda-synth-lmx2595 1.83–4.30, lmk05318b-clock 1.07–8.36, w55rp20
+/// the corpus's bound cap→pin legs (board-d-synth-lmx2595 1.37–2.67 mm,
+/// board-a-synth-lmx2595 1.83–4.30, lmk05318b-clock 1.07–8.36, w55rp20
 /// 1.46–12.66): it takes in every leg on the tight synth board and leaves the
 /// long tail of the loose ones alone.
 ///
@@ -559,7 +559,7 @@ pub const Web = struct {
     /// whose barrel the rest of that cluster shares? A bond the probe refused is no
     /// cluster and gets no say: its pads keep the sites the ordinary ladder picks,
     /// which is what keeps this rule from moving stitch vias all over a board whose
-    /// bonds are all refused (board-a's ground, straps-synth's ground).
+    /// bonds are all refused (board-a's ground, board-d-synth's ground).
     ///
     /// The caller sites THAT barrel on the land's own centre when the land admits it
     /// (clearance to foreign copper and to every barrel already down; the annular

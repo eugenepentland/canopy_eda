@@ -925,7 +925,7 @@ fn parseSyncSchArgs(args: []const []const u8) SyncSchArgs {
 
 /// CLI entry point for `netlisp sync-kicad-sch`. Exports the design's schematic
 /// under its KiCad PROJECT's name (`Board B Digital.kicad_sch`, not
-/// `stm32n6.kicad_sch`) and writes it into the directory holding the board the
+/// `board-c.kicad_sch`) and writes it into the directory holding the board the
 /// design declares, so the KiCad project carries both halves.
 ///
 /// It refuses rather than overwrites: an existing sheet is replaced only when
@@ -1478,38 +1478,38 @@ test "system review CLI rejects ambiguous and command-specific arguments" {
 
 test "parseSyncSchArgs: flags in any order, lone positional is the design" {
     // spec: kicad_sch_push - The sync-kicad-sch CLI reads --project-dir, --dry-run and --force in any order and takes the lone positional as the design
-    const flags_first = [_][]const u8{ project_dir_flag, "projects/designs", "--dry-run", "stm32n6" };
+    const flags_first = [_][]const u8{ project_dir_flag, "projects/designs", "--dry-run", "board-c" };
     const a = parseSyncSchArgs(&flags_first);
     try std.testing.expectEqualStrings("projects/designs", a.project_dir);
-    try std.testing.expectEqualStrings("stm32n6", a.design);
+    try std.testing.expectEqualStrings("board-c", a.design);
     try std.testing.expect(a.dry_run and !a.force);
 
     // The design may also lead, and --force is independent of --dry-run. The
     // whole argv reaches here verbatim: the dispatcher must not re-slice it,
     // which is exactly how the project-dir flag once went missing.
-    const name_first = [_][]const u8{ "stm32n6", "--force", project_dir_flag, "/p" };
+    const name_first = [_][]const u8{ "board-c", "--force", project_dir_flag, "/p" };
     const b = parseSyncSchArgs(&name_first);
     try std.testing.expectEqualStrings("/p", b.project_dir);
-    try std.testing.expectEqualStrings("stm32n6", b.design);
+    try std.testing.expectEqualStrings("board-c", b.design);
     try std.testing.expect(b.force and !b.dry_run);
 }
 
 test "parseBuildArgs: bare positional does not imply push" {
     // spec: commands - a lone positional design name builds without pushing
-    const args = [_][]const u8{ project_dir_flag, "projects/designs", "stm32n6" };
+    const args = [_][]const u8{ project_dir_flag, "projects/designs", "board-c" };
     const got = parseBuildArgs(&args);
     try std.testing.expectEqualStrings("projects/designs", got.project_dir);
-    try std.testing.expectEqualStrings("stm32n6", got.design.?);
+    try std.testing.expectEqualStrings("board-c", got.design.?);
     try std.testing.expect(!got.want_push);
     try std.testing.expect(got.output_dir == null);
 }
 
 test "parseBuildArgs: --push <name> requests a push of that design" {
     // spec: commands - --push with an explicit name pushes that design
-    const args = [_][]const u8{ "--push", "stm32n6" };
+    const args = [_][]const u8{ "--push", "board-c" };
     const got = parseBuildArgs(&args);
     try std.testing.expect(got.want_push);
-    try std.testing.expectEqualStrings("stm32n6", got.design.?);
+    try std.testing.expectEqualStrings("board-c", got.design.?);
 }
 
 test "parseBuildArgs: bare --push pushes the positional design" {

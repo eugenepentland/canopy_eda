@@ -2619,7 +2619,7 @@ test "read tools reuse build's stable refdes assignments after insertion" {
 
 test "fuzzyScore returns 0 for a non-match" {
     // spec: serve/mcp_tools - fuzzyScore returns 0 when the needle does not match the haystack as a substring or subsequence
-    try std.testing.expectEqual(@as(u32, 0), fuzzyScore("xyz", "stm32n6"));
+    try std.testing.expectEqual(@as(u32, 0), fuzzyScore("xyz", "board-c"));
     // 'q' and 'z' never appear, so not even a subsequence.
     try std.testing.expectEqual(@as(u32, 0), fuzzyScore("qz", "buck"));
 }

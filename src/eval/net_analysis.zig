@@ -257,7 +257,7 @@ pub fn findMissingDecouplingNets(
     // share the canonical rail prefix when the pad's power-domain name merges
     // into a board rail (e.g. VDDSMPS/VDDIO2 → V1P8). So a rail whose pads are
     // all locally bypassed carries its caps only on the stubs, never the trunk —
-    // a per-net check would falsely flag the trunk as undecoupled (the stm32n6
+    // a per-net check would falsely flag the trunk as undecoupled (the board-c
     // V1P8 1.8 V rail). Collapsing trunk + stubs to one base-name verdict fixes
     // that without weakening the check for genuinely bare rails.
     var rails_with_ic: std.StringHashMapUnmanaged(void) = .empty;

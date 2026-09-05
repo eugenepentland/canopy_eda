@@ -2516,20 +2516,20 @@ fn finishRoute(run: RouteFinish) std.mem.Allocator.Error!RouteRun {
     // Gloss, then TOPOLOGY (drop every layer hop whose detour can be redrawn on
     // the layer both its ends already use — E10), then stitching. Three
     // constraints pin that order, and each was MEASURED on `bench-route
-    // board-a straps` (2026-08-04) rather than argued:
+    // board-a board-d` (2026-08-04) rather than argued:
     //
     //   * `straighten` runs BEFORE the hop drop because the hop drop's detector
     //     reads copper: `HopScan` follows a bounded run of segments between two
     //     vias and `clearingElbow` judges the replacement against what leaves
     //     each end. On raw maze copper those runs are staircases, and two of
-    //     straps' redundant hops go unrecognised — +4 vias, +10 tracks — when
+    //     board-d's redundant hops go unrecognised — +4 vias, +10 tracks — when
     //     the pass is handed un-tautened metal.
     //   * the hop drop runs BEFORE `stitchReturnPaths`, so the stitcher never
     //     spends a ground via guarding a signal via that is about to be deleted.
     //   * the merged single-layer runs the hop drop leaves are re-glossed HERE,
     //     not left to the cleanup phase's closing sweep, because stitching in
     //     between pins vias into the corridors those runs would tauten through
-    //     (deferring it costs straps +6 tracks). It is conditional because with
+    //     (deferring it costs board-d +6 tracks). It is conditional because with
     //     no hop removed there is nothing merged to simplify.
     if (timing) |t| t.begin(.straighten);
     try straighten.passBoard(board);
@@ -6044,7 +6044,7 @@ test "quarter-pitch pass rescues a base-grid quantization failure beyond the loc
     // findings, two lands double-billed for two legs each.) The finish's own
     // pad-escape pass — which this rescue runs below, and which every board
     // sees — is what centres those entries; the trade on the whole board is
-    // measured the other way round (`bcuda-lt3045-ldo`: 18.47 mm of trace to
+    // measured the other way round (`board-a-lt3045-ldo`: 18.47 mm of trace to
     // 16.87 mm, 24 quality warnings to 9).
     try testing.expectEqual(@as(usize, 7), drc_mod.countKind(viol, .land_transit));
     // Under the full-cross-section contact graph, only three stored sections

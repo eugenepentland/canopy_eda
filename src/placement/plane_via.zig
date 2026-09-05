@@ -38,7 +38,7 @@
 //! `inLandBarrelFits` is the form a caller uses when it does not yet know
 //! whether the site is on a land at all (`landAt` answers that), and the ring
 //! walk, the thermal array and the router's pad-centre sites all measure the
-//! same geometry. Measured on `bcuda-lt3045-ldo`: the router's first candidate
+//! same geometry. Measured on `board-a-lt3045-ldo`: the router's first candidate
 //! is the pad anchor snapped to the routing grid, and on U1's 0.80 x 0.30 mm
 //! DFN ground land that put a 0.4 mm barrel dead on the land with the ring
 //! ~0.05 mm past the 0.30 mm edge on each side — legal by every clearance rule
@@ -186,7 +186,7 @@ const min_step_mm: f64 = 0.05;
 /// huge pour-like land cannot turn one stitch into an unbounded probe. Sixteen
 /// rings reach 1.6 mm from the anchor at the default step — past any pad this
 /// exists for, and measured as the right value rather than guessed: cutting it
-/// to six lost black-canyon five routed nets and straps three, while saving only
+/// to six lost board-e five routed nets and board-d three, while saving only
 /// 2% of the corpus wall clock, because the cost is the ROUTE the moved vias
 /// produce and not the probes themselves.
 const max_ring: usize = 16;
@@ -630,7 +630,7 @@ test "in-pad scan replays the identical site sequence" {
     try testing.expect(n > 8);
 }
 
-/// `bcuda-lt3045-ldo` U1's GND_1 land, as the router measures it: 0.80 x 0.30
+/// `board-a-lt3045-ldo` U1's GND_1 land, as the router measures it: 0.80 x 0.30
 /// mm, and the board's via is 0.4 mm — so no point of it can hold the barrel.
 const dfn_land = pad_shape.Shape{ .x0 = 1.1, .y0 = -0.15, .x1 = 1.9, .y1 = 0.15 };
 /// An 0603 ground land off the same board: 0.90 x 0.95 mm, which holds the same
@@ -710,7 +710,7 @@ test "landAt finds only the routing net's own pad on the via's layer" {
 /// centre below is exactly ON a lattice node: the pad-centre candidate lands on
 /// the land itself, which is what makes containment — and not the snap — the
 /// only thing that can move a via here.
-///   * `U1.1` is `bcuda-lt3045-ldo`'s DFN land, 0.80 x 0.30: too shallow to hold
+///   * `U1.1` is `board-a-lt3045-ldo`'s DFN land, 0.80 x 0.30: too shallow to hold
 ///     the 0.4 mm barrel anywhere, so the in-pad walk is empty and only the
 ///     outward fan is left.
 ///   * `R1.1` is an 0603 land, 0.90 x 0.95: it holds the barrel at its centre.
@@ -750,7 +750,7 @@ const land_fixture = struct {
 
 /// The lattice the `land_fixture` numbers are chosen against: 0.2 mm track and
 /// 0.2 mm clearance put the routing grid at 0.4 mm, and the 0.4/0.2 via is the
-/// board via `bcuda-lt3045-ldo` carries.
+/// board via `board-a-lt3045-ldo` carries.
 const land_params = router.RouteParams{
     .track_width = 0.2,
     .clearance = 0.2,

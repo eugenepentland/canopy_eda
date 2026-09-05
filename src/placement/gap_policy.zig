@@ -409,15 +409,15 @@ pub const gap_grid_divisor: f64 = 2;
 // `bench-route`, ReleaseSafe, against `05e365c`, over the four corpus boards
 // with real headroom, with the threshold lifted so every one of them armed:
 //
-//   * BOTH rungs: black-canyon 50 → 51, everything else unchanged, for
-//     board-a +8.9 s (+72 %), black-canyon +4.6 s, xband +5.6 s, straps
+//   * BOTH rungs: board-e 50 → 51, everything else unchanged, for
+//     board-a +8.9 s (+72 %), board-e +4.6 s, xband +5.6 s, board-d
 //     +29.9 s (+98 %).
 //   * `rippable_frontier` ALONE: **no** net anywhere, board-a +8.8 s,
-//     black-canyon +3.0 s, straps +1.5 s. It is never armed for that reason.
-//   * `capped_flood` ALONE: black-canyon's net, board-a −0.2 s (its residual
-//     has no capped flood at all), straps +26.7 s, xband +5.5 s.
-//   * `capped_flood` + `spenders = 4`: black-canyon's net kept at +1.0 s
-//     (+8.3 %), board-a −0.1 s, xband +0.04 s, straps +5.7 s — the per-board
+//     board-e +3.0 s, board-d +1.5 s. It is never armed for that reason.
+//   * `capped_flood` ALONE: board-e's net, board-a −0.2 s (its residual
+//     has no capped flood at all), board-d +26.7 s, xband +5.5 s.
+//   * `capped_flood` + `spenders = 4`: board-e's net kept at +1.0 s
+//     (+8.3 %), board-a −0.1 s, xband +0.04 s, board-d +5.7 s — the per-board
 //     spend cap cuts the one board that pays by 4.7x while the win survives.
 //
 // So: one rung, gated on the residual's WIDTH and capped by how many of its
@@ -436,7 +436,7 @@ pub const LastK = struct {
     /// Most nets on ONE board that may actually be DECIDED by a widened rung.
     /// The threshold alone bounds the wrong thing: a board of twenty residual
     /// nets that each pull a whole-board fine-grid retry is the expensive case,
-    /// and it is expensive per NET, not per board. Measured on straps, where
+    /// and it is expensive per NET, not per board. Measured on board-d, where
     /// letting the whole residual through the capped-flood rung cost +26.7 s
     /// (+88 %) and closed nothing.
     spenders: usize = 4,
@@ -467,9 +467,9 @@ pub const LastKRungs = struct {
 /// `rippable_frontier` is deliberately NOT armed. Measured alone over the four
 /// boards with real headroom (`bench-route`, ReleaseSafe, threshold lifted so
 /// it armed on all of them) it closed **no** net and cost board-a +8.8 s
-/// (+71 %) and black-canyon +3.0 s — the reachable region a rip could have
+/// (+71 %) and board-e +3.0 s — the reachable region a rip could have
 /// opened is not where these boards are stuck. `capped_flood` is the rung that
-/// pays: it is the one that closes black-canyon's extra net, and on board-a
+/// pays: it is the one that closes board-e's extra net, and on board-a
 /// it costs nothing at all because board-a's residual has no capped flood.
 pub fn lastKRungs(failed: usize, lim: LastK) LastKRungs {
     if (failed == 0 or failed > lim.nets) return .{};

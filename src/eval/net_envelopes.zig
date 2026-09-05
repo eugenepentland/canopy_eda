@@ -487,7 +487,7 @@ fn seedRails(
 /// statement: this is what the port drives, or what the board is fed. On an
 /// INTERNAL INPUT it is the opposite — the pin's tolerated range, the datasheet
 /// absolute maximum. Seeding those would let a consumer's tolerance rewrite the
-/// potential of the rail feeding it: Board A ties `bcuda-boost25`'s
+/// potential of the rail feeding it: Board A ties `board-a-boost25`'s
 /// `(port "EN_25V" in signal (nominal 3.3) (rated 0.0 3.6))` straight to
 /// `V_5VA`, and reading that 0 V floor as a rail fact widened the whole 5 V
 /// domain to 0–5.25 V, which then "proved" a 91 Ω LNA feed resistor at 0.30 W

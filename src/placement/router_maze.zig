@@ -454,7 +454,7 @@ pub fn clearNetOcc(ctx: *Ctx, net: i32) void {
 /// popped goal was accepted at whatever dist it carried and added nothing — so
 /// the fan's outermost ring was the cheapest entry the maze could buy in EVERY
 /// direction, including straight away from the target. Measured on
-/// `bcuda-lt3045-ldo`: `C_VOUT` left its pad 0.51 mm (ring 2) on the heading
+/// `board-a-lt3045-ldo`: `C_VOUT` left its pad 0.51 mm (ring 2) on the heading
 /// opposite its partner and then turned 45° back across itself, and that
 /// wrong-way stub was permanent, because no later pass may LENGTHEN copper to
 /// straighten what the search chose.

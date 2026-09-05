@@ -716,7 +716,7 @@ pub fn findGroundVia(
     // here: it moves the site up to half a grid pitch off the anchor, so a site
     // that sits ON the land can still hang its annular ring over the land's edge
     // — and no clearance probe can see that, because `viaClearsPads` skips the
-    // routing net's own pads. Measured on `bcuda-lt3045-ldo`: U1's GND_1 land is
+    // routing net's own pads. Measured on `board-a-lt3045-ldo`: U1's GND_1 land is
     // 0.80 x 0.30 mm, the snap put a 0.4 mm barrel at (1.578, 0.016) against a
     // land centred (1.500, 0.000), and the ring overhung the 0.30 mm dimension by
     // 0.034/0.066 mm. Refusing it costs one stub and buys a landed annulus.

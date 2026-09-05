@@ -1149,8 +1149,8 @@ const detect_min_fan: usize = 3;
 /// every other gate, so the report is capped rather than exhaustive.
 ///
 /// Sized on the corpus (measured 2026-08-06, uncapped): rf-switch-8way and
-/// adf5901 find 0, the four board-b boards and straps 2-4, black-canyon 6,
-/// board-a 9, board-a-base 11, stm32n6 15, and the unplaced labstation 18.
+/// adf5901 find 0, the four board-b boards and board-d 2-4, board-e 6,
+/// board-a 9, board-a-base 11, board-c 15, and the unplaced board-f 18.
 /// Six covers every finished board's worst handful — board-a's `J1` west
 /// escape, the one the audit named, comes fifth — and holds the two crowded
 /// boards to the same kind of bounded report `pad-sealed` gets from its own cap.

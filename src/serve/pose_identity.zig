@@ -37,7 +37,7 @@ pub const ResolvedPoses = struct {
 
     /// True when pose `i` must be dropped rather than passed through: it bound
     /// to nothing, and its stored ref would collide with a live part that is
-    /// really someone else's (black-canyon: the parked pose of a deleted "C16"
+    /// really someone else's (board-e: the parked pose of a deleted "C16"
     /// shadowed the renumbered C_HPF1_IN → C16 and dragged four parts off the
     /// board). An unbound pose whose ref names NO live part is harmless and is
     /// kept, as before — the caller ignores refs it cannot place.
@@ -58,7 +58,7 @@ pub const ResolvedPoses = struct {
 /// Resolve saved poses onto the current flatten's identity, in two passes: the
 /// sub-block-scoped origin key binds FIRST — it is the renumber-stable
 /// identity, while a ref-des *string* can survive a renumber naming a
-/// DIFFERENT part (the recycled-ref mis-bind that scattered black-canyon's
+/// DIFFERENT part (the recycled-ref mis-bind that scattered board-e's
 /// sub-circuits after a netlist edit). Still-unresolved poses then claim their
 /// exact ref string (legacy entries saved without an origin). The origin map
 /// is scoped by the ref's sub-block prefix, because origin keys are

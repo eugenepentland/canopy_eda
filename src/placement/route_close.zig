@@ -692,8 +692,8 @@ fn planHops(
 /// islands where a signal net strands one. Cheapest-net-first is the greedy answer
 /// to the actual question: it maximises nets closed per hop spent.
 ///
-/// Measured on the corpus, on top of the in-pad stitch search: black-canyon
-/// 47 -> 52 routed nets and straps 80 -> 83, with board-a's sixteen ground
+/// Measured on the corpus, on top of the in-pad stitch search: board-e
+/// 47 -> 52 routed nets and board-d 80 -> 83, with board-a's sixteen ground
 /// stitches still fitting because its whole board asks for fewer hops than the
 /// budget. Dealing round-robin instead — every net's first hop, then every net's
 /// second — measured identically on every board, so the win is in not letting one

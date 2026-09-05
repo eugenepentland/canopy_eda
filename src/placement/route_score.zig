@@ -27,7 +27,7 @@
 //! **The via was priced 20× too dear.** At 2.0 a via cost the same as 20 mm of
 //! copper, while the maze itself prices a layer change at `via_cost_mult` (4.0,
 //! `router.zig`) grid steps ≈ 1.02 mm — so the search preferred a board the
-//! judge then rejected. Measured on `bcuda-lt3045-ldo` (layout
+//! judge then rejected. Measured on `board-a-lt3045-ldo` (layout
 //! "layout 06-22 15:25"): the design's `(preferred-layers "B.Cu")` wave on VIN
 //! spends 2 extra vias and buys back 5.14 mm of copper and 3 corners, and v1
 //! scored the better board DOWN, 959.64 → 956.15. At 0.5 a via still costs a
@@ -358,7 +358,7 @@ fn scoreV1(in: Inputs) f64 {
 
 // spec: placement/route-score - spending vias to shorten and straighten a route now scores as the improvement it is, where v1 rejected it
 test "the B.Cu detour trade scores better under v2 than the surface route" {
-    // Both boards MEASURED through `route_experiment` on `bcuda-lt3045-ldo`,
+    // Both boards MEASURED through `route_experiment` on `board-a-lt3045-ldo`,
     // layout "layout 06-22 15:25", read-only, one plan apart:
     //
     //   surface  (pcb-plan (route (wave "rest" (rest))))          — VIN on F.Cu

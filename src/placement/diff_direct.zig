@@ -7,7 +7,7 @@
 //! whenever there is room for it. This module is what to do when there is not.
 //!
 //! **The measurement** (2026-08-11, `diff_couple`'s own rejection census turned
-//! on, straps-synth-lmx2595 at `?rough=1`): both declared pairs decline at every
+//! on, board-d-synth-lmx2595 at `?rough=1`): both declared pairs decline at every
 //! launch option with `no envelope-wide corridor`, and fall back to routing the
 //! two legs as independent nets. That fallback is what the board ships, and it
 //! is what "the differential pair routing on the clock stuff does not look
@@ -60,7 +60,7 @@ const eps: f64 = 1e-9;
 /// A pitch change below this is a landing-placement tolerance, not a useful RF
 /// fan (mm). Drawing two extra 45 degree corners to absorb 10 um per leg is
 /// strictly worse than the almost-axial pad-to-pad traces. The 1.02 mm R2 pitch
-/// and 1.00 mm C14/C15 pitch on straps-synth-lmx2595 are the motivating case.
+/// and 1.00 mm C14/C15 pitch on board-d-synth-lmx2595 are the motivating case.
 const direct_pitch_delta_mm: f64 = 0.05;
 
 /// The shortest coupled run worth building, as a multiple of the leg offset.
@@ -214,7 +214,7 @@ test "directLegs keeps the narrow launch straight and fans once at the wide pads
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // straps-synth-lmx2595's OSCIN pair: 1.1 mm cap pitch into a 0.5 mm QFN pin
+    // board-d-synth-lmx2595's OSCIN pair: 1.1 mm cap pitch into a 0.5 mm QFN pin
     // pitch, 1.27 mm apart. The two tapers alone want 1.046 mm of the 1.27.
     const off = 0.254;
     const ends = try fixture(arena, 1.1, 0.5, 1.27);
@@ -249,7 +249,7 @@ test "directLegs sends the near-equal R2 and coupling-cap pitches straight pad t
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // straps-synth-lmx2595 REF_P/N: vertical R2 pads are 1.02 mm apart and the
+    // board-d-synth-lmx2595 REF_P/N: vertical R2 pads are 1.02 mm apart and the
     // adjacent C14/C15 pads are 1.00 mm apart, with only 1.02 mm between pair
     // centres. A 10 um jog on each leg buys no controlled-impedance run; it
     // only adds two RF corners.

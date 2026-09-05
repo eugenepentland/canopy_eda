@@ -51,7 +51,7 @@
 //!                            reports it. The other three gates all key off
 //!                            nets that route INSIDE the block, so a port
 //!                            terminating on ONE pad — every SPI line of
-//!                            `straps-synth-lmx2595` — could be fenced in
+//!                            `board-d-synth-lmx2595` — could be fenced in
 //!                            completely without any of them noticing, and the
 //!                            router says nothing either because a one-pin net
 //!                            is not something it routes. Only fires when the
@@ -797,7 +797,7 @@ const ViaBucket = struct {
 /// best-direction clearance first). A board that produces more than that is not
 /// marginally over-constrained, it is unplaced — parts still piled in the
 /// staging band, which the `unplaced` lint already says once instead of once per
-/// pad (measured: `labstation`, which routes 0/189 nets at its saved layout,
+/// pad (measured: `board-f`, which routes 0/189 nets at its saved layout,
 /// yields 104). Capping keeps one broken board from burying a good board's
 /// findings in a shared `lint[]`.
 fn checkSealed(alloc: Allocator, arena: Allocator, b: *const Board, out: *std.ArrayList(Finding)) Allocator.Error!void {

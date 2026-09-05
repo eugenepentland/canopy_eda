@@ -10,7 +10,7 @@
 //! the branch point landed a hair OUTSIDE the land — one trace half-width off
 //! the pad edge — and the run to the next pad went with it, straight down the
 //! escape lane in front of the pad faces, tapping each land sideways with a
-//! stub. Measured on straps-synth-lmx2595 (2026-08-11): `LMX_RFOUTAM`'s two
+//! stub. Measured on board-d-synth-lmx2595 (2026-08-11): `LMX_RFOUTAM`'s two
 //! edges both left R6 pad 2 westward at x = 3.8565 (its escape point, 0.063 mm
 //! off the land) and ran the full height of R6's and R7's west faces.
 //!
@@ -310,7 +310,7 @@ const escape_opt = Options{ .pad = chain_opt.pad, .land_join = false };
 
 // spec: placement/net-topology - two same-net pads whose lands face each other across open board join with one straight run terminating inside both, not through their outward escape points
 test "stacked pads sharing a centre line join pad to pad" {
-    // straps-synth-lmx2595's R6 pad 2 and R7 pad 1: same centre x, both facing
+    // board-d-synth-lmx2595's R6 pad 2 and R7 pad 1: same centre x, both facing
     // west, 1.1 mm apart. The escape join ran west out of both and up the lane
     // in front of their faces; the land run is the vertical between them.
     const a = term(4.190, 2.400, 0.270, 0.320, .{ -1, 0 });

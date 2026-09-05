@@ -5970,7 +5970,7 @@ fn arrangeMacros(
     const nf: f64 = @floatFromInt(n);
     const force = try arena.alloc([2]f64, n);
     // Iteration budget scales with block count: 240 settles a dozen modules,
-    // but a 100+-block board (labstation) needs several times that for the
+    // but a 100+-block board (board-f) needs several times that for the
     // spring/repulsion pair to finish separating while keeping adjacency.
     const iters = rough_iters + 8 * n;
     var it: usize = 0;
@@ -12273,7 +12273,7 @@ test "a cross-hub near binding claims its owner and seeds against the named pad"
     defer astate.deinit();
     const arena = astate.allocator();
 
-    // The black-canyon R_TAP_* shape: a series resistor with one leg on an MCU
+    // The board-e R_TAP_* shape: a series resistor with one leg on an MCU
     // net and the other on a connector net. `pairSeriesLegs` requires BOTH legs
     // to reach one hub, so this part gets no series pairing at all — without a
     // `(near …)` the net-locality scan is free to hand it to J1.

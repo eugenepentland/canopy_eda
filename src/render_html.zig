@@ -3039,7 +3039,7 @@ test "a bridged sub-block port net renders its net label" {
 test "a bridged sub-block port net is not a boundary port" {
     // Same fixture as above. Calling the RESOLVED (parent-side) spelling a
     // BOUNDARY port fixed the missing label but repainted every bridged internal
-    // net in the boundary-port blue and set its scene-graph `port` flag — stm32n6
+    // net in the boundary-port blue and set its scene-graph `port` flag — board-c
     // went from 53 to 288 blue labels, recolouring ordinary internal nets like
     // ADC1_CS as board boundaries. The two roles are separate now: the label
     // renders, in the internal colour, with the port flag clear.

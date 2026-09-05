@@ -84,7 +84,7 @@
 //! to return before the fan was built at all, on the reasoning that the rule was
 //! already satisfied so there was nothing to do. But the rule governs the first
 //! half-millimetre and the SCORE governs the rest, and an end can satisfy the
-//! one while drawing the other badly: straps-synth-lmx2595's `LMX_VREFVCO2`
+//! one while drawing the other badly: board-d-synth-lmx2595's `LMX_VREFVCO2`
 //! leaves C13's land due west on a perfectly legal 0.6 mm ray and then turns 90°
 //! south, because west is where the maze went and nothing ever re-read that
 //! choice (2026-08-12: *"there are still pins like this green one that
@@ -210,7 +210,7 @@ const square_tol_cos: f64 = 0.0871557;
 /// copper rather than spending it — 1252.20 mm of trace fell to 1247.64 mm, with
 /// five of the six boards shrinking, the sixth (lmk05318b-clock) growing 0.05 mm
 /// and the worst single net (board-a's V_22V) growing 0.67 mm. The board
-/// owner's own example, straps-synth-lmx2595's `LMX_VREFVCO2`, lost its right
+/// owner's own example, board-d-synth-lmx2595's `LMX_VREFVCO2`, lost its right
 /// angle AND 0.35 mm of the 2.46 mm it had. A budget widened for a case the
 /// geometry does not produce would only buy detours.
 ///
@@ -270,7 +270,7 @@ const max_tail_skip: usize = 2;
 ///
 /// 0.3 mm is one router lattice step (the grid pitch is track width +
 /// clearance, 0.254 mm at the default class) plus slack, so it takes in the
-/// jogs measured on straps-synth-lmx2595 (0.03–0.18 mm) and nothing that could
+/// jogs measured on board-d-synth-lmx2595 (0.03–0.18 mm) and nothing that could
 /// be a routing decision.
 const skip_reach_mm: f64 = 0.3;
 
@@ -413,7 +413,7 @@ fn onwardDir(pts: []const [2]f64, c: [2]f64) ?[2]f64 {
 /// the maze can leave by a heading that immediately turns back past 90°: the
 /// gateway fan used to hand out its outer rings for free in every direction, so
 /// a pad could exit 0.5 mm on the side AWAY from its partner and 45° back across
-/// itself (`bcuda-lt3045-ldo`'s C_VOUT). Priced gateways (`router.GateAnchors`)
+/// itself (`board-a-lt3045-ldo`'s C_VOUT). Priced gateways (`router.GateAnchors`)
 /// stop the maze buying that shape; this is the other half — the repair pass
 /// could not UNDO one, because the only heading that draws the connection
 /// straight is the 180° reversal the fan structurally refused to build.
@@ -564,7 +564,7 @@ const EndJob = struct {
 /// Would the rewrite take copper off a same-net LAND the old copper served?
 ///
 /// A chain does not only END on pads. `net_topology` deliberately threads a
-/// daisy chain THROUGH the lands between its two ends — straps-synth-lmx2595's
+/// daisy chain THROUGH the lands between its two ends — board-d-synth-lmx2595's
 /// `LO_BIAS_A` runs C19 → R6 → R5 → L1 and turns 90° on each land it crosses —
 /// and those middle pads are held to the net by nothing but the copper lying on
 /// them. The direct line between the chain's ends is shorter and straighter than
@@ -597,7 +597,7 @@ fn dropsPad(pads: []const Pad, was: []const [2]f64, now: []const [2]f64, half: f
 /// chain's far end may rejoin one vertex further along (`max_tail_skip`) and so
 /// redraw the near end's escape as well, and a diagonal that clips the near
 /// land's corner turns one corner where the disciplined ray turns two.
-/// straps-synth-lmx2595's `LMX_RFOUTBM` is exactly that: re-aiming R9's end
+/// board-d-synth-lmx2595's `LMX_RFOUTBM` is exactly that: re-aiming R9's end
 /// replaced U1 pad 18's 0.6 mm northward ray with a 0.21 mm diagonal that
 /// stopped on the land's own edge and turned north along it, leaving half a
 /// track width in the 0.2 mm corridor to pad 19 (2026-08-12: *"I don't want
@@ -967,7 +967,7 @@ const joint_span_mm: f64 = 4.0;
 /// `escapeHead` owns one end: it re-aims that end's ray and rejoins the copper
 /// the other end left behind. That is enough when only one end is wrong, and it
 /// is structurally not enough when the connection's shape is decided by BOTH
-/// reaches at once. straps-synth-lmx2595's `LMX_VBIASVARAC` is the case: U1 pad
+/// reaches at once. board-d-synth-lmx2595's `LMX_VBIASVARAC` is the case: U1 pad
 /// 33 escapes 0.6 mm south (exactly its reach, so it is compliant and held) and
 /// C11 escapes 1.37 mm on the diagonal (likewise), and the 0.18 mm jog between
 /// those two legal rays can only meet the southward one at 90 degrees. Every
@@ -1611,7 +1611,7 @@ fn rayOf(pts: []const [2]f64) [3]f64 {
 /// origin. The board owner's own example was drawn on one of these.
 const cap_pad = Pad{ .x0 = -0.31, .y0 = -0.28, .x1 = 0.31, .y1 = 0.28 };
 
-/// A 0.9 x 0.9 mm land — straps-synth-lmx2595's C13, the bypass cap the board
+/// A 0.9 x 0.9 mm land — board-d-synth-lmx2595's C13, the bypass cap the board
 /// owner's second complaint was drawn on. Its west reach is 0.6 mm, which is
 /// where the square corner sat.
 const bypass_pad = Pad{ .x0 = -0.45, .y0 = -0.45, .x1 = 0.45, .y1 = 0.45 };
@@ -1735,7 +1735,7 @@ test "a compliant escape aimed the wrong way is re-aimed off its square corner" 
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
-    // straps-synth-lmx2595's LMX_VREFVCO2 — C13 pad 1 -> U1 pad 29, the cap end
+    // board-d-synth-lmx2595's LMX_VREFVCO2 — C13 pad 1 -> U1 pad 29, the cap end
     // first, translated onto the origin. The escape is LEGAL: centre-anchored,
     // due west, straight for its full 0.6 mm reach. It is also aimed away from
     // the pin it serves, so the copper turns 90 degrees the instant it is clear
@@ -1828,7 +1828,7 @@ test "a land the old copper ran across is never left behind" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
     const half = 0.0635;
-    // straps-synth-lmx2595's LO_BIAS_A: C19 -> R6 -> R5 -> L1, a daisy chain that
+    // board-d-synth-lmx2595's LO_BIAS_A: C19 -> R6 -> R5 -> L1, a daisy chain that
     // turns 90 degrees ON each land it crosses. Both END escapes are legal, so
     // the pass now looks at it — and the direct line between the ends is both
     // shorter and straighter than the chain, which would strand R6 and R5.
@@ -1857,7 +1857,7 @@ test "a square corner right out of the pad is replaced by a 45 degree one" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
-    // straps-synth-lmx2595's C4 -> U1 pad 21, translated onto the origin: the
+    // board-d-synth-lmx2595's C4 -> U1 pad 21, translated onto the origin: the
     // maze left the land WEST, ran 0.46 mm, turned 90 degrees south and only
     // then took the diagonal it wanted. Somewhere in the fan is a rewrite that
     // needs no square corner at all — and it is the shorter one.
@@ -1889,7 +1889,7 @@ test "the join may skip the maze's own first bend rather than meet it square" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
-    // straps-synth-lmx2595's U1 pad 19 -> R8, translated onto the origin: out
+    // board-d-synth-lmx2595's U1 pad 19 -> R8, translated onto the origin: out
     // of the QFN land 0.6 mm north, 0.11 mm sideways — the lattice's way of
     // saying "diagonal" — and then the diagonal. Meeting that 0.11 mm step is
     // the square corner; rejoining past it is the same length and has none.
@@ -2113,7 +2113,7 @@ test "a short pad-to-pad hop is planned end to end and loses its square corner" 
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
-    // straps-synth-lmx2595's LMX_VBIASVARAC, in board coordinates: U1 pad 33's
+    // board-d-synth-lmx2595's LMX_VBIASVARAC, in board coordinates: U1 pad 33's
     // 0.3 x 0.9 QFN land at (1.25, -2.95) and C11 pad 1's 0.9 x 0.95 land at
     // (2.40, -4.52). Both ends of the copper on the board are COMPLIANT — 0.6 mm
     // south is pad 33's reach to the micron, and the 1.37 mm diagonal is C11's —
@@ -2204,7 +2204,7 @@ test "a rewrite that would leave the other end lapping its own land is refused" 
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
-    // straps-synth-lmx2595's LMX_RFOUTBM, both lands translated so U1 pad 18
+    // board-d-synth-lmx2595's LMX_RFOUTBM, both lands translated so U1 pad 18
     // sits at the origin: a 0.3 x 0.9 QFN land, and R9 pad 1's 0.54 x 0.64 land
     // 1.14 mm north and 0.15 mm east of it. Re-aiming R9's end may rejoin one
     // vertex further along, and the candidate that does turns ONE corner where
@@ -2283,7 +2283,7 @@ test "a pair candidate is scored by the length difference it leaves" {
 
 // spec: placement/pad-escape - both legs of a differential pair take the same escape heading and length at each end, so the rewrite cannot add skew
 test "a pair's two legs gain identical escape vectors" {
-    // straps-synth-lmx2595's OSCIN pair: two 0402 lands 1.1 mm apart feeding two
+    // board-d-synth-lmx2595's OSCIN pair: two 0402 lands 1.1 mm apart feeding two
     // QFN pins 0.5 mm apart, 1.27 mm across — the shape `diff_direct` draws.
     const cap = [2]Pad{
         .{ .x0 = -0.28, .y0 = -0.70, .x1 = 0.28, .y1 = -0.40 },

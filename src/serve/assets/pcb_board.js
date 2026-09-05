@@ -4782,7 +4782,7 @@ function loadLayoutName(nm){
  // origin bridged per sub-block scope), so a Load applies by EXACT ref only.
  // No origin map here: a client-side one was unscoped ("U1" names every
  // sub-block's IC) and last-wins, which collapsed whole sub-circuits onto one
- // pose on Load — the black-canyon layout corruption.
+ // pose on Load — the board-e layout corruption.
  P.forEach(function(p){var s=L.parts[p.ref];if(s){p.x=s.x;p.y=s.y;p.rot=s.rot||0;p.side=s.side||"top";if(s.locked!==undefined)p.locked=!!s.locked;}});applyAll();
  // CLONE out of the saved row, never alias it: almost every copper edit mutates
  // PCB.tracks/vias/zones (and the outline's vertex arrays) IN PLACE, so a row

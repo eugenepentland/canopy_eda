@@ -46,7 +46,7 @@
 //!
 //!   * **The negotiation works as an algorithm.** It converges. On
 //!     board-b-xband-sip the loop closes ELEVEN more nets than the ladder left
-//!     (oracle 25 -> 36) and on straps five (83 -> 88), losing none.
+//!     (oracle 25 -> 36) and on board-d five (83 -> 88), losing none.
 //!   * **Its copper is not legal, and convergence does not make it legal.** A
 //!     lattice on which nobody shares a cell is not a board that clears DRC: the
 //!     grid records path centrelines while the rules measure via barrels,
@@ -57,17 +57,17 @@
 //!   * **Legalized, the negotiation's product is worth zero.** Laying the
 //!     discovered victim SET down the ordinary way, in the router's own priority
 //!     order (`legalize`), gives DRC-clean copper on every board — and gives back
-//!     precisely the board the ladder already had: board-a 81 -> 81, straps
-//!     83 -> 83, board-b-xband-sip 25 -> 25, black-canyon 54 -> 54, no net lost,
+//!     precisely the board the ladder already had: board-a 81 -> 81, board-d
+//!     83 -> 83, board-b-xband-sip 25 -> 25, board-e 54 -> 54, no net lost,
 //!     no net gained, on any board, under any budget tried.
 //!   * **Where the residual is sealed, there is nothing to negotiate.** Board A
-//!     and black-canyon produce 4 and 0 shared cells IN TOTAL: their open nets do
+//!     and board-e produce 4 and 0 shared cells IN TOTAL: their open nets do
 //!     not fail because copper is in the way, they fail because pads, the board
 //!     outline and the lattice are — none of which the sandbox may lower, and a
 //!     pad can never be re-routed. This is the same diagnosis `joint_rescue`
 //!     recorded for the same seven nets.
 //!   * **The unconverged residue is a capacity wall, not a pricing miss.** On
-//!     straps and board-b-xband-sip 11-35 cells stay shared at `present = 256`
+//!     board-d and board-b-xband-sip 11-35 cells stay shared at `present = 256`
 //!     — a surcharge of 256 grid pitches per cell. A net still crossing at that
 //!     price has no alternative path at all.
 //!
@@ -479,7 +479,7 @@ const Sandbox = struct {
         // negotiation's product is the SET — which nets contend — and its own
         // order is an artefact of when each net was pulled in; laying a large
         // set down out of priority order is how a legalized board LOSES nets it
-        // already had (measured on straps: twelve).
+        // already had (measured on board-d: twelve).
         const order = try self.scratch.dupe(usize, self.victims.items);
         std.mem.sort(usize, order, core.result.routable, byPriorityDesc);
         for (order) |net_i| {
