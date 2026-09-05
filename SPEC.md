@@ -5952,6 +5952,7 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - a signal naming a pin its connector does not carry, a contract claiming more contacts than the connector has pads, and two signals claiming one contact are error-severity interface mismatches
 - surplus connector pads and an unreadable connector pad table are reported without blocking, because neither names a defect
 - every interface finding renders its class, kind, severity and locating fields into the readiness document
+- an (auto) interface resolves its contact table by evaluating both boards for real, and a connector that cannot supply a declared contact is refused rather than truncated
 - a stale dossier offers authenticated writers an explicit regenerate action while continuing to serve the old results until the single background replacement finishes
 - the dossier loader waits and reloads rather than polling, so a composition in flight is not destabilised by its own progress page
 - a dossier composition that lost its input closure to concurrent server work is composed again within a bounded number of attempts

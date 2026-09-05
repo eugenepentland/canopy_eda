@@ -4973,3 +4973,94 @@ test "a system contract source shadows the JSON manifest it sits beside" {
     });
     try std.testing.expectError(error.SystemNameMismatch, loadManifest(allocator, project, "demo"));
 }
+
+// spec: system-review - an (auto) interface resolves its contact table by evaluating both boards for real, and a connector that cannot supply a declared contact is refused rather than truncated
+test "an auto interface derives its contacts from two evaluated boards" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "project/src/boards");
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/twin");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/boards/twin-rf.sexp",
+        .data =
+        \\(import pin-header-1x4)
+        \\(design-block "Twin RF"
+        \\  (part-number "TWIN-RF")
+        \\  (revision "A")
+        \\  (section "Interface"
+        \\    (instance "J1" (pin-header-1x4)
+        \\      (pin 1 "V_5V")
+        \\      (pin 2 "GND")
+        \\      (pin 3 "SCK")
+        \\      (pin 4 "SPARE"))))
+        ,
+    });
+    // The base board leaves contact 4 unwired, which is the case a derived
+    // contract has to represent without inventing a net name.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/boards/twin-base.sexp",
+        .data =
+        \\(import pin-header-1x4)
+        \\(design-block "Twin Base"
+        \\  (part-number "TWIN-BASE")
+        \\  (revision "A")
+        \\  (section "Interface"
+        \\    (instance "J1" (pin-header-1x4)
+        \\      (pin 1 "V_5V_SYS")
+        \\      (pin 2 "GND")
+        \\      (pin 3 "SPI_CLK"))))
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/twin/system.sexp",
+        .data =
+        \\(system "twin"
+        \\  (title "Twin Demo")
+        \\  (part-number "TWIN-1")
+        \\  (revision "A")
+        \\  (board "twin-rf" (role rf) (source "src/boards/twin-rf.sexp") (part-number "TWIN-RF") (revision "A"))
+        \\  (board "twin-base" (role base) (source "src/boards/twin-base.sexp") (part-number "TWIN-BASE") (revision "A"))
+        \\  (interface "link"
+        \\    (mates "twin-rf/J1" "twin-base/J1")
+        \\    (auto)
+        \\    (signal "SPI_CLK" (left 3) (right 3)))
+        \\  (document "release-checklist" (title "Checklist")
+        \\    (path "src/systems/twin/release-checklist.md") (classification checklist)))
+        ,
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", allocator);
+
+    var loaded = try loadManifest(allocator, project, "twin");
+    defer loaded.parsed.deinit();
+    const interface = loaded.parsed.value.interfaces[0];
+    try std.testing.expectEqual(@as(usize, 4), interface.contact_count);
+    try std.testing.expectEqualStrings("V_5V", interface.signals[0].canonical);
+    try std.testing.expectEqualStrings("V_5V_SYS", interface.signals[0].right_net);
+    try std.testing.expectEqualStrings("GND", interface.signals[1].canonical);
+    // The authored override renames the contact without disturbing either
+    // board-local net the evaluator reported.
+    try std.testing.expectEqualStrings("SPI_CLK", interface.signals[2].canonical);
+    try std.testing.expectEqualStrings("SCK", interface.signals[2].left_net);
+    try std.testing.expect(system_sexp.isUnconnectedNet(interface.signals[3].right_net));
+
+    // A right connector that cannot supply a left contact is refused, not
+    // silently truncated to the contacts the two happen to share.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/boards/twin-base.sexp",
+        .data =
+        \\(import pin-header-1x2)
+        \\(design-block "Twin Base"
+        \\  (part-number "TWIN-BASE")
+        \\  (revision "A")
+        \\  (section "Interface"
+        \\    (instance "J1" (pin-header-1x2)
+        \\      (pin 1 "V_5V_SYS")
+        \\      (pin 2 "GND"))))
+        ,
+    });
+    try std.testing.expectError(error.InvalidSystemSexp, loadManifest(allocator, project, "twin"));
+}
