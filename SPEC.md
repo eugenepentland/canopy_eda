@@ -7517,6 +7517,8 @@ is what makes the predicate exact rather than approximately right.
 - Copper graph quantization refuses nonfinite and unrepresentable geometry instead of trapping
 
 - Source mutation adapters return commit failures instead of acknowledging successful saves
+- The source endpoint reads and writes each of a design's sidecars through the same whole-file path as the design source
+- A sidecar save through the source endpoint is refused when it does not parse, when the whole design stops evaluating, and when the design has no such sidecar
 
 - Source writes require a transaction and use exact content hashes for revision comparisons
 - Failed source commits preserve the previous file and nested mutation scopes retain one project lock
@@ -7855,6 +7857,8 @@ is what makes the predicate exact rather than approximately right.
 - PCB blobs carry each authored board keepout region as a solid named rectangle beside the derived perimeter band
 - the pcb-describe board facts list every authored keepout region in world millimetres with its side, blocked families, allowed nets and reason
 - The PCB blob emits each pad's rotation, roundrect ratio, oval slot, and through-hole flag
+- A source snapshot captures the design file and every sidecar beside it, so restoring one undoes an edit that landed in a sidecar
+- A history entry written before sidecars were snapshotted still restores its design file and leaves today's sidecars alone
 - The layout sidecar is snapshotted into history and listed newest-first
 - Layout snapshots are pruned to the newest retention cap
 - Source-snapshot listing skips the reserved layouts subdir

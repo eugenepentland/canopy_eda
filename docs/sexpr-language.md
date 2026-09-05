@@ -1285,6 +1285,20 @@ it does not; the same singleton declared in two of the files is refused, naming
 both, which is the state the loader would refuse anyway. Nothing about a split
 design is read-only from the GUI.
 
+Undo covers them. A history snapshot captures the design source **and** every
+sidecar that exists beside it, so the entry written before a settings save
+contains the file that save changed; restoring it moves all of those files back
+together, and removes a sidecar the entry proves did not exist in that revision
+(an entry written before this — one with no `.files` manifest — still restores
+its design file and leaves today's sidecars untouched). The schematic page's
+raw-source editor covers them too: on a split design its title bar grows a file
+picker listing the design source and each sidecar that exists, and saving one
+goes through the same whole-file replace, the same syntax check, the same
+re-evaluation of the whole design, and the same history snapshot as a design
+save — `GET`/`POST /api/source/:name?file=design|checks|layout|diagram` (see
+`docs/webserver-api.md`). Only an already-authored sidecar is offered and
+writable; `split-design` below is what creates one.
+
 #### Splitting an existing design
 
 `split-design` does the move for you, and proves it:

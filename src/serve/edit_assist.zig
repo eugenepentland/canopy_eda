@@ -461,7 +461,7 @@ pub fn saveDiagramLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
         return;
     }
 
-    // Same pre-flight `writeDesignCore` does: a syntax error is reported as
+    // Same pre-flight `writeSourceFileCore` does: a syntax error is reported as
     // one rather than as a failed write.
     _ = sexpr_parser.parse(ctx.allocator, out.written()) catch {
         res.status = 400;

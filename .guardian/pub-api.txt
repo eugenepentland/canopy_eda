@@ -4495,6 +4495,7 @@ src/serve/edit.zig::EditError value
 src/serve/edit.zig::HandlerError value
 src/serve/edit.zig::MpnEditError value
 src/serve/edit.zig::MutationResult struct_
+src/serve/edit.zig::SourceFile enum_
 src/serve/edit.zig::addComponentDatasheetCore | fn addComponentDatasheetCore( allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8, pdf: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::addInstanceApi | fn addInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::addPortApi | fn addPortApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -4506,11 +4507,13 @@ src/serve/edit.zig::editFootprintApi | fn editFootprintApi(ctx: *Server, req: *h
 src/serve/edit.zig::editMpnApi | fn editMpnApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::editMpnCore | fn editMpnCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, mpn: []const u8, manufacturer: []const u8, ) MpnEditError!u32
 src/serve/edit.zig::editValueApi | fn editValueApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::ext | fn ext(self: SourceFile) []const u8
 src/serve/edit.zig::getBoardRoleApi | fn getBoardRoleApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::getSourceApi | fn getSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::movePinApi | fn movePinApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::movePinCore | fn movePinCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, old_pin: []const u8, new_pin: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::newDesignApi | fn newDesignApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/edit.zig::parse | fn parse(spelling: ?[]const u8) SourceFile
 src/serve/edit.zig::rebuildDesign value
 src/serve/edit.zig::removeComponentDatasheetCore | fn removeComponentDatasheetCore( allocator: std.mem.Allocator, project_dir: []const u8, component_name: []const u8, pdf: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::removeInstanceApi | fn removeInstanceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -4529,8 +4532,8 @@ src/serve/edit.zig::setPowerPlaneApi | fn setPowerPlaneApi(ctx: *Server, req: *h
 src/serve/edit.zig::swapPinsApi | fn swapPinsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit.zig::swapPinsCore | fn swapPinsCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, pin_a: []const u8, pin_b: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::writeAndRebuild | fn writeAndRebuild( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, new_source: []const u8, description: ?[]const u8, ) EditError!MutationResult
-src/serve/edit.zig::writeDesignCore | fn writeDesignCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, new_source: []const u8, ) EditError!MutationResult
 src/serve/edit.zig::writeFileAndRebuild | fn writeFileAndRebuild( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, write_path: []const u8, new_source: []const u8, description: ?[]const u8, ) EditError!MutationResult
+src/serve/edit.zig::writeSourceFileCore | fn writeSourceFileCore( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, file: SourceFile, new_source: []const u8, ) EditError!MutationResult
 src/serve/edit_assist.zig::libIndexApi | fn libIndexApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit_assist.zig::saveDiagramLayoutApi | fn saveDiagramLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/edit_assist.zig::validateSourceApi | fn validateSourceApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
