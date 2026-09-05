@@ -60,6 +60,8 @@ const docgen = @import("../docgen.zig");
 const page_cache = @import("page_cache.zig");
 const mcp_flatten = @import("mcp_flatten.zig");
 const pins_by_name = @import("../pins_by_name.zig");
+const export_pinmap = @import("../export_pinmap.zig");
+const export_spice = @import("../export_spice.zig");
 const mcp_checks = @import("mcp_checks.zig");
 const schematic_view = @import("mcp_schematic_view.zig");
 const mcp_build = @import("mcp_build.zig");
@@ -260,6 +262,16 @@ const tools = [_]ToolEntry{
     // write is refused unless the ORIGINAL and REWRITTEN sources flatten to the
     // identical netlist and bindings.
     .{ .name = "rewrite-pins-by-name", .is_mutation = true },
+    // The two hand-off exporters. Both READ-ONLY — they return the exported
+    // file TEXT rather than a JSON envelope, so `netlisp tool … --output` writes
+    // a usable header or deck — and neither touches a project file, which is
+    // why they are not mutations even though the CLI twins accept `--output`.
+    // export_pinmap: the firmware pin map (pad, pinout function, (as …)/(alt …)
+    // alternates, net, pin group, section) as a C header or as JSON.
+    // export_spice: a flattened SPICE deck — R/C/L/bead/diode/transistor element
+    // lines plus one empty .subckt stub per IC, ground on node 0.
+    .{ .name = "export_pinmap", .is_mutation = false },
+    .{ .name = "export_spice", .is_mutation = false },
     // Search Component Search Engine and return candidate parts (read-only).
     // Pairs with download_footprint / download_datasheet to import a chosen one.
     .{ .name = "search_components", .is_mutation = false },
@@ -1115,6 +1127,8 @@ fn dispatchVfs(
     if (std.mem.eql(u8, tool_name, "fetch_datasheet")) return try mcp_parts_tools.toolFetchDatasheet(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "attach_datasheet")) return try toolAttachDatasheet(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "rewrite-pins-by-name")) return try pins_by_name.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "export_pinmap")) return try export_pinmap.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "export_spice")) return try export_spice.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     return null;
 }
 

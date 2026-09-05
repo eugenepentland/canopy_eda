@@ -880,6 +880,105 @@ from the read-only resolve path rather than walking the hierarchy again.
 - completeness-waiver: integer overflow (no arithmetic beyond formatting already-computed net and pad counts)
 - completeness-waiver: panic-free (a design that fails to resolve degrades to a comment line and the next design)
 
+## export-names
+
+Public functions: sanitize, padLessThan, Style, Table, Assignment
+
+Name sanitising and uniqueness shared by the two hand-off exporters. A design is
+entitled to call a net `+3V3` and a part `usb/U2`; C macros and SPICE nodes
+accept neither, and folding them to `[A-Za-z0-9_]` is many-to-one — so `usb/DP`
+and `usb.DP` land on one spelling, and the second silently overwrites the first's
+macro or shorts the first's net. One `Table` per output stream makes that
+impossible: a candidate already held by a different design name is suffixed
+`_2`, `_3`, … in the order the exporter offered it, and the collision is reported
+so the file can name it. `padLessThan` is the pad order both exporters write
+their rows in, natural rather than lexicographic so a pad list reads `2` before
+`10`.
+
+- a design name folds to a legal C and SPICE fragment, with separators collapsed, a leading digit guarded and an empty fold named
+- two design names that fold to one spelling are separated by a numeric suffix, the collision is reported, and one name keeps one spelling however often it is asked for
+- pad ids sort in natural order so a numbered run reads 2 before 10 and a BGA row stays with its row letter
+- a digit run compares as a number of unbounded width, so a pad id longer than any integer type still orders correctly
+
+- completeness-waiver: empty inputs (an empty name folds to the placeholder fragment `X` rather than to an empty identifier that would splice into `U1__PIN`, and an empty table hands out its first candidate unchanged)
+- completeness-waiver: large inputs (every allocation is on the caller's arena and is proportional to the name it folds; a digit run is compared as text, so a pad id wider than any integer type still orders)
+- completeness-waiver: unauthorized access (pure string work over names the caller already holds; no file, network, environment or user capability is touched)
+- completeness-waiver: i/o failure (no I/O is performed; the only failure is allocation, which propagates as an error)
+- completeness-waiver: concurrent access (a `Table` is a plain value owned by the one exporter run that created it, and both exporters are single-threaded)
+- completeness-waiver: malformed encoding (every byte outside `[A-Za-z0-9_]` folds to `_`, so a name in any encoding yields a legal identifier rather than being rejected)
+- completeness-waiver: integer overflow (the collision counter is bounded by the number of names the caller offers, and digit runs are compared as text rather than parsed)
+- completeness-waiver: panic-free (allocation failure is the only error path; no assertion, cast or unreachable is present)
+
+## export-pinmap
+
+Public functions: cmdExportPinmap, tool, PinmapError
+
+The firmware pin map of a design, as a C header or as JSON. The board already
+knows which pad of which IC carries which net, what the silicon calls that pad,
+which alternate function the design signed the pad up for, and which functional
+block it was declared in; firmware re-types all of it off a PDF, and a pin move
+every other surface agrees on stays invisible to the C file naming the old pad.
+One row per CONNECTED pad of each selected part carries the pad, the pinout
+function name, the `(alt …)` and `(as …)` alternates, the flattened net, the
+`(pins … (group "…"))` label and the enclosing `(section …)` with its role and
+protocols. Selection is the hub classes carrying a `lib/pinouts` entry, or
+exactly the parts `--ref` names. Read-only: it resolves the design through the
+same seam the PCB page reads, writes to `--output` or stdout, and mints no id.
+
+- the CLI parses the project dir, the format, the output path and repeated ref filters, and refuses a run that names no design, names two, or names an unknown format
+- the C header carries an include guard, one macro per connected pad with the repeated net separated by a suffix, one table per part, and a *#-marked header carrying the build id
+- the JSON pin map carries the same rows with the alternates as an array and the build id alone on its own line
+- two renders of one pin map are byte-identical in both formats, so a differential comparison sees only real changes
+- the exported C header is accepted by a C99 compiler when one is on PATH, and the check reports no_compiler rather than failing when none is
+- a part with no readable pinout, no connected pad, or outside the selection is left out of the pin map
+- the exporter is registered as a read-only structured tool and its declared schema names every argument the handler reads
+- the tool refuses a missing design name and an unknown format with an ok:false error line rather than exporting something else
+
+- completeness-waiver: empty inputs (a run naming no design is a usage error; a design with no selected part renders a guarded but empty header and an empty `parts` array rather than failing)
+- completeness-waiver: large inputs (the whole run is on one arena released at exit, and the pad index is built in a single pass over the flattened nets rather than rescanned per part)
+- completeness-waiver: unauthorized access (a local read-only CLI and tool over the caller's own project directory; no network, no auth surface, and nothing but the caller's `--output` path is written)
+- completeness-waiver: i/o failure (a design that cannot be resolved fails the command by name; an unwritable `--output` path propagates its write error rather than reporting success)
+- completeness-waiver: concurrent access (single-threaded, sharing no state between runs and holding no lock)
+- completeness-waiver: malformed encoding (the design is parsed by the same evaluator seam the PCB page uses, and every name is folded to `[A-Za-z0-9_]` before it reaches a C identifier)
+- completeness-waiver: integer overflow (no arithmetic beyond formatting already-counted parts and pads)
+- completeness-waiver: panic-free (a missing pinout, an unresolved pad and an absent section each degrade to an empty field or a skipped part)
+
+## export-spice
+
+Public functions: cmdExportSpice, tool, SpiceError
+
+A flattened SPICE netlist for a design. Every connection a simulator needs is
+already on the board; what stops it opening in ngspice is transcription. R/C/L
+become element lines carrying the SI value parsed out of the authored string —
+which cannot be passed through verbatim, because SPICE reads `1M` as a milli. A
+ferrite bead is a DC short, so it becomes an `R` at the `dcr-max` its BOM part
+declares. Diodes and transistors name a `<MPN>_MODEL` placeholder whose `.model`
+card is written as a comment; every IC becomes an `X` line into an EMPTY
+`.subckt` stub whose pin list is the design's own. Ground-class nets map to node
+0 and every other net name is folded, with a fold collision reported rather than
+shorted. The deck therefore LOADS once models and bodies are supplied and does
+not simulate before that; the header comment states each limit in the file.
+
+- the CLI parses the project dir and the output path with one positional design name, and refuses a run that names no design, names two, or carries an unknown flag
+- a part's class comes from its component family before its ref-des letter, so a ferrite bead carrying an L ref-des is not written as an inductor, and a pad count decides the ambiguous packages
+- an authored value carrying a rating after its magnitude is read as its magnitude rather than as nothing
+- the element name carries its own class letter, so a ref-des that already starts with it is kept and a sub-block path or a bead written as a resistor is prefixed
+- the rendered deck writes one element line per part with ground on node 0, comments out a DNP part, names a model and a subcircuit stub for the parts that need one, and ends with .end
+- a component value is written as a plain decimal with the parser's binary floating-point residue trimmed away, and an integer spelling keeps every digit
+- two renders of one deck are byte-identical, so a differential comparison sees only real changes
+- a ground-class net maps to node 0 while every other net is folded, and the ground predicate is the project's own so a split or per-pin ground still reaches 0
+- the exporter is registered as a read-only structured tool and its declared schema names every argument the handler reads
+- the tool refuses a missing design name and an unresolvable design with an ok:false error line rather than exporting an empty deck
+
+- completeness-waiver: empty inputs (a run naming no design is a usage error; a design with no parts renders the header, the limits and `.end` rather than an empty file)
+- completeness-waiver: large inputs (the whole run is on one arena released at exit, and the pad index is built in a single pass over the flattened nets rather than rescanned per part)
+- completeness-waiver: unauthorized access (a local read-only CLI and tool over the caller's own project directory; no network, no auth surface, and nothing but the caller's `--output` path is written)
+- completeness-waiver: i/o failure (a design that cannot be resolved fails the command by name; an unwritable `--output` path propagates its write error rather than reporting success)
+- completeness-waiver: concurrent access (single-threaded, sharing no state between runs and holding no lock)
+- completeness-waiver: malformed encoding (the design is parsed by the same evaluator seam the PCB page uses, and every net and part name is folded to `[A-Z0-9_]` before it reaches a node or element name)
+- completeness-waiver: integer overflow (no arithmetic beyond formatting already-counted nets, parts and stubs; a value that does not parse becomes a parameter placeholder rather than a wrapped number)
+- completeness-waiver: panic-free (a part short of the pads its class needs, an unreadable value, an absent model and an absent pinout each degrade to a comment or a placeholder)
+
 ## power-flow
 
 Public functions: cmdPowerFlow, Args, FlowError

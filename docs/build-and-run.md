@@ -302,6 +302,77 @@ zig build run -- sync-kicad-sch --project-dir projects/designs <design> [--dry-r
 # print palette for paper. Self-checks the composed bytes before writing.
 zig build run -- export-pdf --project-dir projects/designs <design> [--output <file.pdf>] [--theme light]
 
+# Export the FIRMWARE PIN MAP — the pad/function/net/group table a firmware
+# project otherwise re-types by hand off a datasheet PDF, where a pin move the
+# schematic, the netlist, the PCB and the ERC all agree on stays invisible.
+#
+# One row per CONNECTED pad of each selected part (a pad with no net is not a
+# firmware pin), carrying: the pad id, the pinout's function name for that pad,
+# the alternates (the pinout's own `(alt …)` list unioned with the functions the
+# design asserted with `(as …)`), the flattened net, the `(pins … (group "…"))`
+# label the pad was declared under, and the enclosing `(section …)` with its
+# `(role …)` word and `(protocol …)` words. Selected parts are the hub classes
+# U/J/P/X/Q that carry a lib/pinouts entry — a part with no pinout has no
+# function names to export. `--ref` overrides that and names parts exactly,
+# matching the flattened ref-des, its leaf, or the instance's source name, so
+# `(instance "stm32" …)` is reachable as `--ref stm32`.
+#
+# `--format c` (the default) writes an include-guarded C99 header: one
+# `#define <REF>_<NET>_PIN "<pad>"` per row and a
+# `static const struct { const char *pad, *function, *net, *group; } <ref>_pinmap[]`
+# table per part, with the section / role / protocol / alternates in a trailing
+# comment on each row. SANITISING: every byte outside [A-Za-z0-9_] becomes '_',
+# runs collapse, ends are trimmed, an empty fold becomes 'X', and a leading digit
+# is prefixed with 'N' (net `3V3` -> `N3V3`); macros are upper-cased and table
+# identifiers lower-cased. Folding is many-to-one, so two names that land on one
+# spelling (`usb/DP` and `usb.DP`) are separated by a `_2` / `_3` suffix rather
+# than one silently redefining the other, and every macro quotes the design net
+# it came from so any such fold is visible. `--format json` carries the same rows
+# with the alternates as an array.
+#
+# READ-ONLY: it resolves the design through the same seam the PCB page reads,
+# mints no id and edits no source. Deterministic — parts sort by ref-des and pads
+# in natural order — so the only per-run value is the build id:
+#   diff -I '^\*#' base.h cand.h            # C
+#   diff -I '"build_id"' base.json cand.json
+zig build run -- export-pinmap --project-dir projects/designs <design> [--ref REF]… [--format c|json] [--output <file>]
+
+# Export a flattened SPICE NETLIST. Every connection a simulator needs is
+# already on the board; this writes the deck so it does not have to be
+# transcribed by hand.
+#
+# R/C/L become R/C/L element lines carrying the value parsed out of the authored
+# string by `req_checks.parseValueFor` — the project's one reader of those
+# spellings, and the text can never be passed through verbatim because SPICE
+# reads `1M` as a MILLI. A capacitance and an inductance keep the micro unit
+# that reader works in and take SPICE's own `u` scale factor, so `10uF` is `10u`
+# rather than the 9.999999999999999e-6 a multiply into farads produces. A value
+# carrying a rating after its magnitude (`1nF 2kV`) is read as its first word.
+# A ferrite bead is a DC short, so it becomes an `R` at the `dcr-max` its BOM
+# part declares — its own `600R@100MHz` value is an impedance at a test
+# frequency, not a DC element — or a commented placeholder when nothing declares
+# one. Diodes and transistors emit D/Q/M lines naming a `<MPN>_MODEL`
+# placeholder whose `.model` card is written as a COMMENT (the device type is a
+# guess the design does not carry). Every IC and connector becomes an `X` line
+# into an EMPTY `.subckt` stub whose port list is the pads this design wires, in
+# pad order. Ground-class nets (`net_analysis.isGroundName`, over the base name,
+# so a per-pin bypass stub `GND.U1.A3` is still ground) map to node 0; every
+# other net name is folded to [A-Z0-9_], with a fold collision separated by a
+# `_2`/`_3` suffix and reported as a `* net renamed:` line rather than silently
+# shorted. DNP parts are written as comments, and a value the reader could not
+# parse becomes a `{<REF>_VALUE}` parameter with the authored string beside it.
+#
+# LIMITS, restated in the deck's own header so the file says them too: no device
+# models, no bodies for the IC stubs, and no parasitics of any kind — no trace
+# R/L/C, no pad capacitance, no coupling, and an ideal capacitor with no ESR or
+# ESL. The deck therefore LOADS in ngspice once models and bodies are supplied
+# and does not simulate before that.
+#
+# READ-ONLY, and deterministic the same way: nets, parts and stubs are all
+# sorted before any name is assigned, so `diff -I '^\*#' base.cir cand.cir`
+# compares the netlist alone.
+zig build run -- export-spice --project-dir projects/designs <design> [--output <file.cir>]
+
 # Migrate an existing KiCad board INTO netlisp (reverse direction). Reads the
 # .kicad_pcb alone — modern KiCad embeds the netlist (per-pad nets), pin names
 # (pinfunction), footprint geometry, and BOM properties (Value/MPN/DNP) right

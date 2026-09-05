@@ -62,6 +62,9 @@ test {
     _ = @import("docgen.zig");
     _ = @import("drc_dump.zig");
     _ = @import("power_flow_cli.zig");
+    _ = @import("export_names.zig");
+    _ = @import("export_pinmap.zig");
+    _ = @import("export_spice.zig");
     _ = @import("gerber_dump.zig");
     _ = @import("netlist_dump.zig");
     _ = @import("pins_by_name.zig");
