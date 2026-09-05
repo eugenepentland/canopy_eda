@@ -6,7 +6,7 @@
 
 ## ✅ Round 4 (2026-07-04): consume the authored context — groups, flow, pairs
 
-The three highest-leverage items from `docs/layout-context-audit.md`, all
+The three highest-leverage items from `docs/archive/layout-context-audit.md`, all
 "consume what's already written":
 
 - **Authored `(group …)` islands** (`overlayAuthoredGroups`): a group with

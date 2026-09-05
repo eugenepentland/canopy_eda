@@ -2,7 +2,7 @@
 #
 # WHY THIS FILE EXISTS
 #
-# This tree has been audited twice: 2026-07-01 (AUDIT.md, ~148 findings) and
+# This tree has been audited twice: 2026-07-01 (`docs/archive/AUDIT.md`, ~148 findings) and
 # 2026-08-29 (a read-only drift audit whose findings are enumerated in commits
 # e2a5f7e and 7007d88, merged as 79f63e6). Both remediations were real and both
 # were INVISIBLE: nothing in the tree recorded which finding was closed, by
@@ -20,7 +20,7 @@
 # STILL EXISTS in the tree. A fixed finding whose test was deleted or renamed
 # has silently lost its guard, and the gate says so by name.
 #
-# SCOPE (deliberate — this is not a transcription of AUDIT.md)
+# SCOPE (deliberate — this is not a transcription of docs/archive/AUDIT.md)
 #
 #   IN   every finding from the 2026-08-29 drift audit, fixed and open alike.
 #   IN   the July findings whose CLASS is still live or has already reopened —
@@ -64,7 +64,7 @@
 [meta]
 audits = ["2026-07-01", "2026-08-29"]
 fix_wave = ["e2a5f7e", "7007d88", "79f63e6"]
-sources = ["AUDIT.md", "FEEDBACK.md", "git log"]
+sources = ["docs/archive/AUDIT.md", "FEEDBACK.md", "git log"]
 
 
 # ────────────────────────────────────────────────────────────────────────────

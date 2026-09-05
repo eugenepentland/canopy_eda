@@ -7,8 +7,8 @@ probes, fine-rescue, diff-pair engine, and the `bench-route` harness).
 `route_session.zig`, `route_timeline.zig`, `route_policy.zig`, `guardian.toml`,
 `bench_route.zig`, the placement test corpus, the serving seam
 (`pcbRouteApi` / the live-route job), and the three prior router documents
-(`docs/autorouter-audit.md`, `docs/autorouter-plan.md`,
-`docs/autorouter-wall-time.md`). This document is deliberately *fresh*: it does
+(`docs/archive/autorouter-audit.md`, `docs/archive/autorouter-plan.md`,
+`docs/archive/autorouter-wall-time.md`). This document is deliberately *fresh*: it does
 not re-argue the closed questions; it names the gaps those audits left open and
 adds new ones.
 

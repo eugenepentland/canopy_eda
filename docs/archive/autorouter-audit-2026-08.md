@@ -6,8 +6,8 @@
 
 *Method: five parallel code auditors over the routing subsystems (core engine,
 rescue ladders, DRC/oracle, agent loop, RF/diff-pair), cross-checked against
-`docs/autorouter-plan.md`, `docs/autorouter-audit.md` (2026-07-05) and
-`docs/autorouter-wall-time.md` (2026-08-02), plus a fresh ReleaseSafe
+`docs/archive/autorouter-plan.md`, `docs/archive/autorouter-audit.md` (2026-07-05) and
+`docs/archive/autorouter-wall-time.md` (2026-08-02), plus a fresh ReleaseSafe
 `bench-route` run at today's HEAD. File:line references are from worktree
 `claude/autorouter-audit-improvements-2112ee` (main + nothing).*
 
@@ -43,7 +43,7 @@ corpus harness exists to expose, and a reminder that the DRC "err" column is
 dominated by `net_open` markers (see C2: several surfaces double-count them).
 
 Shipped since the July plan and working: direct-probe spatial index +
-probe budget + span gate (`docs/autorouter-wall-time.md` §7); `pad_exit`
+probe budget + span gate (`docs/archive/autorouter-wall-time.md` §7); `pad_exit`
 interior landing + board-hole awareness; the vacate tier (91/91 on barracuda's
 auto-full-v2 via `close_open_nets`); one connectivity oracle behind every
 tally; gap-closer gloss; keepout escape zones reaching the direct probes;

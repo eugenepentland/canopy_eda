@@ -1,6 +1,12 @@
 # Build & Run
 
-> Moved verbatim from CLAUDE.md (2026-08-19); linked from its Reference Docs section.
+**What this is:** the complete build, run and deploy reference for the netlisp
+tool — every command, every flag, and the rules a surface that writes designs
+must follow. Read it if you are building netlisp from source, running a server,
+or touching code that persists a design. [`build-system.md`](build-system.md)
+covers the build graph itself; [`testing-guide.md`](testing-guide.md) covers
+the test suite. Some sections describe the maintainer's single deployment box
+and are labelled as such.
 
 ```bash
 # Build
@@ -57,7 +63,7 @@ zig build run -- build --project-dir projects/designs --push <design-name>
 # footprints, different population. The `.bom` sidecar stays the BASE assembly's
 # identity ledger (every variant's parts, the authored values), so building a
 # non-default variant cannot disturb the MPN selections it carries.
-# See docs/sexpr-language.md → "Assembly variants".
+# See docs/sexp-language.md → "Assembly variants".
 zig build run -- check --project-dir projects/designs --variant Lite <design-name>
 
 # Export KiCad netlist + footprints (handoff to KiCad's PCB editor).

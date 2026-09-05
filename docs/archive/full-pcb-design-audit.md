@@ -7,7 +7,7 @@ PCB design in netlisp alone — no KiCad, no manual file surgery.*
 audits — interactive editor UX, router + copper model, DRC + fab gate, fab
 outputs + interop, footprint/pad/library pipeline, board model + workflow.
 Every claim was verified in current source with file:line evidence.
-This supersedes `docs/pcb-editor-audit.md` (2026-07-06): all of its Tier-0
+This supersedes `docs/archive/pcb-editor-audit.md` (2026-07-06): all of its Tier-0
 and Tier-1 items have shipped except the native footprint editor.*
 
 ---

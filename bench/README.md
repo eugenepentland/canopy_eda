@@ -1,6 +1,6 @@
 # Router benchmark ledger
 
-The durable regression gate for the autorouter (`docs/autorouter-audit-round-two.md`
+The durable regression gate for the autorouter (`docs/archive/autorouter-audit-round-two.md`
 §3a). It makes "the router got better" a **checkable, non-regressing claim** —
 a CI command that fails the build when a router change costs a net.
 

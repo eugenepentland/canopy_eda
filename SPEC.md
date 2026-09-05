@@ -1,6 +1,28 @@
 # Netlisp
 
-CLI-driven electronic design automation for schematic capture using S-expression syntax.
+CLI-driven electronic design automation using S-expression syntax.
+
+**What this file is:** the behaviour ledger the Guardian gate enforces. Every
+`- ` bullet below states one behaviour of the tool in a single line, and every
+bullet is expected to be proved by a test carrying a `// spec:` comment that
+repeats its text exactly. Guardian checks that mapping on every `zig build` and
+`zig build test`, and refuses to let the unmapped set grow. It is a ledger, not
+a design document: it says what the tool does, never how, and it is written to
+be diffed rather than read end to end.
+
+**How a bullet is structured.** `## ` headings are subsystem sections
+(`sexpr/tokenizer`, `eval/forms`, `placement/router`, …) and a bullet lives
+under the section its test names. A `completeness-waiver:` bullet records that
+a named failure mode was considered and deliberately does not apply, so the
+absence of a test for it is a decision rather than a gap.
+
+**To add one:** append a one-line bullet under the right `## ` heading, and in
+the *same* change tag the test that proves it with
+`// spec: <section> - <bullet text>`. Neither half lands alone. The tag text
+must match the bullet character for character, and the section in the tag must
+match the heading the bullet lives under. `guardian-check spec-sync .` prints
+dry-run suggestions for bullets that have no test yet. A worked example and the
+full contract are in [CONTRIBUTING.md](CONTRIBUTING.md) § 4.
 
 ## CLI allocation lifetime
 
@@ -719,7 +741,7 @@ Public functions: geomeanCompletion, benchOne, corpus, writeTable, writeJson, cm
 The whole-corpus routing benchmark that makes "the router got better" checkable.
 Every router change so far was judged on ONE board, and at least two changes that
 looked reasonable were net-negative on the same board they were designed against
-(`docs/autorouter-plan.md` §4). `netlisp bench-route --project-dir <dir>
+(`docs/archive/autorouter-plan.md` §4). `netlisp bench-route --project-dir <dir>
 [--route-space lattice|field] [--json] [<design> ...]` routes every design at
 its starred placement through the shared
 `route_plan` seam — so `routed`/`total` are the connectivity oracle's answer, not
@@ -730,7 +752,7 @@ completion. Under `--json` each board row additionally NAMES its still-open nets
 runs diff net by net instead of only by a count. Read-only: no layout sidecar is
 written, so it is safe against a served project dir.
 
-`--baseline <file>` (added with the round-two audit, `docs/autorouter-audit-round-two.md` §3a)
+`--baseline <file>` (added with the round-two audit, `docs/archive/autorouter-audit-round-two.md` §3a)
 is the durable regression gate: it compares each scorable board against a
 committed `--json` baseline and exits non-zero when any board loses more than
 one net, or when the geomean over the shared board set drops. Record a baseline
@@ -1912,7 +1934,7 @@ armed kill criterion: negotiated congestion is the last of three families of
 global steering measured on this corpus (topology corridors at three doses,
 escape guides, now this) and none has paid. Arming it is a one-line A/B against
 the same binary, the shape `placement/joint-rescue` established. The measured
-trace lives in the commit message and `docs/autorouter-audit-2026-08.md`.
+trace lives in the commit message and `docs/archive/autorouter-audit-2026-08.md`.
 
 - the negotiated-congestion tier ships disarmed, so a route that never raises its iteration cap is bit-for-bit the route it always was
 - foreign copper is a hard wall for every route outside the sandbox and passable-at-a-price only for a net the sandbox can itself re-route
