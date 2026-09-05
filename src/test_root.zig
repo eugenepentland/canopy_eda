@@ -86,6 +86,7 @@ test {
     _ = @import("eval/forms.zig");
     _ = @import("eval/ids.zig");
     _ = @import("eval/instance.zig");
+    _ = @import("eval/interfaces.zig");
     _ = @import("eval/micro_forms.zig");
     _ = @import("eval/modules.zig");
     _ = @import("eval/net_analysis.zig");
