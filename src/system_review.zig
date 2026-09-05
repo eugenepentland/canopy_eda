@@ -258,6 +258,16 @@ pub const DiagnosticCode = enum {
     missing_generated_region,
     empty_checklist,
     incomplete_checklist,
+    // `(system …)` source failures. The sexp manifest produces the identical
+    // in-memory spec, so it shares this diagnostic — only its syntax-level
+    // rejections need codes of their own.
+    invalid_sexp,
+    unknown_sexp_form,
+    missing_sexp_field,
+    duplicate_sexp_field,
+    invalid_sexp_value,
+    unresolved_connector,
+    unknown_contact,
 };
 
 /// Structured, allocation-free diagnostic. `field` and `message` are stable

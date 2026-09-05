@@ -1538,3 +1538,130 @@ A `(sub-block …)` accepts only `(bridge …)`, `(id …)`, `(ids …)` and
 
 The generated reference lists each in its own table; when in doubt, check
 the arity — a parenthesised member list means the design-scope form.
+
+### System contracts: `src/systems/<name>/system.sexp`
+
+A *system* is the layer above one board: which boards form the product, which
+exact connector contacts join them, and which review documents belong beside
+each fabrication archive. It is authored as ordinary netlisp source in
+`src/systems/<name>/system.sexp` and read by `netlisp system-check`, the
+readiness gate, the `/systems` pages and the release/dossier composers. The
+complete form table is in
+[docs/language-forms.md § System contract forms](language-forms.md).
+
+```lisp
+(system "barracuda"
+  (title "Barracuda OC-303-1-01")
+  (part-number "OC-303-1-01")
+  (revision "B3")
+
+  (board "barracuda"
+    (role rf)
+    (source "src/boards/barracuda/barracuda.sexp")
+    (part-number "BARRACUDA-RF")
+    (revision "B4")
+    (layout "Barracuda V2")
+    (dnp drop))
+
+  (interface "j1-board-to-board"
+    (mates "barracuda/J1" "barracuda-base/base-interface/J1")
+    (contact-count 40)
+    (signal "V_12V" (left 1 "V_12V") (right 1 "V_12V_RF"))
+    (signal "GND"   (left 9 "GND")   (right 9 "GND")))
+
+  (document "interface-control"
+    (title "Board-to-Board Interface Control")
+    (path "src/systems/barracuda/docs/interface-control.md")
+    (classification design)
+    (generated interface-matrix)))
+```
+
+A system contract is never *evaluated*. It is parsed straight into the strict
+`netlisp-system-review-v1` spec that the older hand-maintained
+`src/systems/<name>/system.json` also parses to, so none of these forms is
+valid inside a design source, and a design writing `(interface …)` gets the
+ordinary unknown-form warning.
+
+**The JSON manifest still loads.** Where only `system.json` exists nothing
+changes. Where both exist the `.sexp` is the contract, the JSON is inert, and
+readiness says so with a `manifest_shadowed` finding. To migrate:
+
+```bash
+netlisp tool convert-system-manifest --project-dir <d> --args '{"system":"barracuda"}' \
+  --output projects/designs/src/systems/barracuda/system.sexp
+```
+
+The converter is read-only — it prints the equivalent source and writes nothing
+into the project — and the printed contract re-parses to the identical
+canonical spec, so the migration is provably not a rewrite. It is safe to
+delete the JSON afterwards; note that the HTTP manifest-editing endpoints
+(`POST /api/systems/:name/attest` above all) still operate on `system.json`,
+so a workspace that attests through the browser should keep the JSON form for
+now.
+
+#### Endpoint handles
+
+`(mates "board/CONNECTOR" "board/CONNECTOR")` names the two mated connectors.
+The **board** is the first path segment; everything after it is the connector's
+stable source handle, which may itself be a sub-block path
+(`barracuda-base/base-interface/J1`). That handle is deliberately *not* a
+flattened ref-des: evaluator-wide numbering may turn a module-local `J1` into
+`U19`, and a contract must not drift when an unrelated part is inserted.
+
+#### Aliases are derived, not authored
+
+The strict schema requires exactly one board-local→canonical alias per contact
+whose endpoint-local net differs from the canonical name, and requires every
+alias to describe a real contact — so the derivable set is the only valid set.
+The sexp form therefore has no alias form: writing
+`(signal "V_12V" (left 1 "V_12V") (right 1 "V_12V_RF"))` *is* the declaration
+that `V_12V_RF` on the right board is the system's `V_12V`. One board-local net
+carrying two canonical names is refused.
+
+#### `(auto)`: derive the contact table from the boards
+
+```lisp
+(interface "j1-board-to-board"
+  (mates "barracuda/J1" "barracuda-base/base-interface/J1")
+  (auto)
+  (signal "IF1_DSA" (left 15) (right 15)))
+```
+
+`(auto)` walks the left connector's pad table, pairs each pad with the right
+connector's same-numbered pad, and reads the net each side reaches. Pad ids
+compare numerically, so a pinout file's `01` and a design source's `1` are one
+contact. A contact the right connector does not carry is an error, not a
+silently dropped row. A pad wired on one side only keeps the wired net as its
+canonical name and gives the dead side a synthetic no-net name, so a derived
+contract never invents a net that could collide with a real one.
+
+An explicit `(signal …)` inside an `(auto)` interface **overrides one derived
+contact** — its canonical name, its `optional` flag, and either endpoint net
+you choose to restate. It must name a contact both connectors carry, and two
+signals may not claim one contact.
+
+`(auto)` is for bring-up, where the contract is "whatever the boards currently
+say". A released product should carry the explicit table: that is what makes a
+later wiring change show up as a diff rather than as a silently updated
+contract.
+
+#### `interface_mismatch` findings
+
+Whatever the manifest's format, `netlisp system-check` and
+`GET /api/systems/:name/readiness` check the contract against both boards'
+evaluated netlists and connector pad tables. Error-severity findings clear the
+`interface_contract` readiness check and block a release:
+
+| Finding | Severity | Meaning |
+| --- | --- | --- |
+| `contact_unconnected_one_side` | error | The contact reaches a net on one side and nothing — no net, or a net the board's own rule checks call floating — on the other. |
+| `voltage_domain_mismatch` | error | A **required** signal joins two nets that are both supplies or grounds but sit at different *declared* nominal potentials (ground is 0 V by definition). Undeclared potentials are not guessed. |
+| `unknown_contact_pin` | error | A signal names a pad the connector's pinout does not carry. |
+| `contact_count_over_pads` | error | The contract claims more contacts than the connector has pads. |
+| `duplicate_contact_claim` | error | Two signal records claim one physical contact. |
+| `contacts_not_covered` | warning | The connector has more pads than the contract covers — shield, mounting and spare pads are normal. |
+| `connector_pinout_unavailable` | warning | The connector's pad table could not be read, so the pin-existence and pad-count checks did not run for that endpoint. Absent evidence is said out loud rather than passed silently. |
+
+Two differing net **names** across the joint are never a mismatch. Pairing
+`V_12V` with `V_12V_RF` is exactly what the canonical/alias layer is for; a
+check that flagged it would fire on every real contract.

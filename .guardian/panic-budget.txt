@@ -1,5 +1,5 @@
 # guardian-snapshot v2
-comptime_calls 2
+comptime_calls 3
 comptime_max 100000
 fixmes 0
 panics 0

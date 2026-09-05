@@ -64,6 +64,7 @@ const pins_by_name = @import("../pins_by_name.zig");
 const export_pinmap = @import("../export_pinmap.zig");
 const export_spice = @import("../export_spice.zig");
 const split_design = @import("../split_design.zig");
+const system_sexp = @import("../system_sexp.zig");
 const mcp_checks = @import("mcp_checks.zig");
 const schematic_view = @import("mcp_schematic_view.zig");
 const mcp_build = @import("mcp_build.zig");
@@ -281,6 +282,11 @@ const tools = [_]ToolEntry{
     // diffs; a write is refused unless the ORIGINAL and SPLIT trees flatten to
     // the identical netlist AND the identical design-scope form set.
     .{ .name = "split-design", .is_mutation = true },
+    // Print the `(system …)` contract equivalent to an existing
+    // src/systems/<name>/system.json. Read-only: it emits the source to the
+    // caller and never writes into the project, so a migration is reviewed as
+    // a diff before the workspace changes hands.
+    .{ .name = "convert-system-manifest", .is_mutation = false },
     // Search Component Search Engine and return candidate parts (read-only).
     // Pairs with download_footprint / download_datasheet to import a chosen one.
     .{ .name = "search_components", .is_mutation = false },
@@ -1142,6 +1148,7 @@ fn dispatchVfs(
     if (std.mem.eql(u8, tool_name, "export_pinmap")) return try export_pinmap.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "export_spice")) return try export_spice.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "split-design")) return try split_design.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "convert-system-manifest")) return try system_sexp.convertTool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     return null;
 }
 

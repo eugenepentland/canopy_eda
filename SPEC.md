@@ -6194,6 +6194,21 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - a saved review document makes the prior dossier load immediately with a stale notice instead of deleting it or automatically recomposing it
 - the dossier's board-free refusals are decided without starting a composition, so a broken workspace is refused on the first request
 - the dossier status endpoint reports composition state, staleness, and freshness without starting or serving a composition
+- the (system …) source parses to the same strict v1 spec the JSON manifest produces, deriving the canonical-net aliases the schema requires
+- an (auto) interface derives every contact from the two connectors' pad tables by contact number, and an explicit signal overrides one of them
+- a (system …) source is refused with an actionable diagnostic for a syntax error, an unknown form, a missing field, an oversized source, a contact neither connector carries and an unresolvable auto endpoint
+- a JSON manifest converted to (system …) and parsed back yields the identical canonical spec, so the converter is a migration rather than a rewrite
+- convert-system-manifest is a read-only registered tool whose printed source re-parses to the manifest it was given
+- contact identifiers compare numerically across the pinout's zero-padded spelling and the netlist's bare one
+- the generated language reference documents exactly the head atoms a (system …) source accepts, in both directions
+- a system.sexp beside a system.json is the contract the readiness gate reads, and the shadowed JSON is reported rather than silently ignored
+- a contract whose contacts all mate reports no interface mismatch, and two differing net NAMES across the joint are never one
+- a contact wired on one side and unconnected or floating on the other is an error-severity interface mismatch
+- a required signal joining two supplies or grounds at different declared potentials is an error-severity interface mismatch, and an undeclared potential is not guessed
+- a signal naming a pin its connector does not carry, a contract claiming more contacts than the connector has pads, and two signals claiming one contact are error-severity interface mismatches
+- surplus connector pads and an unreadable connector pad table are reported without blocking, because neither names a defect
+- every interface finding renders its class, kind, severity and locating fields into the readiness document
+- an (auto) interface resolves its contact table by evaluating both boards for real, and a connector that cannot supply a declared contact is refused rather than truncated
 - a stale dossier offers authenticated writers an explicit regenerate action while continuing to serve the old results until the single background replacement finishes
 - the dossier loader waits and reloads rather than polling, so a composition in flight is not destabilised by its own progress page
 - a dossier composition that lost its input closure to concurrent server work is composed again within a bounded number of attempts

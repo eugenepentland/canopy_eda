@@ -527,7 +527,29 @@ assembly than the caller asked for.
   `GET /api/systems/:name/readiness`, `GET /api/systems/:name/draft.zip` and
   `POST /api/systems/:name/release` behind it. Session-gated like the rest of
   the browser surface; every mutation needs the `X-Netlisp-Review: 1` header and
-  the writer role.
+  the writer role. The readiness, draft, dossier and release paths read the
+  system contract from `src/systems/<name>/system.sexp` when it exists and fall
+  back to `system.json` otherwise (see
+  [docs/sexpr-language.md § System contracts](sexpr-language.md)); the
+  document-editing and attestation endpoints still read and write the JSON
+  form.
+- **System interface findings**: `GET /api/systems/:name/readiness` (and the
+  identical document `netlisp system-check` prints) carries three fields beyond
+  the historical gate: `manifest` — the project-relative contract actually
+  read; `checks.interface_contract` — false while any error-severity finding
+  stands, and part of `blocked` exactly like the other gates; and `findings[]`,
+  each `{class, kind, severity, interface, board, pin, detail}`.
+
+  `class` is `interface_mismatch` for the board-to-board contract checks
+  (`contact_unconnected_one_side`, `voltage_domain_mismatch`,
+  `unknown_contact_pin`, `contact_count_over_pads`, `duplicate_contact_claim`
+  at `error`; `contacts_not_covered`, `connector_pinout_unavailable` at
+  `warning`) and `manifest_shadowed` for the notice that a `system.sexp` has
+  made the `system.json` beside it inert. Two differing net *names* across a
+  joint are never reported — the manifest's canonical/alias layer exists
+  precisely so `V_12V` and `V_12V_RF` are one conductor. The per-finding
+  meanings are tabulated in
+  [docs/sexpr-language.md § `interface_mismatch` findings](sexpr-language.md).
 - **System dossier**: `GET /systems/:name/dossier` — the draft package's
   self-contained HTML dossier as a readable page, byte-identical to the
   `review/<base>.html` member of the same system's `draft.zip` (one composer,

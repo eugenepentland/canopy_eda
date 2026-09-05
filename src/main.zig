@@ -561,6 +561,7 @@ fn printUsage() !void {
         \\  netlisp build [--project-dir <d>] [--variant <v>]  Evaluate and emit resolved design
         \\  netlisp check [--project-dir <d>] [--severity <s>] [--profile authoring|preflight|release] [--variant <v>] <name>  Run ERC + requirements
         \\  netlisp system-check [--project-dir <d>] <system>  Print system review/fabrication readiness as JSON; fail while blocked
+        \\                                                    (contract: src/systems/<system>/system.sexp, else system.json)
         \\  netlisp review-audit [--project-dir <d>] [--layout <name>] [--output <file.md>] <design>  Write the generated Board Review Audit (Markdown) from release-profile checks, profiles, ladder, fab gate, notes
         \\  netlisp designs [--project-dir <d>]     List designs (name + title + declared assembly variants) as JSON
         \\  netlisp instances [--project-dir <d>] [--variant <v>] <name>  List a design's parts as JSON (with the variant catalog and each part's populated_in when the design declares variants)

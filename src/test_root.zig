@@ -397,6 +397,8 @@ test {
     _ = @import("review.zig");
     _ = @import("review_md.zig");
     _ = @import("system_review.zig");
+    _ = @import("system_sexp.zig");
+    _ = @import("system_interface_check.zig");
     _ = @import("system_review_assets.zig");
     _ = @import("system_review_html.zig");
     _ = @import("system_review_md.zig");

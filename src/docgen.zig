@@ -308,6 +308,7 @@ fn renderSubFormSections(writer: anytype) !void {
 }
 
 fn renderReferenceAppendices(writer: anytype) !void {
+    try renderSystemForms(writer);
     try renderComponentFields(writer);
     try renderThermalForms(writer);
     try renderRequirementChecks(writer);
@@ -437,6 +438,31 @@ fn renderMarkerForms(writer: anytype) !void {
         \\
     );
     try renderSubFormTable(writer, forms.marker_form_docs);
+}
+
+/// Render the system-contract grammar from the same registry
+/// `src/system_sexp.zig` proves its accepted head atoms against. These forms
+/// live in their own section because they are not evaluator forms: they belong
+/// to `src/systems/<name>/system.sexp`, never to a design.
+fn renderSystemForms(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## System contract forms
+        \\
+        \\The body grammar of `src/systems/<name>/system.sexp` — the contract
+        \\`netlisp system-check`, the readiness gate and the `/systems` pages
+        \\read. It parses into the same strict `netlisp-system-review-v1` spec
+        \\the older hand-maintained `system.json` parses to; where both files
+        \\exist the `.sexp` is the contract and readiness reports the JSON as
+        \\shadowed. `netlisp tool convert-system-manifest` prints the
+        \\equivalent source for an existing JSON manifest.
+        \\
+        \\These forms are never evaluated, so none of them is valid in a
+        \\design source. Rows written inside a sibling form show that nesting
+        \\in their template.
+        \\
+    );
+    try renderSubFormTable(writer, forms.system_form_docs);
 }
 
 /// Render the `(component …)` / `(component-family …)` library-definition
