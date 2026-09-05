@@ -549,6 +549,7 @@ fn printUsage() !void {
         \\  netlisp build [--project-dir <d>]       Evaluate and emit resolved design
         \\  netlisp check [--project-dir <d>] [--severity <s>] [--profile authoring|preflight|release] <name>  Run ERC + requirements
         \\  netlisp system-check [--project-dir <d>] <system>  Print system review/fabrication readiness as JSON; fail while blocked
+        \\                                                    (contract: src/systems/<system>/system.sexp, else system.json)
         \\  netlisp review-audit [--project-dir <d>] [--layout <name>] [--output <file.md>] <design>  Write the generated Board Review Audit (Markdown) from release-profile checks, profiles, ladder, fab gate, notes
         \\  netlisp designs [--project-dir <d>]     List designs (name + title) as JSON
         \\  netlisp instances [--project-dir <d>] <name>  List a design's parts as JSON

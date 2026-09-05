@@ -271,6 +271,51 @@ declaration overrides the heuristic.
 
 Valid `(category <key>)` keys: `mcu`, `power`, `memory`, `peripheral`, `connector`, `clock`, `comms`, `sensor`, `analog`, `protection`.
 
+## System contract forms
+
+The body grammar of `src/systems/<name>/system.sexp` — the contract
+`netlisp system-check`, the readiness gate and the `/systems` pages
+read. It parses into the same strict `netlisp-system-review-v1` spec
+the older hand-maintained `system.json` parses to; where both files
+exist the `.sexp` is the contract and readiness reports the JSON as
+shadowed. `netlisp tool convert-system-manifest` prints the
+equivalent source for an existing JSON manifest.
+
+These forms are never evaluated, so none of them is valid in a
+design source. Rows written inside a sibling form show that nesting
+in their template.
+
+| Form | Summary |
+| --- | --- |
+| `(system "NAME" (title …) (part-number …) (revision …) (board …)… (interface …)… (document …)…)` | The whole contract, one per file. NAME must match the `src/systems/<name>/` directory. |
+| `(title "Barracuda OC-303-1-01")` | Human title of the system, or of the enclosing board or document. |
+| `(part-number "OC-303-1-01")` | Stable assembly identity of the system or board, independent of the human title. |
+| `(revision "B3")` | Revision of the system or board this contract is pinned to. |
+| `(board "NAME" (role rf) (source "src/…") (part-number …) (revision …) [(layout …)] [(dnp …)])` | One board in the product. NAME is the design lookup name; identity and layout must match what the board itself resolves to. |
+| `(role rf)` | Archive identity of this board within the system — unique, and the directory its evidence lands in. |
+| `(source "src/boards/barracuda/barracuda.sexp")` | Project-relative design source, checked against the path the design resolver selects. |
+| `(layout "Barracuda V2")` | Saved layout to release. Defaults to `blessed` — the board's starred default. |
+| `(dnp drop)` | Whether do-not-populate parts are dropped (default) or kept in this board's outputs. |
+| `(interface "ID" (mates …) [(contact-count N)] [(auto)] (signal …)…)` | One board-to-board connector contract. Checked against both boards' netlists as `interface_mismatch` findings. |
+| `(mates "barracuda/J1" "barracuda-base/base-interface/J1")` | The two endpoints as `board/CONNECTOR` handles. The connector half may be a sub-block path; the board is the first segment. |
+| `(contact-count 40)` | Physical contact count. Optional, and checked against the records present — declare it to catch a truncated table. |
+| `(auto)` | Derive every contact from the two connectors' pad tables by contact number. Explicit `(signal …)` rows then override single contacts. |
+| `(signal "CANONICAL" (left PIN ["NET"]) (right PIN ["NET"]) [optional])` | One physical contact. Without `(auto)` both nets are required; `optional` marks the contact as not required by the contract. |
+| `(left 1 "V_12V")` | The contact's pad on the first mated connector and the net it reaches there. |
+| `(right 1 "V_12V_RF")` | The same physical contact on the second connector. A net differing from CANONICAL becomes that endpoint's alias. |
+| `(document "ID" (title …) (path "…md") (classification …) [(status …)] [(board …)] [(required …)] [(include-in-fab …)] [(generated …)])` | One authored review document. A system needs at least one active required `checklist`. |
+| `(classification review)` | design, review, checklist, bringup, manufacturing or reference. |
+| `(status active)` | active (default) or historical. A historical document never gates a release. |
+| `(required true)` | Whether the release gate waits on this document. Default true. |
+| `(include-in-fab false)` | Whether the document travels in the fabrication archive. Default true. |
+| `(generated system-summary interface-matrix)` | Generated regions this document carries, each written as `<!-- netlisp:generated ID -->` … `<!-- /netlisp:generated -->`. |
+| `(attestation (system-lock "…") [(attested-by …)] [(attested-at …)] (input …)… (document …)…)` | The export-time content attestation. Normally absent from an authored contract; parsed so an attested manifest round-trips. |
+| `(system-lock "<64 hex>")` | Canonical digest over the contract and every attested input and document. |
+| `(attested-by "reviewer@example.com")` | Authenticated identity that approved the stored attestation. |
+| `(attested-at "2026-09-05T12:34:56Z")` | UTC second-precision approval timestamp. |
+| `(input "src/board.sexp" "<64 hex>")` | Content hash of one attested release input. |
+| `(document "id" "path" "<64 hex>" (checklist 12 12 0))` | Task totals recorded for an attested checklist document: total, complete, open. |
+
 ## Component library fields
 
 The body of a `lib/components/<name>.sexp` definition. A

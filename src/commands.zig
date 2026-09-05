@@ -83,7 +83,11 @@ const export_kicad_usage =
     "--with-schematic also writes the .kicad_sch hierarchy + project sidecars, so\n" ++
     "the output directory opens in KiCad as a complete project.\n";
 const system_check_usage =
-    "Usage: netlisp system-check [--project-dir <d>] <system-name>\n";
+    "Usage: netlisp system-check [--project-dir <d>] <system-name>\n" ++
+    "Reads the contract from src/systems/<name>/system.sexp when it exists, else\n" ++
+    "system.json; when both exist the .sexp wins and the JSON is reported shadowed.\n" ++
+    "Prints the readiness document, whose findings[] carries the interface_mismatch\n" ++
+    "class. Exits non-zero while any gate blocks.\n";
 const export_system_review_usage =
     "Usage: netlisp export-system-review [--project-dir <d>] <system-name> [--output <file.zip>]\n";
 const review_audit_usage =

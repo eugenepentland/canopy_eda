@@ -132,6 +132,8 @@ src/board_review_snapshot.zig::AssemblyEvidence struct_
 src/board_review_snapshot.zig::AssemblySprite struct_
 src/board_review_snapshot.zig::Checks struct_
 src/board_review_snapshot.zig::Connection struct_
+src/board_review_snapshot.zig::ConnectorContactsError value
+src/board_review_snapshot.zig::ConnectorPads struct_
 src/board_review_snapshot.zig::Engineering struct_
 src/board_review_snapshot.zig::Finding struct_
 src/board_review_snapshot.zig::FrequencyPlanReport struct_
@@ -157,6 +159,7 @@ src/board_review_snapshot.zig::Thermal struct_
 src/board_review_snapshot.zig::ThermalCoverage struct_
 src/board_review_snapshot.zig::ThermalModel struct_
 src/board_review_snapshot.zig::build | fn build( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) BuildError!Snapshot
+src/board_review_snapshot.zig::connectorContacts | fn connectorContacts( allocator: std.mem.Allocator, evaluator: *Evaluator, block: *const env_mod.DesignBlock, connector: []const u8, ) ConnectorContactsError!?[]const system_sexp.Contact
 src/board_review_snapshot.zig::screened | fn screened(self: ThermalCoverage) usize
 src/board_review_snapshot.zig::verifySnapshot | fn verifySnapshot( allocator: std.mem.Allocator, project_dir: []const u8, snapshot: Snapshot, ) bool
 src/board_review_state.zig::Entry struct_
@@ -733,6 +736,7 @@ src/eval/forms.zig::special_form_docs value
 src/eval/forms.zig::special_form_schema value
 src/eval/forms.zig::sub_block_form_docs value
 src/eval/forms.zig::sub_form_tables value
+src/eval/forms.zig::system_form_docs value
 src/eval/forms.zig::validateArity | fn validateArity(schema: FormSchema, arg_count: usize) ?ArityViolation
 src/eval/ids.zig::ChildIdSidecar struct_
 src/eval/ids.zig::LoadedPinout struct_
@@ -5359,6 +5363,21 @@ src/svg2pdf.zig::Text struct_
 src/svg2pdf.zig::Theme enum_
 src/svg2pdf.zig::translate | fn translate(gpa: Allocator, svg: []const u8, opts: Options, diag: ?*Diagnostic) Error!Document
 src/svg2pdf.zig::translateAll | fn translateAll(gpa: Allocator, markup: []const u8, opts: Options, diag: ?*Diagnostic) Error![]Document
+src/system_interface_check.zig::Endpoint struct_
+src/system_interface_check.zig::Finding struct_
+src/system_interface_check.zig::Kind enum_
+src/system_interface_check.zig::NetNominal struct_
+src/system_interface_check.zig::Severity enum_
+src/system_interface_check.zig::blocked | fn blocked(findings: []const Finding) bool
+src/system_interface_check.zig::check | fn check( allocator: std.mem.Allocator, interface: system_review.InterfaceContract, left: Endpoint, right: Endpoint, out: *std.ArrayList(Finding), ) std.mem.Allocator.Error!void
+src/system_interface_check.zig::class | fn class(kind: Kind) []const u8
+src/system_interface_check.zig::isSupplyOrGround | fn isSupplyOrGround(net: []const u8) bool
+src/system_interface_check.zig::sameDomain | fn sameDomain(left: f64, right: f64) bool
+src/system_interface_check.zig::severity | fn severity(kind: Kind) Severity
+src/system_interface_check.zig::severity | fn severity(self: Finding) Severity
+src/system_interface_check.zig::voltage_tolerance_fraction value
+src/system_interface_check.zig::voltage_tolerance_v value
+src/system_interface_check.zig::writeFindings | fn writeFindings(writer: *std.Io.Writer, findings: []const Finding) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
 src/system_review.zig::AttestInputError value
 src/system_review.zig::Attestation struct_
 src/system_review.zig::AttestationWriteError value
@@ -5482,6 +5501,22 @@ src/system_review_package.zig::release | fn release( allocator: std.mem.Allocato
 src/system_review_pdf.zig::Error value
 src/system_review_pdf.zig::Options struct_
 src/system_review_pdf.zig::compose | fn compose(allocator: std.mem.Allocator, markdown: []const u8, opts: Options) Error![]u8
+src/system_sexp.zig::Contact struct_
+src/system_sexp.zig::Error value
+src/system_sexp.zig::ParseError value
+src/system_sexp.zig::Resolver struct_
+src/system_sexp.zig::ToolError value
+src/system_sexp.zig::WriteError value
+src/system_sexp.zig::accepted_forms value
+src/system_sexp.zig::convertTool | fn convertTool( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) ToolError!bool
+src/system_sexp.zig::isUnconnectedNet | fn isUnconnectedNet(net: []const u8) bool
+src/system_sexp.zig::json_manifest_name value
+src/system_sexp.zig::lookup | fn lookup( self: Resolver, allocator: std.mem.Allocator, board: []const u8, connector: []const u8, ) Error!?[]const Contact
+src/system_sexp.zig::parse | fn parse( allocator: std.mem.Allocator, source: []const u8, resolver: ?Resolver, diagnostic: *Diagnostic, ) ParseError!SystemSpec
+src/system_sexp.zig::sameContact | fn sameContact(a: []const u8, b: []const u8) bool
+src/system_sexp.zig::sexp_manifest_name value
+src/system_sexp.zig::unconnected_net_prefix value
+src/system_sexp.zig::write | fn write( allocator: std.mem.Allocator, writer: *std.Io.Writer, spec: SystemSpec, ) WriteError!void
 src/target_unblock.zig::Board struct_
 src/target_unblock.zig::Corridor struct_
 src/target_unblock.zig::Gate struct_

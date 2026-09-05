@@ -1178,6 +1178,10 @@ pub fn reservedSubFormNames(comptime table: []const SubFormDoc) [reservedSubForm
 /// double a reference row and make the derived name lists ambiguous.
 fn requireUniqueSubFormNames(comptime table: []const SubFormDoc) void {
     comptime {
+        // Pairwise byte comparison over the whole table: quadratic in rows and
+        // linear in name length, so the default branch budget runs out on the
+        // larger registries long before anything is wrong with them.
+        @setEvalBranchQuota(100_000);
         for (table, 0..) |row, i| {
             for (table[i + 1 ..]) |other| {
                 if (std.mem.eql(u8, row.name, other.name))
@@ -1457,6 +1461,179 @@ pub const port_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
 /// rather than circuit content. `eval/design_block.isInertFormHead` derives
 /// its set from the direct rows here, so these never draw an
 /// unknown-sub-form warning.
+/// Body grammar of a system contract source, `src/systems/<name>/system.sexp`
+/// — the file `netlisp system-check`, the readiness gate and the `/systems`
+/// pages read a system's boards, board-to-board interfaces and review
+/// documents out of.
+///
+/// These are NOT evaluator forms. A system contract is never evaluated: it is
+/// parsed straight into the strict `netlisp-system-review-v1` spec that the
+/// long-standing `system.json` also parses to, so a design source writing
+/// `(interface …)` still gets the ordinary unknown-form warning. They are
+/// registered here because the generated reference documents one language, and
+/// `src/system_sexp.zig` proves its accepted head atoms are exactly this set.
+pub const system_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
+    .{
+        .name = "system",
+        .syntax = "(system \"NAME\" (title …) (part-number …) (revision …) (board …)… (interface …)… (document …)…)",
+        .summary = "The whole contract, one per file. NAME must match the `src/systems/<name>/` directory.",
+    },
+    .{
+        .name = "title",
+        .syntax = "(title \"Barracuda OC-303-1-01\")",
+        .summary = "Human title of the system, or of the enclosing board or document.",
+    },
+    .{
+        .name = "part-number",
+        .syntax = "(part-number \"OC-303-1-01\")",
+        .summary = "Stable assembly identity of the system or board, independent of the human title.",
+    },
+    .{
+        .name = "revision",
+        .syntax = "(revision \"B3\")",
+        .summary = "Revision of the system or board this contract is pinned to.",
+    },
+    .{
+        .name = "board",
+        .syntax = "(board \"NAME\" (role rf) (source \"src/…\") (part-number …) (revision …) [(layout …)] [(dnp …)])",
+        .summary = "One board in the product. NAME is the design lookup name; identity and layout must match what the board itself resolves to.",
+    },
+    .{
+        .name = "role",
+        .within = "board",
+        .syntax = "(role rf)",
+        .summary = "Archive identity of this board within the system — unique, and the directory its evidence lands in.",
+    },
+    .{
+        .name = "source",
+        .within = "board",
+        .syntax = "(source \"src/boards/barracuda/barracuda.sexp\")",
+        .summary = "Project-relative design source, checked against the path the design resolver selects.",
+    },
+    .{
+        .name = "layout",
+        .within = "board",
+        .syntax = "(layout \"Barracuda V2\")",
+        .summary = "Saved layout to release. Defaults to `blessed` — the board's starred default.",
+    },
+    .{
+        .name = "dnp",
+        .within = "board",
+        .syntax = "(dnp drop)",
+        .summary = "Whether do-not-populate parts are dropped (default) or kept in this board's outputs.",
+    },
+    .{
+        .name = "interface",
+        .syntax = "(interface \"ID\" (mates …) [(contact-count N)] [(auto)] (signal …)…)",
+        .summary = "One board-to-board connector contract. Checked against both boards' netlists as `interface_mismatch` findings.",
+    },
+    .{
+        .name = "mates",
+        .within = "interface",
+        .syntax = "(mates \"barracuda/J1\" \"barracuda-base/base-interface/J1\")",
+        .summary = "The two endpoints as `board/CONNECTOR` handles. The connector half may be a sub-block path; the board is the first segment.",
+    },
+    .{
+        .name = "contact-count",
+        .within = "interface",
+        .syntax = "(contact-count 40)",
+        .summary = "Physical contact count. Optional, and checked against the records present — declare it to catch a truncated table.",
+    },
+    .{
+        .name = "auto",
+        .within = "interface",
+        .syntax = "(auto)",
+        .summary = "Derive every contact from the two connectors' pad tables by contact number. Explicit `(signal …)` rows then override single contacts.",
+    },
+    .{
+        .name = "signal",
+        .syntax = "(signal \"CANONICAL\" (left PIN [\"NET\"]) (right PIN [\"NET\"]) [optional])",
+        .summary = "One physical contact. Without `(auto)` both nets are required; `optional` marks the contact as not required by the contract.",
+    },
+    .{
+        .name = "left",
+        .within = "signal",
+        .syntax = "(left 1 \"V_12V\")",
+        .summary = "The contact's pad on the first mated connector and the net it reaches there.",
+    },
+    .{
+        .name = "right",
+        .within = "signal",
+        .syntax = "(right 1 \"V_12V_RF\")",
+        .summary = "The same physical contact on the second connector. A net differing from CANONICAL becomes that endpoint's alias.",
+    },
+    .{
+        .name = "document",
+        .syntax = "(document \"ID\" (title …) (path \"…md\") (classification …) [(status …)] [(board …)] [(required …)] [(include-in-fab …)] [(generated …)])",
+        .summary = "One authored review document. A system needs at least one active required `checklist`.",
+    },
+    .{
+        .name = "classification",
+        .within = "document",
+        .syntax = "(classification review)",
+        .summary = "design, review, checklist, bringup, manufacturing or reference.",
+    },
+    .{
+        .name = "status",
+        .within = "document",
+        .syntax = "(status active)",
+        .summary = "active (default) or historical. A historical document never gates a release.",
+    },
+    .{
+        .name = "required",
+        .within = "document",
+        .syntax = "(required true)",
+        .summary = "Whether the release gate waits on this document. Default true.",
+    },
+    .{
+        .name = "include-in-fab",
+        .within = "document",
+        .syntax = "(include-in-fab false)",
+        .summary = "Whether the document travels in the fabrication archive. Default true.",
+    },
+    .{
+        .name = "generated",
+        .within = "document",
+        .syntax = "(generated system-summary interface-matrix)",
+        .summary = "Generated regions this document carries, each written as `<!-- netlisp:generated ID -->` … `<!-- /netlisp:generated -->`.",
+    },
+    .{
+        .name = "attestation",
+        .syntax = "(attestation (system-lock \"…\") [(attested-by …)] [(attested-at …)] (input …)… (document …)…)",
+        .summary = "The export-time content attestation. Normally absent from an authored contract; parsed so an attested manifest round-trips.",
+    },
+    .{
+        .name = "system-lock",
+        .within = "attestation",
+        .syntax = "(system-lock \"<64 hex>\")",
+        .summary = "Canonical digest over the contract and every attested input and document.",
+    },
+    .{
+        .name = "attested-by",
+        .within = "attestation",
+        .syntax = "(attested-by \"reviewer@example.com\")",
+        .summary = "Authenticated identity that approved the stored attestation.",
+    },
+    .{
+        .name = "attested-at",
+        .within = "attestation",
+        .syntax = "(attested-at \"2026-09-05T12:34:56Z\")",
+        .summary = "UTC second-precision approval timestamp.",
+    },
+    .{
+        .name = "input",
+        .within = "attestation",
+        .syntax = "(input \"src/board.sexp\" \"<64 hex>\")",
+        .summary = "Content hash of one attested release input.",
+    },
+    .{
+        .name = "checklist",
+        .within = "attestation",
+        .syntax = "(document \"id\" \"path\" \"<64 hex>\" (checklist 12 12 0))",
+        .summary = "Task totals recorded for an attested checklist document: total, complete, open.",
+    },
+});
+
 pub const marker_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
     .{
         .name = "id",

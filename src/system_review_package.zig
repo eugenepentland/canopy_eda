@@ -19,6 +19,11 @@ const json_writer = @import("json_writer.zig");
 const pll_loop = @import("pll_loop.zig");
 const review = @import("review.zig");
 const system_review = @import("system_review.zig");
+const system_sexp = @import("system_sexp.zig");
+const interface_check = @import("system_interface_check.zig");
+const env_mod = @import("eval/env.zig");
+const Evaluator = @import("eval/evaluator.zig").Evaluator;
+const mcp_tools = @import("serve/mcp_tools.zig");
 const system_review_markers = @import("system_review_markers.zig");
 const review_assets = @import("system_review_assets.zig");
 const review_html = @import("system_review_html.zig");
@@ -112,6 +117,9 @@ const GateState = struct {
     /// The DRC waiver register is present when a board needs waivers, and
     /// its counts are the release run's counts.
     waivers_ok: bool = true,
+    /// No error-severity `interface_mismatch` finding stands against the
+    /// board-to-board contract.
+    interface_contract_ok: bool = true,
 };
 
 const Analysis = struct {
@@ -128,12 +136,19 @@ const Analysis = struct {
     needs_waiver: bool,
     state: GateState,
     interface_diagnostic: system_review.Diagnostic,
+    /// Project-relative manifest the contract was read from.
+    manifest_relative: []const u8 = "src/systems/unnamed/system.json",
+    /// Every `interface_mismatch` (and the manifest-shadowing notice), in
+    /// manifest order. Error-severity entries block exactly like the other
+    /// readiness gates.
+    findings: []const interface_check.Finding = &.{},
 
     fn blocked(self: Analysis) bool {
         const state = self.state;
         return !state.identity_ok or !state.interface_ok or
             !state.board_review_ok or !state.fab_ok or
-            !state.checklists_ok or !state.attested or !state.waivers_ok;
+            !state.checklists_ok or !state.attested or !state.waivers_ok or
+            !state.interface_contract_ok;
     }
 };
 
@@ -482,6 +497,62 @@ fn copyFabResult(
 const LoadedManifest = struct {
     source: []const u8,
     parsed: system_review.ParsedSystemSpec,
+    /// Project-relative path the bytes came from — `system.sexp` or the
+    /// long-standing `system.json`.
+    relative: []const u8,
+    /// True when a `system.sexp` won over a `system.json` that is still on
+    /// disk. The JSON is then inert and says so as a readiness finding.
+    shadowed_json: bool = false,
+};
+
+/// Resolve `(auto)` interface tables for one system load. A board is evaluated
+/// at most once, no matter how many interfaces name it, and only when some
+/// interface actually asks for derivation.
+const AutoResolver = struct {
+    const Evaluated = struct {
+        name: []const u8,
+        evaluator: *Evaluator,
+        block: *const env_mod.DesignBlock,
+    };
+
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    boards: std.ArrayList(Evaluated) = .empty,
+
+    fn resolver(self: *AutoResolver) system_sexp.Resolver {
+        return .{ .ctx = self, .lookupFn = lookup };
+    }
+
+    fn lookup(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        board: []const u8,
+        connector: []const u8,
+    ) system_sexp.Resolver.Error!?[]const system_sexp.Contact {
+        const self: *AutoResolver = @ptrCast(@alignCast(ctx));
+        const evaluated = self.evaluate(board) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return error.ResolveFailed;
+        };
+        return board_review.connectorContacts(allocator, evaluated.evaluator, evaluated.block, connector) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return error.ResolveFailed;
+        };
+    }
+
+    fn evaluate(self: *AutoResolver, board: []const u8) !Evaluated {
+        for (self.boards.items) |cached| if (std.mem.eql(u8, cached.name, board)) return cached;
+        const evaluator = try self.allocator.create(Evaluator);
+        evaluator.* = Evaluator.init(self.allocator, self.project_dir);
+        const named = try mcp_tools.evalNamedBlock(self.allocator, self.project_dir, board, evaluator);
+        const entry = Evaluated{
+            .name = try self.allocator.dupe(u8, board),
+            .evaluator = evaluator,
+            .block = named.block,
+        };
+        try self.boards.append(self.allocator, entry);
+        return entry;
+    }
 };
 
 /// The board-free front of `analyze`: reject an unusable `name`, read the
@@ -495,17 +566,68 @@ fn loadManifest(
     name: []const u8,
 ) !LoadedManifest {
     if (!simpleName(name)) return error.InvalidSystemName;
-    const manifest_rel = try std.fmt.allocPrint(allocator, "src/systems/{s}/system.json", .{name});
+    const sexp_rel = try std.fmt.allocPrint(allocator, "src/systems/{s}/{s}", .{ name, system_sexp.sexp_manifest_name });
+    const json_rel = try std.fmt.allocPrint(allocator, "src/systems/{s}/{s}", .{ name, system_sexp.json_manifest_name });
+    // The DSL contract wins when it exists; the JSON stays loadable unchanged
+    // for every workspace that has not migrated.
+    if (readManifestSource(allocator, project_dir, sexp_rel)) |sexp_source| {
+        var parsed = try parseSexpManifest(allocator, project_dir, sexp_source);
+        errdefer parsed.deinit();
+        if (!std.mem.eql(u8, name, parsed.value.name)) return error.SystemNameMismatch;
+        return .{
+            .source = sexp_source,
+            .parsed = parsed,
+            .relative = sexp_rel,
+            .shadowed_json = readManifestSource(allocator, project_dir, json_rel) != null,
+        };
+    }
     const manifest_source = try review_assets.readContainedFile(
         allocator,
         project_dir,
-        manifest_rel,
+        json_rel,
         system_review.max_manifest_bytes,
     );
     var parsed = try parseManifestForRefresh(allocator, manifest_source);
     errdefer parsed.deinit();
     if (!std.mem.eql(u8, name, parsed.value.name)) return error.SystemNameMismatch;
-    return .{ .source = manifest_source, .parsed = parsed };
+    return .{ .source = manifest_source, .parsed = parsed, .relative = json_rel };
+}
+
+/// Read one optional manifest file. Only an absent file is null; every other
+/// read failure still propagates through the caller's own read of the file it
+/// decided to use.
+fn readManifestSource(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    relative: []const u8,
+) ?[]const u8 {
+    return review_assets.readContainedFile(
+        allocator,
+        project_dir,
+        relative,
+        system_review.max_manifest_bytes,
+    ) catch null;
+}
+
+/// Parse a `(system …)` source into the same `ParsedSystemSpec` the JSON path
+/// produces. The sexp spec is rendered to canonical JSON and re-parsed rather
+/// than shimmed into the JSON parser's ownership model, so every downstream
+/// consumer keeps working against exactly one spec representation — and the
+/// rendering is the same writer `attest` already round-trips.
+fn parseSexpManifest(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    source: []const u8,
+) !system_review.ParsedSystemSpec {
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    var auto = AutoResolver{ .allocator = scratch.allocator(), .project_dir = project_dir };
+    var diagnostic: system_review.Diagnostic = .{};
+    const spec = try system_sexp.parse(scratch.allocator(), source, auto.resolver(), &diagnostic);
+    try system_review.validateSystemSpec(scratch.allocator(), spec, &diagnostic);
+    var rendered: std.Io.Writer.Allocating = .init(scratch.allocator());
+    try system_review.writeSystemSpecJson(scratch.allocator(), &rendered.writer, spec);
+    return parseManifestForRefresh(allocator, try allocator.dupe(u8, rendered.written()));
 }
 
 const PreflightError = @typeInfo(@typeInfo(@TypeOf(dossierPreflightImpl)).@"fn".return_type.?).error_union.error_set;
@@ -546,6 +668,15 @@ fn analyze(
     const manifest_source = loaded.source;
     var parsed = loaded.parsed;
     errdefer parsed.deinit();
+    var findings: std.ArrayList(interface_check.Finding) = .empty;
+    if (loaded.shadowed_json) try findings.append(allocator, .{
+        .kind = .manifest_shadowed,
+        .detail = try std.fmt.allocPrint(
+            allocator,
+            "{s} is the system contract; the system.json beside it is not read",
+            .{loaded.relative},
+        ),
+    });
 
     var documents: std.ArrayList(DocumentEvidence) = .empty;
     var document_attestations: std.ArrayList(system_review.DocumentAttestation) = .empty;
@@ -655,6 +786,7 @@ fn analyze(
         system_review.validateInterfaceCompleteness(parsed.value, observations, &interface_diagnostic) catch break :blk false;
         break :blk true;
     };
+    try checkInterfaceContracts(allocator, parsed.value, boards.items, &findings);
     const content_lock = try system_review.systemLockDigest(
         allocator,
         parsed.value,
@@ -688,8 +820,11 @@ fn analyze(
             .checklists_ok = checklists_ok,
             .attested = stored_attested,
             .waivers_ok = waivers_ok,
+            .interface_contract_ok = !interface_check.blocked(findings.items),
         },
         .interface_diagnostic = interface_diagnostic,
+        .manifest_relative = loaded.relative,
+        .findings = findings.items,
     };
     // Preflight the exact safe Markdown composition used by draft/final export
     // before readiness or attestation can call these inputs current.
@@ -1188,6 +1323,60 @@ fn interfaceObservations(
     return result.items;
 }
 
+/// Run the `interface_mismatch` checks for every declared interface, using the
+/// evidence each board's snapshot already carries: its connectors' complete pad
+/// tables, the nets those pads actually reach, the nets its rule checks call
+/// floating, and its declared rail potentials.
+fn checkInterfaceContracts(
+    allocator: std.mem.Allocator,
+    spec: system_review.SystemSpec,
+    boards: []const BoardEvidence,
+    out: *std.ArrayList(interface_check.Finding),
+) !void {
+    for (spec.interfaces) |interface| {
+        const left = try endpointEvidence(allocator, boards, interface.left);
+        const right = try endpointEvidence(allocator, boards, interface.right);
+        try interface_check.check(allocator, interface, left, right, out);
+    }
+}
+
+fn endpointEvidence(
+    allocator: std.mem.Allocator,
+    boards: []const BoardEvidence,
+    endpoint: system_review.InterfaceEndpoint,
+) !interface_check.Endpoint {
+    var evidence = interface_check.Endpoint{
+        .board = endpoint.board,
+        .connector = endpoint.connector,
+    };
+    const board = findBoard(boards, endpoint.board) orelse return evidence;
+    for (board.snapshot.physical.connector_pads) |table| {
+        if (!std.mem.eql(u8, table.connector, endpoint.connector)) continue;
+        evidence.pads = table.pads;
+    }
+    var wired: std.ArrayList(system_sexp.Contact) = .empty;
+    for (board.snapshot.physical.connections) |connection| {
+        if (!std.mem.eql(u8, connection.connector, endpoint.connector)) continue;
+        try wired.append(allocator, .{ .pin = connection.pin, .net = connection.net });
+    }
+    evidence.wired = wired.items;
+
+    var floating: std.ArrayList([]const u8) = .empty;
+    for (board.snapshot.analysis.checks.findings) |finding| {
+        if (!std.mem.eql(u8, finding.kind, "floating_net") or finding.net.len == 0) continue;
+        try floating.append(allocator, finding.net);
+    }
+    evidence.floating_nets = floating.items;
+
+    var nominals: std.ArrayList(interface_check.NetNominal) = .empty;
+    for (board.snapshot.analysis.power) |rail| {
+        const volts = rail.nominal_v orelse continue;
+        try nominals.append(allocator, .{ .net = rail.net, .volts = volts });
+    }
+    evidence.nominals = nominals.items;
+    return evidence;
+}
+
 fn findBoard(boards: []const BoardEvidence, name: []const u8) ?BoardEvidence {
     for (boards) |board| if (std.mem.eql(u8, board.member.name, name)) return board;
     return null;
@@ -1264,7 +1453,12 @@ fn renderReadiness(allocator: std.mem.Allocator, analysis: Analysis) ![]const u8
     try writeBoolField(w, "fabrication", analysis.state.fab_ok, true);
     try writeBoolField(w, "checklists", analysis.state.checklists_ok, true);
     try writeBoolField(w, "waivers", analysis.state.waivers_ok, true);
-    try w.writeAll("},\"boards\":[");
+    try writeBoolField(w, "interface_contract", analysis.state.interface_contract_ok, true);
+    try w.writeAll("},\"manifest\":");
+    try json_writer.writeString(w, analysis.manifest_relative);
+    try w.writeAll(",\"findings\":[");
+    try interface_check.writeFindings(w, analysis.findings);
+    try w.writeAll("],\"boards\":[");
     for (analysis.boards, 0..) |board, index| {
         if (index > 0) try w.writeByte(',');
         try w.writeAll("{\"role\":");
@@ -1323,6 +1517,14 @@ fn renderReadiness(allocator: std.mem.Allocator, analysis: Analysis) ![]const u8
     return out.written();
 }
 
+/// The archive keeps the contract source under its own file name, so a
+/// reviewer opening `review/source/` sees the file the workspace actually
+/// authors rather than a rendering that claims to be the other format.
+fn archivedManifestName(allocator: std.mem.Allocator, analysis: Analysis) ![]const u8 {
+    const base = std.fs.path.basename(analysis.manifest_relative);
+    return std.fmt.allocPrint(allocator, "review/source/{s}", .{base});
+}
+
 fn writeBoolField(w: *std.Io.Writer, name: []const u8, value: bool, comma: bool) !void {
     if (comma) try w.writeByte(',');
     try json_writer.writeString(w, name);
@@ -1347,7 +1549,7 @@ fn preflightArchiveNames(
     try appendEmptyEntry(allocator, &entries, try std.fmt.allocPrint(allocator, "review/{s}.md", .{base}));
     try appendEmptyEntry(allocator, &entries, try std.fmt.allocPrint(allocator, "review/{s}.pdf", .{base}));
     try appendEmptyEntry(allocator, &entries, try std.fmt.allocPrint(allocator, "review/{s}.html", .{base}));
-    try appendEmptyEntry(allocator, &entries, "review/source/system.json");
+    try appendEmptyEntry(allocator, &entries, try archivedManifestName(allocator, analysis));
     if (spec.boards.len > 0) try appendEmptyEntry(allocator, &entries, system_diagram_member);
     for (analysis.documents) |document| if (document.spec.include_in_fab)
         try appendEmptyEntry(
@@ -1484,7 +1686,10 @@ fn composeArchive(
     // offline like the per-board fabrication `assembly.html`: a draft carries
     // it too.
     try entries.append(allocator, .{ .name = try std.fmt.allocPrint(allocator, "review/{s}.html", .{base}), .data = html });
-    try entries.append(allocator, .{ .name = "review/source/system.json", .data = analysis.manifest_source });
+    try entries.append(allocator, .{
+        .name = try archivedManifestName(allocator, analysis),
+        .data = analysis.manifest_source,
+    });
     // Review evidence, not CAM: the system figure the combined Markdown points
     // at travels beside it. A board-free manifest draws nothing and the member
     // is omitted rather than archived empty.
@@ -4707,4 +4912,64 @@ test "the system diagram is an archived SVG document the generated section point
     try std.testing.expect(allowedSvgMember(system_diagram_member));
     try std.testing.expect(!allowedSvgMember("review/system-diagram-copy.svg"));
     try std.testing.expect(!allowedSvgMember("review/SYSTEM-DIAGRAM.SVG"));
+}
+
+// spec: system-review - a system.sexp beside a system.json is the contract the readiness gate reads, and the shadowed JSON is reported rather than silently ignored
+test "a system contract source shadows the JSON manifest it sits beside" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/demo");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/demo/system.json",
+        .data =
+        \\{"schema":"netlisp-system-review-v1","name":"demo","title":"Stale JSON","part_number":"OLD-1","revision":"A",
+        \\ "boards":[{"name":"board","role":"main","source":"src/board.sexp","part_number":"PCB-1","revision":"A"}],
+        \\ "documents":[{"id":"release-checklist","title":"Release checklist","path":"src/systems/demo/release.md","classification":"checklist"}]}
+        ,
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", allocator);
+
+    // With only the JSON present, that manifest is the contract.
+    {
+        var loaded = try loadManifest(allocator, project, "demo");
+        defer loaded.parsed.deinit();
+        try std.testing.expectEqualStrings("src/systems/demo/system.json", loaded.relative);
+        try std.testing.expectEqualStrings("Stale JSON", loaded.parsed.value.title);
+        try std.testing.expect(!loaded.shadowed_json);
+    }
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/demo/system.sexp",
+        .data =
+        \\(system "demo"
+        \\  (title "Live contract")
+        \\  (part-number "NEW-1")
+        \\  (revision "B")
+        \\  (board "board" (role main) (source "src/board.sexp") (part-number "PCB-1") (revision "A"))
+        \\  (document "release-checklist" (title "Release checklist")
+        \\    (path "src/systems/demo/release.md") (classification checklist)))
+        ,
+    });
+    var loaded = try loadManifest(allocator, project, "demo");
+    defer loaded.parsed.deinit();
+    try std.testing.expectEqualStrings("src/systems/demo/system.sexp", loaded.relative);
+    try std.testing.expectEqualStrings("Live contract", loaded.parsed.value.title);
+    try std.testing.expectEqualStrings("NEW-1", loaded.parsed.value.part_number);
+    try std.testing.expect(loaded.shadowed_json);
+
+    // A contract naming a different system is refused rather than adopted.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/demo/system.sexp",
+        .data =
+        \\(system "other"
+        \\  (title "Wrong system") (part-number "X") (revision "A")
+        \\  (board "board" (role main) (source "src/board.sexp") (part-number "PCB-1") (revision "A"))
+        \\  (document "release-checklist" (title "C") (path "src/systems/demo/release.md") (classification checklist)))
+        ,
+    });
+    try std.testing.expectError(error.SystemNameMismatch, loadManifest(allocator, project, "demo"));
 }

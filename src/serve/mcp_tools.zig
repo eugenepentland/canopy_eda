@@ -60,6 +60,7 @@ const docgen = @import("../docgen.zig");
 const page_cache = @import("page_cache.zig");
 const mcp_flatten = @import("mcp_flatten.zig");
 const pins_by_name = @import("../pins_by_name.zig");
+const system_sexp = @import("../system_sexp.zig");
 const mcp_checks = @import("mcp_checks.zig");
 const schematic_view = @import("mcp_schematic_view.zig");
 const mcp_build = @import("mcp_build.zig");
@@ -260,6 +261,11 @@ const tools = [_]ToolEntry{
     // write is refused unless the ORIGINAL and REWRITTEN sources flatten to the
     // identical netlist and bindings.
     .{ .name = "rewrite-pins-by-name", .is_mutation = true },
+    // Print the `(system …)` contract equivalent to an existing
+    // src/systems/<name>/system.json. Read-only: it emits the source to the
+    // caller and never writes into the project, so a migration is reviewed as
+    // a diff before the workspace changes hands.
+    .{ .name = "convert-system-manifest", .is_mutation = false },
     // Search Component Search Engine and return candidate parts (read-only).
     // Pairs with download_footprint / download_datasheet to import a chosen one.
     .{ .name = "search_components", .is_mutation = false },
@@ -1115,6 +1121,7 @@ fn dispatchVfs(
     if (std.mem.eql(u8, tool_name, "fetch_datasheet")) return try mcp_parts_tools.toolFetchDatasheet(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "attach_datasheet")) return try toolAttachDatasheet(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "rewrite-pins-by-name")) return try pins_by_name.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "convert-system-manifest")) return try system_sexp.convertTool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     return null;
 }
 
