@@ -98,8 +98,8 @@
 9 src/serve/pcb_layout_chrome.zig|SidebarOpts
 27 src/serve/pcb_layout_page.zig|PngRequest
 8 src/serve/pcb_layout_page.zig|SavedZone
-9 src/serve/pcb_layout_page.zig|SolvedRequest
 13 src/serve/pcb_layout_page.zig|ShownView
+9 src/serve/pcb_layout_page.zig|SolvedRequest
 8 src/serve/saved_zone.zig|SavedZone
 9 src/shape_sketch.zig|Constraint
 8 src/subcircuit_silkscreen.zig|Annotation
