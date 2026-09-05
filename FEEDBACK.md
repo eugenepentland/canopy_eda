@@ -494,7 +494,7 @@ conclusive on its own:
    page.
 2. Excluding the priming reconcile too (so no base can be published during a
    page load at all) left the gate failing 3 of 3.
-3. Stripping the candidate — main's is 61 MB stripped, a `zig-prod` build is
+3. Stripping the candidate — main's is 61 MB stripped, an unstripped ReleaseSafe build is
    143 MB with symbols — changed nothing. Worth knowing anyway: an A/B against
    a release candidate is not like-for-like until both are stripped.
 

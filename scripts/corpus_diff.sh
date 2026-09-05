@@ -35,11 +35,11 @@
 #     --candidate ~/.cache/netlisp/corpus-diff/cand/bin/netlisp
 #
 # Debug is the cheap build and is what the example uses. A poured barracuda-class
-# gerber-dump is much faster from the pinned production compiler; build BOTH
-# sides that way if you go there, and never pass `-Doptimize=safe` to the PATH
-# zig (see CLAUDE.md):
+# gerber-dump is much faster from a ReleaseSafe build, which the pinned compiler
+# emits through its self-hosted backend in seconds; build BOTH sides that way if
+# you go there:
 #
-#   scripts/zig-prod build --seed=1 -Doptimize=safe -p ~/.cache/netlisp/prod/base
+#   zig build --seed=1 -Doptimize=safe -p ~/.cache/netlisp/corpus-diff/base-safe
 #
 # Corpus selection: with no design names it reproduces `bench_page.corpus()` —
 # every `<project-dir>/src/**/<stem>.sexp` whose basename carries no extra dot,

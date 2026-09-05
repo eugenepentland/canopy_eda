@@ -17,13 +17,14 @@ zig build docs
 # Start web server (default port 7050)
 zig build run -- serve --project-dir projects/designs
 
-# Dev server / feature review at production speed (~1.5x Debug, builds in
-# seconds): the pinned production compiler in ReleaseSafe. Never pass
-# -Doptimize=safe to the PATH zig — that selects the multi-minute LLVM build.
-# Prefixes go under ~/.cache/netlisp/prod/, NOT /tmp: /tmp has a per-user
-# quota here and stale prefixes filled it once (2026-08-26), breaking every
-# tool needing tmpfile space. Prune old ones from ~/.cache/netlisp/prod/.
-scripts/zig-prod build --seed=1 -Doptimize=safe -p ~/.cache/netlisp/prod/my-prefix
+# Dev server / feature review at production speed (~1.5x Debug at runtime).
+# The pinned compiler emits ReleaseSafe through its self-hosted x86-64 backend
+# in well under a minute; `-Dllvm` would take minutes, so do not add it.
+# Give the side build its own prefix so it cannot overwrite the
+# zig-out/bin/netlisp a running server or measurement is executing — and keep
+# throwaway prefixes off /tmp: it has a per-user quota here and stale prefixes
+# filled it once (2026-08-26), breaking every tool needing tmpfile space.
+zig build --seed=1 -Doptimize=safe -p ~/.cache/netlisp/builds/my-prefix
 
 # Build a design (stdout), --push sends to running server
 zig build run -- build --project-dir projects/designs --push <design-name>

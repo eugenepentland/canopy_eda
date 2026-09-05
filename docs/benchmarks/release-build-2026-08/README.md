@@ -1,9 +1,12 @@
 # ReleaseSafe build analysis — 2026-08-12
 
 This records the clean-cache measurements behind the production-build update.
-All application development, tests, tools, solver work, and profiling continue
-to use the pinned Zig `0.17.0-dev.1683+5ceec001b` self-hosted Debug mode. LLVM
-ReleaseSafe remains a deployment-only artifact.
+It is a HISTORICAL record: at the time, the deployed artifact was built through
+LLVM, and its 223-second stripped build is the number the strip A/B below
+measures. Deployment has since moved to the pinned compiler's self-hosted
+backend, which builds the same ReleaseSafe artifact in well under a minute
+(`-Dllvm` is the opt-in way back to the LLVM figures here). See
+`ZIG_TOOLCHAIN.md` for the current build-mode table.
 
 ## Attribution
 

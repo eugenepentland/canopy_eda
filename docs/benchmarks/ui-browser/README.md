@@ -86,7 +86,7 @@ Then build the production-class server and run either the full performance
 gate or only the UI matrix:
 
 ```sh
-scripts/zig-prod build --seed=1 -Doptimize=safe -p zig-out-browser-perf
+zig build --seed=1 -Doptimize=safe -p zig-out-browser-perf
 npm run perf:ui -- --binary zig-out-browser-perf/bin/netlisp
 scripts/perf_gate.sh
 ```

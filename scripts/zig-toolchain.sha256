@@ -1,0 +1,14 @@
+# SHA-256 of every official Zig archive for the version pinned in .zigversion.
+#
+# scripts/install-zig.sh verifies the archive it downloads against this table
+# before extracting anything. Regenerate it when the pin moves (see the
+# "Bumping the pin" section of ZIG_TOOLCHAIN.md); the sums are the upstream
+# ziglang.org/builds archives byte for byte, so a GitHub release mirror of the
+# same files verifies identically.
+#
+# Version: 0.17.0-dev.1683+5ceec001b
+b18bd9c61b751ec64982359f85c3d4aec3347f4988b9edbfc15a14c055452eee  zig-aarch64-linux-0.17.0-dev.1683+5ceec001b.tar.xz
+1081a0318a97f492aaca1b76c4e6fe1ce5cd586a212ee2c0db364b05a29b5870  zig-aarch64-macos-0.17.0-dev.1683+5ceec001b.tar.xz
+e6e5c7e0834626bded90cd786d148bebf211dc80b013afefd631472b57b41f77  zig-x86_64-linux-0.17.0-dev.1683+5ceec001b.tar.xz
+2b154b47ce5396c000260c06c8cf018a4bf22dd5f858fc8538e27f2012d86536  zig-x86_64-macos-0.17.0-dev.1683+5ceec001b.tar.xz
+f5291dff1dec0ff16bffec0427b0a2b8629080cf2b89d55721b59eef988d3090  zig-x86_64-windows-0.17.0-dev.1683+5ceec001b.zip

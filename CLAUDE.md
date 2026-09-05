@@ -27,10 +27,15 @@ scripts/perf_gate.sh         # Four primary-page latency gates vs committed base
                              # (pre-push on main runs this; --record re-baselines)
 ```
 
-- NEVER pass `-Doptimize=safe` to the PATH zig (multi-minute LLVM build);
-  use the pinned production compiler: `scripts/zig-prod build --seed=1 -Doptimize=safe -p ~/.cache/netlisp/prod/<prefix>`
-  (prefixes under ~/.cache/netlisp/prod/, never /tmp — /tmp has a per-user
-  quota that stale prefixes once filled, breaking every tool on the machine)
+- One compiler: the official Zig pinned in `.zigversion`, from PATH. Install it
+  with `scripts/install-zig.sh --link` (see ZIG_TOOLCHAIN.md).
+- `zig build --seed=1 -Doptimize=safe` is the production-speed build (~1.5x
+  Debug at runtime) and takes about half a minute — `-Dllvm` is opt-in and
+  turns that into minutes, so do not pass it. Give a side build its own prefix
+  (`-p zig-out-dbg`, `-p zig-out-browser-perf`) so it cannot overwrite the
+  `zig-out/bin/netlisp` a running server or measurement is executing. Keep
+  throwaway prefixes out of /tmp — it has a per-user quota that stale prefixes
+  once filled, breaking every tool on the machine.
 - Unit-test binary compiles at `-Dtest-opt` (keep Debug); do not pass `-Dtest-opt=safe`.
 - IDs are persisted at write time: any surface that writes designs must pin
   minted ids back into `src/<design>.sexp` before deriving uuids
@@ -97,7 +102,7 @@ Source (.sexp files)
 
 Read the relevant file before working in that area — they are the canonical, complete versions of what used to live here:
 
-- `docs/build-and-run.md` — full build / run / deploy reference incl. design-build, push, prod compiler rules, ID-persistence rules
+- `docs/build-and-run.md` — full build / run / deploy reference incl. design-build, push, release-build rules, ID-persistence rules
 - `docs/build-system.md` — build graph internals
 - `docs/sexpr-language.md` — design language spec — read before editing .sexp designs
 - `docs/webserver-api.md` — web server API reference — read before touching server endpoints

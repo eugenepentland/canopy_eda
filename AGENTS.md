@@ -78,34 +78,35 @@ mandatory Guardian feedback log described by the global instructions.
 ## Build and test modes
 
 **Scope: the netlisp tool source only.** These modes drive the toolchain build
-(`zig build …`, `scripts/zig-prod`, `prepare-release.sh`). They exist because
-the tool itself is a compiled Zig program. Design-library changes under
-`projects/designs/` never touch it — `netlisp` is a launcher over the already
-verified binary, so design work never builds, never runs `zig`, and never runs
-`prepare-release.sh`. Continue to the modes only when you are modifying the
-netlisp tool; otherwise work in `projects/designs/` per its own `AGENTS.md`.
+(`zig build …`, `prepare-release.sh`). They exist because the tool itself is a
+compiled Zig program. Design-library changes under `projects/designs/` never
+touch it — `netlisp` is a launcher over the already verified binary, so design
+work never builds, never runs `zig`, and never runs `prepare-release.sh`.
+Continue to the modes only when you are modifying the netlisp tool; otherwise
+work in `projects/designs/` per its own `AGENTS.md`.
 
-Use self-hosted Debug for code iteration and tests, and the pinned production
-compiler's ReleaseSafe output for anything a human actually exercises (dev
-servers, feature review, solver runs, benchmarks). Do not make ad-hoc LLVM
-builds. `scripts/zig-prod` resolves the production compiler from
-`prepare-release.sh` (single source of truth) and forwards all arguments:
+There is exactly one compiler: the official Zig snapshot pinned in
+`.zigversion`, taken from `PATH`. Install it with `scripts/install-zig.sh
+--link`; `build.zig` and both release scripts refuse to run on any other
+version. See `ZIG_TOOLCHAIN.md`.
 
 - **Normal inner loop (schematics, renderers, UI, parsers, serializers):** use
   `zig build --seed=1 -Doptimize=debug` (plain `zig build` is equivalent apart
   from its randomized cache key) and focused tests such as
   `zig build --seed=1 test -Dtest-filter='the behavior being changed'`.
-  The pinned Zig 0.17 master Debug build uses the fast self-hosted backend and
-  is the default for both the application and tests. Follow a focused run with
+  The pinned Zig 0.17 Debug build uses the fast self-hosted backend and is the
+  default for both the application and tests. Follow a focused run with
   `zig build test-compile` when a whole-suite type-check is useful.
-- **Dev servers, feature review, solver runs, and benchmarks:** build with the
-  production compiler in ReleaseSafe:
-  `scripts/zig-prod build --seed=1 -Doptimize=safe -p <own-prefix>`.
+- **Dev servers, feature review, solver runs, and benchmarks:** build
+  ReleaseSafe with the same compiler:
+  `zig build --seed=1 -Doptimize=safe -p <own-prefix>`.
   This is the same artifact class production deploys (about 1.5x faster than
-  Debug on the four-board workload) and builds in seconds because the pinned
-  compiler emits through the self-hosted backend. NEVER pass
-  `-Doptimize=safe` to the PATH `zig` — the official toolchain contains LLVM
-  and a ReleaseSafe build with it takes minutes instead of seconds.
+  Debug on the four-board workload) and compiles in well under a minute,
+  because `build.zig` emits it through Zig's self-hosted x86-64 backend. Do NOT
+  add `-Dllvm`: it is an opt-in escape hatch that trades a multi-minute compile
+  for a faster binary, and no gate, release, or deploy path uses it. Give the
+  build its own `--prefix` so it cannot overwrite the `zig-out/bin/netlisp` a
+  running server or measurement is executing.
   Performance-sensitive focused tests may use
   `zig build --seed=1 test -Dtest-opt=safe -Dtest-filter='...'`.
 - **Full tests:** `zig build --seed=1 test` compiles the test binary in Debug.
@@ -113,17 +114,18 @@ builds. `scripts/zig-prod` resolves the production compiler from
   a genuinely cross-cutting failure; use filters and `test-compile` while
   iterating.
 - **Final release:** rebase onto current `main`, commit the clean tree, and run
-  `.githooks/prepare-release.sh` once. It already runs the unfiltered
-  self-hosted Debug test suite and the sole production self-hosted ReleaseSafe
-  build concurrently; never duplicate the ReleaseSafe build during development. Only
-  that production executable is stripped; every internal Debug artifact keeps
-  symbols. Its exact commit ID comes from validated deployment metadata rather
-  than a compiled option, so non-compiler changes can reuse the verified output.
+  `.githooks/prepare-release.sh` once. It already runs the unfiltered Debug
+  test suite and the sole ReleaseSafe build concurrently; never duplicate the
+  ReleaseSafe build during development. Only that production executable is
+  stripped; every internal Debug artifact keeps symbols. Its exact commit ID
+  comes from validated deployment metadata rather than a compiled option, so
+  non-compiler changes can reuse the verified output.
 
 Backend flags are compiler flags, not Zig build-runner flags:
 `zig build ... -fno-llvm` and `zig build ... -fllvm` are invalid. They may be
-used with direct commands such as `zig build-exe`, but internal netlisp work should
-not override the default self-hosted Debug backend. See `CLAUDE.md` under
-"Build modes and codegen backends" for commands and measurements. Zig 0.17
+used with direct commands such as `zig build-exe`; from `zig build`, the
+backend is chosen with `-Dllvm`. See `ZIG_TOOLCHAIN.md` and
+`docs/build-system.md` under "Build modes and codegen backends" for commands
+and measurements. Zig 0.17
 build options use lowercase enum values (`debug`, `safe`, `fast`, `small`);
 direct compiler `-O` values retain the traditional spellings.
