@@ -520,6 +520,7 @@ test {
     _ = @import("serve/twin_parity.zig");
     _ = @import("serve/upload.zig");
     _ = @import("serve/upload_datasheet.zig");
+    _ = @import("serve/upload_package.zig");
     _ = @import("serve/vfs.zig");
     _ = @import("serve/warmup.zig");
     _ = @import("serve/warm_sched.zig");

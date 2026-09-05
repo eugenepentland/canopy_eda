@@ -50,7 +50,7 @@ pub const HandlerError = std.mem.Allocator.Error || std.Io.Writer.Error ||
 /// routes report a replacement instead of silently leaving a stale (and
 /// possibly dangling) component definition behind — the footgun that made a
 /// re-import look like "footprint + 3D model but no component".
-const ComponentWrite = enum { created, replaced, write_failed };
+pub const ComponentWrite = enum { created, replaced, write_failed };
 
 /// What `importZipBytes` created. Names are the library basenames written
 /// under `lib/{components,footprints,pinouts,models}`. All slices are owned

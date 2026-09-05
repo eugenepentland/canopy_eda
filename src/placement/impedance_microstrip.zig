@@ -7,7 +7,7 @@
 
 const std = @import("std");
 
-const Error = error{OutOfDomain};
+pub const Error = error{OutOfDomain};
 
 /// Free-space wave impedance in the form used by the published equations.
 const eta0: f64 = 120.0 * std.math.pi;

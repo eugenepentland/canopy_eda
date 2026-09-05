@@ -9464,7 +9464,7 @@ fn countRouted(routable: []const RipNet) usize {
     return c;
 }
 
-const RipScore = struct {
+pub const RipScore = struct {
     routed: usize,
     priority: u128,
     trace: f64,

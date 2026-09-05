@@ -24,8 +24,6 @@ src/bench_page.zig::benchOne | fn benchOne( allocator: std.mem.Allocator, arena:
 src/bench_page.zig::cmdBenchPage | fn cmdBenchPage(allocator: std.mem.Allocator, args: []const []const u8) BenchError!void
 src/bench_page.zig::corpus | fn corpus(arena: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error![]const []const u8
 src/bench_page.zig::names value
-src/bench_page.zig::writeResultsJson | fn writeResultsJson(w: *std.Io.Writer, results: []const BoardResult, load: ?LoadReport) json_writer.WriteError!void
-src/bench_page.zig::writeTable | fn writeTable(w: *std.Io.Writer, results: []const BoardResult, reps: usize, load: ?LoadReport) std.Io.Writer.Error!void
 src/bench_route.zig::BenchError value
 src/bench_route.zig::BoardResult struct_
 src/bench_route.zig::Copper struct_
@@ -2401,10 +2399,13 @@ src/placement/impedance_cache.zig::resolvedWidthMm | fn resolvedWidthMm( scratch
 src/placement/impedance_cache.zig::stats | fn stats() Tally
 src/placement/impedance_cache.zig::stats | fn stats(self: *Store) Tally
 src/placement/impedance_cache.zig::widthMm | fn widthMm( self: *Store, scratch: std.mem.Allocator, stack: impedance.Stack, q: Query, ) ?f64
+src/placement/impedance_coupled_microstrip.zig::Error value
 src/placement/impedance_coupled_microstrip.zig::Modes struct_
 src/placement/impedance_coupled_microstrip.zig::analyze | fn analyze(w: f64, h: f64, t: f64, er: f64, gap: f64) Error!Modes
 src/placement/impedance_coupled_microstrip.zig::z0 | fn z0(w: f64, h: f64, t: f64, er: f64, gap: f64) Error!f64
+src/placement/impedance_coupled_stripline.zig::Error value
 src/placement/impedance_coupled_stripline.zig::z0 | fn z0(w: f64, h1: f64, h2: f64, t: f64, er: f64, gap: f64) Error!f64
+src/placement/impedance_cpwg.zig::Error value
 src/placement/impedance_cpwg.zig::Result struct_
 src/placement/impedance_cpwg.zig::analyze | fn analyze(w_mm: f64, h_mm: f64, t_mm: f64, er: f64, gap_mm: f64) Error!Result
 src/placement/impedance_cpwg.zig::z0 | fn z0(w_mm: f64, h_mm: f64, t_mm: f64, er: f64, gap_mm: f64) Error!f64
@@ -2417,6 +2418,7 @@ src/placement/impedance_field.zig::Result struct_
 src/placement/impedance_field.zig::analyze | fn analyze(allocator: std.mem.Allocator, g: Geometry) Error!Result
 src/placement/impedance_field.zig::analyzeOdd | fn analyzeOdd(allocator: std.mem.Allocator, g: Geometry) Error!Result
 src/placement/impedance_microstrip.zig::Analysis struct_
+src/placement/impedance_microstrip.zig::Error value
 src/placement/impedance_microstrip.zig::analyze | fn analyze(w: f64, h: f64, t: f64, er: f64) Error!Analysis
 src/placement/impedance_rules.zig::Physical struct_
 src/placement/impedance_rules.zig::RailModel struct_
@@ -3351,6 +3353,7 @@ src/placement/router.zig::PadObs value
 src/placement/router.zig::PassContext value
 src/placement/router.zig::RipFilter value
 src/placement/router.zig::RipNet struct_
+src/placement/router.zig::RipScore struct_
 src/placement/router.zig::RouteCore struct_
 src/placement/router.zig::RouteCoreResult struct_
 src/placement/router.zig::RouteEvent value
@@ -3648,6 +3651,7 @@ src/pll_loop.zig::CurveFaces struct_
 src/pll_loop.zig::CurvePoint struct_
 src/pll_loop.zig::Mode enum_
 src/pll_loop.zig::Outcome enum_
+src/pll_loop.zig::ParseError value
 src/pll_loop.zig::Polarity enum_
 src/pll_loop.zig::Population struct_
 src/pll_loop.zig::PopulationKind enum_
@@ -3793,6 +3797,7 @@ src/render_svg/branch.zig::drawPassiveChainRight | fn drawPassiveChainRight(_: *
 src/render_svg/branch.zig::drawTerminal | fn drawTerminal(self: *RenderCtx, w: anytype, end_x: f64, cy: f64, term: []const u8, anchor: []const u8) RenderError!void
 src/render_svg/connection.zig::ChainResult struct_
 src/render_svg/connection.zig::DeferredTerminals struct_
+src/render_svg/connection.zig::GroupRender struct_
 src/render_svg/connection.zig::PlannedSpoke struct_
 src/render_svg/connection.zig::deduplicateGroupedSpokes | fn deduplicateGroupedSpokes( self: *RenderCtx, comptime Entry: type, classified: *std.ArrayList(Entry), hub_ref: []const u8, ) error{OutOfMemory}!void
 src/render_svg/connection.zig::findSpokeChain | fn findSpokeChain(self: *RenderCtx, ref_des: []const u8, came_from: Endpoint, visited: *std.StringHashMapUnmanaged(void)) error{OutOfMemory}!ChainResult
@@ -4070,6 +4075,8 @@ src/serve/assembly_debug.zig::ReleaseIdentity struct_
 src/serve/assembly_debug.zig::assemblyDebugPage | fn assemblyDebugPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/assembly_debug.zig::benchColdPage | fn benchColdPage(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?usize
 src/serve/assembly_debug.zig::renderReleasePage | fn renderReleasePage( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, block: *const env_mod.DesignBlock, board_html: []const u8, identity: ReleaseIdentity, ) HandlerError![]const u8
+src/serve/assembly_page_cache.zig::Entry struct_
+src/serve/assembly_page_cache.zig::ServeIn struct_
 src/serve/assembly_page_cache.zig::Store struct_
 src/serve/assembly_page_cache.zig::deinit | fn deinit(self: *Store) void
 src/serve/assembly_page_cache.zig::freeEntry | fn freeEntry(self: *Store, allocator: std.mem.Allocator, key: []const u8, entry: Entry) void
@@ -4449,7 +4456,6 @@ src/serve/mcp_import_tools.zig::toolInspectKicadLayout | fn toolInspectKicadLayo
 src/serve/mcp_import_tools.zig::toolParseKicadNetlist | fn toolParseKicadNetlist( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/mcp_kicad_sch.zig::KicadSchToolError value
 src/serve/mcp_kicad_sch.zig::mcpExportKicadSch | fn mcpExportKicadSch( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) KicadSchToolError!bool
-src/serve/mcp_kicad_sch.zig::validateOutputDir | fn validateOutputDir(dir: []const u8, project_dir: []const u8) ?DirDenial
 src/serve/mcp_notes_tools.zig::dispatchNotes | fn dispatchNotes( allocator: std.mem.Allocator, project_dir: []const u8, tool_name: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!?bool
 src/serve/mcp_notes_tools.zig::dispatchRequirements | fn dispatchRequirements( allocator: std.mem.Allocator, project_dir: []const u8, tool_name: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) component_info.ReqError!?bool
 src/serve/mcp_parts_tools.zig::toolCheckStock | fn toolCheckStock( allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
@@ -4747,7 +4753,9 @@ src/serve/pcb_layout_page.zig::writePerNetJson | fn writePerNetJson(w: *std.Io.W
 src/serve/pcb_layout_page.zig::writeRoutePayload | fn writeRoutePayload( w: *std.Io.Writer, prep: RoutePrep, outcome: RouteOutcome, ) std.Io.Writer.Error!void
 src/serve/pcb_layout_page.zig::writeSavedRoutesJson value
 src/serve/pcb_layout_sync.zig::importKicadLayoutApi value
+src/serve/pcb_page_cache.zig::Entry struct_
 src/serve/pcb_page_cache.zig::Retain struct_
+src/serve/pcb_page_cache.zig::ServeIn struct_
 src/serve/pcb_page_cache.zig::Store struct_
 src/serve/pcb_page_cache.zig::WarmKind enum_
 src/serve/pcb_page_cache.zig::deinit | fn deinit(self: *Store) void
@@ -5083,6 +5091,7 @@ src/serve/thermal_api.zig::solveOver | fn solveOver( alloc: std.mem.Allocator, e
 src/serve/thermal_api.zig::thermalApi | fn thermalApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/thermal_api.zig::thermalFieldApi | fn thermalFieldApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/thermal_api.zig::thermalJson | fn thermalJson( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, ambient_c: ?f64, layout: ?[]const u8, deps: ?*?page_cache.FileSet, ) ThermalError![]const u8
+src/serve/thermal_cache.zig::Entry struct_
 src/serve/thermal_cache.zig::Key struct_
 src/serve/thermal_cache.zig::Store struct_
 src/serve/thermal_cache.zig::active | fn active() ?*Store
@@ -5095,6 +5104,7 @@ src/serve/thermal_page.zig::HandlerError value
 src/serve/thermal_page.zig::benchColdPage | fn benchColdPage(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?usize
 src/serve/thermal_page.zig::thermalPage | fn thermalPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/trace_em_json.zig::write | fn write( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, routed: ?router.RouteResult, ) std.Io.Writer.Error!void
+src/serve/upload.zig::ComponentWrite enum_
 src/serve/upload.zig::HandlerError value
 src/serve/upload.zig::ImportError value
 src/serve/upload.zig::ImportResult struct_
