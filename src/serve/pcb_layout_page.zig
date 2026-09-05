@@ -338,7 +338,7 @@ fn routesWithPerimeterEvidence(alloc: std.mem.Allocator, placement: optimizer.Pl
         var found = false;
         for (vias.items) |via| {
             if (std.ascii.eqlIgnoreCase(via.net, net) and
-                std.math.hypot(via.x - site.x, via.y - site.y) < 1e-6)
+                std.math.hypot(via.x - site.x, via.y - site.y) < drc.eps)
             {
                 found = true;
                 break;
@@ -7381,7 +7381,7 @@ pub fn viasForPoses(
     merged.appendSlice(alloc, ground) catch return null;
     for (fence) |site| {
         var found = false;
-        for (merged.items) |v| if (v.net == site.net and std.math.hypot(v.x - site.x, v.y - site.y) < 1e-6) {
+        for (merged.items) |v| if (v.net == site.net and std.math.hypot(v.x - site.x, v.y - site.y) < drc.eps) {
             found = true;
             break;
         };

@@ -43,6 +43,11 @@ const board_layers = @import("board_layers.zig");
 const env = @import("eval/env.zig");
 const panelize = @import("panelize.zig");
 const net_name = @import("net_name.zig");
+
+/// Numeric-noise floor for this writer's geometry comparisons: degrees when a
+/// pose is tested for axis alignment, board millimetres when a point is tested
+/// against a bound.
+const geom_eps: f64 = 1e-6;
 // Solder-mask margin and copper-pour isolation are no longer hard-coded here —
 // they live in `optimizer.DesignRules` (`mask_margin` / `pour_clearance` /
 // `copper_edge`), resolved from the design's `(design-rules …)` form with the
@@ -1551,7 +1556,7 @@ fn roundrectRatio(pad: geometry.Pad) f64 {
 /// True when `rot` (deg) is a multiple of 90° — an axis-aligned pose an R/O
 /// aperture can represent.
 fn axisAligned(rot: f64) bool {
-    return @abs(rot - @round(rot / 90) * 90) < 1e-6;
+    return @abs(rot - @round(rot / 90) * 90) < geom_eps;
 }
 
 /// Corner-arc segments per rounded corner when a pad is polygonized.
@@ -4373,7 +4378,7 @@ test "padRegion sweeps a roundrect top-right corner arc outward" {
 /// True when some point of `pts` lies strictly past (mx, my) on both axes.
 fn anyBeyond(pts: []const [2]f64, mx: f64, my: f64) bool {
     for (pts) |q| {
-        if (q[0] > mx + 1e-6 and q[1] > my + 1e-6) return true;
+        if (q[0] > mx + geom_eps and q[1] > my + geom_eps) return true;
     }
     return false;
 }

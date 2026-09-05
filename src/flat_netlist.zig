@@ -425,7 +425,7 @@ pub fn applyNetTiesMapped(
     if (aliases) |out| try writeCanonicalAliases(allocator, out, &sets, &canonical, nets.items, &per_pin_renames);
 
     // Rebuild nets list, merging pins by canonical name.
-    var merged: std.StringArrayHashMapUnmanaged(std.ArrayList(FlatPin)) = .empty;
+    var merged: std.array_hash_map.String(std.ArrayList(FlatPin)) = .empty;
     defer {
         var it = merged.iterator();
         while (it.next()) |e| e.value_ptr.deinit(allocator);

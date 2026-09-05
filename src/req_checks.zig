@@ -13,6 +13,10 @@ const derived_checks = @import("req_derived_checks.zig");
 const physical_checks = @import("req_physical_checks.zig");
 const na = @import("eval/net_analysis.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
+
+/// Pico per micro. Capacitance parses to µF and inductance to µH, so a `p`
+/// suffix (1e-12 F / 1e-12 H) is this many of the base unit.
+const pico_per_micro: f64 = 1e-6;
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
 const Check = env_mod.Check;
@@ -827,7 +831,7 @@ pub fn parseMicroHenries(s: []const u8) ?f64 {
 }
 
 fn suffixToMicroHenries(s: []const u8) ?f64 {
-    if (ieql(s, "pH") or ieql(s, "p")) return 1e-6;
+    if (ieql(s, "pH") or ieql(s, "p")) return pico_per_micro;
     if (ieql(s, "nH") or ieql(s, "n")) return 1e-3;
     if (ieql(s, "uH") or ieql(s, "u") or std.mem.startsWith(u8, s, "µ")) return 1.0;
     if (ieql(s, "mH") or ieql(s, "m")) return 1e3;
@@ -1053,7 +1057,7 @@ fn allDigits(s: []const u8) bool {
 }
 
 fn suffixToMicroFarads(s: []const u8) ?f64 {
-    if (ieql(s, "pF") or ieql(s, "p")) return 1e-6;
+    if (ieql(s, "pF") or ieql(s, "p")) return pico_per_micro;
     if (ieql(s, "nF") or ieql(s, "n")) return 1e-3;
     if (ieql(s, "uF") or ieql(s, "u") or std.mem.startsWith(u8, s, "µ")) return 1.0;
     if (ieql(s, "mF") or ieql(s, "m")) return 1e3;

@@ -56,7 +56,7 @@ pub fn plan(
     arena: std.mem.Allocator,
     pins: []const PinAt,
 ) std.mem.Allocator.Error![]const Gang {
-    var by_net: std.StringArrayHashMapUnmanaged(std.ArrayList(PinAt)) = .empty;
+    var by_net: std.array_hash_map.String(std.ArrayList(PinAt)) = .empty;
     defer by_net.deinit(arena);
     for (pins) |p| {
         if (p.net.len == 0) continue;

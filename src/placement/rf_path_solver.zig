@@ -11,6 +11,11 @@
 const std = @import("std");
 const numeric = @import("../numeric.zig");
 
+/// Length slack in board millimetres when a straight run, a trim or a segment
+/// span is compared against a required entry length. Distinct from `eps`,
+/// which is this module's degenerate-quantity guard.
+const len_eps_mm: f64 = 1e-6;
+
 const eps: f64 = 1e-9;
 const c_mm_s: f64 = 299_792_458_000.0;
 
@@ -300,8 +305,8 @@ fn buildCandidate(arena: std.mem.Allocator, in: Input, ratio: f64, transition_fr
         in.policy.weights.excess_length * excess;
 
     const tangents_ok = metrics.entry.start_error_deg <= 2 and metrics.entry.end_error_deg <= 2;
-    const entries_ok = metrics.entry.start_straight_mm + 1e-6 >= start_entry and
-        metrics.entry.end_straight_mm + 1e-6 >= end_entry;
+    const entries_ok = metrics.entry.start_straight_mm + len_eps_mm >= start_entry and
+        metrics.entry.end_straight_mm + len_eps_mm >= end_entry;
     var feasible = tangents_ok and entries_ok and
         metrics.curve.max_abs <= 1.0 / (in.geometry.min_radius_ratio * in.geometry.width_mm) + 1e-8;
     metrics.clearance.ok = feasible;
@@ -403,7 +408,7 @@ pub fn frameFit(start: PortFrame, end: PortFrame, width_mm: f64, min_radius_rati
         result.straight = true;
         result.start_straight_mm = result.length_mm;
         result.end_straight_mm = result.length_mm;
-        result.feasible = result.length_mm + 1e-6 >= entry;
+        result.feasible = result.length_mm + len_eps_mm >= entry;
         return result;
     }
     const apex = portIntersection(start.at, t0, end.at, t1) orelse return result;
@@ -416,7 +421,7 @@ pub fn frameFit(start: PortFrame, end: PortFrame, width_mm: f64, min_radius_rati
     result.start_straight_mm = first - fit.trim_in;
     result.end_straight_mm = last - fit.trim_out;
     result.length_mm = result.start_straight_mm + fit.curve_len + result.end_straight_mm;
-    result.feasible = result.start_straight_mm + 1e-6 >= entry and result.end_straight_mm + 1e-6 >= entry;
+    result.feasible = result.start_straight_mm + len_eps_mm >= entry and result.end_straight_mm + len_eps_mm >= entry;
     return result;
 }
 
@@ -472,8 +477,8 @@ fn portGuide(arena: std.mem.Allocator, in: Input, t0: [2]f64, t1: [2]f64, profil
             });
         }
     }
-    if (dist(before_end, raw.items[raw.items.len - 1]) > 1e-6) try raw.append(arena, before_end);
-    if (dist(in.end.at, raw.items[raw.items.len - 1]) > 1e-6) try raw.append(arena, in.end.at);
+    if (dist(before_end, raw.items[raw.items.len - 1]) > len_eps_mm) try raw.append(arena, before_end);
+    if (dist(in.end.at, raw.items[raw.items.len - 1]) > len_eps_mm) try raw.append(arena, in.end.at);
     return simplify(arena, raw.items);
 }
 
@@ -608,10 +613,10 @@ fn appendLine(arena: std.mem.Allocator, out: *std.ArrayList(Sample), cursor: *[2
 fn fitsClear(pts: []const [2]f64, fits: []const Fit, start_entry: f64, end_entry: f64) bool {
     for (0..pts.len - 1) |i| {
         const used = fits[i].trim_out + fits[i + 1].trim_in;
-        if (used > dist(pts[i], pts[i + 1]) - 1e-6) return false;
+        if (used > dist(pts[i], pts[i + 1]) - len_eps_mm) return false;
     }
-    if (pts.len >= 2 and dist(pts[0], pts[1]) - fits[1].trim_in < start_entry - 1e-6) return false;
-    if (pts.len >= 2 and dist(pts[pts.len - 2], pts[pts.len - 1]) - fits[pts.len - 2].trim_out < end_entry - 1e-6) return false;
+    if (pts.len >= 2 and dist(pts[0], pts[1]) - fits[1].trim_in < start_entry - len_eps_mm) return false;
+    if (pts.len >= 2 and dist(pts[pts.len - 2], pts[pts.len - 1]) - fits[pts.len - 2].trim_out < end_entry - len_eps_mm) return false;
     return true;
 }
 

@@ -84,6 +84,12 @@ const DesignBlock = env.DesignBlock;
 pub const FlatNet = flat_netlist.FlatNet;
 
 // ── Tunables ─────────────────────────────────────────────────────────────
+/// Millimetre / scalar noise floor for the solver's own comparisons: a gap,
+/// a half-extent, a weight sum, a vector magnitude or a cost difference below
+/// it is floating-point rounding, not signal. Same magnitude as `drc.eps` but a
+/// separate fact — this is the solver's tie tolerance, not the checker's
+/// clearance slack, and nothing pre-filters against a DRC threshold with it.
+const solver_eps: f64 = 1e-6;
 const k_decouple: f64 = 0.95; // power/decoupling cap hug + ground-return (highest priority)
 const k_prox: f64 = 0.6; // single-hub signal passive hug (feedback divider, etc.)
 const k_sig: f64 = 0.12; // generic wirelength pull
@@ -1780,7 +1786,7 @@ fn dockEdge(parts: []Part, ic: usize, blocks: []const PackBlock, edge: Edge, gap
         var moved = false;
         for (1..k) |j| {
             const need = (center[j - 1] + half[j - 1] + gap) - (center[j] - half[j]);
-            if (need > 1e-6) {
+            if (need > solver_eps) {
                 const tot = mass[j - 1] + mass[j];
                 center[j - 1] -= need * (mass[j] / tot);
                 center[j] += need * (mass[j - 1] / tot);
@@ -3629,7 +3635,7 @@ fn sidePullTarget(
             has_dir = true;
         }
     }
-    if (!has_dir or sw <= 1e-6) return .{ .x = parts[pi].x, .y = parts[pi].y, .dir = false };
+    if (!has_dir or sw <= solver_eps) return .{ .x = parts[pi].x, .y = parts[pi].y, .dir = false };
     return .{ .x = sx / sw, .y = sy / sw, .dir = true };
 }
 
@@ -3857,7 +3863,7 @@ fn polishCrossings(
             if (i == hi or parts[i].locked) continue;
             for (i + 1..parts.len) |j| {
                 if (j == hi or parts[j].locked) continue;
-                if (@abs(parts[i].hw - parts[j].hw) > 1e-6 or @abs(parts[i].hh - parts[j].hh) > 1e-6) continue;
+                if (@abs(parts[i].hw - parts[j].hw) > solver_eps or @abs(parts[i].hh - parts[j].hh) > solver_eps) continue;
                 // i would move to j's spot and vice versa — skip if that lands a
                 // side-constrained part on the wrong side of the anchor.
                 if (want_side[i] != 255 and posSide(ax, ay, parts[j].x, parts[j].y) != want_side[i]) continue;
@@ -4490,7 +4496,7 @@ fn legInfo(
             cy += q[1];
         }
         const n: f64 = @floatFromInt(pads.len);
-        if (@abs(cx / n - pad.x) > 1e-6 or @abs(cy / n - pad.y) > 1e-6) continue;
+        if (@abs(cx / n - pad.x) > solver_eps or @abs(cy / n - pad.y) > solver_eps) continue;
         var cnt: usize = 0;
         for (scope.parts, 0..) |p, qi| {
             if (qi == scope.owner or qi == skip or p.kind == .hub) continue;
@@ -5846,12 +5852,11 @@ fn arbitratePinSeed(
 /// True when two segments share an endpoint (within a grid epsilon) — two
 /// airwires meeting at the same pad legitimately touch, never "cross".
 fn sharesEndpoint(a: [4]f64, b: [4]f64) bool {
-    const eps = 1e-6;
     const pts_a = [2][2]f64{ .{ a[0], a[1] }, .{ a[2], a[3] } };
     const pts_b = [2][2]f64{ .{ b[0], b[1] }, .{ b[2], b[3] } };
     for (pts_a) |pa| {
         for (pts_b) |pb| {
-            if (@abs(pa[0] - pb[0]) < eps and @abs(pa[1] - pb[1]) < eps) return true;
+            if (@abs(pa[0] - pb[0]) < solver_eps and @abs(pa[1] - pb[1]) < solver_eps) return true;
         }
     }
     return false;
@@ -7438,7 +7443,7 @@ fn makeGroupTerm(arena: std.mem.Allocator, members: []usize, parts: []const Part
     }
     if (n == 0) return .{ .members = members, .hub = hub };
     const mag = std.math.hypot(sx, sy);
-    if (mag < 1e-6) return .{ .members = members, .hub = hub };
+    if (mag < solver_eps) return .{ .members = members, .hub = hub };
     return .{ .members = members, .hub = hub, .dirx = sx / mag, .diry = sy / mag };
 }
 
@@ -8114,7 +8119,7 @@ fn routedPolish(
 
     _ = scratch.reset(.retain_capacity);
     const after_cost = routedObjectiveCost(scratch.allocator(), parts, idx_of, nets, loops, params);
-    if (after_cost > before_cost + 1e-6) {
+    if (after_cost > before_cost + solver_eps) {
         for (parts, 0..) |*p, i| {
             p.x = before[i].x;
             p.y = before[i].y;
@@ -8892,7 +8897,7 @@ fn congestionPenalty(parts: []const Part, idx_of: *std.StringHashMapUnmanaged(us
     const nby = congestBins(maxy - miny);
     const binw = (maxx - minx) / @as(f64, @floatFromInt(nbx));
     const binh = (maxy - miny) / @as(f64, @floatFromInt(nby));
-    if (binw <= 1e-6 or binh <= 1e-6) return 0;
+    if (binw <= solver_eps or binh <= solver_eps) return 0;
     const bin_area = binw * binh;
 
     var dens: [(congest_bins_max * congest_bins_max)]f64 = @splat(0);
@@ -9876,7 +9881,7 @@ fn accumulateLeg(
 ) void {
     const cr = worldRectAt(&force.parts[cap], force.px[cap], force.py[cap], cap_pad);
     const near = nearestHubPadAt(cr, &force.parts[hub], force.px[hub], force.py[hub], hub_pads);
-    if (near.gap < 1e-6) return; // touching → loop leg already minimal
+    if (near.gap < solver_eps) return; // touching → loop leg already minimal
     const np = nearestPoints(cr, near.rect);
     const dx = scale * k_decouple * (np.b.x - np.a.x);
     const dy = scale * k_decouple * (np.b.y - np.a.y);

@@ -7,6 +7,10 @@ const optimizer = @import("optimizer.zig");
 const flat_netlist = @import("../flat_netlist.zig");
 const geometry = @import("geometry.zig");
 
+/// Slack in board millimetres on the shared x band: a sample this far outside
+/// it is still on the band, so a track riding the boundary is not miscounted.
+const band_eps_mm: f64 = 1e-6;
+
 const testing = std.testing;
 
 /// How the copper crosses the gap between two stacked lands: on the band the
@@ -28,7 +32,7 @@ fn gapCrossing(tracks: []const router.Track, gap: [2]f64, band: [2]f64) Crossing
             const y = t.y1 + f * (t.y2 - t.y1);
             if (y < gap[0] or y > gap[1]) continue;
             const x = t.x1 + f * (t.x2 - t.x1);
-            if (x >= band[0] - 1e-6 and x <= band[1] + 1e-6) seen.on_band += 1 else seen.beside += 1;
+            if (x >= band[0] - band_eps_mm and x <= band[1] + band_eps_mm) seen.on_band += 1 else seen.beside += 1;
         }
     }
     return seen;

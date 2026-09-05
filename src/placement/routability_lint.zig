@@ -589,7 +589,7 @@ fn checkCorridors(
     b: *const Board,
     out: *std.ArrayList(Finding),
 ) Allocator.Error!void {
-    var buckets: std.StringArrayHashMapUnmanaged(Bucket) = .empty;
+    var buckets: std.array_hash_map.String(Bucket) = .empty;
     for (b.p.parts, 0..) |_, pi| {
         const pads = b.part_pads[pi];
         for (pads, 0..) |*a, ai| {
@@ -657,7 +657,7 @@ const Bucket = struct {
 
 fn recordCorridor(
     arena: Allocator,
-    buckets: *std.StringArrayHashMapUnmanaged(Bucket),
+    buckets: *std.array_hash_map.String(Bucket),
     mm: CorridorMm,
     a: PadInfo,
     c: PadInfo,
@@ -697,7 +697,7 @@ fn checkViaInPad(
     b: *const Board,
     out: *std.ArrayList(Finding),
 ) Allocator.Error!void {
-    var buckets: std.StringArrayHashMapUnmanaged(ViaBucket) = .empty;
+    var buckets: std.array_hash_map.String(ViaBucket) = .empty;
     for (b.p.parts, 0..) |_, pi| {
         const pads = b.part_pads[pi];
         for (pads, 0..) |*a, ai| {

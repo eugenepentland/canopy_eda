@@ -191,7 +191,7 @@ pub fn group(
     arena: std.mem.Allocator,
     cands: []const Candidate,
 ) std.mem.Allocator.Error![]const Bank {
-    var by_pair: std.StringArrayHashMapUnmanaged(std.ArrayList(u32)) = .empty;
+    var by_pair: std.array_hash_map.String(std.ArrayList(u32)) = .empty;
     defer by_pair.deinit(arena);
     for (cands, 0..) |c, i| {
         const key = try std.fmt.allocPrint(arena, "{s}\x00{s}", .{ c.power, c.gnd });

@@ -259,7 +259,7 @@ fn isRf(name: []const u8) bool {
 /// order — the difference between a deterministic render and a flaky one.
 const LaneTally = struct {
     contacts: usize = 0,
-    names: std.StringArrayHashMapUnmanaged(void) = .empty,
+    names: std.array_hash_map.String(void) = .empty,
 };
 
 /// One interface's contacts split across the lanes, plus how many lanes ended

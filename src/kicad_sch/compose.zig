@@ -787,7 +787,7 @@ const State = struct {
     /// names it, and no pin of it lives anywhere else.
     fn netWires(self: *State, sites: []Site) std.mem.Allocator.Error!void {
         const sizes = self.req.facts.net_pins orelse return;
-        var by_net: std.StringArrayHashMapUnmanaged(std.ArrayList(u32)) = .empty;
+        var by_net: std.array_hash_map.String(std.ArrayList(u32)) = .empty;
         defer by_net.deinit(self.a);
         for (sites, 0..) |s, i| {
             const gop = try by_net.getOrPut(self.a, s.net);

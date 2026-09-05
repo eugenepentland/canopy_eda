@@ -10,6 +10,10 @@ const png = @import("png.zig");
 const font = @import("font5x7.zig");
 const numeric = @import("numeric.zig");
 
+/// Degenerate-segment floor in final-pixel units: a line shorter than this has
+/// no direction to offset a quad along, so it is drawn as its own round cap.
+const degenerate_len_px: f32 = 1e-6;
+
 /// Round `f` to an `i64` pixel index clamped to `[lo, hi]`, guarding the
 /// `@intFromFloat` in float space. A NaN/±inf coordinate (which `@intFromFloat`
 /// would turn into UB in the runtime-safety-off ReleaseSmall prod build) or one
@@ -219,7 +223,7 @@ pub const Canvas = struct {
         const dy = y1 - y0;
         const len = @sqrt(dx * dx + dy * dy);
         const hw = width / 2;
-        if (len < 1e-6) {
+        if (len < degenerate_len_px) {
             self.disc(x0, y0, hw, c, a);
             return;
         }

@@ -37,6 +37,13 @@ pub fn pinFromOrigin(origin_key: []const u8) ?[]const u8 {
     return if (pin.len > 0) pin else null;
 }
 
+/// The SI decimal prefixes a capacitance suffix can carry, named so the switch
+/// below reads as its prefix rather than as a bare exponent.
+const pico: f64 = 1e-12;
+const nano: f64 = 1e-9;
+const micro: f64 = 1e-6;
+const milli: f64 = 1e-3;
+
 /// Parse a capacitance string ("100nF", "4.7uF", "10µF") to farads; 0 when it is
 /// unrecognised. Accepts the UTF-8 micro sign `µ` (0xC2 0xB5) as a `u`-equivalent
 /// so a hand-typed or imported "10µF" bulk cap still clears `bulk_farads` instead
@@ -48,12 +55,12 @@ pub fn capFarads(s: []const u8) f64 {
     const num = std.fmt.parseFloat(f64, s[0..i]) catch return 0;
     if (i >= s.len) return 0;
     // UTF-8 `µ` (U+00B5, bytes 0xC2 0xB5) — the micro sign — reads as `u`.
-    if (s[i] == 0xC2 and i + 1 < s.len and s[i + 1] == 0xB5) return num * 1e-6;
+    if (s[i] == 0xC2 and i + 1 < s.len and s[i + 1] == 0xB5) return num * micro;
     const mult: f64 = switch (s[i]) {
-        'p', 'P' => 1e-12,
-        'n', 'N' => 1e-9,
-        'u', 'U' => 1e-6,
-        'm' => 1e-3,
+        'p', 'P' => pico,
+        'n', 'N' => nano,
+        'u', 'U' => micro,
+        'm' => milli,
         else => return 0,
     };
     return num * mult;
@@ -84,6 +91,10 @@ test "capFarads parses SI prefixes including the micro sign and the bulk thresho
     try testing.expectApproxEqAbs(@as(f64, 4.7e-6), capFarads("4.7uF"), 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 4.7e-6), capFarads("4.7U"), 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 10e-6), capFarads("10µF"), 1e-12);
+    // `m` is the one prefix in the switch nothing pinned, and the only one that
+    // is case-sensitive (no `M`), so a mF bulk cap must not read as 0 F.
+    try testing.expectApproxEqAbs(@as(f64, 1e-3), capFarads("1mF"), 1e-9);
+    try testing.expectEqual(@as(f64, 0), capFarads("1MF"));
     // The micro-sign path must clear the bulk threshold, or a µF reservoir reads
     // as an HF cap and is wrongly required to name a pin.
     try testing.expect(capFarads("10µF") >= bulk_farads);

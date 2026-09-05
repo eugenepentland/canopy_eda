@@ -225,9 +225,9 @@ const test_bom = @import("../bom.zig");
 fn errorIdCounts(
     allocator: std.mem.Allocator,
     body: []const u8,
-) !std.StringArrayHashMapUnmanaged(usize) {
+) !std.array_hash_map.String(usize) {
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, allocator, body, .{});
-    var counts = std.StringArrayHashMapUnmanaged(usize).empty;
+    var counts = std.array_hash_map.String(usize).empty;
     for (parsed.object.get("errors").?.array.items) |item| {
         const id = try allocator.dupe(u8, item.object.get("id").?.string);
         const slot = try counts.getOrPutValue(allocator, id, 0);

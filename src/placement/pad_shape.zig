@@ -16,6 +16,10 @@ const optimizer = @import("optimizer.zig");
 const geometry = @import("geometry.zig");
 const poly_scanline = @import("../poly_scanline.zig");
 
+/// Slack in DEGREES on a pad's total pose when deciding whether it is a
+/// quarter turn: within this the exact axis-aligned box is still correct.
+const ortho_eps_deg: f64 = 1e-6;
+
 /// A pad's world-space collision shape: its bounding box (always) plus, for a
 /// non-rectangular pad, the real copper outline in world mm (`poly`; empty ⇒
 /// the box is exact). The box is the broad phase; the outline is the exact phase.
@@ -155,7 +159,7 @@ pub fn worldShape(arena: std.mem.Allocator, part: optimizer.Part, pad: geometry.
     // path).
     const tot = part.rot + pad.rot;
     const q = @mod(@round(tot), 360);
-    if (@abs(tot - @round(tot / 90) * 90) < 1e-6) {
+    if (@abs(tot - @round(tot / 90) * 90) < ortho_eps_deg) {
         const swap = q == 90 or q == 270;
         const hw = if (swap) pad.h / 2 else pad.w / 2;
         const hh = if (swap) pad.w / 2 else pad.h / 2;

@@ -8,6 +8,10 @@ const req_checks = @import("req_checks.zig");
 const na = @import("eval/net_analysis.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 
+/// Amperes per microampere — the declared SET current is in µA, Ohm's law is
+/// in amperes.
+const amps_per_microamp: f64 = 1e-6;
+
 const DesignBlock = env.DesignBlock;
 const Instance = env.Instance;
 const FeedbackDividerCheck = @FieldType(env.Check, "feedback_divider");
@@ -152,7 +156,7 @@ fn setResistorOutput(
     if (resistor.ohms <= 0 or check.current_ua <= 0) {
         return resultFmt(allocator, false, "SET current and resistance must be positive", .{});
     }
-    const calculated = resistor.ohms * check.current_ua * 1e-6;
+    const calculated = resistor.ohms * check.current_ua * amps_per_microamp;
     const expected = expectedVoltage(block, output_net) orelse
         return resultFmt(
             allocator,

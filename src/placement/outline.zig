@@ -13,6 +13,11 @@ const std = @import("std");
 const numeric = @import("../numeric.zig");
 const optimizer = @import("optimizer.zig");
 
+/// Degenerate-geometry floor for the fillet solve: a leg length (mm), a sine,
+/// a half-angle tangent or a sweep overshoot (radians) below it is rounding
+/// noise, and the corner has no fillet to build.
+const geom_eps: f64 = 1e-6;
+
 /// Even-odd ray-cast point-in-polygon test. Points exactly on an edge may
 /// land on either side (callers that care use `signedInset`'s magnitude).
 pub fn contains(poly: []const [2]f64, x: f64, y: f64) bool {
@@ -241,16 +246,16 @@ fn cornerFillet(a: [2]f64, b: [2]f64, c: [2]f64, want: f64) ?CornerFillet {
     const y2 = c[1] - b[1];
     const l1 = std.math.hypot(x1, y1);
     const l2 = std.math.hypot(x2, y2);
-    if (l1 < 1e-6 or l2 < 1e-6) return null;
+    if (l1 < geom_eps or l2 < geom_eps) return null;
     const ux = x1 / l1;
     const uy = y1 / l1;
     const vx = x2 / l2;
     const vy = y2 / l2;
     const dot = std.math.clamp(ux * vx + uy * vy, -1, 1);
     const cross = ux * vy - uy * vx;
-    if (@abs(cross) < 1e-6 or dot < -0.995) return null;
+    if (@abs(cross) < geom_eps or dot < -0.995) return null;
     const tangent = @tan(std.math.acos(dot) / 2);
-    if (!(tangent > 1e-6)) return null;
+    if (!(tangent > geom_eps)) return null;
     const trim = @min(want * tangent, @min(l1 * 0.45, l2 * 0.45));
     if (trim < 0.01) return null;
     const radius = trim / tangent;
@@ -269,7 +274,7 @@ fn cornerFillet(a: [2]f64, b: [2]f64, c: [2]f64, want: f64) ?CornerFillet {
         while (sweep > 0) sweep -= std.math.tau;
         while (sweep < -std.math.tau) sweep += std.math.tau;
     }
-    if (@abs(sweep) > std.math.pi + 1e-6) return null;
+    if (@abs(sweep) > std.math.pi + geom_eps) return null;
     const mid_angle = start + sweep / 2;
     return .{
         .p1 = p1,

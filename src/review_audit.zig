@@ -637,7 +637,7 @@ fn collectFab(arena: std.mem.Allocator, project_dir: []const u8, name: []const u
             .dnp = jsonInt(stats, "dnp_parts"),
         };
     };
-    var counts: std.StringArrayHashMapUnmanaged(usize) = .empty;
+    var counts: std.array_hash_map.String(usize) = .empty;
     if (root == .object) if (root.object.get("raw_drc")) |raw| if (raw == .array) {
         for (raw.array.items) |item| {
             const severity = jsonStr(item, "severity");

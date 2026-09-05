@@ -271,7 +271,7 @@ const Builder = struct {
     /// internal footprint id -> KiCad name + pads.
     fp: std.StringHashMapUnmanaged(FpInfo) = .empty,
     /// component key -> accumulated symbol requirements, in first-use order.
-    comps: std.StringArrayHashMapUnmanaged(Comp) = .empty,
+    comps: std.array_hash_map.String(Comp) = .empty,
     shapes: std.ArrayList(Shape) = .empty,
     /// flat index -> the source instance it was flattened from.
     src: std.ArrayList(*const env_mod.Instance) = .empty,
@@ -636,7 +636,7 @@ const Builder = struct {
     /// Partition the flattened instances into documents, in sheet-key order.
     fn partition(self: *Builder) std.mem.Allocator.Error![]SheetPlan {
         var order: std.ArrayList(u64) = .empty;
-        var members: std.AutoArrayHashMapUnmanaged(u64, std.ArrayList(u32)) = .empty;
+        var members: std.array_hash_map.Auto(u64, std.ArrayList(u32)) = .empty;
         for (self.instances, 0..) |_, i| {
             const key = self.sheetKeyOf(i);
             const gop = try members.getOrPut(self.a, key);
@@ -852,7 +852,7 @@ const Builder = struct {
         var raw: std.ArrayList(compose.Placeable) = .empty;
         for (members) |m| try self.unitsOf(m, &raw);
 
-        var buckets: std.AutoArrayHashMapUnmanaged(u64, std.ArrayList(compose.Placeable)) = .empty;
+        var buckets: std.array_hash_map.Auto(u64, std.ArrayList(compose.Placeable)) = .empty;
         var order: std.ArrayList(u64) = .empty;
         for (raw.items) |it| {
             const gop = try buckets.getOrPut(self.a, it.group);

@@ -36,6 +36,11 @@ const pad_shape = @import("pad_shape.zig");
 const outline = @import("outline.zig");
 const numeric = @import("../numeric.zig");
 
+/// Radius slack in board millimetres when a measured arc radius is compared
+/// against a floor. Distinct from `eps` above, which is this module's
+/// degenerate-length guard.
+const radius_eps_mm: f64 = 1e-6;
+
 /// The RF rule of thumb: DEFAULT minimum centerline bend radius = 3x trace
 /// width. A `(net-class … (min-bend-radius N))` overrides this floor per net
 /// (see `floorRatio`).
@@ -691,7 +696,7 @@ const Smoother = struct {
                 end += 1;
             if (end >= i + 2) {
                 if (circularRunRadius(chain, i, end)) |radius| {
-                    if (radius + 1e-6 < 0.95 * info.radius)
+                    if (radius + radius_eps_mm < 0.95 * info.radius)
                         try appendMeasuredSharp(self.sink, info, p[(i + end) / 2], radius);
                     i = end + 1;
                     continue;
@@ -859,7 +864,7 @@ const Smoother = struct {
         const t_cap = info.aim_ratio * width * tan_h;
         const t = @min(@min(avail_in, avail_out), t_cap);
         const r_eff = t / tan_h;
-        if (r_eff + 1e-6 < 0.95 * info.radius) return null; // merge must reach ~floor
+        if (r_eff + radius_eps_mm < 0.95 * info.radius) return null; // merge must reach ~floor
         // Build the merged fillet and vet arc + the two extended outer legs.
         const g = BendGeom{
             .apex = v,
@@ -994,14 +999,14 @@ const Smoother = struct {
             try sink.arcs.append(sink.arena, b.arc2);
             trims.e[i - 1] += b.tin;
             trims.s[i] += b.tout;
-            if (b.min_r + 1e-6 < tol_r) try flagSharp(sink, c, b.min_r, b.join);
+            if (b.min_r + radius_eps_mm < tol_r) try flagSharp(sink, c, b.min_r, b.join);
             return;
         }
         if (sym) |s| {
             try sink.arcs.append(sink.arena, s.arc);
             trims.e[i - 1] += s.t;
             trims.s[i] += s.t;
-            if (s.min_r + 1e-6 < tol_r) try flagSharp(sink, c, s.min_r, s.mid);
+            if (s.min_r + radius_eps_mm < tol_r) try flagSharp(sink, c, s.min_r, s.mid);
             return;
         }
         // No arc placed at all: a shallow kink too starved for any arc is
