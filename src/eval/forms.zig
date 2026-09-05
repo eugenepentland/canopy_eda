@@ -832,14 +832,24 @@ pub const scope_form_docs = blk: {
             "resistor likewise carries a known envelope onto the correlated node beyond it (an RC " ++
             "filter's tap, a termination or pull-up's far side, a bias tee fed through its choke), and " ++
             "a node joined to known nets only through series resistors and device pins is bounded by " ++
-            "the supplies those devices reach — both derived, never authored. This form is " ++
-            "for the nets no topology walk can bound — an enable a 3.3 V GPIO drives, a divider tap " ++
-            "sitting between two declared rails, a bus a transceiver holds. The net is named the way a " ++
+            "the supplies those devices reach, capped by any `(electrical … (max-voltage V))` the pin " ++
+            "declares. A divider tap between two bounded nets is solved by the leg ratio; a regulator's " ++
+            "FB pin sits at its `(feedback-divider … (reference-v V))`; a SET pin sits at " ++
+            "I_SET x R_SET from `(set-resistor-output …)`; and a bypassed bias node no conductor reaches " ++
+            "falls back to its pin's declared maximum — all derived, never authored. This form is " ++
+            "for the nets no walk can bound — an enable a 3.3 V GPIO drives, a bus a transceiver " ++
+            "holds, a pin whose datasheet corners are tighter than the rule. The net is named the way a " ++
             "rail is: the FLATTENED name, so a board-level declaration reaches the module-local net " ++
             "bridged onto it and a module-internal node is nameable as \"sub-block/NET\". The optional " ++
             "trailing string records why. A declaration that fails to COVER the envelope the design " ++
             "already proves for that net is a failed assertion, not a silent override — declaring an " ++
-            "enable at 3.3 V on a net a 5 V rail also reaches states something untrue.",
+            "enable at 3.3 V on a net a 5 V rail also reaches states something untrue. " ++
+            "MODULES OWN THEIR OWN NODES: written inside a `(defmodule …)`/`(block …)` body the net is " ++
+            "MODULE-LOCAL and LO/HI are evaluated expressions of the module's parameters " ++
+            "((rated (* vout 0.97) (* vout 1.03))), so a SET/FB/bias node is stated ONCE in the module " ++
+            "and applies to `sub-block/NET` at every instantiation, at that instantiation's numbers. " ++
+            "A board declaration for the same flattened net may restate or WIDEN what the module " ++
+            "claims; narrowing it is the same failed assertion, because the module owns the node.",
     } };
     t[@backingInt(ScopeForm.fabrication_layer)] = .{ .scope = tl, .doc = .{
         .syntax = "(fabrication-layer \"FILE.gbr\" (side top|bottom) (material \"NAME\") (thickness MM) " ++

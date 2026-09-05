@@ -450,7 +450,55 @@ pass, because nothing was measured; author the rating
 (`(cap-0402 "1uF" x7r "10%" "16V")`) and it decides. A net whose envelope the
 tool cannot derive is **unproven** too, naming the net: give the rail a
 `(port … (nominal …))` upstream, or state it outright with
-`(net-envelope "VBUS" (rated 0 5.5) "USB VBUS")`.
+`(net-envelope "VBUS" (rated 0 5.5) "USB VBUS")`. Before reaching for that,
+check what the library already says: a `(feedback-divider … (reference-v V))`
+requirement bounds its FB pin at the reference, a `(set-resistor-output …)` one
+bounds its SET pin at I_SET x R_SET, a divider tap between two bounded nets is
+solved by the leg ratio, and an `(electrical "PIN" … (max-voltage V))`
+declaration bounds the bypassed bias node behind that pin. `netlisp net
+<design> <net>` shows which rule answered, under `envelope.origin`.
+
+### Module-owned envelopes
+
+Most nets need no `(net-envelope …)` at all: a rail's envelope follows its own
+declaration and carries across ferrite beads and series resistors onto the
+nodes beyond them. The nets that *do* need one are usually a module's own
+internals — a regulator's SET or FB node, a bias pin behind its bypass cap —
+and those are a function of the module's parameters, not of the board. Writing
+them at board level means restating the same datasheet arithmetic once per
+instantiation, in the board file, about parts the board cannot see.
+
+So `(net-envelope …)` is a module form too. Inside a `(defmodule …)` /
+`(block …)` body the net name is **module-local**, and `LO`/`HI` are
+**evaluated expressions** of the module's own parameters:
+
+```lisp
+(defmodule bcuda-lt3045-ldo ((vout 3.3))
+  (design-block (fmt "~V LDO (LT3045)" vout)
+    (instance "U1" lt3045edd#pbf (pin 7 "SET") …)
+    (instance "R_SET" (res-0402-0p1 rset-str "0.1%") (pin 1 "SET") (pin 2 "GND"))
+
+    ;; Stated ONCE here, not once per board that instantiates this module.
+    (net-envelope "SET" (rated (* vout 0.97) (* vout 1.03))
+      "LT3045 SET sources 98/100/102 uA into R_SET = vout x 10k, so the node
+       sits within 3 % of the programmed output")))
+```
+
+On flatten the declaration lands on `sub-block/NET` at each instantiation's own
+numbers — `(sub-block "ldo_5v" (bcuda-lt3045-ldo (vout 5.0)) …)` gives
+`ldo_5v/SET` 4.85–5.15 V, and `(vout 3.3)` gives `ldo_3v3a/SET` 3.201–3.399 V —
+and it is reported as `declared in module ldo_5v`, so a reviewer can see which
+body made the claim.
+
+**Precedence.** A module-scope declaration is checked against what the parent's
+own topology derives; the board's own declarations are then checked against
+*that* result. So a board may restate or **widen** what a module claims about
+the module's insides, and a board declaration that **narrows** it is the same
+failed assertion an under-covering declaration always was — the module owns the
+node it owns, and two statements about one net cannot disagree. `netlisp net
+<design> <net>` reports the winning envelope, its `source`
+(`authored`/`derived`), the rule that established it and the ferrite-class root
+it was resolved on.
 
 **`(max-distance (pin "P") (kind C|R|L|any) (mm D) [(min-value X)] [(max-value Y)])`**
 — the nearest matching passive on pin P's net must sit within D mm of that pad

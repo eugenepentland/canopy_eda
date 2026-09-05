@@ -14,6 +14,7 @@
 const std = @import("std");
 const env = @import("eval/env.zig");
 const na = @import("eval/net_analysis.zig");
+const net_envelopes = @import("eval/net_envelopes.zig");
 const power_sequencing = @import("eval/power_sequencing.zig");
 const req = @import("req_checks.zig");
 
@@ -163,17 +164,15 @@ fn unprovenEnvelope(allocator: std.mem.Allocator, net: []const u8) Result {
     );
 }
 
-/// The worst-case DC window on `net`, read from the block's derived envelope
-/// table. Ground-class names are 0 V by definition — the same rule
-/// `fab_readiness.railVoltage` applies before it consults the table, so a cap
-/// to GND is not reported unproven for want of a declaration nobody writes.
+/// The worst-case DC window on `net`, read through the ONE lookup rule every
+/// rating surface shares (`eval/net_envelopes.lookup`): ground-class names are
+/// 0 V by definition, then declared rails, then the derived envelope table.
+/// This check used to carry its own copy of that rule minus the rail arm, so a
+/// net a `PowerRail` bounded but the envelope table did not came back unproven
+/// here while `fab_readiness.railVoltage` resolved it.
 fn envelopeFor(block: *const DesignBlock, net: []const u8) ?Envelope {
-    const base = na.baseNetName(req.netBase(net));
-    if (na.isRatingZeroVolts(base)) return .{ .min = 0, .max = 0 };
-    for (block.net_envelopes) |e| {
-        if (std.ascii.eqlIgnoreCase(base, e.net)) return .{ .min = e.min, .max = e.max };
-    }
-    return null;
+    const found = net_envelopes.lookup(block, req.netBase(net)) orelse return null;
+    return .{ .min = found.min, .max = found.max };
 }
 
 /// A capacitor's authored voltage rating in volts, or null when it carries

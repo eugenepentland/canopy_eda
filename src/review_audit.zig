@@ -761,7 +761,7 @@ fn collectBlockTopology(block: *const env.DesignBlock, inventory: *Inventory) vo
         recordVoltage(inventory, rail.rated_voltage.min);
         recordVoltage(inventory, rail.rated_voltage.max);
     }
-    for (block.net_envelopes) |envelope| {
+    for (block.envelopes.published) |envelope| {
         noteNameCapabilities(inventory, envelope.net);
         recordVoltage(inventory, envelope.min);
         recordVoltage(inventory, envelope.max);

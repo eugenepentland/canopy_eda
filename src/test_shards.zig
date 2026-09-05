@@ -574,6 +574,7 @@ pub const shards: []const []const []const u8 = &.{
         "erc.test.",
         "erc_interface.test.",
         "eval.net_envelopes.test.",
+        "eval.net_envelope_rules.test.",
         "eval.rails.test.",
         "eval.net_suggest.test.",
         "eval.suggest.test.",
@@ -692,6 +693,17 @@ test {
         if (std.mem.eql(u8, filter, "serve.pcb_subseeds.test.")) claimed = true;
     }
     try std.testing.expect(claimed);
+}
+
+// spec: Development pipeline - The library-fact envelope rules remain claimed by the shard manifest
+test {
+    var claims: usize = 0;
+    for (shards) |shard| {
+        for (shard) |filter| {
+            if (std.mem.eql(u8, filter, "eval.net_envelope_rules.test.")) claims += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), claims);
 }
 
 // spec: Development pipeline - The saved-pose identity tests remain claimed by the shard manifest

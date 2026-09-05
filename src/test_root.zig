@@ -99,6 +99,7 @@ test {
     _ = @import("eval/power_budget.zig");
     _ = @import("eval/power_sequencing.zig");
     _ = @import("eval/net_envelopes.zig");
+    _ = @import("eval/net_envelope_rules.zig");
     _ = @import("eval/rails.zig");
     _ = @import("eval/scope_control.zig");
     _ = @import("eval/sidecars.zig");
