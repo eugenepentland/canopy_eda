@@ -1,11 +1,26 @@
 //! Single-line vector glyphs for fabricated silkscreen text.
 //!
 //! The face is Hershey Simplex — the single-stroke sans drawn by Dr. A. V.
-//! Hershey at the U.S. Naval Weapons Laboratory (1967) and distributed as
-//! public-domain coordinate data; the table below is transcribed from the
-//! classic 95-glyph ASCII array. It replaced a hand-authored technical
-//! alphabet because a face designed for plotters and engravers stays legible
-//! at silkscreen sizes where improvised letterforms smear together.
+//! Hershey (1967) and distributed as public-domain coordinate data; the table
+//! below is transcribed from the classic 95-glyph ASCII array. It replaced a
+//! hand-authored technical alphabet because a face designed for plotters and
+//! engravers stays legible at silkscreen sizes where improvised letterforms
+//! smear together.
+//!
+//! THIRD-PARTY FONT DATA. Copyright: 1967 Dr. A. V. Hershey, James Hurt. The
+//! Hershey distribution permits any use, commercial or otherwise, provided
+//! these acknowledgements travel with the font data:
+//!
+//!   - The Hershey Fonts were originally created by Dr. A. V. Hershey while
+//!     working at the U. S. National Bureau of Standards.
+//!   - The format of the Font data in this distribution was originally
+//!     created by James Hurt, Cognition, Inc., 900 Technology Park Drive,
+//!     Billerica, MA 01821.
+//!
+//! It also forbids redistributing the data in the U.S. NTIS format, which
+//! this table is not. The full notice is in THIRD_PARTY_NOTICES.md; the same
+//! data appears as `SILK_FONT` in `serve/assets/pcb_board.js`, which carries
+//! the acknowledgement too.
 //!
 //! Like KiCad's default PCB face, glyphs are move/draw pen paths whose scale
 //! is independent of line thickness, which Gerber preserves at 1 µm precision.

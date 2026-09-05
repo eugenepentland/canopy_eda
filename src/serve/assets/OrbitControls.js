@@ -1,3 +1,15 @@
+/*!
+ * @license
+ * OrbitControls from three.js r128 — examples/js/controls/OrbitControls.js
+ * Copyright 2010-2021 Three.js Authors
+ * SPDX-License-Identifier: MIT
+ *
+ * Upstream ships this file with no per-file notice; this banner is the only
+ * addition. Everything below it is byte-for-byte the r128 release, sha256
+ * 02bb4ade710f3e607329e37a21f098bc3ac70eb6e33daf8a65e79f4db785e7b2.
+ *
+ * Full licence text: THIRD_PARTY_NOTICES.md in the repository root.
+ */
 ( function () {
 
 	// Unlike TrackballControls, it maintains the "up" direction object.up (+Y by default).

@@ -170,4 +170,6 @@ zig build run -- import-kicad-layout --project-dir my-board my-board
 
 [MIT](LICENSE) © 2026 Eugene Pentland. Vendored Zig packages under
 `vendor/` and the browser libraries under `src/serve/assets/` keep their
-own licenses.
+own licenses. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists every
+one of them — component, version, license and where its text lives — and
+flags the two that are not permissively licensed.
