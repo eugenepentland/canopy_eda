@@ -23,6 +23,7 @@ const interfaces = @import("interfaces.zig");
 const forms = @import("forms.zig");
 const footprint_pads = @import("footprint_pads.zig");
 const value_kind = @import("value_kind.zig");
+const attrs_mod = @import("attrs.zig");
 const SpecialForm = forms.SpecialForm;
 const Builtin = forms.Builtin;
 pub const ids = @import("ids.zig");
@@ -585,25 +586,26 @@ pub const Evaluator = struct {
         // Component-family invocation: (cap "100nF") or (cap "10pF" np0)
         if (self.component_cache.get(head_name)) |comp| {
             if (comp.is_family and args.len >= 1) {
-                const val = try self.evalNode(args[0], env);
-                const val_str = val.asString() orelse {
-                    self.setErrorFmt(args[0].span, "({s} …) value must be a string, e.g. ({s} \"100nF\")", .{ head_name, head_name });
-                    return EvalError.TypeError;
+                // A unit-bearing literal is a value spelling in its own right:
+                // `(cap-0402 100nF)` reads better than the quoted form and,
+                // unlike a bare `1e-7`, still says which quantity it is.
+                const val_str = if (args[0].literal) |literal| literal else blk: {
+                    const val = try self.evalNode(args[0], env);
+                    break :blk val.asString() orelse {
+                        self.setErrorFmt(args[0].span, "({s} …) value must be a string or a unit-bearing literal, e.g. ({s} \"100nF\") or ({s} 100nF)", .{ head_name, head_name, head_name });
+                        return EvalError.TypeError;
+                    };
                 };
                 if (!value_kind.accepts(comp.param_type, val_str)) {
                     self.setError(args[0].span, value_kind.mismatchMessage(self.allocator, head_name, comp.param_type, val_str));
                     return EvalError.TypeError;
                 }
-                // Collect additional args as schematic attributes
-                var attrs: std.ArrayList([]const u8) = .empty;
-                for (args[1..]) |attr_node| {
-                    const attr = attributeText(attr_node, env) orelse continue;
-                    attrs.append(self.allocator, attr) catch continue;
-                }
+                const collected = try self.collectAttributes(head_name, args[1..], env);
                 return .{ .component_instance = .{
                     .family = head_name,
                     .value = val_str,
-                    .attrs = attrs.toOwnedSlice(self.allocator) catch &.{},
+                    .attrs = collected.attrs,
+                    .typed_attrs = collected.typed,
                 } };
             }
             return .{ .component = head_name };
@@ -615,6 +617,100 @@ pub const Evaluator = struct {
         self.setError(head.span, suggest.unboundMessage(self, head_name, env));
         return EvalError.UnboundVariable;
     }
+
+    /// The trailing arguments of a component-family call, split into the raw
+    /// attribute list every existing consumer already reads and the typed
+    /// slots that land on the instance as properties.
+    ///
+    /// Both authored spellings produce the same pair:
+    ///
+    /// ```
+    /// (cap-0402 "1uF" x7r "10%" "25V")
+    /// (cap-0402 "1uF" (dielectric x7r) (tolerance 10%) (rating 25V))
+    /// ```
+    ///
+    /// A KEYED attribute is checked: an unknown key is an error with a
+    /// did-you-mean, and a slot filled twice is an error, because a keyed form
+    /// is new syntax with no legacy spellings to protect. A BARE attribute is
+    /// classified but never rejected — the corpus is full of words nothing can
+    /// place (`DNP`, `green`, `jumper`, a bead's `600R@100MHz`), and a second
+    /// bare attribute landing in a filled slot keeps the first rather than
+    /// failing a design that evaluated yesterday.
+    fn collectAttributes(
+        self: *Evaluator,
+        family: []const u8,
+        nodes: []const Node,
+        env: *Env,
+    ) EvalError!CollectedAttributes {
+        var raw: std.ArrayList([]const u8) = .empty;
+        var typed: std.ArrayList(env_mod.Property) = .empty;
+        for (nodes) |node| {
+            if (node.asList()) |children| {
+                const keyed = try self.keyedAttribute(family, node, children, env);
+                for (typed.items) |existing| {
+                    if (!std.ascii.eqlIgnoreCase(existing.key, keyed.key)) continue;
+                    self.setErrorFmt(node.span, "({s} …) sets '{s}' twice ('{s}' then '{s}') — give the attribute once", .{ family, keyed.key, existing.value, keyed.value });
+                    return EvalError.InvalidForm;
+                }
+                typed.append(self.allocator, keyed) catch continue;
+                const slot = attrs_mod.slotForKey(keyed.key) orelse continue;
+                // Only a parts-table selection column belongs in the raw list:
+                // `PartsDb.lookupStrict` demands that every raw attribute
+                // appear on the chosen row, and no row carries an esr/esl.
+                if (slot.isSelectionColumn()) raw.append(self.allocator, keyed.value) catch continue;
+                continue;
+            }
+            const text = attributeText(node, env) orelse continue;
+            raw.append(self.allocator, text) catch continue;
+            const slot = attrs_mod.classify(text) orelse continue;
+            const key = slot.propertyKey();
+            var filled = false;
+            for (typed.items) |existing| {
+                if (std.ascii.eqlIgnoreCase(existing.key, key)) filled = true;
+            }
+            if (filled) continue;
+            typed.append(self.allocator, .{ .key = key, .value = text }) catch continue;
+        }
+        return .{
+            .attrs = raw.toOwnedSlice(self.allocator) catch &.{},
+            .typed = typed.toOwnedSlice(self.allocator) catch &.{},
+        };
+    }
+
+    /// One `(key VALUE)` attribute sub-form, resolved to the property it sets.
+    fn keyedAttribute(
+        self: *Evaluator,
+        family: []const u8,
+        node: Node,
+        children: []const Node,
+        env: *Env,
+    ) EvalError!env_mod.Property {
+        const key = if (children.len > 0) children[0].asAtom() orelse "" else "";
+        const slot = attrs_mod.slotForKey(key) orelse {
+            if (attrs_mod.suggestKey(key)) |near| {
+                self.setErrorFmt(node.span, "({s} …) has no attribute '{s}' — did you mean ({s} …)?", .{ family, key, near });
+            } else {
+                self.setErrorFmt(node.span, "({s} …) has no attribute '{s}' — known attributes: {s}", .{ family, key, attrs_mod.key_list });
+            }
+            return EvalError.InvalidForm;
+        };
+        if (children.len != 2) {
+            self.setErrorFmt(node.span, "({s} …) expects exactly one value, e.g. ({s} 25V)", .{ key, key });
+            return EvalError.ArityError;
+        }
+        const text = attributeText(children[1], env) orelse {
+            self.setErrorFmt(children[1].span, "({s} …) value must be a literal, word, or string", .{key});
+            return EvalError.TypeError;
+        };
+        return .{ .key = slot.propertyKey(), .value = text };
+    }
+};
+
+/// The two views of a family call's trailing arguments — see
+/// `Evaluator.collectAttributes`.
+const CollectedAttributes = struct {
+    attrs: []const []const u8,
+    typed: []const env_mod.Property,
 };
 
 /// Resolve one trailing argument of a component-family call — `x7r` in
@@ -641,6 +737,9 @@ pub const Evaluator = struct {
 /// strings are always literal, and everything else (a list, a number) is
 /// dropped exactly as before.
 fn attributeText(node: Node, env: *Env) ?[]const u8 {
+    // A unit-bearing literal (`25V`, `10%`, `0.4nH`) is source text that has
+    // already been decoded to an f64; its spelling is the attribute.
+    if (node.literal) |suffixed| return suffixed;
     if (node.asString()) |literal| return literal;
     const word = node.asAtom() orelse return null;
     const bound = env.get(word) orelse return word;
@@ -675,6 +774,94 @@ test "component-family attributes resolve parameters and keep bare words" {
     try std.testing.expectEqualStrings("1%", attrs[0]);
     try std.testing.expectEqualStrings("jumper", attrs[1]);
     try std.testing.expectEqualStrings("0.063W", attrs[2]);
+}
+
+/// Assert that two family calls collected the same raw attribute list and the
+/// same typed slots, in the same order.
+fn expectSameAttributes(
+    raw_a: []const []const u8,
+    raw_b: []const []const u8,
+    typed_a: []const env_mod.Property,
+    typed_b: []const env_mod.Property,
+) !void {
+    try std.testing.expectEqual(raw_a.len, raw_b.len);
+    for (raw_a, raw_b) |a, b| try std.testing.expectEqualStrings(a, b);
+    try std.testing.expectEqual(typed_a.len, typed_b.len);
+    for (typed_a, typed_b) |a, b| {
+        try std.testing.expectEqualStrings(a.key, b.key);
+        try std.testing.expectEqualStrings(a.value, b.value);
+    }
+}
+
+/// An evaluator holding one parameterised passive family, for the
+/// attribute-collection tests below.
+fn familyEvaluator(alloc: std.mem.Allocator) !Evaluator {
+    var eval = Evaluator.init(alloc, ".");
+    try eval.component_cache.put(alloc, "cap-0402", .{
+        .name = "cap-0402",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = true,
+        .param_type = "capacitance",
+    });
+    return eval;
+}
+
+// spec: eval/evaluator - Keyed and bare component-family attributes produce the same raw attributes and the same typed slots
+test "keyed and bare family attributes are equivalent" {
+    // page_allocator: evaluator-allocated attribute slices are never freed.
+    const alloc = std.heap.page_allocator;
+    var eval = try familyEvaluator(alloc);
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(
+        alloc,
+        "(cap-0402 \"1uF\" x7r \"10%\" \"25V\")" ++
+            " (cap-0402 \"1uF\" (dielectric x7r) (tolerance 10%) (rating 25V))" ++
+            " (cap-0402 100nF (esr 10mR) DNP)",
+    );
+    const bare = (try eval.evalNode(nodes[0], &env)).component_instance;
+    const keyed = (try eval.evalNode(nodes[1], &env)).component_instance;
+    try expectSameAttributes(bare.attrs, keyed.attrs, bare.typed_attrs, keyed.typed_attrs);
+    try std.testing.expectEqualStrings("dielectric", bare.typed_attrs[0].key);
+    try std.testing.expectEqualStrings("x7r", bare.typed_attrs[0].value);
+    try std.testing.expectEqualStrings("tolerance", bare.typed_attrs[1].key);
+    try std.testing.expectEqualStrings("voltage", bare.typed_attrs[2].key);
+    try std.testing.expectEqualStrings("25V", bare.typed_attrs[2].value);
+
+    // A unit-bearing literal is a value; `esr` is typed but stays OUT of the
+    // raw list (no parts row is keyed by it); `DNP` stays a raw attribute.
+    const mixed = (try eval.evalNode(nodes[2], &env)).component_instance;
+    try std.testing.expectEqualStrings("100nF", mixed.value);
+    try std.testing.expectEqual(@as(usize, 1), mixed.attrs.len);
+    try std.testing.expectEqualStrings("DNP", mixed.attrs[0]);
+    try std.testing.expectEqual(@as(usize, 1), mixed.typed_attrs.len);
+    try std.testing.expectEqualStrings("esr", mixed.typed_attrs[0].key);
+    try std.testing.expectEqualStrings("10mR", mixed.typed_attrs[0].value);
+}
+
+// spec: eval/evaluator - An unknown keyed attribute is rejected with a did-you-mean and a repeated one is rejected as a duplicate
+test "keyed family attributes reject unknown and repeated keys" {
+    // page_allocator: evaluator-allocated attribute slices are never freed.
+    const alloc = std.heap.page_allocator;
+    var eval = try familyEvaluator(alloc);
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(
+        alloc,
+        "(cap-0402 \"1uF\" (voltag 25V))" ++
+            " (cap-0402 \"1uF\" (rating 25V) (voltage 50V))" ++
+            " (cap-0402 \"1uF\" (rating))",
+    );
+    try std.testing.expectError(EvalError.InvalidForm, eval.evalNode(nodes[0], &env));
+    try std.testing.expect(std.mem.indexOf(u8, eval.last_error.?.message, "did you mean (voltage …)") != null);
+    try std.testing.expectError(EvalError.InvalidForm, eval.evalNode(nodes[1], &env));
+    try std.testing.expect(std.mem.indexOf(u8, eval.last_error.?.message, "sets 'voltage' twice") != null);
+    try std.testing.expectError(EvalError.ArityError, eval.evalNode(nodes[2], &env));
 }
 
 // spec: eval/evaluator - last_error records the source span of an unknown form so callers can report file:line:col

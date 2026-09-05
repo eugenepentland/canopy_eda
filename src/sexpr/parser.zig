@@ -150,7 +150,11 @@ fn parseNumberNode(tok: *Tokenizer, token: Token, diag: *ParseDiagnostic) ParseE
         },
         .si_val => {
             const val = parseSiValue(token.text) orelse return fail(diag, token.span, ParseError.InvalidNumber);
-            return Node.float(token.span, val);
+            // The suffix is not scale-only decoration: `100nF` and `100n` are
+            // the same number but only the first says "capacitance". Keeping
+            // the source spelling on the node is what lets a value renderer
+            // write `100nF` back instead of `0.0000001`.
+            return Node.suffixedFloat(token.span, val, token.text);
         },
         .unit_val => {
             const val = std.fmt.parseFloat(f64, token.text) catch
@@ -168,8 +172,8 @@ fn parseNumberNode(tok: *Tokenizer, token: Token, diag: *ParseDiagnostic) ParseE
     }
 }
 
-/// Parse an SI-scaled literal token (`220k`, `100nF`, `3.3V`, `10mA`) into
-/// its numeric value. The numeric prefix is multiplied by the scale letter's
+/// Parse an SI-scaled literal token (`220k`, `100nF`, `3.3V`, `10mA`, `10%`)
+/// into its numeric value. The numeric prefix is multiplied by the scale letter's
 /// entry in `tokenizer.si_scales`; a trailing unit letter carries no scale.
 /// Returns null when the text has no parsable numeric prefix — the
 /// tokenizer's suffix rules make that unreachable for `.si_val` tokens.
@@ -184,7 +188,7 @@ fn parseSiValue(text: []const u8) ?f64 {
     const base = std.fmt.parseFloat(f64, text[0..num_end]) catch return null;
     const scale: f64 = for (tokenizer_mod.si_scales) |s| {
         if (s.letter == text[num_end]) break s.multiplier;
-    } else 1.0; // bare unit letter (V/A/F/H/R)
+    } else 1.0; // bare unit letter (V/A/F/H/R) or the percent sign
     return base * scale;
 }
 
@@ -283,6 +287,26 @@ test "parse si scaled values" {
     try std.testing.expectApproxEqRel(@as(f64, 3.3), c[12].asNumber().?, 1e-12);
     try std.testing.expectApproxEqRel(@as(f64, 0.5), c[13].asNumber().?, 1e-12);
     try std.testing.expectApproxEqRel(@as(f64, 47.0), c[14].asNumber().?, 1e-12);
+}
+
+// spec: sexpr/parser - A suffixed literal keeps its source spelling on the node alongside its decoded value
+test "suffixed literals retain their spelling" {
+    const alloc = std.testing.allocator;
+    const nodes = try parse(alloc, "(vals 100nF 4.7k 33R 10uH 10% 100 2.5 3mm)");
+    defer freeNodes(alloc, nodes);
+    const c = nodes[0].asList().?;
+    const expected = [_]?[]const u8{ null, "100nF", "4.7k", "33R", "10uH", "10%", null, null, null };
+    for (expected, c) |want, node| {
+        if (want) |text| {
+            try std.testing.expectEqualStrings(text, node.valueText().?);
+            try std.testing.expectEqualStrings(text, node.literal.?);
+        } else {
+            try std.testing.expectEqual(@as(?[]const u8, null), node.literal);
+        }
+    }
+    // The percent sign carries no scale: `10%` is the number 10.
+    try std.testing.expectApproxEqRel(@as(f64, 10.0), c[5].asNumber().?, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 1e-7), c[1].asNumber().?, 1e-12);
 }
 
 // spec: sexpr/parser - Parses input containing comments by ignoring them

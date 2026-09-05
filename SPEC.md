@@ -21,6 +21,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Tokenizes SI-scaled literals (220k, 100nF, 3.3V, 10mA) as si_val with the suffix in the token text
 - SI suffix rules leave mm/mil dimensions, bare milli, and longer identifiers untouched
 - SI literal at a paren boundary ends the token
+- A trailing percent sign closes a numeric literal while a standalone percent stays an operator
 - Skips line comments starting with semicolon
 - Tokenizes arithmetic operators as distinct tokens
 - Tokenizes comparison operators as distinct tokens
@@ -36,6 +37,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Parses nested S-expression lists into a tree
 - Parses numbers and unit values into typed AST nodes
 - Parses SI-scaled literals (220k, 100nF, 3.3V, 10mA) into scaled float nodes
+- A suffixed literal keeps its source spelling on the node alongside its decoded value
 - Parses input containing comments by ignoring them
 - Parses multiple top-level forms into separate AST nodes
 - Identifies forms by head atom via isForm helper
@@ -50,6 +52,7 @@ CLI-driven electronic design automation for schematic capture using S-expression
 - Prints a simple list as a single-line S-expression string
 - Prints short nested lists inline on one line
 - Prints long nested lists with multiline indentation
+- Prints a suffixed numeric literal with the unit it was written with
 - Round-trips parse to print to parse producing identical AST
 - Round-trips every .sexp and .kicad_pcb file in the projects/designs tree, dot-directories excluded, through parse → print → parse with structurally equal AST, failing when the corpus count leaves its expected order of magnitude
 - Fuzzing parse-print-parse yields a structurally identical AST for accepted input
@@ -4579,12 +4582,28 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - completeness-waiver: integer overflow (the pad counter is bounded by the source slice length and formatting returns allocation errors)
 - completeness-waiver: panic-free (all new allocation and conversion failures propagate through the evaluator error set)
 
+## eval/attrs
+
+- Bare component-family attributes classify into typed slots and leave unplaceable spellings raw
+- Keyed attribute heads resolve to their slot and an unknown key gets a did-you-mean suggestion
+- Only parts-table selection slots stay in the raw attribute list and esr/esl decode into their PDN model properties
+- A selected rating satisfies an authored one when it is at least as good, and a different dielectric never is
+- completeness-waiver: empty inputs (an empty attribute text classifies as nothing and an empty key suggests nothing, both returning null)
+- completeness-waiver: large inputs (every function scans one short attribute token against a fixed vocabulary, and the edit distance refuses keys past its fixed row buffer)
+- completeness-waiver: unauthorized access (a pure string vocabulary with no request, identity, or authorization surface)
+- completeness-waiver: i/o failure (classification performs no filesystem, socket, or process I/O)
+- completeness-waiver: concurrent access (every function is pure over its arguments and shares no mutable state)
+- completeness-waiver: malformed encoding (undecodable text falls through to null, which the caller reads as "leave it a raw attribute")
+- completeness-waiver: integer overflow (the edit-distance rows are bounded by the fixed key length and magnitudes are parsed as floats)
+- completeness-waiver: panic-free (every parse and lookup returns an optional instead of asserting)
+
 ## eval/micro_forms
 
 - pullup and pulldown lower to one resistor with explicit signal and rail nets
 - divider emits two resistors and records a checked expected tap voltage
 - led emits a resistor and diode and accepts an explicit anode net for migrations
 - a shorthand value that is not the family's declared kind is rejected like a family call
+- Every shorthand writes a unit-bearing literal's own spelling as the part value
 - completeness-waiver: empty inputs (each shorthand diagnoses missing positional arguments and emits no partial circuit)
 - completeness-waiver: large inputs (every form emits at most two parts and scans only its own bounded child list)
 - completeness-waiver: unauthorized access (pure in-process AST lowering with no user, request, or authorization surface)
@@ -4756,6 +4775,8 @@ signal.
 
 - A component-family attribute resolves a bound parameter to its value while an unbound vocabulary word stays literal
 - a component-family value contradicting the declared parameter kind is rejected at the call site
+- Keyed and bare component-family attributes produce the same raw attributes and the same typed slots
+- An unknown keyed attribute is rejected with a did-you-mean and a repeated one is rejected as a duplicate
 - Evaluates arithmetic expressions from S-expression AST
 - an error inside a module body appends the module call stack to the diagnostic
 - block with a string name evaluates as a design root
@@ -5426,6 +5447,7 @@ Public functions: renderSchematic
 ## erc
 
 - a floating net within two edits of a well-connected net suggests that net
+- a parts row that fails an authored typed attribute is reported instead of substituted in silence
 - a net pinned by (module-policy (net-class …)) is not reported as an inferred layout class
 - a declared differential pair with exactly one wired lane is reported as half-connected, naming the wired lane and the open one
 - a declared differential pair wired on both lanes, or on neither, is not reported

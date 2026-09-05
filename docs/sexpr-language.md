@@ -240,6 +240,91 @@ Bare numbers accept SI scale suffixes and an optional unit letter:
 `0.5A`, `100mV` = 0.1 (milli only with a unit letter — `mm`/`mil` stay
 dimension tokens). Unknown trailing text (`100kHz`) still parses as an atom.
 
+A trailing `%` closes a literal the same way a unit letter does: `10%`, `0.1%`.
+Like `V` and `F`, the sign carries **no scale** — `10%` is the number `10` that
+remembers it was written as a percentage, not `0.1`. Tolerances are authored,
+compared and printed in percent everywhere in this language (`(expect 2.105
+5%)`, `(tolerance "10%")`, the parts-table `(tolerance …)` column), so the
+magnitude you wrote is the magnitude every consumer reads. The sign is only a
+literal when it ENDS the token, which leaves `(% a b)` untouched.
+
+**A suffixed literal keeps its spelling.** The number is still a plain `f64` in
+arithmetic — `(let x 100nF)` then `(* x 2)` is 2e-7 as before — but the source
+text travels with it, so anywhere a number is written back out as a *part
+value* it renders by its unit rather than by its magnitude:
+
+```lisp
+(pullup "SDA" 4.7k "V_3V3")      ; the resistor's value is 4.7k, not 4700
+(pullup "SDA" 100nF "V_3V3")     ; rejected: 100nF is not a resistance value
+(cap-0402 100nF)                 ; same as (cap-0402 "100nF")
+```
+
+Before this, `100nF` reached the BOM as the number `1e-7` rendered `0.0000001`
+— a value no parts row matches and that the declared-kind check could not tell
+from a resistance. Every shorthand that takes a value (`pullup`, `pulldown`,
+`divider`, `led`'s `(r …)`) and every component-family call reads the spelling.
+
+### Typed attributes on a family instantiation
+
+A component-family call takes a value and then any number of attributes. They
+may be written bare or keyed, and the two mean exactly the same thing:
+
+```lisp
+(cap-0402 "1uF" x7r "10%" "25V")
+(cap-0402 "1uF" (dielectric x7r) (tolerance 10%) (rating 25V))
+(res-0402-0p1 rset-str (tolerance 0.1%) (power 0.063W) (rating 50V) (tempco 25ppm/C))
+(cap-0402 "100nF" (esr 10mR) (esl 0.4nH))
+```
+
+Each attribute that can be *placed* lands on the instance as a property, and
+that property is the one source every consumer reads — the BOM, `lib/parts/`
+row selection, the capacitor-rating check, the PDN impedance screen, and the
+KiCad export. Consumers keep their old attribute-text scan only as a fallback
+for attributes nothing can place.
+
+| Key | Property | Example | Also selects a `lib/parts/` row |
+| --- | --- | --- | --- |
+| `rating`, `voltage` | `voltage` | `(rating 25V)` | yes |
+| `dielectric` | `dielectric` | `(dielectric x7r)` | yes |
+| `tolerance` | `tolerance` | `(tolerance 10%)` | yes |
+| `power` | `power` | `(power 0.063W)` | yes |
+| `current` | `current` | `(current 1A)` | yes |
+| `tempco`, `tcr` | `tempco` | `(tempco 25ppm/C)` | yes |
+| `esr` | `esr` (+ `pdn-esr-ohm`) | `(esr 10mR)` | no |
+| `esl` | `esl` (+ `pdn-esl-h`) | `(esl 0.4nH)` | no |
+
+`esr` and `esl` are analysis overrides, not selection columns: no parts row is
+keyed by them, so adding them to the row-matching attribute list would make the
+release-gate lookup reject every row. They additionally decode into the
+`pdn-esr-ohm` / `pdn-esl-h` numbers the PDN screen already reads.
+
+**A keyed attribute is checked.** An unknown key is an error with a
+did-you-mean, and setting the same key twice is an error. That strictness is
+safe because keyed attributes are new syntax with no existing spellings to
+protect.
+
+**A bare attribute is classified, never rejected.** `"25V"` → `voltage`,
+`"10%"`/`"0.1%"`/`"±15%"` → `tolerance`, `x5r`/`x7r`/`np0`/`c0g`/`x6s`/`y5v` →
+`dielectric`, `"0.063W"` → `power`, `"1A"` → `current`, `"25ppm/C"` → `tempco`.
+Anything else — `DNP`, `green`, `jumper`, `tantalum`, a bead's `600R@100MHz` —
+stays a raw attribute and reaches the schematic and the parts table exactly as
+it did before. When two bare attributes claim one slot the first wins, silently,
+because a design that evaluated yesterday must evaluate today.
+
+**When the selected part does not meet the request.** The parts lookup is
+deliberately lenient: if no row carries the requested rating it falls back to a
+value-only match, and the row's own `(voltage …)` then overrides the authored
+one (the row is the physical part). `netlisp check` reports that substitution
+as an `attribute_row_mismatch` warning naming both values.
+
+A row is allowed to be **better** than what was asked, and those are silent: a
+50 V part where 25 V was asked, a 1% resistor where 5% was asked, a 0.1 W part
+where 0.063 W was asked. Headroom ratings (`voltage`, `power`, `current`) must
+be at least the authored one; deviation budgets (`tolerance`, `tempco`) must be
+no wider. `dielectric` is categorical — an x5r is not a worse x7r, it is a
+different part with a different capacitance-versus-bias curve — so any
+difference is reported.
+
 ### Component datasheet link: `(datasheet "file.pdf")`
 
 A library part declares the datasheets that document it with one `(datasheet

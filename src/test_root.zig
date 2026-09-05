@@ -78,6 +78,7 @@ test {
     _ = @import("eval/builders.zig");
     _ = @import("eval/builtins.zig");
     _ = @import("eval/check_grammar.zig");
+    _ = @import("eval/attrs.zig");
     _ = @import("eval/design_block.zig");
     _ = @import("eval/electrical.zig");
     _ = @import("eval/env.zig");
