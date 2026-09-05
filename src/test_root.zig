@@ -71,6 +71,7 @@ test {
     _ = @import("drc_board_json.zig");
     _ = @import("emit.zig");
     _ = @import("erc.zig");
+    _ = @import("erc_interface.zig");
     _ = @import("escape.zig");
     _ = @import("eval/board_keepout.zig");
     _ = @import("eval/board_role_cases.zig");

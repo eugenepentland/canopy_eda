@@ -4594,6 +4594,35 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - completeness-waiver: integer overflow (resistor math uses finite floating-point inputs and IDs use bounded source keys)
 - completeness-waiver: panic-free (arity, type, allocation, and invalid-value failures return explicit evaluator errors)
 
+## eval/interfaces
+
+Interface bundles: the named-lane buses `bus-port`/`bus-net` cannot express.
+An `(interface NAME (signal …)…)` definition states one vocabulary — SPI,
+I²C, UART, SWD, JTAG ship with the binary under `stdlib/interfaces/` and a
+project shadows one with its own `lib/interfaces/<name>.sexp`. Directions are
+stated from the PERIPHERAL's point of view, and `(port-group … (role
+controller))` mirrors them. A module declares its side with `(port-group
+"PREFIX" iface …)`, which expands to one `(port …)` per signal and records the
+bundle on the block; a board wires the whole bundle with one
+`(bridge-interface "GROUP" (to "NET_PREFIX"))` in place of one `(rename …)` per
+signal.
+
+- A port-group expansion is indistinguishable from the hand-written ports it replaces
+- A controller port-group flips its lanes and honours rename, omit and replayed port modifiers
+- A project lib/interfaces file shadows the bundled interface of the same name
+- A bridge-interface emits exactly the net ties the bridge lines it replace would
+- A prefix joins a signal name with exactly one underscore and an empty prefix gives the bare name
+- The controller role mirrors in and out while a bidirectional lane stays bidirectional
+- The naming lint recognises a signal only as the final segment of a port name
+- Every signal of a bundled interface definition is a canonical row of the naming vocabulary
+- completeness-waiver: large inputs (a definition file is read under the shared library-file cap, and a bundle is a handful of lanes — the expansion emits one port per declared signal and nothing iterates further)
+- completeness-waiver: i/o failure (an unreadable or absent lib/interfaces file simply falls through to the next root and finally to the bundled table; only a named interface that NO root carries is an error, reported at the (port-group …) that asked)
+- completeness-waiver: unauthorized access (definitions are library data read through the same project/--lib-dir/stdlib order as components; the module grants no capability of its own)
+- completeness-waiver: concurrent access (the registry lives on one Evaluator, which is single-threaded for the whole of a build)
+- completeness-waiver: malformed encoding (a signal row that is not a name plus a direction warns and is skipped; a definition left with no lanes is an explicit error, never a silent empty bundle)
+- completeness-waiver: integer overflow (the only arithmetic is slice-length bookkeeping inside checked allocator calls)
+- completeness-waiver: panic-free (every malformed sub-form warns and continues; a missing interface, a non-string prefix and an empty definition all return an EvalError with a source span)
+
 ## eval/env
 
 - Stores and retrieves values by name in an environment
@@ -5431,6 +5460,10 @@ Public functions: renderSchematic
 - Emits no overvoltage violation when every driver stays inside the declared ratings
 - Flags a driver whose output high exceeds a receiver's declared absolute-maximum voltage
 - The strap direct-tie check shares the power-pin check's supply-rail vocabulary
+- A port group with some lanes wired and a required lane open is reported as interface_half_connected
+- A fully wired port group and a wholly unwired one are both silent, and an optional lane is never demanded
+- Two or more ports matching one interface vocabulary without a port-group raise the info-severity interface_naming lint
+- The interface naming lint stays silent for a declared port group and for a single matching port
 
 ## eval/power_budget
 

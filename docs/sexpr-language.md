@@ -1005,6 +1005,151 @@ Two spellings beyond the default:
 An explicit signal-type word (`rf`, `clock`, …) wins over the `differential`
 default; the pairing lives in its own field, not in that word.
 
+### Interface bundles: `(interface …)`, `(port-group …)`, `(bridge-interface …)`
+
+`(bus-port …)` writes a bus whose lanes are **numbered**. SPI, I²C, UART, SWD
+and JTAG lanes are **named**, and the names vary: across `lib/modules` the SPI
+clock is spelled `SCK`, `SCLK`, `SPI_SCK` and `RF_SPI_SCK`; data-out is `MOSI`,
+`SDI`, `SPI_SDI`, `SPI_MOSI`; select is `CS`, `CSN`, `SPI_CS`, `SPI_CSN`,
+`SPI_LMX_CSN`. The boards then carry 269 `(rename …)` forms to tie those
+spellings together, 36 of them for SPI/I²C alone.
+
+An `(interface …)` states one vocabulary once. Direction is always written from
+the **peripheral's** point of view — a peripheral is clocked, is selected,
+receives on `MOSI` and answers on `MISO`:
+
+```scheme
+;; stdlib/interfaces/spi.sexp, bundled into the binary
+(interface spi "Four-wire SPI (controller/peripheral), peripheral perspective"
+  (signal SCK  in  clock)
+  (signal MOSI in  data)
+  (signal MISO out data)
+  (signal CS   in))
+```
+
+`spi`, `i2c`, `uart`, `swd` and `jtag` ship with the binary. A project shadows
+one by name with its own `lib/interfaces/<name>.sexp` — the same
+project → `--lib-dir` → `NETLISP_STDLIB_DIR` → bundle order every library file
+resolves through (see [docs/standard-library.md](standard-library.md)) — and an
+`(interface …)` written at the top level of a design or module file needs no
+file at all.
+
+#### The module side: `(port-group …)`
+
+`(port-group "PREFIX" iface …)` expands to one `(port …)` per signal, named
+`PREFIX_SIGNAL` (one underscore, however the prefix is spelled: `"IMU"` and
+`"IMU_"` both give `IMU_SCK`). An empty prefix gives bare signal names. Every
+trailing modifier — `(rated …)`, `(side …)`, `(electrical …)`, `optional` — is
+replayed onto each lane exactly the way `(diff-port …)` replays them onto both
+of its.
+
+```scheme
+;; lib/modules/bno08x-imu.sexp declares its SPI boundary as four lines:
+(port "SCK"  in)
+(port "MOSI" in)
+(port "MISO" out)
+(port "CS"   in)
+
+;; The same boundary as one bundle — and the lanes now carry the signal types
+;; the vocabulary states (`SCK` clock, `MOSI`/`MISO` data):
+(port-group "" spi)
+```
+
+Three options shape the expansion:
+
+- `(role controller)` mirrors every direction, so an MCU declares the same
+  bundle as the peripheral it drives. A bidirectional lane — I²C's two
+  open-drain lines, SWD's `SWDIO` — is its own mirror and never flips.
+- `(rename SIGNAL "PORTNAME")` names one lane outright, for a part whose
+  datasheet spells chip-select `CSN`.
+- `(omit SIGNAL…)` drops lanes the part has no pin for.
+
+```scheme
+;; lib/modules/bcuda-dsa-hmc1119.sexp — a write-only three-wire attenuator:
+(port "SPI_DSA_SCK" in)
+(port "SPI_DSA_SDI" in)
+(port "SPI_DSA_CSN" in)
+
+;; …as one bundle that still keeps the datasheet's spellings:
+(port-group "SPI_DSA" spi (rename MOSI "SPI_DSA_SDI") (rename CS "SPI_DSA_CSN")
+                          (omit MISO))
+```
+
+The expansion also **records the bundle** on the block, which four hand-written
+ports cannot. A group is addressed by its prefix — by the interface name when
+the prefix is empty, so the `(port-group "" spi)` above is the group `"spi"`.
+
+#### The board side: `(bridge-interface …)`
+
+Inside a `(sub-block …)`, `(bridge-interface "GROUP" (to "NET_PREFIX"))` ties
+every member port of that group to board net `NET_PREFIX_SIGNAL`. It is exactly
+equivalent to the `(bridge …)` lines it replaces — same net ties, in the same
+order:
+
+```scheme
+;; src/boards/cyclops/stm32n6.sexp, today:
+(sub-block "imu" (bno08x-imu)
+  (bridge "IMU_" SCK MOSI MISO INT NRST WAKE (rename CS NCS)) (id d444ddf5))
+
+;; …with the bus named once and the three loose signals left as they were:
+(sub-block "imu" (bno08x-imu)
+  (bridge-interface "spi" (to "IMU") (rename CS "IMU_NCS"))
+  (bridge "IMU_" INT NRST WAKE) (id d444ddf5))
+```
+
+```scheme
+;; src/boards/barracuda/barracuda.sexp, today — five of the seven bridged
+;; ports are the SPI bus, spelled out one (rename …) at a time:
+(sub-block "dsa" (bcuda-dsa-hmc1119)
+  (bridge "" (rename LPF_RF IF1_LNA) (rename DSA_RF IF1_DSA) V_3V3A
+             (rename SPI_DSA_SCK SPI_SCK) (rename SPI_DSA_SDI SPI_MOSI)
+             SPI_DSA_CSN GND)
+  (id a625bd1e))
+
+;; …with the module declaring (port-group "SPI_DSA" spi …) as above:
+(sub-block "dsa" (bcuda-dsa-hmc1119)
+  (bridge-interface "SPI_DSA" (to "SPI") (rename CS "SPI_DSA_CSN"))
+  (bridge "" (rename LPF_RF IF1_LNA) (rename DSA_RF IF1_DSA) V_3V3A GND)
+  (id a625bd1e))
+```
+
+A board that carries a bus straight through to its own boundary declares a
+`(port-group …)` of its own and ties the sub-block to it by name:
+
+```scheme
+(port-group "EXT" spi (role controller))
+(sub-block "imu" (bno08x-imu)
+  (bridge-interface "spi" (to-group "EXT")))
+;;   →  (net "EXT_SCK"  "imu/SCK")   (net "EXT_MOSI" "imu/MOSI")
+;;      (net "EXT_MISO" "imu/MISO")  (net "EXT_CS"   "imu/CS")
+```
+
+A `(rename SIGNAL "NET")` on the `(bridge-interface …)` overrides one lane's
+board net whichever destination form is used, and a signal a `(to-group …)`
+peer does not carry is simply not tied.
+
+#### What ERC does with a group
+
+A `(port-group …)` is a **both-or-neither** bundle, like `(diff-port …)`:
+wiring `SCK` and `MOSI` while leaving `CS` open is reported as
+`interface_half_connected`, inside the module or from a parent that bridges
+only part of the bus. Lanes the vocabulary marks `optional` (UART's `CTS`/`RTS`,
+JTAG's `TRST`, SWD's `SWO`/`NRST`) are never demanded, and a group with nothing
+wired at all is left to the ordinary required-port rule.
+
+Separately, `interface_naming` is an **info**-severity advisory — never a
+warning, so it cannot fail a release build. A module that declares two or more
+ports out of one interface's naming vocabulary (`SCLK`, `SDI`, `SDO`, `CSN`,
+`NCS`, `SS`, … all count) without a `(port-group …)` gets one row naming the
+interface and the exact line that would replace those ports:
+
+```
+info  interface_naming — 'bcuda-dsa-hmc1119' declares SPI_DSA_SCK, SPI_DSA_SDI,
+      SPI_DSA_CSN — the spi signal vocabulary — as loose ports; declare the
+      bundle instead: (port-group "SPI_DSA" spi (rename MOSI "SPI_DSA_SDI")
+      (rename CS "SPI_DSA_CSN") (omit MISO))
+```
+
 ### Iterating a list: `(for name (item…) body…)`
 
 `(repeat name start end body…)` counts integers. `(for …)` walks a literal

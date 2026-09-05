@@ -194,6 +194,40 @@ pub const Port = struct {
     }
 };
 
+/// One expanded lane of a `(port-group …)`: which interface signal it stands
+/// for, and the `Port` that carries it. Kept alongside the ports rather than
+/// inside them because the interesting object is the GROUP — ERC's
+/// both-or-neither rule and the board-side `(bridge-interface …)` both ask
+/// "what are this bundle's lanes", never "what bundle is this port in".
+pub const PortGroupMember = struct {
+    /// Signal name as the interface definition spells it (`SCK`, `MOSI`).
+    signal: []const u8,
+    /// The port the expansion declared — `PREFIX_SIGNAL` unless a
+    /// `(rename …)` named it outright.
+    port: []const u8,
+    /// That port's net. Equal to `port` for the ordinary short-form port; a
+    /// board-side group's peer lookup reads this, not the name.
+    net: []const u8,
+    /// A lane the bundle allows to stay open (UART's CTS/RTS, JTAG's TRST),
+    /// or one the author marked `optional`. Never demanded by ERC.
+    optional: bool = false,
+};
+
+/// A boundary bus declared as one thing by `(port-group "PREFIX" iface …)`.
+/// The member ports are ordinary `Port`s in `DesignBlock.ports`; this record
+/// is what makes them addressable — and checkable — as a bundle.
+pub const PortGroup = struct {
+    /// How `(bridge-interface "GROUP" …)` addresses it: the declared prefix,
+    /// or the interface name when the prefix is empty.
+    name: []const u8,
+    /// Interface definition the group expanded from (`spi`, `i2c`, …).
+    interface: []const u8,
+    /// `peripheral` (the definition's own point of view) or `controller`
+    /// (every direction mirrored).
+    role: []const u8 = "peripheral",
+    members: []const PortGroupMember = &.{},
+};
+
 /// A note annotation.
 pub const Note = struct {
     ref_des: []const u8,
@@ -2229,6 +2263,12 @@ pub const DesignBlock = struct {
     groups: []const Group,
     sub_blocks: []const SubBlock,
     sections: []const Section = &.{},
+    /// Boundary buses declared as one thing by `(port-group …)`. Their member
+    /// ports are in `ports` like any other; this list is what lets ERC hold a
+    /// bundle to a both-or-neither connection rule and lets a parent wire the
+    /// whole bus with one `(bridge-interface …)`. Empty for blocks that
+    /// declare their boundary signal by signal.
+    port_groups: []const PortGroup = &.{},
     /// Hand-authored functional super-blocks (`(function …)` forms) — the
     /// top-level "what the system does" layer above sections. Empty for
     /// designs that don't author them.

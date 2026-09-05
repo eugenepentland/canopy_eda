@@ -19,6 +19,7 @@ const pll_loop = @import("../pll_loop.zig");
 const frequency_plan = @import("../frequency_plan.zig");
 const instance_mod = @import("instance.zig");
 const builders = @import("builders.zig");
+const interfaces = @import("interfaces.zig");
 const forms = @import("forms.zig");
 const footprint_pads = @import("footprint_pads.zig");
 const value_kind = @import("value_kind.zig");
@@ -194,6 +195,14 @@ pub const Evaluator = struct {
     /// so no two components ever share an id (incl. after copy-paste from
     /// another design built by the same evaluator).
     design_ids: std.StringHashMapUnmanaged(void),
+    /// Interface bundle definitions in scope, keyed by name. Filled by an
+    /// `(interface …)` form at a file's top level and, lazily, by the first
+    /// `(port-group … iface)` that names one — which reads
+    /// `lib/interfaces/<name>.sexp` through the standard library resolution
+    /// order. Process-wide for the run rather than lexically scoped: a
+    /// vocabulary is a shared naming convention, not a binding, and a module
+    /// that declares `spi` ports must mean the same `spi` its board does.
+    interfaces: std.StringHashMapUnmanaged(interfaces.Def) = .empty,
     /// True once `loadPassivesPrelude` has run. Guards against re-entering
     /// the prelude when a module load itself triggers another module load,
     /// and lets `evalFile` skip the work after the first design.
@@ -385,6 +394,9 @@ pub const Evaluator = struct {
         self.pending_ids.deinit(self.allocator);
         self.pending_child_ids.deinit(self.allocator);
         self.design_ids.deinit(self.allocator);
+        var iface_keys = self.interfaces.keyIterator();
+        while (iface_keys.next()) |key| self.allocator.free(key.*);
+        self.interfaces.deinit(self.allocator);
     }
 
     /// Evaluate a file and return the top-level design block. Routes
@@ -538,6 +550,10 @@ pub const Evaluator = struct {
                 try special_forms.checkArity(self, .implements, args);
                 break :blk .nil;
             },
+            // A bus vocabulary, registered on the evaluator rather than bound
+            // into `env`: it is consulted by name from `(port-group …)` in
+            // module bodies the defining file never lexically encloses.
+            .interface => interfaces.evalDefinition(self, args),
         };
 
         // Builtins (evaluate arguments first). Looking the operator up
