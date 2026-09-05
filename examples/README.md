@@ -522,7 +522,7 @@ Small changes with visible consequences:
 
 Where to read next:
 
-* [docs/sexpr-language.md](../docs/sexpr-language.md) — the language, form by form
+* [docs/sexp-language.md](../docs/sexp-language.md) — the language, form by form
 * [docs/language-forms.md](../docs/language-forms.md) — the generated grammar reference
 * [docs/standard-library.md](../docs/standard-library.md) — what is bundled and how overrides resolve
 * [docs/webserver-api.md](../docs/webserver-api.md) — every HTTP route and structured tool

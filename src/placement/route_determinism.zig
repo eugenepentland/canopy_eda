@@ -1,4 +1,4 @@
-//! Whole-board router determinism regression (`docs/autorouter-audit-round-two.md` §3f).
+//! Whole-board router determinism regression (`docs/archive/autorouter-audit-round-two.md` §3f).
 //!
 //! The router uses no RNG and is deterministic today, but it is *adjacent* to
 //! nondeterminism: a few `AutoHashMap` iteration sites ride in the routing

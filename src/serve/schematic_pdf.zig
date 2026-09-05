@@ -1,5 +1,5 @@
 //! `GET /api/schematic-pdf/:name` — the review-document PDF (WP-D of
-//! `docs/pdf-export-plan.md`). The HTTP twin of `netlisp export-pdf`: it
+//! `docs/archive/pdf-export-plan.md`). The HTTP twin of `netlisp export-pdf`: it
 //! assembles the exact same triple the CLI does — the evaluated block, the
 //! `review.ReviewDoc`, and an `export_pdf.Options` — so the downloaded file and
 //! the CLI's output are the same document. The one deliberate difference is the

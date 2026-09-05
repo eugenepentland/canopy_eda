@@ -47,10 +47,10 @@ fn header(kind: sidecars.Kind) []const u8 {
     return switch (kind) {
         .layout => "; Layout sidecar — autoloaded and spliced into the design body.\n" ++
             "; Board, stackup, net classes, PCB plan, design rules, PDN, envelopes.\n" ++
-            "; See docs/sexpr-language.md → \"Sidecar files\".\n\n",
+            "; See docs/sexp-language.md → \"Sidecar files\".\n\n",
         .diagram => "; Diagram sidecar — autoloaded and spliced into the design body.\n" ++
             "; Block-diagram arrangement, design-scope groups and functions.\n" ++
-            "; See docs/sexpr-language.md → \"Sidecar files\".\n\n",
+            "; See docs/sexp-language.md → \"Sidecar files\".\n\n",
         .checks => "",
     };
 }
@@ -664,6 +664,10 @@ test "the split lifts each form with its comment block, byte for byte" {
     try testing.expect(std.mem.indexOf(u8, plan.main_text, "stackup") == null);
     try testing.expect(std.mem.indexOf(u8, plan.main_text, "Four-layer construction") == null);
     try testing.expect(std.mem.indexOf(u8, plan.main_text, "net-class") == null);
+
+    // Both sidecar banners point readers at the one hand-written guide.
+    try testing.expect(std.mem.indexOf(u8, header(.layout), "docs/sexp-language.md") != null);
+    try testing.expect(std.mem.indexOf(u8, header(.diagram), "docs/sexp-language.md") != null);
 
     // A file with no design-block is refused rather than half-split.
     const board_only = try parser_mod.parse(arena, "(component-family cap (param-type capacitance))");

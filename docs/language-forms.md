@@ -7,7 +7,7 @@
 Every special form, builtin operator, fmt directive, numeric-literal
 suffix, and design-scope form the toolchain recognises, with arity
 contracts and one-line summaries. The hand-written prose lives in
-[`sexpr-language.md`](sexpr-language.md); this file is the
+[`sexp-language.md`](sexp-language.md); this file is the
 machine-checked grammar surface.
 
 ## Special forms

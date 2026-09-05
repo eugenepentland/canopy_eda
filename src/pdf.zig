@@ -1,5 +1,5 @@
 //! Minimal deterministic PDF 1.4 writer — the output backend for the schematic
-//! PDF export (`docs/pdf-export-plan.md`, WP-A). Hand-rolled for the same
+//! PDF export (`docs/archive/pdf-export-plan.md`, WP-A). Hand-rolled for the same
 //! reason `png.zig` / `deflate.zig` / `export_gerber.zig` are: a single Zig
 //! binary with no image or PDF library, and no prod deployment dependency for
 //! one export feature.

@@ -7,7 +7,7 @@
 // in `st.stages` rather than hard-coded here. Everything else on the page —
 // pour rims/labels/keepouts, silk, courtyards, airwires, labels, every overlay
 // and every gesture — stays on the 2D canvas ABOVE this one and is untouched.
-// See docs/webgpu-renderer-plan.md.
+// See docs/archive/webgpu-renderer-plan.md.
 //
 // WHY: the Canvas2D path's remaining wall is raster fill-rate, which grows with
 // zoom (a 0.3 mm track is ~2 device px at fit and ~25 px zoomed in). Every class

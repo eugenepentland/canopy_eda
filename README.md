@@ -24,9 +24,17 @@ There is no GUI capture step; the browser is a viewer and review surface.
   schema (`netlisp tool list`), so an agent can drive the whole flow
   without a browser or a server.
 
-Status: early public release. Linux x86_64 is the platform the test suite
-runs on. Toolchain archives for macOS and aarch64 Linux are mirrored, but
-those builds are untested.
+Status: early public release.
+
+- **Linux x86_64** is the supported platform: the test suite, the Guardian
+  gate, CI and the maintainer's own server all run on it.
+- **macOS (aarch64 and x86_64)** compiles but is untested. CI cross-compiles
+  both targets on every push so the tree cannot regress into code that will
+  not build there, and the HTTP server uses its kqueue backend; nothing has
+  been run on a Mac yet.
+- **Linux aarch64** is untested; only the toolchain archive is mirrored.
+- **Windows** does not build (POSIX process groups in the subprocess layer,
+  and the Guardian gate does not compile there either).
 
 ## Prerequisites
 

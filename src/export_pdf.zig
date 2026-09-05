@@ -1,5 +1,5 @@
 //! Review-document PDF composer — the WP-C half of the schematic PDF export
-//! (`docs/pdf-export-plan.md`). It is the *only* place `pdf.zig` (the byte
+//! (`docs/archive/pdf-export-plan.md`). It is the *only* place `pdf.zig` (the byte
 //! writer) and `svg2pdf.zig` (the SVG-subset translator) meet: the translator
 //! hands back a flat `DrawOp` display list, and `drawOp` below maps each one
 //! onto a page helper. That decoupling is deliberate — neither half knows the

@@ -54,7 +54,7 @@ fn renderTo(writer: anytype) !void {
         \\Every special form, builtin operator, fmt directive, numeric-literal
         \\suffix, and design-scope form the toolchain recognises, with arity
         \\contracts and one-line summaries. The hand-written prose lives in
-        \\[`sexpr-language.md`](sexpr-language.md); this file is the
+        \\[`sexp-language.md`](sexp-language.md); this file is the
         \\machine-checked grammar surface.
         \\
         \\## Special forms
@@ -858,6 +858,10 @@ test "the reference links only to documents that exist" {
         checked += 1;
     }
     try std.testing.expect(checked >= 1);
+    // The hand-written guide is docs/sexp-language.md; its former twin
+    // sexpr-language.md is gone, so the header must name the survivor.
+    try std.testing.expect(std.mem.indexOf(u8, doc, "](sexp-language.md)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "sexpr-language") == null);
 }
 
 // spec: docgen - The section-classifier reference states that an explicit (category …) is the source of truth

@@ -3,7 +3,7 @@
 //!
 //! Every router change so far has been judged on one board, and at least two
 //! changes that looked reasonable turned out to be net-negative *on the same
-//! board they were designed against* (`docs/autorouter-plan.md` §4). A
+//! board they were designed against* (`docs/archive/autorouter-plan.md` §4). A
 //! single-board measurement cannot detect that. This routes a whole corpus in
 //! one command and prints a per-board table plus a geomean, so a change that
 //! wins a net here and loses two there is visible immediately.

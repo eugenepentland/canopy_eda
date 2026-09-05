@@ -78,7 +78,7 @@
 //! lists), and the machinery is the only place in this engine where a
 //! whole-board re-route may pass through an illegal state and be judged solely
 //! on where it ends up. The full per-iteration trace is in the commit message
-//! and in `docs/autorouter-audit-2026-08.md`.
+//! and in `docs/archive/autorouter-audit-2026-08.md`.
 //!
 //! Deterministic by construction: no RNG, no clock, no hash-map iteration order
 //! reaches a decision (the victim list is built in net-index order and the

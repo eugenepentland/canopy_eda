@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Corpus benchmark of the autorouter — stage 0 of docs/autorouter-plan.md.
+"""Corpus benchmark of the autorouter — stage 0 of docs/archive/autorouter-plan.md.
 
 Routes every board in the corpus from its CURRENT saved copper and records what
 came out: nets closed, DRC by severity, copper laid, wall clock. Prints a
