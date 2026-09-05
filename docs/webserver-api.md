@@ -791,6 +791,26 @@ Tools include:
   `{ok,file,rewritten,written,netlist_equivalent,parts_without_pinout,
   positional_parts,skipped[{ref,pad,reason}],skipped_omitted,diff}`. Full rules
   in `docs/sexpr-language.md`.
+- **Hand-off exporters (read-only)**: `export_pinmap` `{name, format?, refs?}`
+  and `export_spice` `{name}`. Both return the exported file **text itself**
+  rather than a JSON envelope — so `netlisp tool export_pinmap … --output
+  pinmap.h` writes a usable header — and a plain `error: …` line with
+  `ok:false` on refusal. Neither writes a project file, which is why both are
+  read-only. `export_pinmap` writes the firmware pin map: one row per connected
+  pad of each selected part carrying the pad id, the pinout function name, the
+  `(alt …)`/`(as …)` alternates, the flattened net, the `(pins … (group "…"))`
+  label and the enclosing `(section …)` with its `(role …)`/`(protocol …)`.
+  `format:"c"` (default) is an include-guarded header with one
+  `#define <REF>_<NET>_PIN "<pad>"` per row plus a `static const
+  {pad,function,net,group}` table per part; `format:"json"` is the same rows
+  with the alternates as an array. `refs` names parts exactly (by flattened
+  ref-des, its leaf, or the instance's source name) and overrides the default
+  hub-class selection. `export_spice` writes a flattened SPICE deck: R/C/L,
+  ferrite-as-DC-resistance, `D`/`Q`/`M` and one `X` line per IC into an EMPTY
+  `.subckt` stub, with ground-class nets on node 0. It carries no models, no
+  stub bodies and no parasitics — the deck's own header says so. Both are
+  deterministic: only the build id moves between runs (`diff -I '^\*#'` for the
+  C header and the deck, `diff -I '"build_id"'` for the JSON).
 - **VFS file ops**: `read_file`, `list_dir`, `glob` (read-only);
   `write_file`, `edit_file`, `delete_file`, `move_file` (mutation).
 - **Build / state**: `build`, `regenerate_pinout`, `restore_version`.
