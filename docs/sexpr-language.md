@@ -1005,37 +1005,102 @@ Two spellings beyond the default:
 An explicit signal-type word (`rf`, `clock`, …) wins over the `differential`
 default; the pairing lives in its own field, not in that word.
 
-### Iterating a list: `(for name (item…) body…)`
+### Structural control flow: `when` / `unless` / `if` / `for` / `repeat`
 
-`(repeat name start end body…)` counts integers. `(for …)` walks a literal
-list, so a loop variable can be a channel letter, a lane suffix, or any
-expression — including `(let …)`-bound values. Each item is evaluated in the
-enclosing scope, then bound in a fresh child scope for one pass over the body.
-Both forms work in expression position and in a `(design-block …)` body.
+Five forms are *statements* as well as expressions: written directly in a
+design scope, their body holds whatever that scope accepts — instances,
+ports, nets, `pins`, `decouple`/`series`, sub-blocks, notes, sections, and
+each other. All five are legal at **design-block top level, inside a
+`(section …)`, and inside a nested sub-section**; the generated forms are
+indistinguishable from the same lines written out by hand, so a section
+records its hosted instances, pin groups and notes exactly as before.
+
+| Form | Body | Runs when |
+| --- | --- | --- |
+| `(when cond form…)` | any number of forms | `cond` is true |
+| `(unless cond form…)` | any number of forms | `cond` is false |
+| `(if cond then else)` | exactly one form per branch | always — one branch |
+| `(for name (item…) body…)` | any number of forms | once per item |
+| `(repeat name start end body…)` | any number of forms | once per integer, inclusive |
+
+The condition is any expression that evaluates to a **boolean**:
+`(== variant "A")`, `(> vout 5.0)`, a `(let …)`-bound comparison, a module
+parameter compared against a value. A number or a string is rejected with an
+error naming the form — in design scope a silently-taken branch would add or
+drop real parts, so truthiness is not guessed. `(if …)` in *expression*
+position (`(let rail (if (== ratio 1) "GND" "VCC"))`) keeps its ordinary
+Lisp behaviour, truthiness included.
 
 ```scheme
-;; The anti-alias filter block of lib/modules/ad7380-channel.sexp — sixteen
-;; hand-copied instance lines, four per channel — as one loop nest:
-(for ch ("A" "B" "C" "D")
-  (for leg ("P" "N")
-    (instance (fmt "R_F~a~a" ch leg) (res-0201 "33R")
-      (pin 1 (fmt "AIN~a_EXT_~a" ch leg)) (pin 2 (fmt "AIN~a_~a" ch leg)))
-    (instance (fmt "C_F~a~a" ch leg) (cap-0201 "68pF")
-      (pin 1 (fmt "AIN~a_~a" ch leg)) (pin 2 "GND"))))
+;; Assembly options, at design-block top level.
+(design-block "Regulator"
+  (let precision (== grade "A"))
+  (when precision
+    (instance "R_SET" (res-0402 "49.9k" "0.1%") (pin 1 "VOUT") (pin 2 "SET")))
+  (unless precision
+    (instance "R_SET" (res-0402 "49.9k" "1%") (pin 1 "VOUT") (pin 2 "SET")))
+  …)
 
-;; A string item composes ref-des names through (fmt …) and drops straight
-;; into a net name:
-(for ch ("A" "B" "C" "D")
-  (instance (fmt "R_SD~a" ch) (res-0201 "100R")
-    (pin 1 (fmt "SDO~a_RAW" ch)) (pin 2 (fmt "SDO~a" ch))))
+;; The same choice as one-form-per-branch sugar.
+(if precision
+  (instance "C_REF" (cap-0402 "10nF" np0) (pin 1 "SET") (pin 2 "GND"))
+  (instance "C_REF" (cap-0402 "10nF" x7r) (pin 1 "SET") (pin 2 "GND")))
 ```
 
-Identity works exactly as it does for `repeat`: the `(for …)` form owns one
-source-resident `(id …)` anchor, and each generated child's id derives from
-that anchor plus its `origin_key` and the item's **0-based ordinal**, so ids
-are stable across rebuilds without minting an impossible `(id …)` per
-iteration. A `(ids ("R_FAP@0" <hex8>) …)` sidecar on the loop form pins
-migrated identities when a hand-unrolled block is folded into a `for`.
+```scheme
+;; Loops inside a section — the four filters land in the section, and the
+;; section's hosted-instance list, status and diagram read as if the sixteen
+;; lines had been typed out.
+(section "Anti-alias filters"
+  (for ch ("A" "B" "C" "D")
+    (for leg ("P" "N")
+      (instance (fmt "R_F~a~a" ch leg) (res-0201 "33R")
+        (pin 1 (fmt "AIN~a_EXT_~a" ch leg)) (pin 2 (fmt "AIN~a_~a" ch leg)))
+      (instance (fmt "C_F~a~a" ch leg) (cap-0201 "68pF")
+        (pin 1 (fmt "AIN~a_~a" ch leg)) (pin 2 "GND")))))
+
+;; Nesting composes: a loop inside a conditional inside a section.
+(section "Calibration"
+  (when cal-fitted
+    (for ch ("A" "B")
+      (instance (fmt "R_CAL~a" ch) (res-0402 "1k")
+        (pin 1 (fmt "CAL~a" ch)) (pin 2 "GND")))))
+```
+
+`(repeat …)` counts integers; `(for …)` walks a literal list, so a loop
+variable can be a channel letter, a lane suffix, or any expression —
+including `(let …)`-bound values. Each item is evaluated in the enclosing
+scope, then bound in a fresh child scope for one pass over the body, so a
+body-local `(let …)` never leaks sideways into the next iteration.
+
+**Identity.** The **outermost** structural form owns one source-resident
+`(id …)` anchor, which the build mints into the file when it is missing —
+one anchor per nest, never one per generated child (they all share a single
+source location, so per-child `(id …)` insertion is impossible). Every child
+derives its id from that anchor, its own stable `origin_key`, and the
+accumulated **key path** of the branches and iterations it sits inside:
+
+- a taken `when`/`unless` body, and an `(if …)` then-branch, contribute `@t`;
+- an `(if …)` else-branch contributes `@f`;
+- a `for`/`repeat` iteration contributes `@<0-based ordinal>` / `@<index>`.
+
+So a child of `(for …)` alone keys as `R_FAP@0`, and one inside
+`(when …)` → `(for …)` keys as `R_CALA@t@0`. Two consequences worth stating:
+flipping a condition **re-derives** rather than re-uses — an else-branch part
+can never inherit the id of the then-branch part it replaces, even when both
+carry the same ref-des — and nesting composes instead of the outer form
+flattening the inner one's distinctions.
+
+An `(ids ("R_FAP@0" <hex8>) …)` sidecar on the anchor form pins migrated
+identities, which is how a hand-unrolled block is folded into a loop or a
+conditional without changing its established PCB UUIDs. Wrapping existing
+instances in a control form otherwise re-derives their ids, exactly as
+folding them into a `for` does.
+
+**Errors.** A body form that the enclosing scope does not accept is reported
+at **its own** `file:line:col`, with the same message a hand-written sibling
+would draw — `(stackup …) is top-level-only — ignored inside (section …)`
+points at the `(stackup …)`, not at the `(when …)` around it.
 
 ### Sub-block port wiring: `(bridge …)`
 

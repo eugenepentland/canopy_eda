@@ -212,6 +212,21 @@ pub fn evalIf(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value {
     }
 }
 
+/// Evaluate `(when cond form…)` (`want = true`) or `(unless cond form…)`
+/// (`want = false`) in expression position: run the body only when the
+/// condition matches `want`, returning the last body value (or `.nil` when
+/// the body is skipped). The design-scope spelling — where the body holds
+/// instances, sections and the rest of the enclosing scope's grammar — is in
+/// `eval/scope_control.zig`; both share this one head atom and arity.
+pub fn evalWhen(self: *Evaluator, args: []const Node, env: *Env, want: bool) EvalError!Value {
+    try checkArity(self, if (want) .when_ else .unless_, args);
+    const cond = try self.evalNode(args[0], env);
+    if (cond.isTruthy() != want) return .nil;
+    var result: Value = .nil;
+    for (args[1..]) |form| result = try self.evalNode(form, env);
+    return result;
+}
+
 /// Evaluate `(fmt "template" args…)` and return the formatted string. The
 /// template uses the `~V` / `~R` / `~C` / `~A` / `~S` directives from
 /// `eval/fmt.zig` so module names can render computed voltages / resistances

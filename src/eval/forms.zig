@@ -22,6 +22,8 @@ pub const SpecialForm = enum {
     repeat,
     for_,
     if_,
+    when_,
+    unless_,
     import,
     defmodule,
     design_block,
@@ -52,6 +54,8 @@ const atom_to_form = std.StaticStringMap(SpecialForm).initComptime(.{
     .{ "repeat", .repeat },
     .{ "for", .for_ },
     .{ "if", .if_ },
+    .{ "when", .when_ },
+    .{ "unless", .unless_ },
     .{ "import", .import },
     .{ "defmodule", .defmodule },
     .{ "design-block", .design_block },
@@ -249,6 +253,8 @@ pub const special_form_schema = blk: {
         .{ .repeat, .{ .min_args = 4, .max_args = null } },
         .{ .for_, .{ .min_args = 3, .max_args = null } },
         .{ .if_, .{ .min_args = 3, .max_args = 3 } },
+        .{ .when_, .{ .min_args = 2, .max_args = null } },
+        .{ .unless_, .{ .min_args = 2, .max_args = null } },
         .{ .import, .{ .min_args = 1, .max_args = null } },
         .{ .defmodule, .{ .min_args = 2, .max_args = null } },
         .{ .design_block, .{ .min_args = 1, .max_args = null } },
@@ -344,7 +350,17 @@ pub const special_form_docs = blk: {
     };
     t[@backingInt(SpecialForm.if_)] = .{
         .syntax = "(if cond then else)",
-        .summary = "Short-circuit conditional. Only the matching branch is evaluated.",
+        .summary = "Short-circuit conditional. Only the matching branch is evaluated. In design scope " ++
+            "each branch is a single form and the whole conditional is sugar for `when`/`unless`.",
+    };
+    t[@backingInt(SpecialForm.when_)] = .{
+        .syntax = "(when cond form… [(id hex8)] [(ids (\"origin@branch\" hex8)…)])",
+        .summary = "Evaluate `form…` only when `cond` is true. In design scope the body may hold any " ++
+            "form the enclosing scope accepts, so a whole sub-circuit can be made conditional.",
+    };
+    t[@backingInt(SpecialForm.unless_)] = .{
+        .syntax = "(unless cond form… [(id hex8)] [(ids (\"origin@branch\" hex8)…)])",
+        .summary = "`when`'s negation — evaluate `form…` only when `cond` is false.",
     };
     t[@backingInt(SpecialForm.import)] = .{
         .syntax = "(import name…)",
@@ -429,6 +445,30 @@ pub const ScopeAvailability = packed struct {
 
 /// A design-scope form's doc row plus the scopes that accept it.
 pub const ScopedFormDoc = struct { doc: FormDoc, scope: ScopeAvailability };
+
+/// One structural control-flow form: a `SpecialForm` that ALSO works as a
+/// design-scope statement, expanding into whatever the enclosing scope
+/// accepts. Their scope availability cannot live in `ScopeForm` (they are
+/// dispatched before it, and a body may hold `(design-block …)` in expression
+/// position), so it is declared here and rendered with the same D/S/s column.
+pub const StructuralFormDoc = struct {
+    form: SpecialForm,
+    scope: ScopeAvailability,
+    /// What the form contributes to identity, one line.
+    identity: []const u8,
+};
+
+/// The forms `docgen` renders under "Structural control flow". Every entry is
+/// accepted at design-block top level, in a `(section …)`, and in a nested
+/// sub-section; each body form is dispatched by the enclosing scope's own
+/// grammar, so a form illegal there is still illegal inside a branch.
+pub const structural_form_docs = [_]StructuralFormDoc{
+    .{ .form = .when_, .scope = .{ .design_block = true, .section = true, .sub_section = true }, .identity = "Children key off the anchor plus branch key `@t`." },
+    .{ .form = .unless_, .scope = .{ .design_block = true, .section = true, .sub_section = true }, .identity = "Children key off the anchor plus branch key `@t`." },
+    .{ .form = .if_, .scope = .{ .design_block = true, .section = true, .sub_section = true }, .identity = "Then-children key `@t`, else-children `@f`, so a condition flip cannot alias them." },
+    .{ .form = .for_, .scope = .{ .design_block = true, .section = true, .sub_section = true }, .identity = "Children key off the anchor plus the item's 0-based ordinal." },
+    .{ .form = .repeat, .scope = .{ .design_block = true, .section = true, .sub_section = true }, .identity = "Children key off the anchor plus the loop index." },
+};
 
 pub const scope_form_docs = blk: {
     const N = @typeInfo(ScopeForm).@"enum".field_names.len;

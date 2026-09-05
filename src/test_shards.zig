@@ -422,6 +422,7 @@ pub const shards: []const []const []const u8 = &.{
         "eval.board_keepout.test.",
         "eval.builders.test.",
         "eval.section_maturity.test.",
+        "eval.scope_control.test.",
         "eval.power_budget.test.",
         "eval.test_point.test.",
         "eval.thermal.test.",

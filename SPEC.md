@@ -4594,6 +4594,32 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - completeness-waiver: integer overflow (resistor math uses finite floating-point inputs and IDs use bounded source keys)
 - completeness-waiver: panic-free (arity, type, allocation, and invalid-value failures return explicit evaluator errors)
 
+## eval/scope_control
+
+- kindOf maps only the structural special forms and rejects the rest
+- isStructuralNode is true for a control form and false for a scope form
+- the then and else branch key segments differ so a condition flip cannot alias children
+- when materializes its design-block-scope body only when the condition holds
+- unless is when's negation in design scope
+- if at design-block scope selects one single-form branch instead of dropping both
+- an if's then-child and else-child never share an id, so flipping the condition re-derives
+- conditional child identities are stable across rebuilds
+- for inside a section emits into that section like a hand-written child
+- when inside a section and inside a nested sub-section materializes into that scope
+- a for nested inside a when inside a section composes and keeps every child identity distinct
+- a non-boolean condition is an error naming the offending form
+- a form illegal in the enclosing scope is diagnosed at its own location inside a branch
+- design-scope if rejects a multi-form branch by name instead of silently dropping it
+- expression-position when returns the last body value and unless its negation
+- completeness-waiver: empty inputs (an empty branch body materializes nothing and a zero-length item list runs no iteration)
+- completeness-waiver: large inputs (iteration counts are bounded by `repeat`'s cap and by the literal length of a `for` item list)
+- completeness-waiver: unauthorized access (pure in-process AST expansion with no request, identity, or authorization surface)
+- completeness-waiver: i/o failure (control-flow expansion performs no filesystem, socket, or process I/O)
+- completeness-waiver: concurrent access (all structural state belongs to the caller's per-materialization build state)
+- completeness-waiver: malformed encoding (the parser has produced typed nodes before any branch is selected)
+- completeness-waiver: integer overflow (loop ordinals are bounded by the iteration cap and key formatting returns allocation errors)
+- completeness-waiver: panic-free (condition, arity, and allocation failures all return explicit evaluator errors)
+
 ## eval/env
 
 - Stores and retrieves values by name in an environment
@@ -4622,6 +4648,8 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - a project's own lib/components file overrides the bundled family of the same name
 - Module calls bind purely positional arguments in declaration order
 - Module calls accept named (param expr) arguments in any order
+- a module body whose parts are all inside structural statements is still a raw design body
+- a module body that selects a whole design-block with if still yields that block as a value
 - Module calls mix leading positional with trailing named arguments
 - A 2-list whose head is not a declared param stays a positional expression
 - Binding the same module parameter twice is diagnosed by name

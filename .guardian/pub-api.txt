@@ -528,8 +528,17 @@ src/eval/check_grammar.zig::CheckDoc struct_
 src/eval/check_grammar.zig::check_docs value
 src/eval/check_grammar.zig::check_keyword_list value
 src/eval/check_grammar.zig::parseCheck | fn parseCheck(allocator: std.mem.Allocator, node: ast.Node) ?Check
+src/eval/design_block.zig::emit | fn emit(self: BlockScopeSink, ev: *Evaluator, form: Node, env: *Env) EvalError!void
+src/eval/design_block.zig::emit | fn emit(self: SectionSink, ev: *Evaluator, form: Node, env: *Env) EvalError!void
+src/eval/design_block.zig::emit | fn emit(self: SubSectionSink, ev: *Evaluator, form: Node, env: *Env) EvalError!void
 src/eval/design_block.zig::evalDesignBlock | fn evalDesignBlock(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/design_block.zig::materializeBlock | fn materializeBlock(self: *Evaluator, name: []const u8, body_forms: []const Node, env: *Env) EvalError!Value
+src/eval/design_block.zig::state | fn state(self: BlockScopeSink) *scope_control.State
+src/eval/design_block.zig::state | fn state(self: SectionSink) *scope_control.State
+src/eval/design_block.zig::state | fn state(self: SubSectionSink) *scope_control.State
+src/eval/design_block.zig::targets | fn targets(self: BlockScopeSink) scope_control.Targets
+src/eval/design_block.zig::targets | fn targets(self: SectionSink) scope_control.Targets
+src/eval/design_block.zig::targets | fn targets(self: SubSectionSink) scope_control.Targets
 src/eval/electrical.zig::parse | fn parse(form_children: []const Node) ?ElectricalDecl
 src/eval/electrical.zig::parseSubForms | fn parseSubForms(decl: *ElectricalDecl, subs: []const Node) void
 src/eval/env.zig::AssertionResult struct_
@@ -708,6 +717,7 @@ src/eval/forms.zig::ScopeAvailability struct_
 src/eval/forms.zig::ScopeForm enum_
 src/eval/forms.zig::ScopedFormDoc struct_
 src/eval/forms.zig::SpecialForm enum_
+src/eval/forms.zig::StructuralFormDoc struct_
 src/eval/forms.zig::SubFormDoc struct_
 src/eval/forms.zig::builtin_docs value
 src/eval/forms.zig::component_form_docs value
@@ -731,6 +741,7 @@ src/eval/forms.zig::scope_form_docs value
 src/eval/forms.zig::sourceName | fn sourceName(self: SpecialForm) []const u8
 src/eval/forms.zig::special_form_docs value
 src/eval/forms.zig::special_form_schema value
+src/eval/forms.zig::structural_form_docs value
 src/eval/forms.zig::sub_block_form_docs value
 src/eval/forms.zig::sub_form_tables value
 src/eval/forms.zig::validateArity | fn validateArity(schema: FormSchema, arg_count: usize) ?ArityViolation
@@ -838,6 +849,14 @@ src/eval/rails.zig::module_supply_prefixes value
 src/eval/rails.zig::schematic_supply_prefixes value
 src/eval/rails.zig::supply_pad_prefixes value
 src/eval/rails.zig::system_rail value
+src/eval/scope_control.zig::Anchor struct_
+src/eval/scope_control.zig::Kind enum_
+src/eval/scope_control.zig::State struct_
+src/eval/scope_control.zig::Targets struct_
+src/eval/scope_control.zig::evalForm | fn evalForm( self: *Evaluator, kind: Kind, form_children: []const Node, env: *Env, scope: anytype, ) EvalError!void
+src/eval/scope_control.zig::isStructuralNode | fn isStructuralNode(node: Node) bool
+src/eval/scope_control.zig::kindOf | fn kindOf(sf: forms.SpecialForm) ?Kind
+src/eval/scope_control.zig::sourceName | fn sourceName(self: Kind) []const u8
 src/eval/section_maturity.zig::creditSections | fn creditSections( sections: []env_mod.Section, sub_blocks: []const env_mod.SubBlock, groups: []const env_mod.Group, layout_groups: []const env_mod.LayoutGroup, body_forms: []const Node, ) void
 src/eval/special_forms.zig::ForSpec struct_
 src/eval/special_forms.zig::RepeatIterator struct_
@@ -851,6 +870,7 @@ src/eval/special_forms.zig::evalFor | fn evalFor(self: *Evaluator, args: []const
 src/eval/special_forms.zig::evalIf | fn evalIf(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalLet | fn evalLet(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
 src/eval/special_forms.zig::evalRepeat | fn evalRepeat(self: *Evaluator, args: []const Node, env: *Env) EvalError!Value
+src/eval/special_forms.zig::evalWhen | fn evalWhen(self: *Evaluator, args: []const Node, env: *Env, want: bool) EvalError!Value
 src/eval/special_forms.zig::iterator | fn iterator(self: RepeatSpec) RepeatIterator
 src/eval/special_forms.zig::next | fn next(self: *RepeatIterator) ?i64
 src/eval/special_forms.zig::parseFor | fn parseFor(self: *Evaluator, args: []const Node) EvalError!ForSpec
