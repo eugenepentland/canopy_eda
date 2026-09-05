@@ -4946,14 +4946,14 @@ src/serve/pcb_layout_page.zig::SolvedRequest struct_
 src/serve/pcb_layout_page.zig::StoreRevCheck struct_
 src/serve/pcb_layout_page.zig::SubBlockSeeds struct_
 src/serve/pcb_layout_page.zig::SubPinNet struct_
-src/serve/pcb_layout_page.zig::SubcircuitRouteSeedStats struct_
+src/serve/pcb_layout_page.zig::SubcircuitRouteSeedStats value
 src/serve/pcb_layout_page.zig::SyncPerimeterMask struct_
 src/serve/pcb_layout_page.zig::SyncPose value
 src/serve/pcb_layout_page.zig::SyncVia struct_
 src/serve/pcb_layout_page.zig::ThermalPng struct_
 src/serve/pcb_layout_page.zig::Toggles struct_
 src/serve/pcb_layout_page.zig::View struct_
-src/serve/pcb_layout_page.zig::addSubcircuitRouteSeeds | fn addSubcircuitRouteSeeds( alloc: std.mem.Allocator, project_dir: []const u8, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, options: *route_policy.Options, ) std.mem.Allocator.Error!SubcircuitRouteSeedStats
+src/serve/pcb_layout_page.zig::addSubcircuitRouteSeeds value
 src/serve/pcb_layout_page.zig::applyDeferred | fn applyDeferred(ctx: *Server, name: []const u8, placement: optimizer.Placement, view: *ShownView) void
 src/serve/pcb_layout_page.zig::applyFabricationLayerOverrides | fn applyFabricationLayerOverrides(alloc: std.mem.Allocator, placement: *optimizer.Placement, overrides: []const SavedFabricationLayer) bool
 src/serve/pcb_layout_page.zig::bodyParam | fn bodyParam(req: *httpz.Request, res: *httpz.Response) ?[]const u8
@@ -4961,7 +4961,7 @@ src/serve/pcb_layout_page.zig::commitNamedLayoutMutation | fn commitNamedLayoutM
 src/serve/pcb_layout_page.zig::ct_hdr value
 src/serve/pcb_layout_page.zig::deleteNamedLayoutApi | fn deleteNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::descendToSub | fn descendToSub( allocator: std.mem.Allocator, block: *env_mod.DesignBlock, sub_slug: []const u8, ) ?env_mod.SubBlock
-src/serve/pcb_layout_page.zig::diagnoseWithSubcircuitSeeds | fn diagnoseWithSubcircuitSeeds( alloc: std.mem.Allocator, project_dir: []const u8, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, base_options: route_policy.Options, ) std.mem.Allocator.Error!struct { diagnostic: route_plan.PlannedDiagnostic, seeds: SubcircuitRouteSeedStats = .{} }
+src/serve/pcb_layout_page.zig::diagnoseWithSubcircuitSeeds value
 src/serve/pcb_layout_page.zig::dnpMode | fn dnpMode(req: *httpz.Request) export_fab.DnpMode
 src/serve/pcb_layout_page.zig::drawnSource | fn drawnSource(o: SavedOutline) optimizer.OutlineSource
 src/serve/pcb_layout_page.zig::fabViewFor value
@@ -5055,7 +5055,7 @@ src/serve/pcb_layout_page.zig::restoreLayoutHistoryApi | fn restoreLayoutHistory
 src/serve/pcb_layout_page.zig::restoreRoutes | fn restoreRoutes(alloc: std.mem.Allocator, sr: SavedRoutes, nets: []const export_kicad.FlatNet) ?router.RouteResult
 src/serve/pcb_layout_page.zig::routePrepFailure | fn routePrepFailure(e: RoutePrepError) struct { status: u16, msg: ?[]const u8 }
 src/serve/pcb_layout_page.zig::routePrepared | fn routePrepared( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, prep: RoutePrep, live: route_plan.LiveRoute, ) std.mem.Allocator.Error!RouteOutcome
-src/serve/pcb_layout_page.zig::routeWithSubcircuitSeeds | fn routeWithSubcircuitSeeds( alloc: std.mem.Allocator, project_dir: []const u8, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, base_options: route_policy.Options, ) std.mem.Allocator.Error!struct { result: router.RouteResult, seeds: SubcircuitRouteSeedStats = .{} }
+src/serve/pcb_layout_page.zig::routeWithSubcircuitSeeds value
 src/serve/pcb_layout_page.zig::route_source_agent value
 src/serve/pcb_layout_page.zig::route_source_autorouter value
 src/serve/pcb_layout_page.zig::route_source_human value
@@ -5090,9 +5090,20 @@ src/serve/pcb_layout_page.zig::writePageScripts | fn writePageScripts(w: *std.Io
 src/serve/pcb_layout_page.zig::writePcbDerivedData value
 src/serve/pcb_layout_page.zig::writePerNetJson value
 src/serve/pcb_layout_page.zig::writeRoutePayload | fn writeRoutePayload( w: *std.Io.Writer, prep: RoutePrep, outcome: RouteOutcome, ) std.Io.Writer.Error!void
-src/serve/pcb_layout_page.zig::writeRouteSeedStats | fn writeRouteSeedStats(w: *std.Io.Writer, stats: SubcircuitRouteSeedStats) std.Io.Writer.Error!void
+src/serve/pcb_layout_page.zig::writeRouteSeedStats value
 src/serve/pcb_layout_page.zig::writeSavedRoutesJson value
 src/serve/pcb_layout_page.zig::writeUrlEncoded | fn writeUrlEncoded(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void
+src/serve/pcb_layout_seeds.zig::SubRouteMap struct_
+src/serve/pcb_layout_seeds.zig::SubSeedsJson struct_
+src/serve/pcb_layout_seeds.zig::SubcircuitRouteSeedStats struct_
+src/serve/pcb_layout_seeds.zig::addSubcircuitRouteSeeds | fn addSubcircuitRouteSeeds( alloc: std.mem.Allocator, project_dir: []const u8, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, options: *route_policy.Options, ) std.mem.Allocator.Error!SubcircuitRouteSeedStats
+src/serve/pcb_layout_seeds.zig::armRouteDeadline | fn armRouteDeadline(options: *route_policy.Options) void
+src/serve/pcb_layout_seeds.zig::buildSubModulesJson | fn buildSubModulesJson(alloc: std.mem.Allocator, block: *const env_mod.DesignBlock) []const u8
+src/serve/pcb_layout_seeds.zig::buildSubSeedsJson | fn buildSubSeedsJson( alloc: std.mem.Allocator, project_dir: []const u8, block: *const env_mod.DesignBlock, p: optimizer.Placement, ) SubSeedsJson
+src/serve/pcb_layout_seeds.zig::diagnoseWithSubcircuitSeeds | fn diagnoseWithSubcircuitSeeds( alloc: std.mem.Allocator, project_dir: []const u8, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, base_options: route_policy.Options, ) std.mem.Allocator.Error!struct { diagnostic: route_plan.PlannedDiagnostic, seeds: SubcircuitRouteSeedStats = .{} }
+src/serve/pcb_layout_seeds.zig::routeWithSubcircuitSeeds | fn routeWithSubcircuitSeeds( alloc: std.mem.Allocator, project_dir: []const u8, block: *const env_mod.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, base_options: route_policy.Options, ) std.mem.Allocator.Error!struct { result: router.RouteResult, seeds: SubcircuitRouteSeedStats = .{} }
+src/serve/pcb_layout_seeds.zig::writeRouteSeedStats | fn writeRouteSeedStats(w: *std.Io.Writer, stats: SubcircuitRouteSeedStats) std.Io.Writer.Error!void
+src/serve/pcb_layout_seeds.zig::writeSubRoutesJson | fn writeSubRoutesJson( w: *std.Io.Writer, alloc: std.mem.Allocator, slug: []const u8, sr: SavedRoutes, map: SubRouteMap, ) std.Io.Writer.Error!void
 src/serve/pcb_layout_sync.zig::importKicadLayoutApi value
 src/serve/pcb_page_cache.zig::Entry struct_
 src/serve/pcb_page_cache.zig::Retain struct_

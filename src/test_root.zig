@@ -503,6 +503,7 @@ test {
     _ = @import("serve/pcb_derived.zig");
     _ = @import("serve/pcb_layout_blob.zig");
     _ = @import("serve/pcb_layout_fab.zig");
+    _ = @import("serve/pcb_layout_seeds.zig");
     _ = @import("serve/pcb_layout_chrome.zig");
     _ = @import("serve/pcb_layout_mcp.zig");
     _ = @import("serve/pcb_layout_page.zig");
