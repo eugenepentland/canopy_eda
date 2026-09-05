@@ -37,6 +37,7 @@ const numeric = @import("../numeric.zig");
 const flat_netlist = @import("../flat_netlist.zig");
 const router = @import("router.zig");
 const router_ctx = @import("router_ctx.zig");
+const router_direct = @import("router_direct.zig");
 const router_maze = @import("router_maze.zig");
 const router_rescue = @import("router_rescue.zig");
 
@@ -77,7 +78,7 @@ const viaR = router_ctx.viaR;
 // The passes and searches this one calls back into (see `router.zig`).
 const CtxResult = router.CtxResult;
 const FineRescueRun = router_rescue.FineRescueRun;
-const DirectRun = router.DirectRun;
+const DirectRun = router_direct.DirectRun;
 const Gap = gap_policy.Gap;
 const GapBoard = gap_policy.GapBoard;
 const GapPath = gap_policy.GapPath;
@@ -94,7 +95,7 @@ const emitShapeRoute = router_rescue.emitShapeRoute;
 const gateStub = router_maze.gateStub;
 const markForbiddenDisc = router.markForbiddenDisc;
 const padGateways = router_maze.padGateways;
-const rollbackDirectRun = router.rollbackDirectRun;
+const rollbackDirectRun = router_direct.rollbackDirectRun;
 const route = router.route;
 const routeCancelled = router.routeCancelled;
 const searchWasLimited = router.searchWasLimited;
@@ -107,8 +108,8 @@ const softProbe = router.softProbe;
 const StitchTarget = router.StitchTarget;
 const fineRescueEligible = router_rescue.fineRescueEligible;
 const stitchTarget = router.stitchTarget;
-const tryDirectPair = router.tryDirectPair;
-const tryTwoViaSeededMaze = router.tryTwoViaSeededMaze;
+const tryDirectPair = router_direct.tryDirectPair;
+const tryTwoViaSeededMaze = router_direct.tryTwoViaSeededMaze;
 const windowCtx = router.windowCtx;
 
 const RipBreadth = gap_policy.RipBreadth;

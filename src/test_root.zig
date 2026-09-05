@@ -356,6 +356,7 @@ test {
     _ = @import("placement/routed_copper.zig");
     _ = @import("placement/router.zig");
     _ = @import("placement/router_ctx.zig");
+    _ = @import("placement/router_direct.zig");
     _ = @import("placement/router_gap_close.zig");
     _ = @import("placement/router_maze.zig");
     _ = @import("placement/router_rescue.zig");
