@@ -8,6 +8,7 @@ const evaluator_mod = @import("evaluator.zig");
 const instance_mod = @import("instance.zig");
 const modules = @import("modules.zig");
 const ids = @import("ids.zig");
+const sidecars = @import("sidecars.zig");
 
 const Node = ast.Node;
 const TestPoint = env_mod.TestPoint;
@@ -115,6 +116,7 @@ pub fn evalForm(
         try self.pending_ids.append(self.allocator, .{
             .form_offset = form_children[0].span.offset -| 1,
             .id = inst_id,
+            .file = sidecars.pendingIdFile(self),
         });
     }
 

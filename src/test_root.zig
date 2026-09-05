@@ -101,6 +101,7 @@ test {
     _ = @import("eval/net_envelopes.zig");
     _ = @import("eval/rails.zig");
     _ = @import("eval/scope_control.zig");
+    _ = @import("eval/sidecars.zig");
     _ = @import("eval/section_maturity.zig");
     _ = @import("eval/stackup_presets.zig");
     _ = @import("eval/suggest.zig");
@@ -206,6 +207,7 @@ test {
     _ = @import("pdf_afm.zig");
     _ = @import("pdf_verify.zig");
     _ = @import("pll_loop.zig");
+    _ = @import("split_design.zig");
     _ = @import("spurious.zig");
     _ = @import("power_integrity_json.zig");
     _ = @import("placement/airwire_geometry.zig");

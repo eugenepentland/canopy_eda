@@ -811,6 +811,22 @@ Tools include:
   stub bodies and no parasitics — the deck's own header says so. Both are
   deterministic: only the build id moves between runs (`diff -I '^\*#'` for the
   C header and the deck, `diff -I '"build_id"'` for the JSON).
+- **Design splitting (mutation)**: `split-design` `{design, write?}` — move a
+  design's physical and diagram declarations out of `src/<name>.sexp` into the
+  two autoloaded sidecars `<name>.layout.sexp` (`board`, `stackup`, `net-class`,
+  `pcb-plan`, `design-rules`, `pdn`, `module-policy`, `net-envelope`,
+  `power-plane`, `rough`, `fabrication-layer`, `kicad-pcb`) and
+  `<name>.diagram.sexp` (`diagram-layout`, design-scope `group`, `function`).
+  Each form is lifted at its parser span **byte for byte** with the comment
+  block written directly above it, and appended to the sidecar (an existing
+  sidecar is appended to, never overwritten); the circuit, `board-role`,
+  `hierarchical-ids` and every `(id …)` stay put. Both sidecars are autoloaded
+  and spliced back into `(design-block …)`, and the write is refused unless the
+  ORIGINAL and SPLIT trees flatten to the identical netlist AND the identical
+  evaluated design-scope form set. Default `write:false` returns the three
+  unified diffs without touching a file. Returns
+  `{ok,design,moved,written,equivalent,files[{path,forms,lines,diff}]}`. Full
+  rules in `docs/sexpr-language.md` → "Sidecar files".
 - **VFS file ops**: `read_file`, `list_dir`, `glob` (read-only);
   `write_file`, `edit_file`, `delete_file`, `move_file` (mutation).
 - **Build / state**: `build`, `regenerate_pinout`, `restore_version`.

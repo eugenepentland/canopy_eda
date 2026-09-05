@@ -8,6 +8,7 @@ const infra_fs = @import("infra/fs.zig");
 const log = @import("infra/log.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 const paren_span = @import("sexpr/paren_span.zig");
+const sidecars = @import("eval/sidecars.zig");
 
 /// Error set for source-file ID insertion. Combines file IO (read & write)
 /// with the allocator failures that can come out of `ArrayList`/dupe, plus
@@ -78,8 +79,39 @@ pub fn persistMintedIds(
     eval: *const Evaluator,
 ) bool {
     if (eval.pending_ids.items.len == 0 and eval.pending_child_ids.items.len == 0) return false;
-    insertPendingIds(allocator, source_path, eval.pending_ids.items, eval.pending_child_ids.items) catch |err| {
-        log.warn("[id-insert] persist failed for {s}: {s}", .{ source_path, @errorName(err) });
+    var wrote = persistInto(allocator, source_path, "", eval);
+    // A form spliced in from a sidecar carries a byte offset into THAT file's
+    // buffer. Writing it into the design source would stamp an unrelated `(`,
+    // so each sidecar's mints are written back into the sidecar itself.
+    for (sidecars.kinds) |kind| {
+        const path = sidecars.siblingPath(allocator, source_path, kind) orelse continue;
+        defer allocator.free(path);
+        wrote = persistInto(allocator, path, path, eval) or wrote;
+    }
+    return wrote;
+}
+
+/// Write back exactly the pending entries whose `file` is `tag` (the empty
+/// string selecting the design source's own forms).
+fn persistInto(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    tag: []const u8,
+    eval: *const Evaluator,
+) bool {
+    var pending: std.ArrayList(Evaluator.PendingId) = .empty;
+    defer pending.deinit(allocator);
+    var child: std.ArrayList(Evaluator.PendingChildId) = .empty;
+    defer child.deinit(allocator);
+    for (eval.pending_ids.items) |p| {
+        if (std.mem.eql(u8, p.file, tag)) pending.append(allocator, p) catch return false;
+    }
+    for (eval.pending_child_ids.items) |c| {
+        if (std.mem.eql(u8, c.file, tag)) child.append(allocator, c) catch return false;
+    }
+    if (pending.items.len == 0 and child.items.len == 0) return false;
+    insertPendingIds(allocator, path, pending.items, child.items) catch |err| {
+        log.warn("[id-insert] persist failed for {s}: {s}", .{ path, @errorName(err) });
         return false;
     };
     return true;
@@ -445,4 +477,85 @@ test "persistMintedIds pins hierarchical sub-block ids, stays idempotent, and sk
     const flat_after = try infra_fs.cwd().readFileAlloc(alloc, flat_path, 1 << 20);
     defer alloc.free(flat_after);
     try std.testing.expectEqualStrings(flat_before, flat_after);
+}
+
+// spec: id_insert - an id minted by a form spliced in from a sidecar is written back into that sidecar, leaving the design source byte-identical
+test "a sidecar form's minted id lands in the sidecar, not the design file" {
+    // page_allocator: the evaluator allocates from it and never frees (AST
+    // slices reference source buffers).
+    const alloc = std.heap.page_allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project_dir);
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/cap.sexp",
+        .data = "(component-family cap (param-type capacitance) (footprint \"0402\"))",
+    });
+
+    // The `(import …)` is what makes this a regression test rather than a
+    // smoke test: it is the first `(` in the design file, so a sidecar offset
+    // written against the WRONG buffer lands inside it and corrupts the design.
+    const design =
+        \\(import cap)
+        \\
+        \\(design-block "Sidecar Ids"
+        \\  (board-role main))
+    ;
+    const sidecar =
+        \\(stub "Reference oscillator"
+        \\  (category oscillator)
+        \\  (signal "REF" "REF_10M"))
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/sc.sexp", .data = design });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/sc.checks.sexp", .data = sidecar });
+
+    const design_path = try std.fmt.allocPrint(alloc, "{s}/src/sc.sexp", .{project_dir});
+    defer alloc.free(design_path);
+    const sidecar_path = try std.fmt.allocPrint(alloc, "{s}/src/sc.checks.sexp", .{project_dir});
+    defer alloc.free(sidecar_path);
+
+    {
+        var eval = Evaluator.init(alloc, project_dir);
+        defer eval.deinit();
+        _ = try eval.evalFile(design_path);
+        try std.testing.expect(eval.pending_ids.items.len > 0);
+        try std.testing.expectEqualStrings(sidecar_path, eval.pending_ids.items[0].file);
+        // An unreadable target is logged and reported as "did not write",
+        // never propagated: id persistence is best-effort everywhere it runs.
+        try std.testing.expect(!persistInto(alloc, "/no/such/dir/sc.checks.sexp", sidecar_path, &eval));
+        try std.testing.expect(persistMintedIds(alloc, design_path, &eval));
+    }
+
+    const design_after = try infra_fs.cwd().readFileAlloc(alloc, design_path, 1 << 20);
+    defer alloc.free(design_after);
+    try std.testing.expectEqualStrings(design, design_after);
+
+    const sidecar_after = try infra_fs.cwd().readFileAlloc(alloc, sidecar_path, 1 << 20);
+    defer alloc.free(sidecar_after);
+    try std.testing.expect(std.mem.indexOf(u8, sidecar_after, "(id ") != null);
+
+    // Idempotent: the id is now pinned in the sidecar, so a second evaluation
+    // mints nothing and neither file is rewritten.
+    {
+        var eval = Evaluator.init(alloc, project_dir);
+        defer eval.deinit();
+        _ = try eval.evalFile(design_path);
+        try std.testing.expect(!persistMintedIds(alloc, design_path, &eval));
+    }
+    const sidecar_twice = try infra_fs.cwd().readFileAlloc(alloc, sidecar_path, 1 << 20);
+    defer alloc.free(sidecar_twice);
+    try std.testing.expectEqualStrings(sidecar_after, sidecar_twice);
+
+    // A pending entry naming a file that is not a sidecar of this design is
+    // dropped rather than stamped at a foreign offset: `insertPendingIds`
+    // itself refuses a token the target already carries.
+    const collide = [_]Evaluator.PendingId{
+        .{ .form_offset = 0, .id = "deadbeef" },
+        .{ .form_offset = 0, .id = "deadbeef" },
+    };
+    try std.testing.expectError(error.IdCollision, insertPendingIds(alloc, design_path, &collide, &.{}));
 }

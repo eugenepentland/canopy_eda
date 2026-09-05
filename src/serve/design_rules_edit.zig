@@ -9,6 +9,7 @@ const infra_fs = @import("../infra/fs.zig");
 const paths = @import("../paths.zig");
 const serve_root = @import("../serve.zig");
 const edit = @import("edit.zig");
+const sidecars = @import("../eval/sidecars.zig");
 
 const Server = serve_root.Server;
 const max_source_bytes: usize = 10 * 1024 * 1024;
@@ -115,6 +116,51 @@ fn replaceSpan(allocator: std.mem.Allocator, source: []const u8, span: Span, rep
     try out.writer.writeAll(replacement);
     try out.writer.writeAll(source[span.end..]);
     return out.toOwnedSlice();
+}
+
+/// A top-level `(head …)` form in a file that has no `(design-block …)`
+/// wrapper — i.e. a sidecar. Scans at depth zero only, so a `(stackup …)`
+/// nested inside some other form is not mistaken for the design's own.
+fn topLevelForm(source: []const u8, head: []const u8) ?Span {
+    var cursor: usize = 0;
+    while (cursor < source.len) {
+        const ch = source[cursor];
+        if (ch == '"' or ch == ';') {
+            skipStringOrComment(source, &cursor, source.len);
+            continue;
+        }
+        if (ch == '(') {
+            const end = formEnd(source, cursor) orelse return null;
+            if (std.mem.eql(u8, formHead(source, cursor, end), head)) return .{ .start = cursor, .end = end };
+            cursor = end;
+            continue;
+        }
+        cursor += 1;
+    }
+    return null;
+}
+
+/// True when this design keeps `head` in its `<name>.layout.sexp` sidecar
+/// rather than in the design file (see `eval/sidecars.zig`).
+///
+/// These endpoints patch the design source's own text, and create the form
+/// when it is missing. On a design that `split-design` has moved the form out
+/// of, that would write a SECOND copy — and `stackup`, `board`, `pcb-plan`,
+/// `design-rules` and `diagram-layout` are singletons the sidecar loader
+/// refuses to see twice, so the board would stop evaluating altogether.
+/// Refuse instead, naming the file that owns the form. (Patching the sidecar
+/// in place is the better answer and is not implemented here yet.)
+fn livesInLayoutSidecar(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    head: []const u8,
+) bool {
+    const path = paths.designSiblingPath(allocator, project_dir, name, sidecars.Kind.layout.ext()) catch return false;
+    defer allocator.free(path);
+    const source = infra_fs.cwd().readFileAlloc(allocator, path, max_source_bytes) catch return false;
+    defer allocator.free(source);
+    return topLevelForm(source, head) != null;
 }
 
 fn designBlockSpan(source: []const u8) ?Span {
@@ -366,6 +412,8 @@ pub fn editDesignRulesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respons
     const values = parsed.value.object.get("rules") orelse return jsonError(res, 400, "{\"error\":\"missing rules\"}");
     if (values != .object) return jsonError(res, 400, "{\"error\":\"rules must be an object\"}");
 
+    if (livesInLayoutSidecar(ctx.allocator, ctx.project_dir, name, "design-rules"))
+        return jsonError(res, 409, "{\"error\":\"(design-rules …) lives in this design's .layout.sexp sidecar — edit it there\"}");
     const path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch
         return jsonError(res, 404, "{\"error\":\"design source not found\"}");
     defer ctx.allocator.free(path);
@@ -413,6 +461,8 @@ pub fn editStackupPlanesApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
     };
     defer ctx.allocator.free(planes);
 
+    if (livesInLayoutSidecar(ctx.allocator, ctx.project_dir, name, "stackup"))
+        return jsonError(res, 409, "{\"error\":\"(stackup …) lives in this design's .layout.sexp sidecar — edit it there\"}");
     const path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch
         return jsonError(res, 404, "{\"error\":\"design source not found\"}");
     defer ctx.allocator.free(path);
@@ -530,4 +580,41 @@ test "whole-layer plane input rejects duplicate layers and escapes source string
     const got = try patchStackupPlanes(a, "(design-block \"b\")", 4, &planes);
     defer a.free(got);
     try std.testing.expect(std.mem.indexOf(u8, got, "(plane 2 \"rail\\\\\\\"name\")") != null);
+}
+
+// spec: Web Server - Design Settings refuses to author a second copy of a rule form the design keeps in its .layout.sexp sidecar
+test "design settings defer to a split design's layout sidecar" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/split.sexp",
+        .data = "(design-block \"Split\"\n  (section \"RF\"))\n",
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/split.layout.sexp",
+        .data =
+        \\; Layout sidecar.
+        \\(design-rules (clearance 0.15))
+        \\(stackup 4 (thickness 1.6))
+        ,
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(project);
+
+    // Both forms the Design Settings drawer owns now live next door; writing
+    // either into the design file would make it a duplicate singleton and stop
+    // the board evaluating.
+    try std.testing.expect(livesInLayoutSidecar(a, project, "split", "design-rules"));
+    try std.testing.expect(livesInLayoutSidecar(a, project, "split", "stackup"));
+    // A form the sidecar does not carry is still the design file's to author.
+    try std.testing.expect(!livesInLayoutSidecar(a, project, "split", "pcb-plan"));
+    // A design with no sidecar at all keeps the unchanged behaviour.
+    try std.testing.expect(!livesInLayoutSidecar(a, project, "nosuch", "design-rules"));
+
+    // The scan is top-level only: a `(stackup …)` nested inside another form
+    // is not the design's own declaration.
+    try std.testing.expect(topLevelForm("(board (stackup 4))", "stackup") == null);
+    try std.testing.expect(topLevelForm("; (stackup 4)\n(design-rules)", "stackup") == null);
 }

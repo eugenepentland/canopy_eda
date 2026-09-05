@@ -9,6 +9,7 @@ const std = @import("std");
 const json_writer = @import("../json_writer.zig");
 const infra_fs = @import("../infra/fs.zig");
 const paths = @import("../paths.zig");
+const sidecars = @import("../eval/sidecars.zig");
 const edit = @import("edit.zig");
 const diag_format = @import("diag_format.zig");
 const vfs = @import("vfs.zig");
@@ -62,6 +63,7 @@ const mcp_flatten = @import("mcp_flatten.zig");
 const pins_by_name = @import("../pins_by_name.zig");
 const export_pinmap = @import("../export_pinmap.zig");
 const export_spice = @import("../export_spice.zig");
+const split_design = @import("../split_design.zig");
 const mcp_checks = @import("mcp_checks.zig");
 const schematic_view = @import("mcp_schematic_view.zig");
 const mcp_build = @import("mcp_build.zig");
@@ -272,6 +274,13 @@ const tools = [_]ToolEntry{
     // lines plus one empty .subckt stub per IC, ground on node 0.
     .{ .name = "export_pinmap", .is_mutation = false },
     .{ .name = "export_spice", .is_mutation = false },
+    // Move a design's physical/diagram declarations out of its `.sexp` into the
+    // autoloaded `<name>.layout.sexp` / `<name>.diagram.sexp` sidecars — lifted
+    // at their parser spans with the comment block above each, so the forms move
+    // byte for byte. `write:false` (the default) returns the three unified
+    // diffs; a write is refused unless the ORIGINAL and SPLIT trees flatten to
+    // the identical netlist AND the identical design-scope form set.
+    .{ .name = "split-design", .is_mutation = true },
     // Search Component Search Engine and return candidate parts (read-only).
     // Pairs with download_footprint / download_datasheet to import a chosen one.
     .{ .name = "search_components", .is_mutation = false },
@@ -1132,6 +1141,7 @@ fn dispatchVfs(
     if (std.mem.eql(u8, tool_name, "rewrite-pins-by-name")) return try pins_by_name.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "export_pinmap")) return try export_pinmap.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     if (std.mem.eql(u8, tool_name, "export_spice")) return try export_spice.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
+    if (std.mem.eql(u8, tool_name, "split-design")) return try split_design.tool(ctx.allocator, ctx.project_dir, ctx.args, ctx.out);
     return null;
 }
 
@@ -1792,8 +1802,9 @@ pub fn optionalBool(args_val: ?std.json.Value, key: []const u8) ?bool {
 /// Write `s` as a JSON string literal (with escapes) to `w`.
 /// Scan `{project_dir}/src/` recursively and return the basename of every
 /// file whose top-level form is a `(design-block …)`. Helper for the CLI
-/// `list_designs` tool and the index page's design list. Sibling
-/// `<name>.checks.sexp` files (autoloaded verifications) are skipped.
+/// `list_designs` tool and the index page's design list. The autoloaded
+/// sidecars (`<name>.checks.sexp`, `<name>.layout.sexp`, `<name>.diagram.sexp`)
+/// are skipped — they are part of a design, not designs of their own.
 pub fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) ToolError![][]const u8 {
     const src_path = try std.fmt.allocPrint(allocator, "{s}/src", .{project_dir});
     defer allocator.free(src_path);
@@ -1807,7 +1818,7 @@ pub fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) To
     while (try walker.next()) |entry| {
         if (entry.kind != .file and entry.kind != .sym_link) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".sexp")) continue;
-        if (std.mem.endsWith(u8, entry.basename, ".checks.sexp")) continue;
+        if (sidecars.kindOfPath(entry.basename) != null) continue;
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src_path, entry.path });
         defer allocator.free(full_path);
         if (!hasTopLevelDesignBlock(allocator, full_path)) continue;
@@ -2261,7 +2272,7 @@ pub fn listDesignSummaries(
     while (try walker.next()) |entry| {
         if (entry.kind != .file and entry.kind != .sym_link) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".sexp")) continue;
-        if (std.mem.endsWith(u8, entry.basename, ".checks.sexp")) continue;
+        if (sidecars.kindOfPath(entry.basename) != null) continue;
         const base = try allocator.dupe(u8, entry.basename[0 .. entry.basename.len - ".sexp".len]);
         var mtime_sec: i64 = 0;
         var size: u64 = 0;

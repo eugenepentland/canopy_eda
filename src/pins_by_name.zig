@@ -39,6 +39,7 @@ const env_mod = @import("eval/env.zig");
 const evaluator_mod = @import("eval/evaluator.zig");
 const eval_modules = @import("eval/modules.zig");
 const eval_builders = @import("eval/builders.zig");
+const sidecars = @import("eval/sidecars.zig");
 const instance_mod = @import("eval/instance.zig");
 const eval_ids = @import("eval/ids.zig");
 
@@ -615,23 +616,22 @@ fn evalBlock(eval: *Evaluator, target: Target, source: []const u8) ?*env_mod.Des
 }
 
 /// Evaluate a design source exactly as `Evaluator.evalFile` would, including
-/// the sibling `<name>.checks.sexp` splice, but from bytes rather than disk.
+/// the sibling sidecar splice, but from bytes rather than disk.
 fn evalDesignSource(eval: *Evaluator, path: []const u8, source: []const u8) ?env_mod.Value {
     const parsed = parser_mod.parse(eval.allocator, source) catch return null;
-    const nodes = spliceSiblingChecks(eval, path, parsed);
+    const nodes = spliceSiblingSidecars(eval, path, parsed);
     var env = Env.init(eval.allocator, null);
     defer env.deinit();
     eval_modules.loadPassivesPrelude(eval, &env);
     return eval.evalNodes(nodes, &env) catch null;
 }
 
-fn spliceSiblingChecks(eval: *Evaluator, path: []const u8, nodes: []const Node) []const Node {
+fn spliceSiblingSidecars(eval: *Evaluator, path: []const u8, nodes: []const Node) []const Node {
     if (!std.mem.endsWith(u8, path, ".sexp")) return nodes;
-    const stem = path[0 .. path.len - ".sexp".len];
-    const checks_path = std.fmt.allocPrint(eval.allocator, "{s}.checks.sexp", .{stem}) catch return nodes;
-    infra_fs.cwd().access(checks_path, .{}) catch return nodes;
-    const checks = eval_builders.loadFile(eval, checks_path) orelse return nodes;
-    return eval_builders.spliceChecksIntoDesignBlock(eval, nodes, checks) orelse nodes;
+    var buf: [sidecars.kinds.len]sidecars.Loaded = undefined;
+    const loaded = eval_builders.loadSidecars(eval, path, &buf);
+    const merged = sidecars.splice(eval, path, nodes, loaded) catch return nodes;
+    return merged orelse nodes;
 }
 
 /// Instantiate a `lib/modules/` file's `(defmodule …)` from bytes with zero

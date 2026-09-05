@@ -17,6 +17,7 @@ const suggest = @import("suggest.zig");
 const thermal = @import("thermal.zig");
 const forms_mod = @import("forms.zig");
 const variants = @import("variants.zig");
+const sidecars = @import("sidecars.zig");
 const PinNetDecl = evaluator_mod.PinNetDecl;
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -223,6 +224,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         try self.pending_ids.append(self.allocator, .{
             .form_offset = form_children[0].span.offset -| 1,
             .id = inst_id,
+            .file = sidecars.pendingIdFile(self),
         });
     }
 
@@ -1052,6 +1054,7 @@ pub fn evalSeriesForm(
             try self.pending_ids.append(self.allocator, .{
                 .form_offset = form_children[0].span.offset -| 1,
                 .id = gen,
+                .file = sidecars.pendingIdFile(self),
             });
             break :blk gen;
         };
@@ -1085,6 +1088,7 @@ pub fn evalSeriesForm(
             try self.pending_ids.append(self.allocator, .{
                 .form_offset = form_children[0].span.offset -| 1,
                 .id = s_id,
+                .file = sidecars.pendingIdFile(self),
             });
         }
         const ta = try parseTrailingArgs(self, form_children[3..], env);
@@ -1125,6 +1129,7 @@ pub fn evalFanoutForm(
         try self.pending_ids.append(self.allocator, .{
             .form_offset = form_children[0].span.offset -| 1,
             .id = gen,
+            .file = sidecars.pendingIdFile(self),
         });
         break :blk gen;
     };
