@@ -61,10 +61,15 @@
         // verification — so the link may point at a dirty working tree.
         // Guardian is the only URL dep here; everything else is vendored or a
         // path dep, so that one entry is the whole override. Bump the pin by
-        // tagging guardian-zig and re-running
-        // `zig fetch --save=guardian <tarball-url>` (with this entry deleted
-        // first — `--save` over an existing entry rewrites the value in place
-        // and drops the hash).
+        // tagging guardian-zig, running `zig fetch <tarball-url>` ONLY to read
+        // the hash it prints, writing url+hash here by hand, then deleting
+        // `~/.cache/zig/p/<hash>.tar.gz` and running `zig build --fetch`. Two
+        // bugs in this Zig snapshot make the detour necessary: `zig fetch
+        // --save` over an existing entry rewrites the value in place and drops
+        // the hash, and the standalone `zig fetch` recompresses the cached
+        // tarball with the archive's top-level directory still nested, so the
+        // next build reports a hash mismatch against an `N-V-…` package. The
+        // build's own fetch path writes a correct cache entry.
         .guardian = .{
             .url = "https://github.com/eugenepentland/guardian-zig/archive/refs/tags/v0.2.1.tar.gz",
             .hash = "guardian-0.2.1-Qv8iu_GLPQBNOe5Zp3pE9AGxcf6Bxfm4dtwCaa6iaYyN",

@@ -10,7 +10,7 @@ pub const required_zig_version = "0.17.0-dev.1683+5ceec001b";
 pub fn build(b: *std.Build) void {
     if (!std.mem.eql(u8, builtin.zig_version_string, required_zig_version)) {
         std.debug.panic(
-            "netlisp requires Zig {s}; found {s}. See README.md for the pinned toolchain and archive checksum.",
+            "netlisp requires Zig {s}; found {s}. See ZIG_TOOLCHAIN.md (scripts/install-zig.sh installs it).",
             .{ required_zig_version, builtin.zig_version_string },
         );
     }

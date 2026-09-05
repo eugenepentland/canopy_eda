@@ -49,8 +49,6 @@ guardian_runtime.db
 
 # Claude Code worktree metadata (per-machine; not part of the project)
 .claude/worktrees/
-# Machine-local symlink for the guardian path dep (see build.zig.zon)
-.claude/canopy
 # Per-machine scheduler lock written by the local agent runtime
 .claude/scheduled_tasks.lock
 
