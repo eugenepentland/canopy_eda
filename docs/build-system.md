@@ -6,14 +6,14 @@ Dependencies: `httpz` (HTTP server), `guardian` (code-quality gate).
 
 ### Build modes and codegen backends
 
-The repository has one bright-line policy: **every internal netlisp build is the
-self-hosted Debug build**. That includes the application, focused/full tests,
-dev servers, renderers/exporters, mutation runs, solver experiments, profiling,
-and benchmarks. **Self-hosted ReleaseSafe is built only at the deployment boundary**
-by `prepare-release.sh`, never as a parallel
-developer workflow.
+The repository has one bright-line policy: **every netlisp build uses Zig's
+self-hosted backend**. Debug is the default for the application, focused/full
+tests, dev servers, renderers/exporters, mutation runs, solver experiments,
+profiling, and benchmarks. ReleaseSafe — also self-hosted — is what
+`prepare-release.sh` deploys, and what you build locally when a human is going
+to interact with the result.
 
-Match the Debug workflow to the question being answered:
+Match the workflow to the question being answered:
 
 | Purpose | Command | When to use it |
 |---|---|---|
@@ -21,34 +21,28 @@ Match the Debug workflow to the question being answered:
 | Focused behavioral test | `zig build --seed=1 test -Dtest-filter='name'` | The normal inner loop. Tests default to Debug; confirm that the printed match count is nonzero. |
 | Whole-suite type-check | `zig build test-compile` | After focused tests when a change could affect distant test call sites. Runs no tests. |
 | Full suite | `zig build --seed=1 test` | Cross-cutting diagnosis or the final gate. The test binary defaults to Debug independently of `-Doptimize`. |
-| Exact production candidate | `.githooks/prepare-release.sh` | Once, on the final clean commit after rebasing onto current `main`. Runs self-hosted Debug tests and the sole self-hosted ReleaseSafe application build concurrently. |
+| Production-speed local build | `zig build --seed=1 -Doptimize=safe -p <own-prefix>` | Dev servers, feature review, solver runs, benchmarks. Its own prefix, so it cannot overwrite the `zig-out/bin/netlisp` a running server or measurement is executing. |
+| Exact production candidate | `.githooks/prepare-release.sh` | Once, on the final clean commit after rebasing onto current `main`. Runs Debug tests and the sole deployable ReleaseSafe build concurrently. |
 
-Do not construct a standalone ReleaseSafe application during development.
-`prepare-release` owns that build and runs it once beside the Debug suite.
-During normal iteration, use the Debug application, Debug dev server, filtered
-or full Debug tests, native Debug render/export tools, and `test-compile`.
-
-The repository exactly pins Zig `0.17.0-dev.1683+5ceec001b`; see
-`ZIG_TOOLCHAIN.md`. Its normal Debug build selects Zig's self-hosted code
-generator. The top-level build runner does **not** accept
-compiler flags such as `-fno-llvm` or `-fllvm`; both of these are invalid:
+The repository exactly pins the official Zig snapshot named in `.zigversion`;
+see `ZIG_TOOLCHAIN.md` for the install script and checksums. That compiler
+ships LLVM, but nothing here uses it by default: the build option `-Dllvm`
+(default false) selects the backend for the `netlisp` executable, and every
+gate, release and deploy path leaves it off.
 
 ```bash
-zig build -Doptimize=debug -fno-llvm
-zig build -Doptimize=debug -fllvm
+zig build --seed=1 -Doptimize=safe            # self-hosted (seconds)
+zig build --seed=1 -Doptimize=safe -Dllvm     # LLVM (minutes) — opt-in only
 ```
 
-Direct compiler invocations may spell the self-hosted Debug backend explicitly,
-for example the slim optimizer benchmark:
+`-fno-llvm` / `-fllvm` are *compiler* flags and are rejected by the build
+runner; use `-Dllvm` with `zig build`. Direct compiler invocations may still
+spell the backend, for example the slim optimizer benchmark:
 
 ```bash
 zig build-exe src/bench_layout.zig -ODebug -fno-llvm \
-  -femit-bin=/tmp/bench-layout-selfhost
+  -femit-bin=$HOME/.cache/netlisp/bench-layout-selfhost
 ```
-
-Do not substitute `-fllvm`, `-OReleaseSafe`, `-Dtest-opt=safe`, or
-`-Doptimize=safe` in an internal workflow. The deployment scripts own the
-self-hosted ReleaseSafe application artifact.
 
 Measured 2026-08-11 with clean caches and the same four-design, three-rep
 optimizer workload (all pose checksums matched):
@@ -66,9 +60,10 @@ the current snapshot: Debug took 43.53 s versus 134.47 s on 0.15.1 (**3.09x
 faster**) and ReleaseSafe was effectively unchanged at 6.28 s versus 6.23 s;
 all pose checksums matched. The application, Guardian, Ward, httpz, zt,
 websocket, metrics, passcay, and zbor are now ported and pinned together.
-Use self-hosted Debug for development and internal performance work. Production
-performance is checked on the candidate that `prepare-release.sh` already
-builds; do not create a second ReleaseSafe binary just to benchmark it. Before
+Use self-hosted Debug for development and internal performance work, and a
+self-hosted ReleaseSafe build (its own `--prefix`) when the measurement needs
+production-class code. The release gate's own candidate is what production
+performance is judged on. Before
 the latency-sensitive PCB-editor measurement, release preparation waits for
 three quiet CPU/run-queue samples. A timing-budget miss gets up to three
 attempts, each after another quiet window; renderer, workload, and other

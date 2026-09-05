@@ -11,12 +11,16 @@ trap 'rm -rf -- "$TMP"' EXIT
 REPO="$TMP/repo"
 mkdir -p "$REPO/.githooks" "$REPO/bin"
 cp "$ROOT/.githooks/prepare-release.sh" "$REPO/.githooks/prepare-release.sh"
+# prepare-release reads the required version from .zigversion, and so does the
+# fake compiler below — one source of truth, so a pin bump needs no edit here.
+cp "$ROOT/.zigversion" "$REPO/.zigversion"
 
 cat >"$REPO/bin/zig" <<'ZIG'
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = version ]; then
-  printf '%s\n' '0.17.0-dev.1683+5ceec001b'
+  tr -d '[:space:]' <"$(dirname "$0")/../.zigversion"
+  printf '\n'
   exit 0
 fi
 case " $* " in
@@ -48,12 +52,6 @@ case " $* " in
 esac
 ZIG
 chmod +x "$REPO/bin/zig" "$REPO/.githooks/prepare-release.sh"
-# The production script intentionally rejects same-version compiler binaries
-# with different contents. Bind this isolated fixture to its fake compiler so
-# the test reaches the grouped jobs instead of stopping at that security gate.
-fake_zig_sha="$(sha256sum "$REPO/bin/zig" | awk '{print $1}')"
-sed -i "s/^REQUIRED_ZIG_SHA256=.*/REQUIRED_ZIG_SHA256=\"$fake_zig_sha\"/" \
-  "$REPO/.githooks/prepare-release.sh"
 
 git -C "$REPO" init -q
 git -C "$REPO" config user.name test

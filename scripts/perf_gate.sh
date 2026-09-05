@@ -132,7 +132,7 @@ zig build --seed=1 -Doptimize=debug
 # Page rendering and CAM generation are user-facing/benchmark work, so the
 # browser half runs the pinned self-hosted ReleaseSafe artifact. A Debug server
 # makes Barracuda's cold CAM payload take minutes and measures the wrong thing.
-scripts/zig-prod build --seed=1 -Doptimize=safe -p zig-out-browser-perf
+zig build --seed=1 -Doptimize=safe -p zig-out-browser-perf
 
 if [ "${1:-}" = "--record" ]; then
   mkdir -p "$(dirname "$BASELINE")"

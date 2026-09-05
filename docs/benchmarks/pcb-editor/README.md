@@ -24,7 +24,7 @@ Assembly, and all-pages browser gates.
 Build a production-class binary and run the focused gate with:
 
 ```sh
-scripts/zig-prod build --seed=1 -Doptimize=safe -p zig-out-browser-perf
+zig build --seed=1 -Doptimize=safe -p zig-out-browser-perf
 npm run perf:pcb-editor -- --binary zig-out-browser-perf/bin/netlisp \
   --project-dir projects/designs
 ```

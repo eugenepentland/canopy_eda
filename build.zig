@@ -185,14 +185,24 @@ pub fn build(b: *std.Build) void {
     // Embed the compiled drc.wasm so static_assets.zig can @embedFile it.
     exe_mod.addAnonymousImport("drc.wasm", .{ .root_source_file = wasm_bin });
 
+    // Codegen backend for the `netlisp` executable. The pinned official Zig
+    // ships LLVM, but every optimized build here goes through the self-hosted
+    // x86-64 backend by default: LLVM turns a seconds-long ReleaseSafe compile
+    // into a multi-minute one, which is why releases (and any local
+    // `-Doptimize=safe`) are self-hosted. `-Dllvm` opts a build back into LLVM
+    // when the faster *runtime* is worth the slow compile — it is not used by
+    // any gate, release, or deploy path. Debug leaves the choice to the
+    // compiler default (also self-hosted on this target).
+    const use_llvm = b.option(
+        bool,
+        "llvm",
+        "Emit the netlisp executable through LLVM instead of the self-hosted backend (much slower compile)",
+    ) orelse false;
+
     const exe = b.addExecutable(.{
         .name = "netlisp",
         .root_module = exe_mod,
-        // The sole production ReleaseSafe artifact uses Zig's self-hosted
-        // x86-64 backend even though the pinned official compiler also ships
-        // LLVM. Debug keeps the compiler default; repository policy reserves
-        // `.safe` for prepare-release.sh.
-        .use_llvm = if (optimize == .safe) false else null,
+        .use_llvm = if (use_llvm) true else if (optimize == .debug) null else false,
     });
     exe.step.dependOn(template_predecessor);
     b.installArtifact(exe);
@@ -347,6 +357,11 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(template_predecessor);
     test_step.dependOn(template_predecessor);
 
+    // A plain `zig build` runs Guardian's external gates, which spawn `node`
+    // and `python3` themselves — so the host probe guards the default step
+    // too, not just `test`'s tree-policy checks.
+    b.getInstallStep().dependOn(addHostPrereqCheck(b));
+
     // Order the compile-only probe behind template codegen AND its auto-fmt.
     // Behind codegen because the probe compiles src/test_root.zig, which imports the
     // generated files; behind the fmt because otherwise `zig build test-compile`
@@ -478,6 +493,11 @@ fn addTestShard(
 /// the green-run digest and because they are the right home once that path is
 /// fixed. See AUDIT-LEDGER.toml DRIFT-INFRA-004.
 fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step) void {
+    // Every check below spawns `node` or `python3`. Order them behind the
+    // host-prerequisite probe so a machine without them reports what to
+    // install instead of a bare "unable to spawn" from whichever gate lost the
+    // race.
+    const prereqs = addHostPrereqCheck(b);
     const checks = [_][]const []const u8{
         // `--syntax` parses every first-party asset with Node here, because
         // the `node --check` externals that were supposed to do it do not run.
@@ -490,6 +510,12 @@ fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step) void {
         // gates here were decorative. Nothing in this tree could have noticed,
         // because a gate that never fires looks exactly like one that cannot.
         &.{"scripts/check_external_gates_armed.sh"},
+        // One compiler, from PATH, pinned by `.zigversion` — asserted against
+        // the release/deploy scripts, build.zig's backend default and the
+        // systemd unit. It used to be a manual-only script that nothing ran
+        // (AUDIT-LEDGER.toml), which is how the private-compiler pin it
+        // guarded went unnoticed; it has a home now.
+        &.{"scripts/test_production_toolchain_pin.sh"},
         // JavaScript unit-test runners. Each was declared as an
         // external and therefore ran nowhere — which put shape_sketch.test.js
         // back in exactly the state DRIFT-INFRA-003 described, "a unit test
@@ -508,8 +534,24 @@ fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step) void {
         // by output hash — and a skipped policy check is the failure mode
         // these exist to prevent.
         run.has_side_effects = true;
+        run.step.dependOn(prereqs);
         test_step.dependOn(&run.step);
     }
+}
+
+/// The `node` / `python3` probe a newcomer's first build hits before anything
+/// else spawns them. Guardian's `[[external]]` gates alone shell out to `node`
+/// 47 times and to `python3` four times on a plain `zig build`, and a missing
+/// interpreter surfaces there as an unattributed external-gate failure. This
+/// says "install Node 20+ / Python 3.11+" in one line instead. Returns the run
+/// step so callers can order real work behind it.
+fn addHostPrereqCheck(b: *std.Build) *std.Build.Step {
+    const run = b.addSystemCommand(&.{"scripts/check_host_prereqs.sh"});
+    run.setCwd(b.path("."));
+    // It probes the machine, not the tree: nothing here is cacheable by output
+    // hash, and a skipped probe is exactly the confusing failure it prevents.
+    run.has_side_effects = true;
+    return &run.step;
 }
 
 /// Developer-only changed-file selector. The script starts a nested filtered

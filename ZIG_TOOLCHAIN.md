@@ -1,171 +1,170 @@
-# Pinned Zig toolchains
+# The Zig toolchain
 
-This repository requires Zig version `0.17.0-dev.1683+5ceec001b`. `build.zig`
-rejects any other version, including a later Zig master snapshot. Production is
-stricter: both release preparation and deployment require the exact official
-compiler binary and SHA-256 below, so a same-version compiler cannot silently
-change the generated executable.
-
-Official Linux x86_64 archive:
+netlisp builds with one compiler: the official Zig master snapshot named in
+[`.zigversion`](.zigversion).
 
 ```text
-https://ziglang.org/builds/zig-x86_64-linux-0.17.0-dev.1683+5ceec001b.tar.xz
-SHA-256 e6e5c7e0834626bded90cd786d148bebf211dc80b013afefd631472b57b41f77
+0.17.0-dev.1683+5ceec001b
 ```
 
-The production host keeps this official archive at
-`/home/epentland/zig-toolchains/0.17.0-dev.1683+5ceec001b` and points
-`/home/epentland/.local/bin/zig` at it for ordinary self-hosted Debug work.
-Other development machines may use any path; `zig version` must match
-`.zigversion` exactly.
+`build.zig` compares `builtin.zig_version_string` against that file's contents
+and refuses to configure on anything else, including a *newer* master snapshot.
+The release and deploy scripts check `zig version` against the same file before
+they start a build.
 
-Production ReleaseSafe candidates use the reconstructed compiler package:
+## Why it is pinned this exactly
+
+Zig master has no stability guarantee: language, `std`, and build-system APIs
+change between nightlies, and this tree tracks a snapshot rather than a release
+because it depends on 0.17's self-hosted x86-64 backend for fast optimized
+builds. A floating "latest master" would break the build on an arbitrary day
+for reasons unrelated to any change here, so the snapshot is pinned and moved
+deliberately (see [Bumping the pin](#bumping-the-pin)).
+
+## Other prerequisites
+
+`zig build` is not self-contained: the build graph and the Guardian gate shell
+out to a few host tools. `scripts/check_host_prereqs.sh` runs first on every
+build and names whichever is missing.
+
+| Tool | Version | Why |
+| --- | --- | --- |
+| Zig | exactly `.zigversion` | The compiler. |
+| Node.js | ≥ 20 | 47 Guardian external gates (`node --check` over the browser assets) plus the JS unit-test runners wired into `zig build test`. |
+| Python | ≥ 3.11 | `scripts/check_audit_ledger.py` and `scripts/check_js_asset_gates.py`; 3.11 is where `tomllib` entered the standard library. |
+| git | any recent | Guardian's process gates and the release/deploy hooks read repository state. |
+| `strip`, `readelf` (binutils) | any recent | `prepare-release.sh` strips the deployed executable and verifies no symbols remain. Release only. |
+| Playwright | optional | Only the browser performance scripts under `scripts/*_perf/` (`npm install`). |
+
+## Install
+
+```sh
+scripts/install-zig.sh --link
+```
+
+That downloads the archive for your host, verifies its SHA-256 against the
+checked-in table [`scripts/zig-toolchain.sha256`](scripts/zig-toolchain.sha256),
+extracts it to `~/.local/share/netlisp/zig/<version>/`, and symlinks
+`~/.local/bin/zig` at it. Without `--link` it prints the `export PATH=…` line
+instead. Re-running it is a no-op once the right version is installed.
+
+- `ZIG_INSTALL_DIR` overrides the install root.
+- Supported hosts: linux and macOS on x86_64 and aarch64. On Windows, or if you
+  would rather not run the script, install by hand below.
+
+Check it worked:
+
+```sh
+zig version            # must print exactly the contents of .zigversion
+zig build --seed=1     # builds netlisp
+```
+
+## Manual install
+
+Download the archive for your platform, verify its SHA-256, extract it, and put
+the resulting directory on `PATH`.
+
+The repository mirrors the archives as assets of the GitHub release
+[`toolchain-0.17.0-dev.1683`](https://github.com/eugenepentland/netlisp/releases/tag/toolchain-0.17.0-dev.1683),
+because `ziglang.org/builds/` is a rotating nightly directory: it serves this
+snapshot today and may drop it at any time. Both sources are the same bytes, so
+either verifies against the same checksum.
 
 ```text
-Path      /home/epentland/zig-toolchains/0.17.0-dev.1683+5ceec001b-eda-286f77f2-8f4af965/zig
-SHA-256   8f4af9650b5358abcdd8a283976d30b5dcdca2b400e44af25953b2e34101e7d4
-Source    /home/epentland/ai/canopy/zig-eda-candidate-auto-inline @ 286f77f28e
+Mirror    https://github.com/eugenepentland/netlisp/releases/download/toolchain-0.17.0-dev.1683/<archive>
+Upstream  https://ziglang.org/builds/<archive>
 ```
 
-It is not selected through `PATH`: the release and deploy scripts default to
-the absolute path above and verify the binary SHA before any gate, candidate
-reuse, installation, or restart. The package includes the source commit's
-complete `lib/` tree. The compiler host was emitted once with LLVM ReleaseFast,
-but it contains no LLVM backend; production application code is emitted by the
-self-hosted x86-64 backend.
+| Platform | Archive | SHA-256 |
+| --- | --- | --- |
+| linux x86_64 | `zig-x86_64-linux-0.17.0-dev.1683+5ceec001b.tar.xz` | `e6e5c7e0834626bded90cd786d148bebf211dc80b013afefd631472b57b41f77` |
+| linux aarch64 | `zig-aarch64-linux-0.17.0-dev.1683+5ceec001b.tar.xz` | `b18bd9c61b751ec64982359f85c3d4aec3347f4988b9edbfc15a14c055452eee` |
+| macOS x86_64 | `zig-x86_64-macos-0.17.0-dev.1683+5ceec001b.tar.xz` | `2b154b47ce5396c000260c06c8cf018a4bf22dd5f858fc8538e27f2012d86536` |
+| macOS aarch64 | `zig-aarch64-macos-0.17.0-dev.1683+5ceec001b.tar.xz` | `1081a0318a97f492aaca1b76c4e6fe1ce5cd586a212ee2c0db364b05a29b5870` |
+| Windows x86_64 | `zig-x86_64-windows-0.17.0-dev.1683+5ceec001b.zip` | `f5291dff1dec0ff16bffec0427b0a2b8629080cf2b89d55721b59eef988d3090` |
 
-The experimental source remains in
-`/home/epentland/ai/canopy/zig-eda-private`, but it is not production-approved.
-The full EDA gate exposed a deterministic router miscompile in both Debug and
-ReleaseSafe output from compiler SHA `e3c839e6...`; a later clean-cache rebuild
-still failed the same focused test. Keeping that repository available supports
-future diagnosis without putting its compiler on the production path.
+`scripts/zig-toolchain.sha256` holds the same sums in `sha256sum -c` format.
 
-## Build-mode boundary
+## Build modes
 
-All internal EDA work uses Zig's self-hosted Debug backend: application builds,
-focused and full tests, dev servers, render/export tools, mutation runs,
-solver experiments, and benchmarks. Use plain `zig build`/`zig build test` or
-spell `-Doptimize=debug`; do not request LLVM or ReleaseSafe for those tasks.
+| Mode | Command | Backend | What it is for |
+| --- | --- | --- | --- |
+| Debug (default) | `zig build --seed=1` | self-hosted | All development and every test. |
+| ReleaseSafe | `zig build --seed=1 -Doptimize=safe` | self-hosted | Releases, dev servers you actually interact with, benchmarks. |
+| ReleaseSafe + LLVM | `zig build --seed=1 -Doptimize=safe -Dllvm` | LLVM | Opt-in only: a faster binary for a much longer compile. |
 
-Self-hosted ReleaseSafe is reserved for the production artifact created by
-`.githooks/prepare-release.sh` and installed by the deployment hook. Developers
-should invoke the release script, not construct a second
-ReleaseSafe binary manually. The prebuilt ReleaseSafe `guardian-check` is a
-separate build-gate tool, not an EDA application artifact; it stays optimized
-so running the gate does not add roughly 40x overhead to every Debug build.
+The pinned compiler ships LLVM, but netlisp does **not** use it by default:
+`-Dllvm` defaults to false, so every optimized build goes through Zig's
+self-hosted x86-64 backend. Measured on this tree (cold per-mode build cache,
+warm global cache, 2026-09-05):
 
-Only the deployed ReleaseSafe EDA executable is stripped. Because the current
-self-hosted backend does not honor the build graph's strip request for this ELF,
-`prepare-release.sh` applies `/usr/bin/strip --strip-all` and verifies the
-result has no debug or symbol-table sections before publication. Internal
-self-hosted Debug artifacts retain symbols. The exact deployed commit is
-supplied as
-validated runtime candidate metadata rather than embedded as a compiler option,
-which lets Zig reuse the verified output when only non-compiler inputs move.
-
-Zig 0.17 renamed build option enum values. Use `-Doptimize=debug`,
-`-Doptimize=safe`, `-Doptimize=fast`, and `-Doptimize=small`; only `debug` is a
-normal developer choice in this repository. The deploy scripts own `safe`.
-Direct compiler commands continue to accept spellings such as `-ODebug`.
-
-Pass `--seed=1` to repeatable build/test gates. The 0.17 maker adds its random
-seed to test-runner arguments after `build.zig` configuration, so the previous
-in-script seed rewrite is no longer possible; a fixed command-line seed keeps
-an unchanged test run cacheable.
-
-## 2026-08-16 production decision
-
-Commit `a54011c1b066ccbf7d995df0446c104c568ab2c4` passed the complete release
-gate with the pinned official compiler forced through the self-hosted x86-64
-backend. All 79 Guardian checks and the application tests passed, the resulting
-binary was stripped, and the candidate metadata recorded compiler SHA-256
-`1d314883fd8cf4490c1c29dd73ad8b64e319a8a53c4d9087d1135b52977df37f`.
-The exact response JSON matched the deployed LLVM ReleaseSafe binary on all
-four benchmark boards.
-
-The canary nevertheless failed the runtime-performance acceptance criterion:
-
-| Artifact | Four-board runtime | Relative to deployed LLVM |
+| Build | Wall | Installed binary |
 | --- | ---: | ---: |
-| Deployed LLVM ReleaseSafe | 0.203349 s | 1.00x |
-| Official Zig, self-hosted ReleaseSafe | 0.893649 s | 4.39x slower |
-| Historical self-hosted Debug baseline | 0.964540 s | 4.74x slower |
+| Debug, self-hosted | 18.3 s | 448 MB |
+| ReleaseSafe, self-hosted | 24.3 s | 162 MB |
+| ReleaseSafe, `-Dllvm` | 300.0 s | 29 MB |
 
-The self-hosted candidate compiled in 15 seconds versus the historical LLVM
-ReleaseSafe build's roughly 223 seconds, but it was only 1.08x faster at runtime
-than the old Debug baseline and did not approach the 1.5x measured experimental
-compiler or the 3x target. `perf` recorded 16.606 billion cycles and 26.215
-billion instructions for the candidate versus 2.771 billion cycles and 6.082
-billion instructions for the deployed LLVM artifact.
+That is the whole reason the default is self-hosted: LLVM makes the same
+optimized build **12.3x** slower to compile. Reach for `-Dllvm` only when a
+measurement needs the faster generated code and you can wait; no gate, release,
+or deploy path passes it.
 
-Decision: keep this work on `codex/production-zig-pin`; do not merge, install,
-or restart production. Production remains at commit `37ba1bf6` with executable
-SHA-256 `7dde59dc08e8591450282c4f5d6aeaf9f1accd7221ec4824dbf8b2402e5fdc10`.
-The next candidate must both pass the full correctness gate and close the
-runtime gap before rollout.
+(The size column is the *installed* binary. `build.zig` asks for a stripped
+ReleaseSafe artifact and LLVM honors it; the self-hosted backend currently does
+not, which is why `prepare-release.sh` runs `strip --strip-all` itself and
+verifies the result.)
 
-## 2026-08-16 reconstructed compiler result
+Mode notes:
 
-The unsafe source was reduced to a reproducible checkpoint at Zig source commit
-`e3baa78b1e`. EDA commit `6886c8e93e73ddce92fb67bac124e0d00c558d92`
-then passed all 79 Guardian checks and all 2,945 application tests. The exact
-release gate built the stripped ReleaseSafe artifact in 11 seconds:
+- Backend selection is a *compiler* flag, not a build-runner flag.
+  `zig build -fno-llvm` / `-fllvm` are invalid; use `-Dllvm` with `zig build`,
+  or `-fno-llvm`/`-fllvm` with a direct `zig build-exe`.
+- Zig 0.17 spells build-option optimize modes in lowercase: `-Doptimize=debug`,
+  `safe`, `fast`, `small`. Direct compiler commands keep `-ODebug`,
+  `-OReleaseSafe`, and so on.
+- Pass `--seed=1` to any repeatable build or test gate. Zig 0.17 appends its
+  random seed to the test runner's arguments after `build.zig` configuration,
+  so a fixed command-line seed is what keeps an unchanged test run cacheable.
 
-```text
-Compiler SHA-256  8f4af9650b5358abcdd8a283976d30b5dcdca2b400e44af25953b2e34101e7d4
-Netlisp SHA-256   cac0b3ff67847dd5b00da7c701ce32368512a2e4441fdc3e402537c2df7dc1a2
-```
+## The release artifact
 
-An adjacent seven-repetition, CPU-pinned canary produced identical response
-SHA-256 values for all four boards:
+`.githooks/prepare-release.sh` builds the one ReleaseSafe artifact that gets
+deployed. It takes `zig` from `PATH` (override with `$ZIG`), fails loudly if
+`zig version` is not the pinned string, and records the compiler binary's
+SHA-256 alongside the candidate. That SHA is a *fingerprint*, not a second pin:
+nothing requires a particular value, but it keys the per-tree build caches and
+the candidate's provenance, so artifacts emitted by two different builds of the
+same version can never be reused for each other.
 
-| Artifact | Four-board mean | Relative to deployed LLVM |
-| --- | ---: | ---: |
-| Deployed LLVM ReleaseSafe | 0.204200 s | 1.00x |
-| Reconstructed self-hosted ReleaseSafe | 0.726507 s | 3.56x slower |
+Only that deployed executable is stripped — `prepare-release.sh` runs
+`strip --strip-all` and verifies no `.debug_*`/`.symtab` sections remain,
+because the self-hosted backend does not currently honor the build graph's
+strip request for this ELF. Every internal Debug artifact keeps its symbols.
 
-The reconstruction is 1.23x faster than the official self-hosted candidate and
-1.33x faster than the historical 0.964540-second Debug baseline. Hardware
-counters recorded 18.642 billion cycles and 30.783 billion instructions for
-the reconstruction versus 3.863 billion cycles and 8.449 billion instructions
-for deployed LLVM.
+## Bumping the pin
 
-Decision: correctness and reproducibility are restored, but the runtime gate
-still fails. Keep the reconstructed compiler and EDA pin on their feature
-branches; do not merge or deploy this candidate.
+Moving to a newer master snapshot is a deliberate change, not a maintenance
+chore. The steps:
 
-## 2026-08-17 retained compiler optimizations
+1. Put the new version string in `.zigversion` and in `required_zig_version` in
+   `build.zig`.
+2. Download every platform archive for the new version from
+   `https://ziglang.org/builds/`, and regenerate the checksum table:
 
-The removed post-checkpoint changes were rebuilt and measured independently.
-The work is committed in the Zig worktree
-`/home/epentland/ai/canopy/zig-eda-candidate-auto-inline` on branch
-`eda-candidate-auto-inline`:
+   ```sh
+   sha256sum zig-*-<new-version>.* >>scripts/zig-toolchain.sha256
+   ```
 
-```text
-1c3775dc08  x86: retain safe EDA runtime optimizations
-001f1a9712  docs: hand off isolated EDA compiler results
-```
+   Replace the old rows and update the `# Version:` header line, then update
+   the table in this file to match.
+3. Publish the archives as assets of a new GitHub release tagged
+   `toolchain-<version without the +hash>` (e.g. `toolchain-0.17.0-dev.1683`).
+   `scripts/install-zig.sh` derives that tag from `.zigversion`, so nothing in
+   the script needs editing.
+4. Install it (`scripts/install-zig.sh --link`) and run the full gate:
+   `zig build --seed=1 test`. Expect real work here — a master bump usually
+   moves `std` APIs.
+5. Re-measure the build-mode table above if the timings shifted noticeably.
 
-The retained changes are bounded automatic scalar-leaf inlining and paired
-x86-64 `cos`/`sin` lowering. The final LLVM-hosted compiler built from that
-tracked source passed the focused router discriminator, all 79 Guardian checks,
-and all 2,945 EDA tests. Its tested unstripped SHA-256 is
-`86ced2d8adcb348ea5d9639c3b94271b1ae5661d3e2cd17a7d5005cabac9e5ea`.
-
-Alternating 21-request canary windows measured 0.677069 and 0.677919 seconds
-per four-board pass, with all four response hashes equal to deployed LLVM. This
-is about 7% faster than the 0.726507-second safe checkpoint and about 1.42x the
-throughput of the historical Debug build, but still roughly 3.3x slower than
-deployed LLVM ReleaseSafe.
-
-Early call-argument death independently reproduced the router miscompile and is
-rejected. Pointer-argument pinning and balanced switch lowering were correct but
-slower and are also rejected. Full commands, individual measurements, and the
-continuation checklist are in that Zig branch's `EDA_COMPILER.md`.
-
-This result is a handoff, not a production cutover. The compiler has not been
-packaged or installed, this branch's existing compiler pin has not changed, and
-main/production remain untouched. A successor must rebuild and strip from
-`1c3775dc08`, package the matching `lib/`, pin the resulting final SHA, run the
-exact release gate, and repeat the production canary before considering merge.
+The dependency graph in `build.zig.zon` (httpz, zt, ward, guardian) is pinned
+separately and generally has to move with the compiler.

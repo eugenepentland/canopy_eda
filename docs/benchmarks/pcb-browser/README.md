@@ -50,7 +50,7 @@ MCP service is involved. It also passes `--skip-warmup`; otherwise the server's
 unrelated whole-corpus cache warm-up competes with the measured page.
 
 ```sh
-scripts/zig-prod build --seed=1 -Doptimize=safe -p zig-out-browser-perf
+zig build --seed=1 -Doptimize=safe -p zig-out-browser-perf
 npm run perf:assembly -- --binary zig-out-browser-perf/bin/netlisp
 ```
 

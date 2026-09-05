@@ -233,7 +233,7 @@ candidate for deployment.
 - Verifies the self-hosted production ELF has no debug or symbol-table sections before publication
 - Records the source tree hash alongside every candidate it publishes
 - Binds release candidates and caches to the exact compiler binary, not only its reported version
-- Rejects production preparation and deployment unless the compiler binary matches the pinned SHA-256
+- Rejects production preparation and deployment unless the PATH compiler reports the version pinned in .zigversion
 - Carries an exact runtime build ID and artifact policy with every release candidate
 - Adopts an already-verified candidate for an identical tree instead of rebuilding
 - Adopts only a candidate carrying its verification marker and a passing checksum, and otherwise falls back to the full build
