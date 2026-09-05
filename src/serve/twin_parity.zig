@@ -792,13 +792,13 @@ test "the instances CLI and list_instances emit the same payload at the same sco
     // asking it for a different scope — which is exactly what an argv default
     // and a JSON-argument default are free to do independently.
     var flat: std.Io.Writer.Allocating = .init(alloc);
-    try testing.expect(try mcp_tools.listInstances(alloc, project, "twinfx", query_cli.scopeOf(&.{}), &flat.writer));
+    try testing.expect(try mcp_tools.listInstances(alloc, project, "twinfx", .{ .scope = query_cli.scopeOf(&.{}) }, &flat.writer));
     const flat_tool = try mcpCall(alloc, project, "list_instances", "{\"name\":\"twinfx\"}");
     try testing.expect(flat_tool.ok);
     try testing.expectEqualStrings(flat.written(), flat_tool.body);
 
     var top: std.Io.Writer.Allocating = .init(alloc);
-    try testing.expect(try mcp_tools.listInstances(alloc, project, "twinfx", query_cli.scopeOf(&.{"--top-level"}), &top.writer));
+    try testing.expect(try mcp_tools.listInstances(alloc, project, "twinfx", .{ .scope = query_cli.scopeOf(&.{"--top-level"}) }, &top.writer));
     const top_tool = try mcpCall(alloc, project, "list_instances", "{\"name\":\"twinfx\",\"flatten\":false}");
     try testing.expect(top_tool.ok);
     try testing.expectEqualStrings(top.written(), top_tool.body);

@@ -16,6 +16,7 @@ const footprint_pads = @import("footprint_pads.zig");
 const suggest = @import("suggest.zig");
 const thermal = @import("thermal.zig");
 const forms_mod = @import("forms.zig");
+const variants = @import("variants.zig");
 const PinNetDecl = evaluator_mod.PinNetDecl;
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -276,6 +277,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
     var inline_notes: std.ArrayList(Note) = .empty;
     var inline_props: std.ArrayList(env_mod.Property) = .empty;
     var dnp_flag = false;
+    var variant_rules: std.ArrayList(env_mod.VariantRule) = .empty;
     var binds: env_mod.InstanceBinds = .{};
     var strap_oks: std.ArrayList(env_mod.StrapOk) = .empty;
     var nc_oks: std.ArrayList(env_mod.NcOk) = .empty;
@@ -301,6 +303,12 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         } else if (form.isForm("dnp")) {
             // (dnp) — mark Do Not Populate. Bare flag form (no value).
             dnp_flag = true;
+        } else if (variants.isInstanceForm(form)) {
+            // (only-in …) / (dnp-in …) / (value-in …) — assembly-variant
+            // clauses. Names are checked against the ROOT design's `(variant …)`
+            // declarations here, so a typo inside a module body reports the
+            // module's own file and line.
+            try variants.parseInstanceForm(self, form, ref_des, resolved.family, env, &variant_rules);
         } else if (form.isForm("decouples")) {
             try parseDecouples(self, form, ref_des, env, &binds.decouple);
         } else if (form.isForm("near")) {
@@ -345,9 +353,22 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
 
     warnPinoutlessMultiPad(self, form_children[0].span, &inst, reverse_pinout, pin_nets.items);
 
+    try variants.validateInstance(self, form_children[0].span, ref_des, dnp_flag, variant_rules.items);
+
     var final_inst = inst;
     final_inst.pinout_facts = summarisePinout(reverse_pinout);
-    final_inst.dnp = dnp_flag;
+    // The SELECTED assembly variant lands on the two fields the rest of the
+    // toolchain already reads — `dnp` and `value` — so ERC exemptions, the BOM,
+    // the KiCad attributes, the schematic and the layout need no variant
+    // awareness. The clauses themselves ride along for the population matrix.
+    const applied = variants.apply(self.variants.scope, variant_rules.items);
+    final_inst.dnp = dnp_flag or applied.dnp;
+    if (applied.value) |override| {
+        final_inst.variants.base_value = inst.value;
+        final_inst.value = override;
+    }
+    if (variant_rules.items.len > 0)
+        final_inst.variants.rules = variant_rules.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;
     final_inst.bind = binds;
     final_inst.thermal.power = power;
     if (strap_oks.items.len > 0) final_inst.strap_oks = strap_oks.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory;

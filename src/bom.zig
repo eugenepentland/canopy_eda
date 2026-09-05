@@ -205,7 +205,11 @@ pub fn collectFlatInstances(
             .ref_des = ref,
             .component = inst.component,
             .footprint = inst.footprint,
-            .value = inst.value,
+            // The sidecar is the identity ledger for the BASE assembly: it
+            // fingerprints the authored value, never a `(value-in …)` override.
+            // Building a non-default variant therefore cannot invalidate the
+            // rows the base assembly's MPN selections live in.
+            .value = inst.variants.baseValue(inst.value),
             .attrs = inst.attrs,
             .nets = nets_list,
             .properties = inst.properties,

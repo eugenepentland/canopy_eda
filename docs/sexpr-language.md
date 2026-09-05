@@ -846,6 +846,92 @@ matches every module-local net of that name. A pinned class is final — the
 hub-plus-inductor switch-node upgrade does not apply — and a pinned net is no
 longer reported as inferred. Unknown class atoms are warned and dropped.
 
+### Assembly variants: `(variant …)`, `(only-in …)`, `(dnp-in …)`, `(value-in …)`
+
+One PCB, one netlist, one set of footprints — several build configurations
+differing only in **which parts are populated** and **what value a populated
+part carries**. Declare the variant space at design-block scope:
+
+```lisp
+(design-block "Sensor Node"
+  (variant "Lite" "no radio, cost-reduced")
+  (variant "Pro"  "full feature set" (default))
+  …)
+```
+
+`(variant …)` is repeatable, at most one may carry `(default)`, and the name is
+a literal quoted string (like `(revision "A")` — it is the identity the CLI, the
+URL and the BOM spell out, so it is read straight off the source). A design with
+no declaration has exactly one implicit **base** variant.
+
+Each instance opts in with one or more clauses in its body:
+
+```lisp
+(instance "U7" (sx1262)                 (only-in "Pro"))      ;; Pro only; DNP elsewhere
+(instance "R14" (res-0402 "0R")         (dnp-in "Lite"))      ;; populated everywhere but Lite
+(instance "R9" (res-0402 "10k")
+  (value-in "Pro" "4.7k"))                                    ;; different value in Pro
+```
+
+* `(only-in "V"…)` — populated **only** in the listed variants; every other
+  variant, the base included, leaves it Do Not Populate.
+* `(dnp-in "V"…)` — Do Not Populate in the listed variants, populated in the rest.
+* `(value-in "V" "VALUE")` — value override in that variant; repeat the form
+  once per variant. The family's declared value-kind applies to the override
+  exactly as it applies to the authored value, so `(value-in "Pro" "4.7k")` on a
+  `cap-0402` is still rejected.
+
+Unlike the declaration, these arguments are evaluated, so a `let`-bound name or
+an `(fmt …)` works.
+
+**Only assembly differences are expressible.** The footprint and its pads stay
+on the board in every variant — `(only-in …)` stops the pick-and-place, not the
+copper. A difference that changes the netlist or the footprints is a different
+board, not a variant.
+
+**Variants are design-level.** A module is a circuit, not an assembly: the same
+regulator module is embedded in boards whose variant names have nothing in
+common. So a `(variant …)` inside a module body is an error, while an instance
+inside a `(sub-block …)` names the **root design's** variants directly:
+
+```lisp
+(defmodule radio-front-end ()
+  (design-block "Radio Front End"
+    (instance "U1" (sx1262) (only-in "Pro"))))   ;; "Pro" is the ROOT design's variant
+```
+
+A variant name the root design never declared is a build error naming the
+module's own file and line, with a did-you-mean.
+
+**Errors.** `(dnp)` is unconditional, so combining it with `(only-in …)` or
+`(dnp-in …)` is an error; so is naming one variant in both `(only-in …)` and
+`(dnp-in …)` on the same part; so is a second `(default)`, a duplicate variant
+name, and a duplicate `(value-in …)` for one variant. The shorthand-generated
+parts (`decouple` / `series` / `pullup` / `divider`) take no variant clauses.
+
+**Selecting one.** `--variant NAME` on `netlisp build`, `check`, `instances`,
+`export-kicad`, `export-kicad-sch` and `export-pdf`; `?variant=NAME` on the
+schematic page and the export endpoints; a `variant` argument on the
+`list_instances` and `run_checks` structured tools. Omitted, the `(default)`
+variant is selected, and failing that the base. The selection lands on each
+part's `dnp` flag and `value` **before** ERC, the BOM, the exports and the
+views read them, so everything the unconditional `(dnp)` already drives — the
+BOM badge and CSV, the KiCad `dnp` / `exclude_from_bom` attributes, the ERC
+exemptions, the schematic strike-through — follows the selected variant.
+
+`netlisp instances` reports the declared variants, the selected one, and each
+part's `populated_in` list; `netlisp designs` lists the names each design
+declares. The BOM CSV gains a `Populated In` column listing, per rolled-up line,
+which variants stuff that part — and two otherwise identical parts populated in
+different variants become two lines, because they are two purchase decisions.
+Both are omitted for a design that declares no variants, so a single-assembly
+BOM keeps exactly the columns it has always had.
+
+The `.bom` sidecar is the identity ledger for the **base** assembly:
+every variant's parts are in it and it records the authored value, never a
+`(value-in …)` override, so building a non-default variant cannot disturb the
+MPN selections the base assembly's rows carry.
+
 ### Lint warnings and authoring errors
 
 Unknown sub-forms / enum words inside known forms (e.g. `(role inptu)`, a

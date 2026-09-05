@@ -672,6 +672,102 @@ pub const Property = struct {
     value: []const u8,
 };
 
+/// One `(variant "NAME" ["doc"] [(default)])` declared at design-block scope.
+///
+/// Variants here are ASSEMBLY variants: one PCB, one netlist, one set of
+/// footprints, differing only in which parts are populated and what value a
+/// populated part carries. Nothing structural (a different net, a different
+/// footprint) is expressible, on purpose — a structural difference is a
+/// different board, and pretending otherwise is what makes variant systems
+/// silently ship the wrong copper.
+pub const VariantDecl = struct {
+    name: []const u8,
+    /// Optional prose from the declaration's second string argument.
+    doc: []const u8 = "",
+    /// True for the single `(default)`-marked declaration, which every surface
+    /// selects when no `--variant` / `?variant=` is given.
+    is_default: bool = false,
+};
+
+/// Which of the three instance-level variant sub-forms a `VariantRule` records.
+pub const VariantRuleKind = enum {
+    /// `(only-in "V"…)` — populated ONLY in the listed variants.
+    only_in,
+    /// `(dnp-in "V"…)` — Do Not Populate in the listed variants.
+    dnp_in,
+    /// `(value-in "V" "4.7k")` — value override in one variant.
+    value_in,
+};
+
+/// One variant clause authored on an instance. Rules are kept on the instance
+/// (rather than collapsed at parse time) so a surface can report the whole
+/// population matrix — `populated_in` — without re-evaluating the design once
+/// per variant.
+pub const VariantRule = struct {
+    kind: VariantRuleKind,
+    /// The variant name this clause names. Validated against the root design's
+    /// declarations when the instance is built, so it is always a declared name.
+    variant: []const u8,
+    /// The `(value-in …)` override. Empty for the two population kinds.
+    value: []const u8 = "",
+};
+
+/// Everything one instance declares about assembly variants. Grouped like
+/// `InstanceBinds` and `InstanceThermal` — the fields are only ever read
+/// together, by the population-matrix reporters and the BOM writer.
+pub const InstanceVariants = struct {
+    /// `(only-in …)` / `(dnp-in …)` / `(value-in …)` clauses in source order.
+    /// The instance's own `dnp` and `value` already reflect the SELECTED
+    /// variant; these are kept so a surface can report the whole population
+    /// matrix without re-evaluating the design once per variant.
+    rules: []const VariantRule = &.{},
+    /// The value the source authored before any `(value-in …)` override was
+    /// applied. Empty when no override applied — which is every part in every
+    /// design that declares no variants. The `.bom` sidecar fingerprints THIS
+    /// (not `value`), so building a non-default variant cannot invalidate the
+    /// identity ledger the base assembly's MPN selections live in.
+    base_value: []const u8 = "",
+
+    /// The value this part carries in the variant that was selected.
+    pub fn baseValue(self: InstanceVariants, value: []const u8) []const u8 {
+        return if (self.base_value.len > 0) self.base_value else value;
+    }
+};
+
+/// The variant space of the design being evaluated plus the one selected for
+/// this evaluation. Lives on the `Evaluator` for the duration of the ROOT
+/// design's materialization, so every instance — including instances a
+/// `(sub-block …)` module emits — resolves against the same declarations, and
+/// is copied onto the finished `DesignBlock` as the record of what was built.
+pub const VariantScope = struct {
+    decls: []const VariantDecl = &.{},
+    /// Index into `decls` of the selected variant, or null for the implicit
+    /// base variant (nothing declared, or nothing selected and no `(default)`).
+    active: ?usize = null,
+
+    /// The selected variant's name; "" for the base variant.
+    pub fn activeName(self: VariantScope) []const u8 {
+        const i = self.active orelse return "";
+        return self.decls[i].name;
+    }
+
+    /// Index of `name` among the declarations, or null when undeclared.
+    pub fn find(self: VariantScope, name: []const u8) ?usize {
+        for (self.decls, 0..) |d, i| {
+            if (std.mem.eql(u8, d.name, name)) return i;
+        }
+        return null;
+    }
+
+    /// Index of the `(default)`-marked declaration, or null when none is.
+    pub fn defaultIndex(self: VariantScope) ?usize {
+        for (self.decls, 0..) |d, i| {
+            if (d.is_default) return i;
+        }
+        return null;
+    }
+};
+
 /// A placed component in the design — a single ref-des bound to a library
 /// component plus its value, footprint, attached requirements, and per-part
 /// pin breakdown for multi-part symbols.
@@ -739,6 +835,9 @@ pub const Instance = struct {
     /// during a rework), but it is excluded from the assembly BOM and marked DNP
     /// in the schematic, the KiCad netlist, and the .kicad_pcb footprint attrs.
     dnp: bool = false,
+    /// What this instance declares about assembly variants. `dnp` and `value`
+    /// above already reflect the SELECTED variant; see `InstanceVariants`.
+    variants: InstanceVariants = .{},
     /// Every authored *placement* binding this instance carries — which hub pad
     /// it decouples, which pad it must sit beside. See `InstanceBinds`.
     bind: InstanceBinds = .{},
@@ -2372,6 +2471,11 @@ pub const DesignBlock = struct {
     /// place-then-route wave order a later resolution slice turns into concrete
     /// part/net member sets. Null ⇒ no plan authored.
     pcb_plan: ?PcbPlanSpec = null,
+    /// Assembly variants declared by top-level `(variant …)` forms plus the one
+    /// this evaluation selected. Empty declarations ⇒ the design has exactly one
+    /// (implicit, unnamed) assembly. Every instance's `dnp` and `value` already
+    /// reflect the selection.
+    variants: VariantScope = .{},
 };
 
 /// Assertion result.

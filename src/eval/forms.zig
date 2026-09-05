@@ -172,6 +172,7 @@ pub const ScopeForm = enum {
     design_rules,
     pcb_plan,
     module_policy,
+    variant,
 
     pub fn fromAtom(name: []const u8) ?ScopeForm {
         return atom_to_scope_form.get(name);
@@ -229,6 +230,7 @@ const atom_to_scope_form = std.StaticStringMap(ScopeForm).initComptime(.{
     .{ "frequency-plan", .frequency_plan },
     .{ "design-rules", .design_rules },
     .{ "pcb-plan", .pcb_plan },
+    .{ "variant", .variant },
 });
 
 // ── Schema ─────────────────────────────────────────────────────────────
@@ -1078,6 +1080,17 @@ pub const scope_form_docs = blk: {
             "pour-clearance 0.3, track-width 0.127, " ++
             "via 0.4 / 0.2, via-plating 0.025), so a design with no form uses those defaults.",
     } };
+    t[@backingInt(ScopeForm.variant)] = .{ .scope = tl, .doc = .{
+        .syntax = "(variant \"NAME\" [\"doc\"] [(default)])",
+        .summary = "Declare one ASSEMBLY variant — same PCB, same netlist, same footprints, " ++
+            "different population and values. Repeatable; at most one may carry `(default)`, " ++
+            "which is the variant every surface selects when none is asked for. A design with " ++
+            "no declaration has exactly one implicit (base) variant. Instances opt in with the " ++
+            "`(only-in …)` / `(dnp-in …)` / `(value-in …)` body forms, including instances a " ++
+            "`(sub-block …)` module places — variants are design-level, so a module names the " ++
+            "ROOT design's variant names. Select one with `--variant NAME`, `?variant=NAME`, " ++
+            "or a structured tool's `variant` argument.",
+    } };
     t[@backingInt(ScopeForm.revision)] = .{ .scope = tl, .doc = .{
         .syntax = "(revision \"ID\" [(date \"YYYY-MM-DD\")] [(change \"ID\" \"summary\")…])",
         .summary = "Declare the design's canonical board revision: a human-meaningful spin id " ++
@@ -1386,6 +1399,26 @@ pub const instance_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
         .name = "nc-ok",
         .syntax = "(nc-ok PIN \"reason\")",
         .summary = "Sign off a deliberately unconnected pad, satisfying the `no_connect` ERC rule.",
+    },
+    .{
+        .name = "only-in",
+        .syntax = "(only-in \"VARIANT\"…)",
+        .summary = "Populate this part ONLY in the listed assembly variants; every other variant " ++
+            "(the base included) leaves it Do Not Populate. The footprint and its pads stay on the " ++
+            "board either way. Cannot be combined with `(dnp)`, which is unconditional.",
+    },
+    .{
+        .name = "dnp-in",
+        .syntax = "(dnp-in \"VARIANT\"…)",
+        .summary = "Do Not Populate this part in the listed assembly variants, populating it in the " ++
+            "rest. The complement of `(only-in …)`; naming one variant in both is an error.",
+    },
+    .{
+        .name = "value-in",
+        .syntax = "(value-in \"VARIANT\" \"VALUE\")",
+        .summary = "Override this part's value in one assembly variant — repeat the form per variant. " ++
+            "The family's declared value-kind applies to the override exactly as to the authored " ++
+            "value, so a variant is not a way past the check that rejects `(cap-0402 \"4.7k\")`.",
     },
     .{
         .name = "id",
@@ -1860,8 +1893,9 @@ test "instance sub-form registry reserves the instance body head atoms" {
     // Reserved = every direct child plus `(as …)`, which is written inside
     // `(pin …)` but guarded at instance level so a stray one is not a property.
     const expected = [_][]const u8{
-        "pin", "as",        "part", "bus",      "note",  "power",
-        "dnp", "decouples", "near", "strap-ok", "nc-ok", "id",
+        "pin",   "as",      "part",      "bus",      "note",
+        "power", "dnp",     "decouples", "near",     "strap-ok",
+        "nc-ok", "only-in", "dnp-in",    "value-in", "id",
     };
     try std.testing.expectEqual(expected.len, instance_reserved_forms.len);
     for (expected) |name| {

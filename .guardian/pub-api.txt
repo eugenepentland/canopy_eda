@@ -599,6 +599,7 @@ src/eval/env.zig::Group struct_
 src/eval/env.zig::Instance struct_
 src/eval/env.zig::InstanceBinds struct_
 src/eval/env.zig::InstanceThermal struct_
+src/eval/env.zig::InstanceVariants struct_
 src/eval/env.zig::LayoutEdge struct_
 src/eval/env.zig::LayoutGroup struct_
 src/eval/env.zig::LayoutRow struct_
@@ -673,18 +674,26 @@ src/eval/env.zig::TestPoint struct_
 src/eval/env.zig::TestPointTag enum_
 src/eval/env.zig::ThermalDecl struct_
 src/eval/env.zig::Value union_
+src/eval/env.zig::VariantDecl struct_
+src/eval/env.zig::VariantRule struct_
+src/eval/env.zig::VariantRuleKind enum_
+src/eval/env.zig::VariantScope struct_
 src/eval/env.zig::Verification struct_
 src/eval/env.zig::ViaRules struct_
+src/eval/env.zig::activeName | fn activeName(self: VariantScope) []const u8
 src/eval/env.zig::asBool | fn asBool(self: Value) ?bool
 src/eval/env.zig::asNumber | fn asNumber(self: Value) ?f64
 src/eval/env.zig::asString | fn asString(self: Value) ?[]const u8
+src/eval/env.zig::baseValue | fn baseValue(self: InstanceVariants, value: []const u8) []const u8
 src/eval/env.zig::constructionThickness | fn constructionThickness(self: StackupSpec) f64
 src/eval/env.zig::containsString | fn containsString(haystack: []const []const u8, needle: []const u8) bool
+src/eval/env.zig::defaultIndex | fn defaultIndex(self: VariantScope) ?usize
 src/eval/env.zig::default_clearance_mm value
 src/eval/env.zig::default_outer_pour_clearance_mm value
 src/eval/env.zig::default_pour_clearance_mm value
 src/eval/env.zig::default_via_plating_mm value
 src/eval/env.zig::deinit | fn deinit(self: *Env) void
+src/eval/env.zig::find | fn find(self: VariantScope, name: []const u8) ?usize
 src/eval/env.zig::get | fn get(self: *const Env, name: []const u8) ?Value
 src/eval/env.zig::hasPlanes | fn hasPlanes(self: StackupSpec) bool
 src/eval/env.zig::init | fn init(allocator: std.mem.Allocator, parent: ?*Env) Env
@@ -709,6 +718,7 @@ src/eval/evaluator.zig::NetTie struct_
 src/eval/evaluator.zig::PendingChildId struct_
 src/eval/evaluator.zig::PendingId struct_
 src/eval/evaluator.zig::PinNetDecl struct_
+src/eval/evaluator.zig::VariantState struct_
 src/eval/evaluator.zig::deinit | fn deinit(self: *Evaluator) void
 src/eval/evaluator.zig::evalFile | fn evalFile(self: *Evaluator, path: []const u8) EvalError!Value
 src/eval/evaluator.zig::evalNode | fn evalNode(self: *Evaluator, node: Node, env: *Env) EvalError!Value
@@ -953,6 +963,25 @@ src/eval/validate.zig::validateDesign | fn validateDesign(self: *Evaluator, bloc
 src/eval/validate.zig::warnCombinableNets | fn warnCombinableNets(self: *Evaluator, sources: *std.StringHashMapUnmanaged(u32)) EvalError!void
 src/eval/value_kind.zig::accepts | fn accepts(param_type: []const u8, value: []const u8) bool
 src/eval/value_kind.zig::mismatchMessage | fn mismatchMessage( allocator: std.mem.Allocator, family: []const u8, param_type: []const u8, value: []const u8, ) []const u8
+src/eval/variants.zig::Applied struct_
+src/eval/variants.zig::apply | fn apply(scope: VariantScope, rules: []const VariantRule) Applied
+src/eval/variants.zig::applyFor | fn applyFor(variant: []const u8, rules: []const VariantRule) Applied
+src/eval/variants.zig::decl_form value
+src/eval/variants.zig::dnp_in_form value
+src/eval/variants.zig::formName | fn formName(kind: env_mod.VariantRuleKind) []const u8
+src/eval/variants.zig::hasPopulationRule | fn hasPopulationRule(rules: []const VariantRule) bool
+src/eval/variants.zig::install | fn install( self: *Evaluator, body_forms: []const Node, span: ast.Span, ) EvalError!VariantScope
+src/eval/variants.zig::isDeclaration | fn isDeclaration(node: Node) bool
+src/eval/variants.zig::isInstanceForm | fn isInstanceForm(form: Node) bool
+src/eval/variants.zig::max_name_len value
+src/eval/variants.zig::only_in_form value
+src/eval/variants.zig::parseInstanceForm | fn parseInstanceForm( self: *Evaluator, form: Node, ref_des: []const u8, family: []const u8, env: *Env, rules: *std.ArrayList(VariantRule), ) EvalError!void
+src/eval/variants.zig::populatedIn | fn populatedIn(rules: []const VariantRule, base_dnp: bool, variant: []const u8) bool
+src/eval/variants.zig::rulesEqual | fn rulesEqual(a: []const VariantRule, b: []const VariantRule) bool
+src/eval/variants.zig::unconditionalDnp | fn unconditionalDnp(dnp: bool, rules: []const VariantRule) bool
+src/eval/variants.zig::validateInstance | fn validateInstance( self: *Evaluator, span: ast.Span, ref_des: []const u8, has_dnp: bool, rules: []const VariantRule, ) EvalError!void
+src/eval/variants.zig::valueIn | fn valueIn(rules: []const VariantRule, base_value: []const u8, variant: []const u8) []const u8
+src/eval/variants.zig::value_in_form value
 src/exit.zig::failure | fn failure() noreturn
 src/exit.zig::failure_status value
 src/exit.zig::fatal | fn fatal(comptime fmt: []const u8, args: anytype) noreturn
@@ -3775,6 +3804,7 @@ src/preflight.zig::profileSeverity | fn profileSeverity(profile: Profile) checks
 src/preflight.zig::required_review_categories value
 src/preflight.zig::requirementSeverity | fn requirementSeverity(status: req_checks.Status, profile: Profile) checks.Severity
 src/preflight.zig::run | fn run( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, project_dir: []const u8, profile: Profile, ) std.mem.Allocator.Error!Report
+src/query.zig::Listing struct_
 src/query.zig::QueryError value
 src/query.zig::cmdDescribe | fn cmdDescribe(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void
 src/query.zig::cmdDesigns | fn cmdDesigns(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void
@@ -3785,6 +3815,7 @@ src/query.zig::cmdNet | fn cmdNet(allocator: std.mem.Allocator, args: []const []
 src/query.zig::cmdReference | fn cmdReference(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void
 src/query.zig::cmdSchematic | fn cmdSchematic(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void
 src/query.zig::designsJson | fn designsJson(a: std.mem.Allocator, project_dir: []const u8) QueryError![]const u8
+src/query.zig::instancesJson | fn instancesJson( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: mcp_tools.InstanceOpts, ) QueryError!Listing
 src/query.zig::scopeOf | fn scopeOf(args: []const []const u8) mcp_tools.Scope
 src/raster.zig::Anchor enum_
 src/raster.zig::Canvas struct_
@@ -4538,6 +4569,8 @@ src/serve/mcp_flatten.zig::getNetFlat | fn getNetFlat( allocator: std.mem.Alloca
 src/serve/mcp_flatten.zig::instancePinCount | fn instancePinCount( eval: *Evaluator, component: []const u8, symbol: []const u8, parts: []const env_mod.Part, ) usize
 src/serve/mcp_flatten.zig::listFreePinsFlat | fn listFreePinsFlat( allocator: std.mem.Allocator, eval: *Evaluator, block: *const env_mod.DesignBlock, ref_des: []const u8, filter: ?[]const u8, w: anytype, ) !bool
 src/serve/mcp_flatten.zig::listInstancesFlat | fn listInstancesFlat( allocator: std.mem.Allocator, eval: *Evaluator, block: *const env_mod.DesignBlock, w: anytype, ) !bool
+src/serve/mcp_flatten.zig::writePopulatedIn | fn writePopulatedIn( w: anytype, block: *const env_mod.DesignBlock, inst_variants: env_mod.InstanceVariants, dnp: bool, ) !void
+src/serve/mcp_flatten.zig::writeVariantHeader | fn writeVariantHeader(w: anytype, block: *const env_mod.DesignBlock) !void
 src/serve/mcp_import_tools.zig::toolBenchmarkKicadRouting | fn toolBenchmarkKicadRouting( allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/mcp_import_tools.zig::toolImportKicad | fn toolImportKicad( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/mcp_import_tools.zig::toolInspectKicadLayout | fn toolInspectKicadLayout( allocator: std.mem.Allocator, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
@@ -4574,6 +4607,7 @@ src/serve/mcp_schematic_view.zig::writeBlockSummary | fn writeBlockSummary( allo
 src/serve/mcp_tools.zig::CallResult struct_
 src/serve/mcp_tools.zig::DesignSummary struct_
 src/serve/mcp_tools.zig::FreePinOpts struct_
+src/serve/mcp_tools.zig::InstanceOpts struct_
 src/serve/mcp_tools.zig::NamedBlock struct_
 src/serve/mcp_tools.zig::Scope enum_
 src/serve/mcp_tools.zig::ToolError value
@@ -4589,7 +4623,7 @@ src/serve/mcp_tools.zig::json_net_key value
 src/serve/mcp_tools.zig::listDesignNames | fn listDesignNames(allocator: std.mem.Allocator, project_dir: []const u8) ToolError![][]const u8
 src/serve/mcp_tools.zig::listDesignSummaries | fn listDesignSummaries( allocator: std.mem.Allocator, project_dir: []const u8, ) ToolError![]DesignSummary
 src/serve/mcp_tools.zig::listFreePins | fn listFreePins( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ref_des: []const u8, opts: FreePinOpts, w: anytype, ) ToolError!bool
-src/serve/mcp_tools.zig::listInstances | fn listInstances( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, scope: Scope, w: anytype, ) !bool
+src/serve/mcp_tools.zig::listInstances | fn listInstances( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: InstanceOpts, w: anytype, ) !bool
 src/serve/mcp_tools.zig::listLibrarySubdir | fn listLibrarySubdir( allocator: std.mem.Allocator, project_dir: []const u8, sub: []const u8, query: ?[]const u8, limit: ?usize, w: anytype, ) !void
 src/serve/mcp_tools.zig::missingArg | fn missingArg(out: *std.ArrayList(u8), allocator: std.mem.Allocator, key: []const u8) std.mem.Allocator.Error!bool
 src/serve/mcp_tools.zig::optionalBool | fn optionalBool(args_val: ?std.json.Value, key: []const u8) ?bool

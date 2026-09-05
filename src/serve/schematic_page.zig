@@ -58,6 +58,10 @@ const CacheIdent = struct {
     /// `?embed=1` changes the emitted body class, so it is a different
     /// document and must not share a cache slot with the full page.
     embed: bool = false,
+    /// `?variant=NAME` selects an assembly variant, which changes which parts
+    /// render DNP and what values they carry — a different document, so it
+    /// takes its own cache slot. "" is the design's default selection.
+    variant: []const u8 = "",
 };
 
 /// Return a request-arena copy of the cached HTML for `name` when a valid entry
@@ -67,21 +71,21 @@ fn htmlCacheKey(
     allocator: std.mem.Allocator,
     ident: CacheIdent,
 ) std.mem.Allocator.Error![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}?view={s}{s}", .{
+    return std.fmt.allocPrint(allocator, "{s}?view={s}{s}{s}{s}", .{
         ident.name,
         @tagName(ident.view),
         if (ident.embed) "&embed=1" else "",
+        if (ident.variant.len > 0) "&variant=" else "",
+        ident.variant,
     });
 }
 
 fn htmlCacheGet(
     arena: std.mem.Allocator,
-    name: []const u8,
-    schematic_view: render_html.SchematicView,
-    embed: bool,
+    ident: CacheIdent,
     live_version: u32,
 ) ?[]const u8 {
-    const key = htmlCacheKey(arena, .{ .name = name, .view = schematic_view, .embed = embed }) catch return null;
+    const key = htmlCacheKey(arena, ident) catch return null;
     defer arena.free(key);
     html_cache_mutex.lock();
     defer html_cache_mutex.unlock();
@@ -266,6 +270,15 @@ pub fn schematicPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         break :blk !(raw.len == 0 or std.mem.eql(u8, raw, "0"));
     } else |_| false;
 
+    // `?variant=NAME` picks one of the design's `(variant …)` assemblies. It
+    // changes population and values, not copper, so the page is the same
+    // document with different DNP marks — and takes its own cache slot.
+    const variant: []const u8 = if (req.query()) |query|
+        (query.get("variant") orelse "")
+    else |_|
+        "";
+    const ident: CacheIdent = .{ .name = name, .view = schematic_view, .embed = embed, .variant = variant };
+
     // A module name typed into a design URL: render the module in place via the
     // module renderer, so designs and modules open from the same address shape
     // with no redirect hop. (The module chrome's own links stay at /modules/.)
@@ -275,13 +288,14 @@ pub fn schematicPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
     // Capture the live version *before* evaluating so a bump mid-eval is
     // correctly treated as a miss on the next load rather than baked in.
     const live_version = serve_root.getLiveVersion(name);
-    if (htmlCacheGet(ctx.allocator, name, schematic_view, embed, live_version)) |cached| {
+    if (htmlCacheGet(ctx.allocator, ident, live_version)) |cached| {
         res.content_type = .HTML;
         res.body = cached;
         return;
     }
 
     var eval = Evaluator.init(ctx.allocator, ctx.project_dir);
+    eval.variants.requested = if (variant.len > 0) variant else null;
     defer eval.deinit();
 
     const result = eval.evalFile(board_path) catch |e| {
@@ -321,7 +335,7 @@ pub fn schematicPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Ha
         return;
     };
 
-    htmlCachePut(ctx.allocator, &eval, ctx.project_dir, .{ .name = name, .view = schematic_view, .embed = embed }, html, live_version);
+    htmlCachePut(ctx.allocator, &eval, ctx.project_dir, ident, html, live_version);
 
     res.content_type = .HTML;
     res.body = html;
@@ -356,6 +370,20 @@ test "schematic HTML cache separates the embedded pane from the full page" {
     // strip it from the full page, depending on which request landed first).
     try testing.expectEqualStrings("demo?view=functional", full);
     try testing.expectEqualStrings("demo?view=functional&embed=1", embedded);
+}
+
+// spec: Web Server - the schematic page HTML cache keys each assembly variant apart
+test "schematic HTML cache separates one assembly variant from another" {
+    const testing = std.testing;
+    // Population and values differ per variant, so two variants of one design
+    // are two documents; sharing a slot would serve the Pro board's DNP marks
+    // to whoever asked for Lite.
+    const base = try htmlCacheKey(testing.allocator, .{ .name = "demo", .view = .functional });
+    defer testing.allocator.free(base);
+    const lite = try htmlCacheKey(testing.allocator, .{ .name = "demo", .view = .functional, .variant = "Lite" });
+    defer testing.allocator.free(lite);
+    try testing.expectEqualStrings("demo?view=functional", base);
+    try testing.expectEqualStrings("demo?view=functional&variant=Lite", lite);
 }
 
 test "schematic HTML cache separates original and functional views" {

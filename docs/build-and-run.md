@@ -47,6 +47,19 @@ zig build run -- build --project-dir projects/designs --push <design-name>
 # read tools — deliberately never write: after one build or save the ids are
 # already in the file, so there is nothing left for a read to mint.
 
+# ASSEMBLY VARIANTS. A design that declares `(variant "NAME" …)` forms builds
+# as one of them: `--variant NAME` on `build`, `check`, `instances`,
+# `export-kicad`, `export-kicad-sch` and `export-pdf`. Omitted, the design's
+# `(default)` variant is selected, and failing that the base (implicit) one; a
+# name the design never declared is a build error with a did-you-mean, never a
+# silent fallback. The selection sets each part's DNP flag and value before ERC,
+# the BOM and the exports read them — same copper, same netlist, same
+# footprints, different population. The `.bom` sidecar stays the BASE assembly's
+# identity ledger (every variant's parts, the authored values), so building a
+# non-default variant cannot disturb the MPN selections it carries.
+# See docs/sexpr-language.md → "Assembly variants".
+zig build run -- check --project-dir projects/designs --variant Lite <design-name>
+
 # Export KiCad netlist + footprints (handoff to KiCad's PCB editor).
 # --with-schematic ALSO writes the .kicad_sch hierarchy + project sidecars, so
 # the output directory opens in KiCad as a complete project (netlist,

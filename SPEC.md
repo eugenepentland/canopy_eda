@@ -4748,6 +4748,24 @@ signal.
 - a name with no close candidate reports a plain unknown-name message
 - a fixed vocabulary yields the nearest spelling and never suggests an exact match
 
+## eval/variants
+
+- The base variant populates everything except parts reserved by only-in
+- The selected variant drives population and the value override
+- populatedIn reports the population matrix without re-evaluating the design
+- An unconditional dnp is the one no population clause could have set
+- Two parts roll onto one BOM line only when their variant clauses agree
+- valueIn reports the per-variant value without re-evaluating the design
+- A variant scope reports its active name and finds declarations by name
+- completeness-waiver: empty inputs (an empty rule set and an empty declaration list ARE the base variant — the case every design with no `(variant …)` form takes, asserted above)
+- completeness-waiver: large inputs (a variant name is capped at the did-you-mean scan's own name length, and a rule scan is linear over the clauses one instance authored by hand)
+- completeness-waiver: unauthorized access (pure in-memory resolution over the design the caller already evaluated; it opens nothing and checks no identity)
+- completeness-waiver: i/o failure (no file, socket or process is touched — declarations and clauses come from the already-parsed AST)
+- completeness-waiver: concurrent access (evaluation is single-threaded, and the selection is installed and torn down inside one materialization)
+- completeness-waiver: malformed encoding (a variant name is compared bytewise and never decoded, so a non-UTF-8 spelling is simply an undeclared name)
+- completeness-waiver: integer overflow (no arithmetic: the only number is a declaration index bounded by the declaration count)
+- completeness-waiver: panic-free (every path is a bounds-checked slice walk or a switch over the closed rule-kind enum)
+
 ## eval/net_suggest
 
 - a one-off net name suggests the established net it is closest to
@@ -6126,6 +6144,20 @@ ladder, the ladder needs the saved layouts, and the schematic page these fragmen
 embed reads nothing but the design's own `.sexp`. Thermal is served by
 `serve/thermal_page.zig` at `/thermal/:name` and by `serve/thermal_api.zig` at
 `/api/thermal/:name`, both of which opt into the layout read deliberately.
+
+## query
+
+- instancesJson returns an unresolved design as a failed listing rather than exiting
+- The designs listing reads every declared assembly variant name out of the source text in order
+- The instances subcommand takes --variant as a value flag so the design name stays the positional
+- completeness-waiver: empty inputs (a missing design name exits with the subcommand's usage line, and a project with no src/ directory lists no designs)
+- completeness-waiver: large inputs (each design source is read under the shared 4 MiB cap and the listings stream straight to one allocating writer)
+- completeness-waiver: unauthorized access (the CLI runs with the invoking user's filesystem authority; there is no user or permission surface)
+- completeness-waiver: i/o failure (an unreadable or unresolvable design is skipped or reported as a failed listing, never a crash)
+- completeness-waiver: concurrent access (each process owns its evaluator and output buffer and shares no mutable state)
+- completeness-waiver: malformed encoding (a title or variant name that is not a quoted string is reported as absent rather than guessed at)
+- completeness-waiver: integer overflow (the only arithmetic is bounds-checked slice indexing over the source text)
+- completeness-waiver: panic-free (every scan is a bounds-checked slice walk and every fallible call is either handled or propagated)
 
 ## tool_cli
 
@@ -7666,6 +7698,7 @@ is what makes the predicate exact rather than approximately right.
 - the schematic page serves an embedded pane variant that drops the navbar, page header, and sidebar
 - the schematic layout's deep semantic-zoom layer reuses existing inset SVGs through references instead of cloning their full DOM during a wheel gesture
 - the schematic page HTML cache keys the embedded pane apart from the full page
+- the schematic page HTML cache keys each assembly variant apart
 - each assembly rework guide takes its title from its first Markdown H1 and falls back to its filename slug
 - the assembly guide panel opens as a clickable list of guide titles, renders one guide at a time, and returns to that list from any guide
 - PCB trace selection preserves layer color and component drags ignore click jitter

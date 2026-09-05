@@ -10,10 +10,10 @@
 13 src/eval/env.zig|BoardSpec
 15 src/eval/env.zig|Check
 9 src/eval/env.zig|ClassRf
-30 src/eval/env.zig|DesignBlock
+31 src/eval/env.zig|DesignBlock
 13 src/eval/env.zig|DesignRulesSpec
 9 src/eval/env.zig|ElectricalDecl
-27 src/eval/env.zig|Instance
+28 src/eval/env.zig|Instance
 13 src/eval/env.zig|NetClassSpec
 8 src/eval/env.zig|PdnIntent
 10 src/eval/env.zig|PlaceholderPart
@@ -25,12 +25,12 @@
 8 src/eval/env.zig|StackupSpec
 8 src/eval/env.zig|Value
 14 src/eval/evaluator.zig|ComponentData
-26 src/eval/evaluator.zig|Evaluator
+27 src/eval/evaluator.zig|Evaluator
 13 src/eval/instance.zig|ResolvedComponent
 12 src/eval/power_budget.zig|Rail
 8 src/export_gerber.zig|Layer
 9 src/fab_readiness.zig|Stats
-12 src/flat_netlist.zig|FlatInstance
+13 src/flat_netlist.zig|FlatInstance
 8 src/font5x7.zig|BoardText
 8 src/import_fold.zig|FoldResult
 12 src/import_kicad.zig|ImportSummary
