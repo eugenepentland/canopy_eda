@@ -801,3 +801,25 @@ real time and none is specific to that board.
   preflight free-space check in `build.zig` that names the real cause, or a
   documented `zig build clean-worktree-caches` so an agent has a sanctioned way
   to reclaim space without touching another agent's tree.
+
+## 2026-09-05 — evaluated `(rated LO HI)` port bounds
+
+- **`netlisp check` is the wrong instrument for envelope regressions.** The
+  net-envelope coverage contradiction ("… does not cover the L–H V this design
+  already declares") is a failed *assertion*, and `netlisp check` prints ERC +
+  requirements only — barracuda-base's two new contradictions were invisible in
+  a byte-identical `check --severity info` diff at both profiles. They show up
+  in `netlisp tool run_checks` (`assertion_failures`) and in
+  `run_fab_readiness` (`errors`). Any corpus differential that cares about
+  envelopes/assertions must diff `run_checks`, not `check`. Cost here was a
+  full 19-design × 2-profile sweep that "proved" nothing changed.
+- **`netlisp tool …` JSON needs an explicit UTF-8 decode.** Messages carry
+  en-dashes; piping into `python3 -c "json.load(sys.stdin)"` under the default
+  non-UTF-8 locale dies with `UnicodeDecodeError` and, wrapped in a `try`,
+  silently reports every design as unparseable. `PYTHONIOENCODING=utf-8` (or
+  `sys.stdin.buffer.read().decode('utf-8')`) is required.
+- **There is no bulk net-envelope dump.** Answering "which nets' derived
+  envelopes moved" meant 1863 individual `netlisp net <design> <net>` calls per
+  binary (~10 min each) driven off `netlist-dump`. A `netlisp envelopes
+  <design>` (or a `--json` block on `netlist-dump`) would turn a 20-minute
+  sweep into two commands.

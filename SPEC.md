@@ -5051,6 +5051,7 @@ against its own file rather than the design's.
 - insertPendingIds writes a child (ids …) sidecar and stays idempotent
 - persistMintedIds writes minted ids back like the CLI and is a no-op when nothing is pending
 - an id minted by a form spliced in from a sidecar is written back into that sidecar, leaving the design source byte-identical
+- every design-scope form the inserter can stamp with an (id …)/(ids …) anchor re-reads its own output on the next build, byte-identical
 - a CLI export pins the ids its evaluation minted, so a second export of an untouched design reproduces the same identity
 
 ## convert/footprint
@@ -5837,6 +5838,7 @@ Public functions: analyze
 - fanout places one component from COMMON to each listed net
 - decouple-defaults lets decouple omit its component and host ref
 - decouple with no defaults keeps its legacy explicit form
+- a positional decouple resolves the token after per-pin as a pad of the default IC, then as a part declared in the block, and diagnoses one that is neither
 - decouple per-pin auto expands the decouple-defaults IC's pins on the decoupled net
 - decouple per-pin auto without a decouple-defaults ic is diagnosed
 - a decoupling binding resolves its pin through the target IC's pinout whichever of the two is declared first
@@ -5865,6 +5867,14 @@ Public functions: analyze
 - stackup form captures layer count and plane assignments on the design block
 - net-envelope form publishes an authored voltage envelope on the design block
 - net-envelope rated bounds are evaluated so a module can express them from its own parameters
+- a design-block port's rated bounds are evaluated so a parameterized module can publish its own window
+- literal rated bounds on a port keep parsing exactly as they did
+- a section port's rated bounds are evaluated and recorded on the section port
+- a diff-port replays evaluated rated bounds onto both lanes
+- a port-group replays evaluated rated bounds onto every expanded lane
+- a rated bound that does not evaluate to a number is an error naming the port
+- an inverted rated window on a port is an error naming the port
+- a module port's evaluated rated window reaches the parent's derived rail and net envelope
 - pdn form captures an explicit AC-domain target and source model
 - stackup captures per-layer copper foil and core/prepreg construction details
 - stackup process entries capture stepped soldermask and per-layer trapezoidal etch geometry
@@ -6334,6 +6344,12 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - contact identifiers compare numerically across the pinout's zero-padded spelling and the netlist's bare one
 - the generated language reference documents exactly the head atoms a (system …) source accepts, in both directions
 - a system.sexp beside a system.json is the contract the readiness gate reads, and the shadowed JSON is reported rather than silently ignored
+- manifest discovery answers with the contract source when a workspace has one and the JSON manifest otherwise, and a workspace with neither is absent rather than empty
+- a contract source's (attestation …) is replaced, appended or dropped at its byte span, leaving every other byte, comment and blank line as authored
+- an identity-only parse drops an (auto) interface it has no evaluator for instead of refusing the contract, so a listing surface never pays a board evaluation per workspace
+- approving a workspace whose contract is a (system …) source and approving the JSON manifest it converts from leave the identical spec, so an attestation does not depend on which manifest spelling a workspace keeps
+- a contract source whose stored attestation no longer parses still loads as the authored contract, and one whose contract itself is broken is refused with its diagnostic
+- one attestation normalizes to canonical order through a single function, and a normalization that runs out of memory part-way releases what it already took
 - a contract whose contacts all mate reports no interface mismatch, and two differing net NAMES across the joint are never one
 - a contact wired on one side and unconnected or floating on the other is an error-severity interface mismatch
 - a required signal joining two supplies or grounds at different declared potentials is an error-severity interface mismatch, and an undeclared potential is not guessed
@@ -7583,6 +7599,8 @@ is what makes the predicate exact rather than approximately right.
 - A design whose evaluation fails is cached against the library files its imports could resolve to, so creating the missing one re-evaluates it
 - The home page's data gather runs without a request, so the startup warm-up fills exactly the caches a render reads
 - The home page lists every `src/systems/` review workspace as its own card kind, from the same enumeration `/api/systems` serves, so a system is reachable without knowing its URL
+- a workspace whose only manifest is a (system …) contract source is listed, opened and attested through the browser exactly as a JSON one is, because every manifest reader and writer resolves the contract the same way
+- a system endpoint refuses a missing, unsafe or unparseable manifest with the status and diagnostic that name the failure, whichever manifest spelling the workspace uses
 - A system card's search text leads with its kind word and carries its identity, so the home page's existing search box and its Systems filter both surface it with no extra client script
 - The PCB layout page renders without a request, reading a missing request as the plain no-query page, so the startup warm-up can retain it under the same cache entry a bare URL looks up
 - Startup warms PCB editor pages before the slower progress ladders, so an unrelated lazy diagnostic cannot leave every editor cache cold after a deploy

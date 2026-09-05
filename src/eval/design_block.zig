@@ -553,7 +553,7 @@ fn evalBlockBodyForm(
         if (scope_control.kindOf(special)) |kind|
             return scope_control.evalForm(self, kind, form_children, env, BlockScopeSink{ .build = build });
         switch (special) {
-            .let, .assert_, .assert_range, .import, .id_, .implements => {
+            .let, .assert_, .assert_range, .import, .id_, .ids_, .implements => {
                 _ = try self.evalNode(form, env);
                 return;
             },
@@ -6560,6 +6560,36 @@ fn evalWarningFixture(alloc: std.mem.Allocator, eval: *Evaluator, source: []cons
     _ = try eval.evalNodes(nodes, &env);
 }
 
+/// Evaluate `source` ONCE with a `fakeic` component registered and hand back the
+/// top-level design block — the fixture for tests that need the parent, not a
+/// sub-block (and that must not mint the same ids twice).
+fn evalTopBlockFixture(alloc: std.mem.Allocator, eval: *Evaluator, source: []const u8) !*DesignBlock {
+    eval.* = Evaluator.init(alloc, ".");
+    try eval.component_cache.put(alloc, "fakeic", .{
+        .name = "fakeic",
+        .symbol_name = "",
+        .footprint_name = "",
+        .is_family = false,
+        .param_type = "",
+    });
+    const nodes = try sexpr_parser.parse(alloc, source);
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    return switch (try eval.evalNodes(nodes, &env)) {
+        .design_block => |b| b,
+        else => error.TestUnexpectedResult,
+    };
+}
+
+/// The derived envelope a `net_envelopes.build` result holds for one flattened
+/// net name, or null when it derived none.
+fn derivedEnvelopeFor(result: net_envelopes.Result, net: []const u8) ?env_mod.NetEnvelope {
+    for (result.envelopes) |e| {
+        if (std.mem.eql(u8, e.net, net)) return e;
+    }
+    return null;
+}
+
 /// True when any recorded warning message contains `needle`.
 fn hasWarningContaining(eval: *const Evaluator, needle: []const u8) bool {
     for (eval.warnings.items) |w| {
@@ -7373,4 +7403,43 @@ test "sub-block ref-des namespaces are independent" {
     const block = value.design_block;
     try testing.expectEqual(@as(usize, 2), block.sub_blocks.len);
     try testing.expectEqual(@as(?evaluator_mod.EvalDiagnostic, null), eval.last_error);
+}
+
+// spec: eval/design_block - a module port's evaluated rated window reaches the parent's derived rail and net envelope
+test "a computed port (rated …) window reaches the derived rail and net envelope" {
+    const alloc = std.heap.page_allocator;
+    var eval: Evaluator = undefined;
+    // The lib/modules/bcuda-lt3045-ldo.sexp shape: one parameterized regulator
+    // publishing its own +/-5 % output window, instantiated at 5.11 V. Before
+    // the bounds were evaluated this rail derived as the single point 5.11 V.
+    const source =
+        \\(defmodule ldo (vout)
+        \\  (design-block "LDO"
+        \\    (instance "U1" fakeic (pin 1 "VOUT") (pin 2 "GND"))
+        \\    (port "VOUT" out power (nominal vout) (rated (* vout 0.95) (* vout 1.05)) (current 0.5 0.5))
+        \\    (port "GND" bidi)))
+        \\(design-block "Top"
+        \\  (sub-block "reg" (ldo (vout 5.11))
+        \\    (bridge "" (rename VOUT V_5V1) GND)))
+    ;
+    const top = try evalTopBlockFixture(alloc, &eval, source);
+
+    // The module port itself carries the evaluated window …
+    const inner = top.sub_blocks[0].block;
+    try testing.expectApproxEqAbs(@as(f64, 4.8545), inner.ports[0].rated_min.?, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5.3655), inner.ports[0].rated_max.?, 1e-9);
+
+    // … the parent's rail keeps it as its rated range …
+    // (page_allocator; the rails slice is left to the test process, as every
+    // other design_block fixture here does.)
+    const rails = try rails_mod.build(alloc, top);
+    try testing.expectEqual(@as(usize, 1), rails.len);
+    try testing.expectApproxEqAbs(@as(f64, 4.8545), rails[0].rated_voltage.min.?, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5.3655), rails[0].rated_voltage.max.?, 1e-9);
+
+    // … and the downstream net envelope is that window, not the point 5.11 V.
+    const envelopes = try net_envelopes.build(alloc, top, .{});
+    const derived = derivedEnvelopeFor(envelopes, "V_5V1") orelse return error.TestExpectedEnvelope;
+    try testing.expectApproxEqAbs(@as(f64, 4.8545), derived.min, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5.3655), derived.max, 1e-9);
 }

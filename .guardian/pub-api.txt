@@ -543,7 +543,7 @@ src/eval/builders.zig::loadDesignFile | fn loadDesignFile(self: *Evaluator, path
 src/eval/builders.zig::loadFile | fn loadFile(self: *Evaluator, path: []const u8) ?[]const Node
 src/eval/builders.zig::loadSidecars | fn loadSidecars( self: *Evaluator, design_path: []const u8, buf: *[sidecars.kinds.len]sidecars.Loaded, ) []const sidecars.Loaded
 src/eval/builders.zig::parseSectionCalc | fn parseSectionCalc(self: *Evaluator, sf_children: []const Node, env: *env_mod.Env) EvalError!?env_mod.CalcBlock
-src/eval/builders.zig::parseSectionPort | fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod.Env) EvalError!?env_mod.SectionPort
+src/eval/builders.zig::parseSectionPort | fn parseSectionPort(self: *Evaluator, sf_children: []const Node, env: *env_mod.Env) EvalError!?env_mod.SectionPort
 src/eval/builders.zig::processPinForm | fn processPinForm( self: *Evaluator, pin_form: Node, pins_ref: []const u8, pin_func_map: ?*const std.StringHashMapUnmanaged([]const u8), env: *env_mod.Env, all_pin_nets: *std.ArrayList(PinNetDecl), pg_pins: *std.ArrayList(env_mod.PartPin), net_ties: *std.ArrayList(NetTie), ) EvalError!void
 src/eval/builders.zig::resolveDecoupleTargets | fn resolveDecoupleTargets(self: *Evaluator, instances: []Instance) void
 src/eval/builders.zig::resolveNearTargets | fn resolveNearTargets(self: *Evaluator, instances: []Instance) void
@@ -679,6 +679,7 @@ src/eval/env.zig::PowerRail struct_
 src/eval/env.zig::Property struct_
 src/eval/env.zig::Provenance struct_
 src/eval/env.zig::RatedVoltage struct_
+src/eval/env.zig::RatedWindow struct_
 src/eval/env.zig::Requirement struct_
 src/eval/env.zig::Revision struct_
 src/eval/env.zig::RevisionChange struct_
@@ -5620,8 +5621,10 @@ src/system_review.zig::ValidationError value
 src/system_review.zig::allComplete | fn allComplete(self: ChecklistSummary) bool
 src/system_review.zig::attestDocument | fn attestDocument( allocator: std.mem.Allocator, spec: DocumentSpec, content: []const u8, diagnostic: *Diagnostic, ) DocumentError!DocumentAttestation
 src/system_review.zig::attestInput | fn attestInput( allocator: std.mem.Allocator, path: []const u8, content: []const u8, diagnostic: *Diagnostic, ) AttestInputError!InputAttestation
+src/system_review.zig::canonicalAttestation | fn canonicalAttestation( allocator: std.mem.Allocator, attestation: Attestation, ) std.mem.Allocator.Error!Attestation
 src/system_review.zig::canonicalSpecDigest | fn canonicalSpecDigest( allocator: std.mem.Allocator, spec: SystemSpec, ) std.mem.Allocator.Error![64]u8
 src/system_review.zig::clear | fn clear(self: *Diagnostic) void
+src/system_review.zig::freeCanonicalAttestation | fn freeCanonicalAttestation(allocator: std.mem.Allocator, attestation: Attestation) void
 src/system_review.zig::generatedSection | fn generatedSection(id: []const u8) ?GeneratedSection
 src/system_review.zig::generated_region_close value
 src/system_review.zig::generated_region_open value
@@ -5701,13 +5704,17 @@ src/system_review_md.zig::renderMarkdownAlloc | fn renderMarkdownAlloc(allocator
 src/system_review_md.zig::stripEmphasis | fn stripEmphasis( allocator: Allocator, out: *std.ArrayList(u8), line: []const u8, ) Allocator.Error!void
 src/system_review_md.zig::uncheckedChecklistCount | fn uncheckedChecklistCount(self: *const Document) usize
 src/system_review_package.zig::AttestationResult struct_
+src/system_review_package.zig::ContractDepth enum_
 src/system_review_package.zig::PackageResult struct_
+src/system_review_package.zig::ParseContractError value
+src/system_review_package.zig::ParsedContract struct_
 src/system_review_package.zig::Readiness struct_
 src/system_review_package.zig::ReleaseOptions struct_
 src/system_review_package.zig::attest | fn attest( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, expected_content_lock: []const u8, actor: []const u8, attested_at: []const u8, ) AttestError!AttestationResult
 src/system_review_package.zig::dossierPreflight | fn dossierPreflight( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) PreflightError!void
 src/system_review_package.zig::draft | fn draft( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) DraftError!PackageResult
 src/system_review_package.zig::draftDossierHtml | fn draftDossierHtml( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) DossierHtmlError![]const u8
+src/system_review_package.zig::parseSexpContract | fn parseSexpContract( allocator: std.mem.Allocator, project_dir: []const u8, source: []const u8, depth: ContractDepth, diagnostic: *system_review.Diagnostic, ) ParseContractError!ParsedContract
 src/system_review_package.zig::readiness | fn readiness( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) ReadinessError!Readiness
 src/system_review_package.zig::release | fn release( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: ReleaseOptions, renderer: fab_service.AssemblyRenderer, ) ReleaseError!PackageResult
 src/system_review_pdf.zig::Error value
@@ -5715,20 +5722,32 @@ src/system_review_pdf.zig::Options struct_
 src/system_review_pdf.zig::compose | fn compose(allocator: std.mem.Allocator, markdown: []const u8, opts: Options) Error![]u8
 src/system_sexp.zig::Contact struct_
 src/system_sexp.zig::Error value
+src/system_sexp.zig::LocateError value
+src/system_sexp.zig::Manifest struct_
+src/system_sexp.zig::ManifestKind enum_
+src/system_sexp.zig::Options struct_
 src/system_sexp.zig::ParseError value
 src/system_sexp.zig::Resolver struct_
+src/system_sexp.zig::Span struct_
 src/system_sexp.zig::ToolError value
 src/system_sexp.zig::WriteError value
 src/system_sexp.zig::accepted_forms value
+src/system_sexp.zig::attestationSpan | fn attestationSpan(allocator: std.mem.Allocator, source: []const u8) ?Span
 src/system_sexp.zig::convertTool | fn convertTool( allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) ToolError!bool
+src/system_sexp.zig::hasAttestation | fn hasAttestation(allocator: std.mem.Allocator, source: []const u8) bool
 src/system_sexp.zig::isUnconnectedNet | fn isUnconnectedNet(net: []const u8) bool
 src/system_sexp.zig::json_manifest_name value
+src/system_sexp.zig::locate | fn locate( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) LocateError!Manifest
 src/system_sexp.zig::lookup | fn lookup( self: Resolver, allocator: std.mem.Allocator, board: []const u8, connector: []const u8, ) Error!?[]const Contact
 src/system_sexp.zig::parse | fn parse( allocator: std.mem.Allocator, source: []const u8, resolver: ?Resolver, diagnostic: *Diagnostic, ) ParseError!SystemSpec
+src/system_sexp.zig::parseWith | fn parseWith( allocator: std.mem.Allocator, source: []const u8, options: Options, diagnostic: *Diagnostic, ) ParseError!SystemSpec
 src/system_sexp.zig::sameContact | fn sameContact(a: []const u8, b: []const u8) bool
 src/system_sexp.zig::sexp_manifest_name value
 src/system_sexp.zig::unconnected_net_prefix value
+src/system_sexp.zig::withAttestation | fn withAttestation( allocator: std.mem.Allocator, source: []const u8, form: []const u8, ) std.mem.Allocator.Error!?[]const u8
+src/system_sexp.zig::withoutAttestation | fn withoutAttestation( allocator: std.mem.Allocator, source: []const u8, ) std.mem.Allocator.Error!?[]const u8
 src/system_sexp.zig::write | fn write( allocator: std.mem.Allocator, writer: *std.Io.Writer, spec: SystemSpec, ) WriteError!void
+src/system_sexp.zig::writeAttestationForm | fn writeAttestationForm( allocator: std.mem.Allocator, writer: *std.Io.Writer, raw_attestation: system_review.Attestation, ) WriteError!void
 src/target_unblock.zig::Board struct_
 src/target_unblock.zig::Corridor struct_
 src/target_unblock.zig::Gate struct_
