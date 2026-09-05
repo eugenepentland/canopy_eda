@@ -74,6 +74,26 @@ my-project/
 The design *name* is the source file stem — `netlisp designs` prints exactly
 the tokens the other commands accept.
 
+Two more directories appear beside those while the tool **runs**, and neither is
+part of the design: `logs/` (the interaction log `serve` writes) and `history/`
+(the snapshots the layout and edit tools take before every mutation).
+
+### Where runtime output goes
+
+`--state-dir <d>`, accepted by **every** command, puts `logs/` and `history/` under
+`<d>` instead of beside the project; `NETLISP_STATE_DIR=<d>` does the same and the
+flag wins. Nothing else moves — design sources, their sidecars (`.bom`,
+`.layouts.json`, …), the library and every export stay exactly where they were, so a
+relocated run reads and writes the same design. It is what lets a *tracked* project
+be served and laid out with a clean `git status`.
+
+```bash
+netlisp serve --project-dir examples/blinky-breakout --state-dir /var/tmp/nl-state
+```
+
+Like `--lib-dir` below, this is consumed before the command sees its arguments, so
+its value can never be mistaken for a positional design name.
+
 ### Where a library name resolves
 
 Every `lib/<sub>/<name>.sexp` lookup — components, footprints, pinouts, modules,
@@ -410,19 +430,56 @@ renumbers pads carries it along.
 
 > **The quoting rule.** A bare token is resolved by the *lexer* first. If it
 > parses as a number — a digit run followed by a scale letter, a unit letter
-> (`V A F H R`) or `%` — it becomes that number and is used as a **pad id**,
-> silently. So on a hex inverter whose pinout maps pad 5 to function `3A`:
+> (`V A F H R`) or `%` — it becomes that number, and the only reading left for it
+> is a **pad id**. That collision is no longer resolved in silence. A `(pin …)`
+> token that reached the parser as an SI-suffixed numeric literal is checked
+> against the part's own library records before it is bound:
+>
+> - the part's pinout has a **function** literally named after the token's source
+>   text, or its footprint has a **pad** so named — the two readings genuinely
+>   disagree, and the build **stops** at `file:line:col` naming both of them and
+>   the quoting that picks one;
+> - **nothing** on the part answers to that text — the numeric reading is the only
+>   one available, so it stands, with a warning that names both readings.
+>
+> So on a hex inverter whose pinout maps pad 1 to function `1A` and pad 5 to `3A`:
 >
 > ```lisp
-> (pin 3A  "X")     ; the NUMBER 3 with unit A  → pad 3, whose function is 2A. WRONG.
-> (pin "3A" "X")    ; the function name 3A      → pad 5. Right.
-> (pin 1Y  "X")     ; Y is not a unit letter    → an atom → function 1Y → pad 2. Fine.
+> (pin 3A  "X")     ; ERROR: the NUMBER 3 with unit A → pad 3, but "3A" is pad 5's function
+> (pin "3A" "X")    ; the function name 3A → pad 5. Right.
+> (pin 3   "X")     ; the pad. Also right, and unambiguous.
+> (pin 1Y  "X")     ; Y is not a unit letter → an atom → function 1Y → pad 2. Fine.
 > ```
 >
+> ```text
+> src/p-pin3a.sexp:6:10: error: (pin 3A …) on "U2" — `3A` is ambiguous: unquoted it is
+> a NUMBER (the SI unit/scale letter closes the literal) and binds pad 3, but this part
+> also has a pin function named "3A" (pad 5). Write (pin "3A" …) for the pin name, or
+> (pin 3 …) for the pad.
+> ```
+>
+> A token that names nothing on the part — `2V` on that same inverter — binds the
+> numeric pad and says so, which is the case the warning exists for: `3n` is far
+> likelier to be a mis-quoted pin name than a deliberate 3e-9.
+>
+> ```text
+> src/p-pin2v.sexp:6:10: warning: (pin 2V …) on "U2" — `2V` is a NUMBER here (the SI
+> unit/scale letter closes the literal), so it binds pad 2. Quote a pin name that
+> starts with a digit: (pin "2V" …)
+> ```
+>
+> (If the numeric reading is not a pad the part has, the ordinary pad-set error
+> below follows the warning — `3n` is 3e-9, which resolves to pad `0`.)
+>
 > **Quote any function name that starts with a digit.** Bare atoms like `VCC`,
-> `GND`, `VIN`, `PA3` and `1Y` are unambiguous and need no quotes. If you are not
-> sure, quoting is always safe: a quoted token is resolved as a function name
-> first and as a pad id second.
+> `GND`, `VIN`, `PA3` and `1Y` are unambiguous and need no quotes, and so is a bare
+> `(pin 1 …)`: a plain integer is not an SI-suffixed literal either, so neither
+> spelling is ever checked or warned about. If you are not sure, quoting is always
+> safe — a quoted token is resolved as a function name first and as a pad id second.
+>
+> The check runs on both `(pin …)` spellings — an instance body and
+> `(pins "REF" … (pin …))` — and nowhere else: a `(strap-ok 3A …)`, `(nc-ok 3A …)`
+> or `(near …)` pad still takes the numeric reading silently.
 
 A pad the part does not have is an error, not a downstream floating-net warning:
 
@@ -552,7 +609,9 @@ what keeps the check quiet on a 100-pin MCU. Sign one off the same way:
 
 Both take a `PIN` resolved exactly like a `(pin …)` token, and an empty or missing
 reason does **not** suppress the finding. The module-level twin is
-`(port … optional)`.
+`(port … optional)`. One thing they do *not* inherit is the SI-suffixed-token check
+described under [Pins](#pins) above: a `(nc-ok 3A …)` still takes the numeric reading
+without a word, so quote a sign-off pin name that starts with a digit.
 
 ### Rewriting pads to function names
 
@@ -1439,7 +1498,21 @@ and a note, so one number can drive all of them:
 (instance (fmt "R_F~a~a" ch leg) (res-0201 "33R") …)
 ```
 
-An unknown directive (`~x`) is a format error; too few arguments is an error too.
+**When a template does not hold.** All three failures are ordinary located
+`file:line:col` errors that name the directive and its byte offset in the template.
+The span points at the **argument** when the directive was reaching for one, and at
+the **template** otherwise:
+
+| What went wrong | Spanned at | Message |
+| --- | --- | --- |
+| Unknown directive | the template | ``(fmt …) unknown directive `~Q` at template offset 8 — the directives are ~a ~V ~R ~C ~A ~S ~~`` |
+| Too few arguments | the template | ``(fmt …) directive `~V` at template offset 7 wants argument 2, but the form supplies 1`` |
+| Wrong kind of argument | **the argument** | ``(fmt …) directive `~V` at template offset 2 needs a number argument`` |
+
+The accepted set in that first message is rendered from the directive table itself,
+so it is exactly the seven rows above: `~a ~V ~R ~C ~A ~S ~~`. The "needs a *kind*
+argument" wording comes from the same table's argument column — `~S` handed a number
+says `needs a string argument`.
 
 ---
 
@@ -1454,15 +1527,26 @@ An unknown directive (`~x`) is a format error; too few arguments is an error too
 ```
 
 `(assert …)`'s message must be a string. `(assert-range …)` builds its own message
-with a fixed format — the value to **four** decimals, the bounds to **one**:
+in the fixed shape `LABEL = VALUE (range LO-HI)`. Every number in it — the value and
+both bounds — goes through one rule:
+
+- a **whole** number prints plain, with no decimal point and no trailing `.0`;
+- an ordinary magnitude prints at four decimal places with trailing zeros trimmed;
+- a magnitude **below a hundredth** prints at the shortest text that round-trips,
+  because four decimals stop carrying such a value's own digits.
 
 ```text
-LED current (mA) = 4.8148 (range 2.0-10.0)
-VOUT = 3.3000 (range 0.6-16.0)
+VOUT = 3.3 (range 0.6-16)
+LED current (mA) = 4.8148 (range 2-10)
+LED current (A) = 0.0048148148 (range 0.002-0.01)
 ```
 
-Inside a `(calc …)` block the same head renders differently — label, colon, three
-decimals everywhere, and a bracketed interval:
+That last line is why the rule exists: under a flat one-decimal rendering a
+milliamp-scale window reported itself as `(range 0.0-0.0)`, a message that described
+nothing.
+
+Inside a `(calc …)` block the same head renders differently, and that spelling is
+unchanged — label, colon, three decimals everywhere, and a bracketed interval:
 
 ```text
 I_LED: 0.005 in [0.002, 0.010]
@@ -1472,30 +1556,43 @@ I_LED: 0.005 in [0.002, 0.010]
 
 **Assertions never interrupt *evaluation*.** The design is evaluated to the end and
 every assertion is recorded, so one run tells you about all of them rather than
-stopping at the first. What happens *after* evaluation depends on the command:
+stopping at the first. What happens *after* evaluation is decided per command, by
+what that command hands you. `netlisp help` states the same rule.
 
-| Command | A failed assertion |
-| --- | --- |
-| `netlisp build` | prints `FAIL: …` for each, then **`Build failed: assertion violations` and exits 1**. Nothing is emitted — no resolved design on stdout, no `.bom` sidecar. Ids that were minted are still written back to the source. |
-| `netlisp export-kicad` | the same: prints, then exits 1 with nothing written. |
-| `netlisp check` | reports each as an **`error assertion`** finding and exits 1 (it exits non-zero on any error-severity violation). |
-| `netlisp serve` and the read-only surfaces | never abort. The failure is shown in the schematic page's status, the review report and `run_checks`. |
-| `netlisp instances`, `netlist-dump`, `export-pdf` | report it and exit 0 — they are inspection surfaces. |
+| Layer | Commands | A failed assertion |
+| --- | --- | --- |
+| **Hand off the board** | `build`, `export-kicad` | Every assertion prints, the failing ones at `file:line:col`. **Nothing is written** — no resolved design on stdout, no `.bom`, no KiCad project — and the command exits 1. Ids that were minted *are* still written back to the source. |
+| **Report** | `check` | One **error-severity** finding beside the ERC and requirement findings. The whole report still prints; exit 1. |
+| **Review** | `export-pdf`, the served pages, `review-audit` | The document is still produced. A review of a board that fails its own arithmetic is exactly what you want to read, so the PDF's *Validation* page lists every assertion (`Assertions: 2 pass, 2 warn, 2 fail`) and the schematic page shows the failing ones. Exit 0. **Caveat:** the `review-audit` Markdown is written but does *not* carry them — its release-profile row counts only non-assertion findings, and `run_fab_readiness` passes on warning-severity assertions alone — so read the audit beside `netlisp check`, not instead of it. |
+| **Derived views** | `export-kicad-sch`, `export-spice`, `export-pinmap`, `netlist-dump`, `instances`, … | Produced regardless. Exit 0. |
+
+The `file:line:col` on a `FAIL:` line is the assertion's **first argument** — the
+condition of an `(assert …)`, the value expression of an `(assert-range …)` — so it
+is as jumpable as a compiler diagnostic:
 
 ```console
-$ netlisp build --project-dir . p-assert
+$ netlisp build --project-dir . p-layer
 PASS: v exceeds 1V
-FAIL: v exceeds 5V
-PASS: VOUT = 3.3000 (range 0.6-16.0)
-FAIL: VIN = 3.3000 (range 5.0-12.0)
-Build failed: assertion violations
+FAIL: ./src/p-layer.sexp:6:11: v exceeds 5V
+PASS: VOUT = 3.3 (range 0.6-16)
+FAIL: ./src/p-layer.sexp:8:17: VIN = 3.3 (range 5-12)
+Build failed: the design's own assertions do not hold — nothing was emitted.
+  Evaluation never stops at an assertion, so every one above was checked; a
+  command that EMITS refuses to write a netlist, BOM or export the design's
+  own arithmetic contradicts. `netlisp check` reports the same failures as
+  findings beside ERC, prints its whole report, and exits 1.
 $ echo $?
 1
 ```
 
-Some evaluator diagnostics are recorded as *warning-severity* assertions rather
-than errors — a dead-end net, for instance — and those print `WARN:` and do not
-abort.
+An assertion with no source form of its own — the frequency-plan and PLL analyses
+synthesise theirs — falls back to the bare message with no location.
+
+**Warning-severity assertions block nothing, in any layer.** They print `WARN:` and
+are reported as `warning assertion` findings. Two kinds exist: evaluator diagnostics
+recorded as assertions (a dead-end net, for instance), and the *advisory* rows an RF
+analysis raises — `(frequency-plan … (mode advisory))` and `(pll-loop …)`. A build
+carrying only those still emits its resolved design and its `.bom`, and exits 0.
 
 ### `netlisp check`
 
@@ -1640,6 +1737,14 @@ non-default variant cannot disturb the MPN selections the base rows carry.
 copper, as one or more **named** layouts of which one may be starred as the default.
 It is not authored by hand; the design source declares intent (`(board …)`,
 `(stackup …)`, `(net-class …)`) and the sidecar holds geometry.
+
+A part's pose in there is its **footprint origin** in board millimetres, y growing
+down — the `(0,0)` its land pattern's `(pad … (pos X Y))` offsets are measured from.
+That is the body centre only when the pads happen to be centred on it: the bundled
+0.1 in pin header puts pad 1 at `(0, 0)` and its courtyard at `y = -1.27 … 3.81`, so
+its origin sits 1.27 mm from the middle of the strip. `set_part_poses`' `x_mm`/`y_mm`
+and `describe_pcb_layout`'s `parts[].x`/`y` are that same point, which is what lets
+one be fed straight back to the other.
 
 Both belong in version control: committing them is what makes a clone show the same
 board, and what makes a rebuild a no-op.
@@ -1803,6 +1908,18 @@ records a `deprecated_form` info saying so. `(virtual)` has no other spelling an
 not deprecated. Test points take a renumber-safe `TP` ref-des from their own counter
 and are exempt from the "IC has no ground" ERC.
 
+Because the schematic's hub/spoke rule calls every non-passive prefix a hub, board
+**fixture** — the `TP`, `H`/`MH`/`MK`/`M` and `FID` classes, each a pad and a label
+and nothing else — is drawn as a hub too. It does not, however, spend a budget meant
+for circuit blocks: `export-schematic-png` refuses an unfocused render above **eight**
+hubs, and fixture is not counted, so a four-block board with four test points and four
+mounting holes renders without `--ref`. Nine *real* hubs still refuse, and say so:
+
+```text
+design has more than eight schematic circuit hubs (test points, mounting holes and
+fiducials are not counted); choose sub=<slug> or ref=<hub>
+```
+
 ---
 
 ## 16. Common mistakes
@@ -1827,21 +1944,32 @@ evaluates both arguments, an instance `(note text)` evaluates its one, and a sec
 
 **3. Believing a failed assertion is only a finding.** It is a finding *inside*
 evaluation — the design is evaluated to the end and every assertion is recorded —
-but `netlisp build` and `netlisp export-kicad` then print
-`Build failed: assertion violations` and **exit 1 with nothing emitted**, and
-`netlisp check` reports each as an `error assertion` and exits 1. Only `serve` and
-the read-only inspection commands carry on. See
-[§12](#12-assertions-and-checks).
+but the layer that follows decides. `netlisp build` and `netlisp export-kicad` hand
+off the board, so they print every assertion (the failing ones at `file:line:col`)
+and **exit 1 with nothing written** — no resolved design, no `.bom`, no KiCad
+project; only the minted ids still land back in the source. `netlisp check` reports
+each as an `error assertion` beside the ERC findings and exits 1. `export-pdf` and
+the served pages still produce their document *with* the failure in it, `review-audit`
+still writes its audit (but does not carry the failure — read it beside `check`), and
+every other export is a derived view produced regardless. A *warning*-severity
+assertion — a dead-end net, or an advisory `(frequency-plan …)` / `(pll-loop …)`
+row — blocks nothing anywhere. See [§12](#12-assertions-and-checks).
 
 **4. Writing a pin function name that starts with a digit, unquoted.**
-`(pin 1A "NET")` is the *number* 1 carrying the SI unit letter `A`, so it silently
-wires **pad 1**. On a hex inverter, `(pin 3A …)` wires pad 3 — whose function is
-`2A` — and `(pin 6A …)` wires pad 6, whose function is `3Y`. Quote it:
-`(pin "3A" "NET")`. The trigger is a digit run followed by a scale letter
-(`k M G u n p`, or `m` before a unit letter), a unit letter (`V A F H R`) or `%`;
-`1Y` and `1B` are unaffected because `Y` and `B` are neither. Bare atoms like `VCC`,
-`GND`, `VIN` and `PA3` are always safe, and a quoted token is resolved as a function
-name first and a pad id second, so quoting is never wrong. See
+`(pin 1A "NET")` is the *number* 1 carrying the SI unit letter `A`. That no longer
+passes in silence: because the part's pinout has a function literally named `1A`,
+the two readings collide and the **build stops** at `file:line:col`, naming both and
+the quoting that picks one. `(pin 3A …)` on a hex inverter is the same error — pad 3
+versus the pad 5 its pinout calls `3A`. Write `(pin "3A" "NET")` for the name or
+`(pin 3 "NET")` for the pad. When nothing on the part answers to the text (`2V` on
+that inverter) it binds the numeric pad **with a warning** naming both readings. The
+trigger is a digit run followed by a scale letter (`k M G u n p`, or `m` before a
+unit letter), a unit letter (`V A F H R`) or `%`; `1Y` and `1B` are unaffected
+because `Y` and `B` are neither. Bare atoms like `VCC`, `GND`, `VIN` and `PA3` are
+always safe, a bare `(pin 1 …)` is unambiguous, and a quoted token is resolved as a
+function name first and a pad id second — so quoting is never wrong. The check
+covers `(pin …)` and `(pins "REF" … (pin …))` only; a `(strap-ok 3A …)` or
+`(nc-ok 3A …)` still binds the number quietly. See
 [§5](#5-instances-pins-nets-and-ports).
 
 **5. Expecting `~R` to print an `R`, or `~V` to scale.** `~R` emits `47`, `4.7k`,
@@ -1849,10 +1977,13 @@ name first and a pad id second, so quoting is never wrong. See
 with **no** scaling, so `(fmt "~V" 0.0033)` is `0.0033V`. The rounding is: a whole
 number prints as an integer, otherwise the *scaled mantissa* prints to four decimal
 places and trailing zeros are trimmed — `(fmt "~R" 1234.5678)` is `1.2346k`.
-`(assert-range …)` has its own fixed format (`VOUT = 3.3000 (range 0.6-16.0)` — four
-decimals, bounds to one), and inside a `(calc …)` block a third
-(`I_LED: 0.005 in [0.002, 0.010]`). See [§11](#11-arithmetic-and-fmt) and
-[§12](#12-assertions-and-checks).
+`(assert-range …)` has its own fixed format — `LABEL = VALUE (range LO-HI)`, whole
+numbers plain, ordinary magnitudes at four trimmed decimals and anything under a
+hundredth at full round-trip precision, so `VOUT = 3.3 (range 0.6-16)` and
+`LED current (A) = 0.0048148148 (range 0.002-0.01)`. Inside a `(calc …)` block a
+third (`I_LED: 0.005 in [0.002, 0.010]`). And a template that does not hold is a
+located error naming the directive, not a bare `error.FormatError`. See
+[§11](#11-arithmetic-and-fmt) and [§12](#12-assertions-and-checks).
 
 **6. Reaching for `cond`, `true`/`false`, or `1e-7`.** None of the three exists.
 `cond` was removed — nest `(if …)` or use `(when …)`/`(unless …)`. There are no
