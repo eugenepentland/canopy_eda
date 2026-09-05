@@ -11,4 +11,4 @@ concept|src/serve/assets/pcb_board.js|layer-palette
 concept|src/serve/assets/pcb_layout.css|layer-palette
 concept|src/serve/assets/pcb_replay.js|layer-palette
 concept|src/serve/assets/pcb_settings.js|design-rule-field-names
-concept|src/serve/pcb_layout_page.zig|design-rule-field-names
+concept|src/serve/pcb_layout_blob.zig|design-rule-field-names

@@ -120,7 +120,9 @@ assert.strictEqual(home.scenarios.at(-1)?.id, "progress_hydration",
 
 const pcb = surfaces.find((surface) => surface.id === "pcb_2d");
 const pcbScenarioIds = new Set(pcb.scenarios.map((scenario) => scenario.id));
-const pcbPageSource = fs.readFileSync(path.join(root, "src", "serve", "pcb_layout_page.zig"), "utf8");
+// The toolstrip markup lives in the page's chrome module (split out of
+// pcb_layout_page.zig, 2026-09-05); the page itself now only calls into it.
+const pcbPageSource = fs.readFileSync(path.join(root, "src", "serve", "pcb_layout_chrome.zig"), "utf8");
 const pcbBoardSource = fs.readFileSync(path.join(root, "src", "serve", "assets", "pcb_board.js"), "utf8");
 const toolstripBlock = pcbPageSource.slice(
   pcbPageSource.indexOf("const toolstrip_html ="),
