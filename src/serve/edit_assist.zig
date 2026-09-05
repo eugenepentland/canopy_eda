@@ -32,6 +32,7 @@ const HandlerError = edit.HandlerError;
 const paths = @import("../paths.zig");
 const sexp_form_bounds = @import("../sexp_form_bounds.zig");
 const lib_limits = @import("../lib_limits.zig");
+const settings_target = @import("design_settings_target.zig");
 
 const header_cors = "access-control-allow-origin";
 const max_source_bytes: usize = 10 * 1024 * 1024;
@@ -366,6 +367,12 @@ fn findLayoutForm(source: []const u8) ?struct { start: usize, end: usize } {
 /// validates + writes + rebuilds via the normal mutation path. Powers the
 /// Layout tab's drag-to-arrange writeback — the schematic twin of PCB
 /// `spec-save`.
+///
+/// `diagram-layout` is a `<name>.diagram.sexp` form AND a singleton, so a
+/// split design keeps it next door: the write goes to whichever file declares
+/// it (`design_settings_target`), and a design with a diagram sidecar but no
+/// form yet gets one there. Authoring a second copy in the design file would
+/// make the board stop evaluating altogether.
 pub fn saveDiagramLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     res.content_type = .JSON;
     res.header(header_cors, "*");
@@ -403,11 +410,26 @@ pub fn saveDiagramLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
     }
     const form = form_val.string;
 
-    const path = paths.designSourcePath(ctx.allocator, ctx.project_dir, name) catch {
-        res.status = 500;
+    const resolution = settings_target.resolve(ctx.allocator, ctx.project_dir, name, &.{ "diagram-layout", "layout" }) catch {
+        res.status = 404;
+        res.body = "{\"ok\":false,\"error\":\"cannot read design\"}";
         return;
     };
-    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, path, max_source_bytes) catch {
+    defer resolution.deinit(ctx.allocator);
+    if (resolution == .conflict) {
+        res.status = 409;
+        res.body = try std.fmt.allocPrint(
+            ctx.allocator,
+            "{{\"ok\":false,\"error\":\"(diagram-layout …) is declared in both {s} and {s} — a design may declare it once\"}}",
+            .{
+                std.fs.path.basename(resolution.conflict.first),
+                std.fs.path.basename(resolution.conflict.second),
+            },
+        );
+        return;
+    }
+    const where = resolution.target;
+    const source = infra_fs.cwd().readFileAlloc(ctx.allocator, where.path, max_source_bytes) catch {
         res.status = 404;
         res.body = "{\"ok\":false,\"error\":\"cannot read design\"}";
         return;
@@ -419,6 +441,9 @@ pub fn saveDiagramLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
         try w.writeAll(source[0..span.start]);
         try w.writeAll(form);
         try w.writeAll(source[span.end..]);
+    } else if (where.container == .top_level) {
+        const appended = try settings_target.appendTopLevel(ctx.allocator, source, form);
+        try w.writeAll(appended);
     } else if (std.mem.indexOf(u8, source, "(design-block")) |db| {
         const close = sexp_form_bounds.closeIndex(source, db) orelse {
             res.status = 400;
@@ -436,7 +461,14 @@ pub fn saveDiagramLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Respo
         return;
     }
 
-    const result = edit.writeDesignCore(ctx.allocator, ctx.project_dir, name, out.written()) catch |err| {
+    // Same pre-flight `writeSourceFileCore` does: a syntax error is reported as
+    // one rather than as a failed write.
+    _ = sexpr_parser.parse(ctx.allocator, out.written()) catch {
+        res.status = 400;
+        res.body = "{\"ok\":false,\"error\":\"InvalidSource\"}";
+        return;
+    };
+    const result = edit.writeFileAndRebuild(ctx.allocator, ctx.project_dir, name, where.path, out.written(), "write_design") catch |err| {
         res.status = 400;
         res.body = try std.fmt.allocPrint(ctx.allocator, "{{\"ok\":false,\"error\":\"{s}\"}}", .{@errorName(err)});
         return;
@@ -509,4 +541,49 @@ test "extractFootprint reads atom and quoted footprint forms" {
     try std.testing.expectEqualStrings("sot891", extractFootprint(quoted));
     // No footprint form → empty.
     try std.testing.expectEqualStrings("", extractFootprint("(component \"x\" (mpn \"X\"))"));
+}
+
+// spec: serve/edit_assist - the Layout tab's diagram-layout writeback replaces the form in whichever of the design's files declares it, and refuses a design it cannot read instead of writing one
+test "saveDiagramLayoutApi writes the diagram sidecar of a split design" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    const design = "(design-block \"Dia\"\n  (board-role board)\n  (section \"S\"))\n";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/dia.sexp", .data = design });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/dia.diagram.sexp",
+        .data = "; Diagram sidecar.\n(diagram-layout (row \"S\"))\n",
+    });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    var state = serve_root.ServerState{};
+    var srv = Server{ .allocator = a, .project_dir = root, .auth_dir = root, .state = &state };
+
+    var request = httpz.testing.init(.{});
+    defer request.deinit();
+    request.param("name", "dia");
+    request.body("{\"form\":\"(diagram-layout (row \\\"S\\\") (row \\\"T\\\"))\"}");
+    try saveDiagramLayoutApi(&srv, request.req, request.res);
+    try std.testing.expectEqual(@as(u16, 200), request.res.status);
+
+    // The singleton was replaced next door; the design file grew no second copy.
+    try std.testing.expectEqualStrings(design, try tmp.dir.readFileAlloc(std.testing.io, "src/dia.sexp", a, .limited(4096)));
+    const sidecar = try tmp.dir.readFileAlloc(std.testing.io, "src/dia.diagram.sexp", a, .limited(4096));
+    try std.testing.expect(std.mem.indexOf(u8, sidecar, "(row \"T\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sidecar, "; Diagram sidecar.") != null);
+    try std.testing.expectEqual(
+        std.mem.indexOf(u8, sidecar, "(diagram-layout"),
+        std.mem.lastIndexOf(u8, sidecar, "(diagram-layout"),
+    );
+
+    // A design that cannot be read is answered, not written blind.
+    var missing = httpz.testing.init(.{});
+    defer missing.deinit();
+    missing.param("name", "nosuchdesign");
+    missing.body("{\"form\":\"(diagram-layout)\"}");
+    try saveDiagramLayoutApi(&srv, missing.req, missing.res);
+    try std.testing.expectEqual(@as(u16, 404), missing.res.status);
+    try std.testing.expect(std.mem.indexOf(u8, missing.res.body, "cannot read design") != null);
 }

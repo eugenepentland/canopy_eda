@@ -390,7 +390,7 @@ Auth in full: [auth.md](auth.md).
   arrangement screen, not CFD or thermal signoff. The enclosure mesh and
   STEP/STL exports remain driven by the occupied plan envelope.
 - **Live push**: `POST /api/push/:name` — rebuild and push update. On eval failure the JSON (and the schematic page, and the CLI `build` tool) carries a structured `diagnostic` `{file,line,col,message,source_line}` rendered compiler-style with a caret (`src/serve/diag_format.zig`).
-- **Version history + diff**: `GET /api/history/:name` — stored snapshot ids (file copies under `<project>/history/<name>/<timestamp>/`, written before every mutation); `GET /api/diff/:name?from=<id>&to=<id|current>` — request-local netlist diff (instances added/removed, value/footprint changes, net membership changes; `src/serve/design_diff.zig`). Schematic header's History panel renders it. Caveat: snapshots capture the design file only, so an old revision re-evaluates against today's lib/ modules.
+- **Version history + diff**: `GET /api/history/:name` — stored snapshot ids (file copies under `<project>/history/<name>/<timestamp>/`, written before every mutation); `GET /api/diff/:name?from=<id>&to=<id|current>` — request-local netlist diff (instances added/removed, value/footprint changes, net membership changes; `src/serve/design_diff.zig`). Schematic header's History panel renders it. A snapshot covers **the design source plus every autoloaded sidecar that exists beside it** (`<name>.checks.sexp`, `<name>.layout.sexp`, `<name>.diagram.sexp`), so a Design Settings save that lands in `<name>.layout.sexp` on a split board is undoable; the entry's `.files` manifest names exactly what was captured, and restoring moves every one of those files together (deleting a sidecar the manifest proves did not exist in that revision). An entry written before sidecars were snapshotted has no manifest and still restores, design-file-only, leaving today's sidecars alone. The list and diff endpoints are unchanged — one entry is still one id — and `?from=` evaluates the revision *with* its own snapshotted sidecars. Caveat: no snapshot captures `lib/`, so an old revision re-evaluates against today's modules.
 - **Datasheet attach**: `POST /api/attach-datasheet` `{component,file}` — splices an uploaded PDF filename or an HTTP(S) URL into `lib/components/<name>.sexp` (idempotent and scheme/path-safe); the library page has a per-card attach control. `GET /api/datasheets` lists uploaded local candidates. The CLI twin is the `attach_datasheet` tool (below), which an agent pairs with `fetch_datasheet` to go from a manufacturer URL to a declared `(datasheet "…")` without a browser.
 - **Cross-probing**: `/pcb-layout/:name?focus=REF` (or `#REF`) zooms/flashes a part (leaf-matching like `?refs=`); PCB sidebar rows link "Show in schematic →" (`#comp-REF` scroll+flash), schematic component detail links "Locate on PCB →". **Two-window live sync**: with `/pcb-layout/<name>` and `/schematics/<name>` open in separate tabs/windows of the same browser (the KiCad two-monitor workflow), clicking a part on one page highlights it on the other through the `BroadcastChannel("netlisp-xprobe")` bridge in `pcb_board.js` and `schematic_viewer.js` (messages carry the design and ref; receivers ignore other designs; no server round-trip).
 - **PCB Find**: the full `/pcb-layout/:name` editor has a dock-wide Find field above its four workflow tabs (`Ctrl/Cmd+F`; arrows preview; Enter locates; F3 / Shift+F3 steps). Its client-only index covers component refs/values/footprints, collapsed nets, DRC ids/kinds/parties, sub-circuits, and board text; results reuse the normal part selection, review-focus, DRC locator, and point-focus paths. Prefixes `ref:`, `net:`, `drc:`, `sub:`, `text:`, `value:`, and `fp:` narrow a query, and `*` / `?` provide simple wildcards. Embeds omit the dock and keep native browser Find.
@@ -402,7 +402,30 @@ Auth in full: [auth.md](auth.md).
   written>}`. Caps: body > 256 KiB → 413, more than 200 events → 400, non-JSON
   or no `events` array → 400. Same auth as every other `/api` route
   (`src/serve/request_log.zig`).
+- **Whole-file source editing**: `GET /api/source/:name[?file=design|checks|layout|diagram]` → `{"source":…,"sourceRevision":…,"file":…,"files":[…]}` — the raw text of one of the design's files. `file` defaults to `design` (the `.sexp`); the other values name the autoloaded sidecars (`docs/sexpr-language.md`, "Sidecar files"), and `files` lists only the ones this design actually has, which is what the schematic editor's file picker renders. `POST /api/source/:name` with `{"source":…,"file":…,"sourceRevision":…}` replaces that whole file: syntax is checked before the bytes hit disk, the write is snapshotted into history (design **and** sidecars, above), the **whole design** is re-evaluated afterwards and a failure answers `400 rebuild failed` — a sidecar save is gated by exactly the checks a design save is. `sourceRevision` is the optimistic-concurrency hash **of the file being written**, so two editors on the same board's different sidecars do not collide and neither can clobber the other's file unseen. Only an already-authored sidecar is writable (`404`); creating one is `split-design`'s job.
 - **Value editing**: `POST /api/edit-value/:name` — edit component value in .sexp file
+- **PCB Design Settings**: `POST /api/design-rules/:name` `{"rules":{…}}` patches
+  the board-level numeric rules inside `(design-rules …)`;
+  `POST /api/stackup-planes/:name`
+  `{"layers":N,"planes":[{"index":I,"net":"…"}]}` replaces the whole-layer
+  copper assignments inside `(stackup …)` (the list is authoritative — an
+  omitted layer deletes its plane). Both are surgical: comments, ordering,
+  physical construction and every form the GUI does not know survive byte for
+  byte, and a board that relied on defaults gets the form authored for it.
+  Both are **sidecar-aware**. `design-rules` and `stackup` may live in the
+  design's `<name>.layout.sexp` (`docs/sexpr-language.md` → "Sidecar files"),
+  so each save is applied to whichever file declares the form, at THAT file's
+  byte spans, leaving the other file untouched; a form that exists nowhere yet
+  is authored into the layout sidecar when the design has one, else into the
+  design file. Either way the DESIGN is what is re-evaluated, id-pinned (each
+  minted `(id …)` back into the file its offset indexes), BOM-resolved and
+  version-bumped, and the sidecar's mtime is in the page-cache read-set, so the
+  served page refreshes on the next poll. The only refusal left is **409** when
+  the same singleton is declared in BOTH files — the message names both, and
+  the evaluator refuses that board anyway. `POST /api/power-plane/:name`
+  (subcircuit supply-plane policy, `GET /api/board-role/:name` reports it) and
+  `POST /api/diagram-layout/:name` (the Layout tab's drag-to-arrange writeback)
+  follow the same rule for `(power-plane …)` and `(diagram-layout …)`.
 - **ERC**: `GET /api/erc/:name` — electrical-rule violations. Repeat requests
   are answered from a dependency-validated in-memory cache
   (`src/serve/read_cache.zig`): the evaluator read-set (design, checks, every

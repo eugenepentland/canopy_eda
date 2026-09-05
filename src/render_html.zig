@@ -489,7 +489,8 @@ fn writeHeader(
     );
     // Edit the raw .sexp source in-browser: loads GET /api/source into a modal
     // editor and saves via POST /api/source (validates syntax, rebuilds, bumps
-    // the live version).
+    // the live version). On a split design the modal also offers each
+    // autoloaded sidecar through the same endpoint's `file=` selector.
     try w.writeAll(
         "<button class=\"head-link head-btn\" id=\"edit-src-btn\" type=\"button\" " ++
             "title=\"Edit the raw .sexp source\">\u{270E} Edit SRC</button>",

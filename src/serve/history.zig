@@ -1,22 +1,78 @@
-//! Design-file version history: before every mutation a timestamped copy of
-//! the `.sexp` is written under `<project>/history/<name>/<ts>/`, and this
-//! module lists, restores, and (for layouts) snapshots them. A snapshot
-//! captures the design source only — an old revision re-evaluates against
-//! today's lib/ modules.
+//! Design version history: before every mutation a timestamped copy of the
+//! design's files is written under `<project>/history/<name>/<ts>/`, and this
+//! module lists, restores, and (for layouts) snapshots them.
+//!
+//! A snapshot covers the design source AND every autoloaded sidecar that
+//! exists beside it (`<name>.checks.sexp`, `<name>.layout.sexp`,
+//! `<name>.diagram.sexp` — see `eval/sidecars.zig`), because those files are
+//! part of the design: a Design Settings save on a split board lands in
+//! `<name>.layout.sexp`, and a snapshot that held the design source alone gave
+//! that save a history entry which did not contain the byte it changed. Undo
+//! then restored an untouched design file and left the sidecar at the NEWER
+//! state — a silent, wrong undo.
+//!
+//! What a snapshot captured is recorded in a `.files` manifest beside the
+//! copies, one basename per line. Its PRESENCE is the version marker: an entry
+//! written before sidecars were snapshotted has no manifest and is restored
+//! design-file-only, exactly as it was written, so old entries stay usable. An
+//! entry that HAS one is authoritative in both directions — a sidecar the
+//! manifest does not list did not exist when the snapshot was taken, so
+//! restoring that revision deletes it.
+//!
+//! A snapshot still does not capture `lib/`: an old revision re-evaluates
+//! against today's modules.
 
 const std = @import("std");
+const atomic_write = @import("../infra/atomic_write.zig");
 const infra_fs = @import("../infra/fs.zig");
 const json_writer = @import("../json_writer.zig");
 const log = @import("../infra/log.zig");
 const paths = @import("../paths.zig");
+const sidecars = @import("../eval/sidecars.zig");
 const sortable_stamp = @import("sortable_stamp.zig");
 
 // ── Constants ─────────────────────────────────────────────────────
-const sexp_file_template = "{s}/{s}.sexp";
 const layouts_file_template = "{s}/{s}.layouts.json";
 const note_max_bytes: usize = 4096;
+/// Manifest of the design files one snapshot directory captured, one basename
+/// per line. See the module header — its presence is the entry's version.
+const manifest_name = ".files";
+const manifest_max_bytes: usize = 4096;
+/// Upper bound on a design file this module copies through memory. Matches the
+/// evaluator's own file cap, so a design it can build is a design it can undo.
+const source_max_bytes: usize = 10 * 1024 * 1024;
 
-// Source-snapshot storage: projects/designs/history/<name>/<timestamp>/{name}.sexp
+/// The files one snapshot covers, in a fixed order: slot 0 is the design
+/// source, then one slot per `sidecars.kinds` entry.
+const design_slots = 1 + sidecars.kinds.len;
+
+/// The extension of slot `i` — `".sexp"` for the design, the sidecar's own
+/// suffix otherwise.
+fn slotExt(i: usize) []const u8 {
+    return if (i == 0) ".sexp" else sidecars.kinds[i - 1].ext();
+}
+
+/// The LIVE path of slot `i` for `name` (caller owns). Every slot resolves
+/// beside the design source, so a grouped `src/<group>/` layout and a
+/// `lib/modules/` design both find their own siblings.
+fn slotPath(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, i: usize) HistoryError![]u8 {
+    return paths.designSiblingPath(allocator, project_dir, name, slotExt(i));
+}
+
+/// True when `manifest` lists `basename` as a captured file. A null manifest
+/// is a legacy entry: only the design source (slot 0) was ever captured, so
+/// that is the only slot it can restore and the only one it can speak for.
+fn manifestCovers(manifest: ?[]const u8, i: usize, basename: []const u8) bool {
+    const text = manifest orelse return i == 0;
+    var lines = std.mem.tokenizeAny(u8, text, "\r\n");
+    while (lines.next()) |line| {
+        if (std.mem.eql(u8, std.mem.trim(u8, line, " \t"), basename)) return true;
+    }
+    return false;
+}
+
+// Source-snapshot storage: projects/designs/history/<name>/<timestamp>/ holds
+// {name}.sexp, each sidecar that existed, the `.files` manifest and the `.note`.
 // Timestamp format: YYYY-MM-DDTHH-MM-SS (filesystem-safe, sorts lexicographically).
 //
 // Layout-snapshot storage lives in a reserved `layouts/` subdir beside the
@@ -33,26 +89,31 @@ pub const HistoryError = error{
     SnapshotNotFound,
 } ||
     std.mem.Allocator.Error ||
+    atomic_write.Error ||
     infra_fs.Dir.AccessError ||
     infra_fs.Dir.MakeError ||
     infra_fs.Dir.CopyFileError ||
+    infra_fs.Dir.DeleteFileError ||
     infra_fs.Dir.OpenError ||
     infra_fs.File.OpenError ||
     infra_fs.Iterator.Error ||
-    infra_fs.File.ReadError;
+    infra_fs.File.ReadError ||
+    std.Io.Dir.WriteFileError;
 
-/// Copy the current .sexp for `name` into
-/// projects/designs/history/<name>/<timestamp>/. Returns the snapshot id
-/// (caller owns). Returns null when the source file doesn't exist yet (nothing
-/// to snapshot on a brand-new create). When `description` is non-null, a
-/// `.note` file alongside the copied `.sexp` records the human-readable reason.
+/// Copy every file of `name` — the design source plus each autoloaded sidecar
+/// that exists — into projects/designs/history/<name>/<timestamp>/, together
+/// with the `.files` manifest naming exactly what was captured. Returns the
+/// snapshot id (caller owns), or null when the design source doesn't exist yet
+/// (nothing to snapshot on a brand-new create). When `description` is
+/// non-null, a `.note` file alongside the copies records the human-readable
+/// reason.
 pub fn snapshot(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
     description: ?[]const u8,
 ) HistoryError!?[]const u8 {
-    const sexp_src = try paths.designSourcePath(allocator, project_dir, name);
+    const sexp_src = try slotPath(allocator, project_dir, name, 0);
     defer allocator.free(sexp_src);
 
     infra_fs.cwd().access(sexp_src, .{}) catch |e| switch (e) {
@@ -67,9 +128,7 @@ pub fn snapshot(
     defer allocator.free(dir);
     try infra_fs.cwd().makePath(dir);
 
-    const dst_sexp = try std.fmt.allocPrint(allocator, sexp_file_template, .{ dir, name });
-    defer allocator.free(dst_sexp);
-    try infra_fs.cwd().copyFile(sexp_src, infra_fs.cwd(), dst_sexp, .{});
+    try captureSlots(allocator, project_dir, name, dir);
 
     if (description) |d| if (d.len > 0) {
         const note_path = try std.fmt.allocPrint(allocator, "{s}/.note", .{dir});
@@ -83,6 +142,40 @@ pub fn snapshot(
     };
 
     return id;
+}
+
+/// Copy each existing slot of `name` into the snapshot directory `dir` and
+/// write the `.files` manifest. The manifest is written LAST and lists exactly
+/// the copies that succeeded, so a manifest on disk always describes a
+/// complete entry — a half-written directory has none, and `restore` reads it
+/// as legacy (design-file-only) rather than deleting a sidecar it never saw.
+fn captureSlots(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    dir: []const u8,
+) HistoryError!void {
+    var manifest: std.ArrayList(u8) = .empty;
+    defer manifest.deinit(allocator);
+
+    for (0..design_slots) |i| {
+        const src = try slotPath(allocator, project_dir, name, i);
+        defer allocator.free(src);
+        if (i > 0) infra_fs.cwd().access(src, .{}) catch |e| switch (e) {
+            error.FileNotFound => continue,
+            else => return e,
+        };
+        const basename = std.fs.path.basename(src);
+        const dst = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, basename });
+        defer allocator.free(dst);
+        try infra_fs.cwd().copyFile(src, infra_fs.cwd(), dst, .{});
+        try manifest.appendSlice(allocator, basename);
+        try manifest.append(allocator, '\n');
+    }
+
+    const manifest_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, manifest_name });
+    defer allocator.free(manifest_path);
+    try infra_fs.cwd().writeFile(.{ .sub_path = manifest_path, .data = manifest.items });
 }
 
 /// One snapshot entry: id plus optional human-readable description loaded
@@ -156,6 +249,14 @@ pub fn writeSnapshotsJson(w: *std.Io.Writer, snaps: []const SnapshotInfo) (std.I
 /// Restore the snapshot at `id` back into src/. Does NOT snapshot the current
 /// state — callers should call `snapshot` first if they want the restore to
 /// be undoable.
+///
+/// Every file the entry covers moves together. The snapshot's bytes are read
+/// in full FIRST and only then committed, each through the atomic writer, so a
+/// failure mid-way cannot leave one revision's design file paired with
+/// another's sidecar — a mixture that is neither of the two states the user
+/// asked for and may not evaluate at all. A sidecar the manifest proves did
+/// not exist at snapshot time is deleted; a legacy entry (no manifest) proves
+/// nothing about sidecars and therefore leaves them alone.
 pub fn restore(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -171,11 +272,45 @@ pub fn restore(
     defer allocator.free(dir);
     infra_fs.cwd().access(dir, .{}) catch return error.SnapshotNotFound;
 
-    const src_sexp = try std.fmt.allocPrint(allocator, sexp_file_template, .{ dir, name });
-    defer allocator.free(src_sexp);
-    const dst_sexp = try paths.designSourcePath(allocator, project_dir, name);
-    defer allocator.free(dst_sexp);
-    try infra_fs.cwd().copyFile(src_sexp, infra_fs.cwd(), dst_sexp, .{});
+    const manifest_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, manifest_name });
+    defer allocator.free(manifest_path);
+    const manifest: ?[]u8 = infra_fs.cwd().readFileAlloc(allocator, manifest_path, manifest_max_bytes) catch null;
+    defer if (manifest) |m| allocator.free(m);
+
+    var dest: [design_slots]?[]u8 = @splat(null);
+    var staged: [design_slots]?[]u8 = @splat(null);
+    defer for (0..design_slots) |i| {
+        if (dest[i]) |d| allocator.free(d);
+        if (staged[i]) |b| allocator.free(b);
+    };
+
+    for (0..design_slots) |i| {
+        const live = try slotPath(allocator, project_dir, name, i);
+        dest[i] = live;
+        const basename = std.fs.path.basename(live);
+        if (!manifestCovers(manifest, i, basename)) continue;
+        const from = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, basename });
+        defer allocator.free(from);
+        // A file the manifest promises but the directory does not hold is a
+        // damaged entry: refuse it whole rather than restore part of it.
+        staged[i] = infra_fs.cwd().readFileAlloc(allocator, from, source_max_bytes) catch
+            return error.SnapshotNotFound;
+    }
+
+    for (0..design_slots) |i| {
+        const live = dest[i].?;
+        if (staged[i]) |bytes| {
+            try atomic_write.writeFile(live, bytes);
+            continue;
+        }
+        // Only a manifest-bearing entry can prove absence; a legacy one is
+        // silent about sidecars, so nothing is removed for it.
+        if (i == 0 or manifest == null) continue;
+        infra_fs.cwd().deleteFile(live) catch |e| switch (e) {
+            error.FileNotFound => {},
+            else => return e,
+        };
+    }
 }
 
 // ── Layout-sidecar snapshots (`.layouts.json`) ─────────────────────
@@ -313,6 +448,89 @@ fn seedFakeLayoutSnapshots(alloc: std.mem.Allocator, project: []const u8, name: 
         defer alloc.free(f);
         try infra_fs.cwd().writeFile(.{ .sub_path = f, .data = "{}" });
     }
+}
+
+/// Write `data` at `<project>/src/<rel>` for the snapshot fixtures below.
+fn seedSrcFile(alloc: std.mem.Allocator, project: []const u8, rel: []const u8, data: []const u8) !void {
+    const dir = try std.fmt.allocPrint(alloc, "{s}/src", .{project});
+    defer alloc.free(dir);
+    try infra_fs.cwd().makePath(dir);
+    const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir, rel });
+    defer alloc.free(path);
+    try infra_fs.cwd().writeFile(.{ .sub_path = path, .data = data });
+}
+
+/// The current bytes of `<project>/src/<rel>`, or null when it is gone.
+fn readSrcFile(alloc: std.mem.Allocator, project: []const u8, rel: []const u8) !?[]u8 {
+    const path = try std.fmt.allocPrint(alloc, "{s}/src/{s}", .{ project, rel });
+    defer alloc.free(path);
+    return infra_fs.cwd().readFileAlloc(alloc, path, 1 << 20) catch |e| switch (e) {
+        error.FileNotFound => null,
+        else => e,
+    };
+}
+
+// spec: Web Server - A source snapshot captures the design file and every sidecar beside it, so restoring one undoes an edit that landed in a sidecar
+test "snapshot and restore cover the design's sidecars" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project);
+
+    try seedSrcFile(alloc, project, "split.sexp", "(design-block \"Split\")");
+    try seedSrcFile(alloc, project, "split.layout.sexp", "(design-rules (clearance 0.2))");
+
+    const id = (try snapshot(alloc, project, "split", "before")) orelse return error.TestExpectedId;
+    defer alloc.free(id);
+
+    // A settings save lands in the sidecar, and a diagram sidecar appears that
+    // the snapshot never saw.
+    try seedSrcFile(alloc, project, "split.layout.sexp", "(design-rules (clearance 0.9))");
+    try seedSrcFile(alloc, project, "split.diagram.sexp", "(diagram-layout)");
+
+    try restore(alloc, project, "split", id);
+
+    const layout = (try readSrcFile(alloc, project, "split.layout.sexp")) orelse return error.TestExpectedEqual;
+    defer alloc.free(layout);
+    try std.testing.expectEqualStrings("(design-rules (clearance 0.2))", layout);
+    // The design file the settings save never touched comes back unchanged.
+    const design = (try readSrcFile(alloc, project, "split.sexp")) orelse return error.TestExpectedEqual;
+    defer alloc.free(design);
+    try std.testing.expectEqualStrings("(design-block \"Split\")", design);
+    // The manifest proves the diagram sidecar did not exist in this revision.
+    try std.testing.expect((try readSrcFile(alloc, project, "split.diagram.sexp")) == null);
+}
+
+// spec: Web Server - A history entry written before sidecars were snapshotted still restores its design file and leaves today's sidecars alone
+test "a legacy single-file history entry stays restorable" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project);
+
+    try seedSrcFile(alloc, project, "old.sexp", "(design-block \"New\")");
+    try seedSrcFile(alloc, project, "old.layout.sexp", "(stackup (layers 4))");
+
+    // A pre-manifest entry: the design source alone, no `.files`.
+    const dir = try std.fmt.allocPrint(alloc, "{s}/history/old/2026-01-01T00-00-01", .{project});
+    defer alloc.free(dir);
+    try infra_fs.cwd().makePath(dir);
+    const legacy = try std.fmt.allocPrint(alloc, "{s}/old.sexp", .{dir});
+    defer alloc.free(legacy);
+    try infra_fs.cwd().writeFile(.{ .sub_path = legacy, .data = "(design-block \"Old\")" });
+
+    try restore(alloc, project, "old", "2026-01-01T00-00-01");
+
+    const design = (try readSrcFile(alloc, project, "old.sexp")) orelse return error.TestExpectedEqual;
+    defer alloc.free(design);
+    try std.testing.expectEqualStrings("(design-block \"Old\")", design);
+    // The entry says nothing about sidecars, so today's is neither reverted
+    // nor deleted.
+    const layout = (try readSrcFile(alloc, project, "old.layout.sexp")) orelse return error.TestExpectedEqual;
+    defer alloc.free(layout);
+    try std.testing.expectEqualStrings("(stackup (layers 4))", layout);
 }
 
 // spec: Web Server - The layout sidecar is snapshotted into history and listed newest-first
