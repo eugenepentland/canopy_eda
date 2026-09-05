@@ -253,7 +253,7 @@ pub fn build(b: *std.Build) void {
     addDeployUnitImports(b, test_mod);
 
     const test_step = b.step("test", "Run unit tests");
-    addTreePolicyChecks(b, test_step);
+    addTreePolicyChecks(b, test_step, exe);
     // SHARDED. `test` compiles one test binary per shard in src/test_shards.zig
     // and runs them concurrently — the build system executes independent steps
     // in parallel (default `-j` = core count), so the suite's 78s serial test
@@ -516,7 +516,7 @@ fn addTestShard(
 /// the guardian.toml entries stay, because they still declare these files to
 /// the green-run digest and because they are the right home once that path is
 /// fixed. See AUDIT-LEDGER.toml DRIFT-INFRA-004.
-fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step) void {
+fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step, exe: *std.Build.Step.Compile) void {
     // Every check below spawns `node` or `python3`. Order them behind the
     // host-prerequisite probe so a machine without them reports what to
     // install instead of a bare "unable to spawn" from whichever gate lost the
@@ -561,6 +561,25 @@ fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step) void {
         run.step.dependOn(prereqs);
         test_step.dependOn(&run.step);
     }
+
+    // ── examples/ ────────────────────────────────────────────────────────
+    // The projects under examples/ are the only tracked designs in this
+    // repository and the first thing a newcomer runs, so they are gated like
+    // any other tree policy: every design is built, checked, exported to
+    // KiCad and PDF, and DRC'd against its committed layout, after which the
+    // tree must be byte-identical (ids are pinned into the .sexp and the .bom
+    // sidecar is committed, so a changed byte means the two disagree).
+    //
+    // Unlike the checks above it needs the netlisp binary, so the compiled
+    // artifact's path is passed as an argument. `addArtifactArg` depends on
+    // the COMPILE step, never on the install step, so `test` still writes
+    // nothing to zig-out/ (asserted by assertDoesNotInstall).
+    const examples = b.addSystemCommand(&.{ "scripts/check_examples.sh", "--netlisp" });
+    examples.addArtifactArg(exe);
+    examples.setCwd(b.path("."));
+    examples.has_side_effects = true;
+    examples.step.dependOn(prereqs);
+    test_step.dependOn(&examples.step);
 }
 
 /// The `node` / `python3` probe a newcomer's first build hits before anything

@@ -81,15 +81,25 @@ bundled set for a directory of your own. The passive families need no
 `(import …)`; test points, mounting holes and pin headers do. See
 [docs/standard-library.md](docs/standard-library.md).
 
-[`test/fixtures/stdlib-smoke`](test/fixtures/stdlib-smoke) is a complete
-minimal project. Build it, check it, and hand it to KiCad:
+[`examples/blinky-breakout`](examples/blinky-breakout) is a complete board:
+a 5 V input, a 3.3 V regulator, a Schmitt-trigger oscillator blinking an LED,
+four spare gates on an expansion header, test points, mounting holes, and a
+placed and routed two-layer PCB. Build it, check it, and hand it to KiCad:
 
 ```bash
-zig build run -- build --project-dir test/fixtures/stdlib-smoke stdlib-smoke
-zig build run -- check --project-dir test/fixtures/stdlib-smoke --profile preflight stdlib-smoke
-zig build run -- export-kicad --project-dir test/fixtures/stdlib-smoke \
-    --output-dir out/kicad --with-schematic stdlib-smoke
+zig build run -- build --project-dir examples/blinky-breakout blinky-breakout
+zig build run -- check --project-dir examples/blinky-breakout blinky-breakout
+zig build run -- export-kicad --project-dir examples/blinky-breakout \
+    --output-dir ~/blinky-kicad --with-schematic blinky-breakout
 ```
+
+[`examples/README.md`](examples/README.md) is the walkthrough: it goes from
+that clone to a KiCad project, explaining every form as it appears, how the
+bundled library and the project's own `lib/` resolve, how to drive the same
+steps with `netlisp tool …`, and how the board was placed and routed.
+[`test/fixtures/stdlib-smoke`](test/fixtures/stdlib-smoke) is the smaller
+fixture next to it — a project with no `lib/` at all, proving the bundled
+library end to end.
 
 `netlisp help` lists every command; `netlisp reference [section]` prints the
 language grammar from the binary itself.
