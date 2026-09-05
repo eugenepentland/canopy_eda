@@ -67,9 +67,14 @@ pub const PackageResult = struct {
     readiness: Readiness,
 };
 
-/// Serialized top-level attestation carrying the newly authenticated lock.
+/// The newly authenticated lock, serialized once per manifest spelling. A
+/// caller persists whichever one its workspace's contract is written in; both
+/// describe the identical `system_review.Attestation`.
 pub const AttestationResult = struct {
     attestation_json: []const u8,
+    /// The same record as one `(attestation …)` form, indented as a child of
+    /// `(system …)`.
+    attestation_sexp: []const u8,
     readiness: Readiness,
 };
 
@@ -326,11 +331,14 @@ fn attestImpl(
         return error.ManifestTooLarge;
     var encoded_attestation: std.Io.Writer.Allocating = .init(scratch.allocator());
     try system_review.writeAttestationJson(scratch.allocator(), &encoded_attestation.writer, attestation);
+    var encoded_form: std.Io.Writer.Allocating = .init(scratch.allocator());
+    try system_sexp.writeAttestationForm(scratch.allocator(), &encoded_form.writer, attestation);
 
     analysis.state.attested = true;
     const ready_json = try renderReadiness(scratch.allocator(), analysis);
     return .{
         .attestation_json = try allocator.dupe(u8, encoded_attestation.written()),
+        .attestation_sexp = try allocator.dupe(u8, encoded_form.written()),
         .readiness = try copyReadiness(allocator, analysis, ready_json),
     };
 }
@@ -566,68 +574,98 @@ fn loadManifest(
     name: []const u8,
 ) !LoadedManifest {
     if (!simpleName(name)) return error.InvalidSystemName;
-    const sexp_rel = try std.fmt.allocPrint(allocator, "src/systems/{s}/{s}", .{ name, system_sexp.sexp_manifest_name });
-    const json_rel = try std.fmt.allocPrint(allocator, "src/systems/{s}/{s}", .{ name, system_sexp.json_manifest_name });
     // The DSL contract wins when it exists; the JSON stays loadable unchanged
-    // for every workspace that has not migrated.
-    if (readManifestSource(allocator, project_dir, sexp_rel)) |sexp_source| {
-        var parsed = try parseSexpManifest(allocator, project_dir, sexp_source);
-        errdefer parsed.deinit();
-        if (!std.mem.eql(u8, name, parsed.value.name)) return error.SystemNameMismatch;
-        return .{
-            .source = sexp_source,
-            .parsed = parsed,
-            .relative = sexp_rel,
-            .shadowed_json = readManifestSource(allocator, project_dir, json_rel) != null,
-        };
-    }
-    const manifest_source = try review_assets.readContainedFile(
-        allocator,
-        project_dir,
-        json_rel,
-        system_review.max_manifest_bytes,
-    );
-    var parsed = try parseManifestForRefresh(allocator, manifest_source);
+    // for every workspace that has not migrated. Which file that is, is
+    // `system_sexp.locate`'s decision alone — every other surface asks it too.
+    const manifest = try system_sexp.locate(allocator, project_dir, name);
+    var diagnostic: system_review.Diagnostic = .{};
+    var parsed = switch (manifest.kind) {
+        .sexp => (try parseSexpContract(allocator, project_dir, manifest.source, .full, &diagnostic)).parsed,
+        .json => try parseManifestForRefresh(allocator, manifest.source),
+    };
     errdefer parsed.deinit();
     if (!std.mem.eql(u8, name, parsed.value.name)) return error.SystemNameMismatch;
-    return .{ .source = manifest_source, .parsed = parsed, .relative = json_rel };
+    return .{
+        .source = manifest.source,
+        .parsed = parsed,
+        .relative = manifest.relative,
+        .shadowed_json = manifest.shadowed_json,
+    };
 }
 
-/// Read one optional manifest file. Only an absent file is null; every other
-/// read failure still propagates through the caller's own read of the file it
-/// decided to use.
-fn readManifestSource(
-    allocator: std.mem.Allocator,
-    project_dir: []const u8,
-    relative: []const u8,
-) ?[]const u8 {
-    return review_assets.readContainedFile(
-        allocator,
-        project_dir,
-        relative,
-        system_review.max_manifest_bytes,
-    ) catch null;
-}
+/// How much of a `(system …)` contract one parse needs.
+pub const ContractDepth = enum {
+    /// The complete contract, evaluating both boards behind any `(auto)`
+    /// interface so its contact table is real.
+    full,
+    /// Identity, boards and documents only. A derivable interface is omitted
+    /// rather than evaluated — the home page's cards render none of it and
+    /// cannot afford an evaluation per workspace.
+    identity_only,
+};
+
+/// A `(system …)` contract as every consumer of a manifest wants it: the same
+/// `ParsedSystemSpec` the JSON path produces, plus the canonical JSON the spec
+/// renders to. Both belong to the caller's allocator; `parsed.deinit()`
+/// releases the spec and `json` is freed separately.
+pub const ParsedContract = struct {
+    parsed: system_review.ParsedSystemSpec,
+    json: []const u8,
+};
+
+pub const ParseContractError = @typeInfo(@typeInfo(@TypeOf(parseSexpContractImpl)).@"fn".return_type.?).error_union.error_set;
 
 /// Parse a `(system …)` source into the same `ParsedSystemSpec` the JSON path
 /// produces. The sexp spec is rendered to canonical JSON and re-parsed rather
 /// than shimmed into the JSON parser's ownership model, so every downstream
-/// consumer keeps working against exactly one spec representation — and the
-/// rendering is the same writer `attest` already round-trips.
-fn parseSexpManifest(
+/// consumer keeps working against exactly one spec representation — and that
+/// rendering is what the HTTP surface hands the browser in place of the raw
+/// manifest bytes, so a sexp workspace's editor sees the same object shape a
+/// JSON workspace's does.
+///
+/// Like the JSON loader, the authored contract is what gets validated: a
+/// stored attestation is exempt (an approval goes stale the moment a document
+/// is edited, and that must not make the workspace unreadable), and one whose
+/// grammar is broken outright is dropped rather than fatal.
+pub fn parseSexpContract(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     source: []const u8,
-) !system_review.ParsedSystemSpec {
+    depth: ContractDepth,
+    diagnostic: *system_review.Diagnostic,
+) ParseContractError!ParsedContract {
+    return parseSexpContractImpl(allocator, project_dir, source, depth, diagnostic) catch |first_error| {
+        var scratch = std.heap.ArenaAllocator.init(allocator);
+        defer scratch.deinit();
+        const stripped = (system_sexp.withoutAttestation(scratch.allocator(), source) catch
+            return first_error) orelse return first_error;
+        return parseSexpContractImpl(allocator, project_dir, stripped, depth, diagnostic) catch return first_error;
+    };
+}
+
+fn parseSexpContractImpl(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    source: []const u8,
+    depth: ContractDepth,
+    diagnostic: *system_review.Diagnostic,
+) !ParsedContract {
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
     var auto = AutoResolver{ .allocator = scratch.allocator(), .project_dir = project_dir };
-    var diagnostic: system_review.Diagnostic = .{};
-    const spec = try system_sexp.parse(scratch.allocator(), source, auto.resolver(), &diagnostic);
-    try system_review.validateSystemSpec(scratch.allocator(), spec, &diagnostic);
+    const options: system_sexp.Options = switch (depth) {
+        .full => .{ .resolver = auto.resolver() },
+        .identity_only => .{ .omit_underivable_interfaces = true },
+    };
+    const spec = try system_sexp.parseWith(scratch.allocator(), source, options, diagnostic);
+    var authored = spec;
+    authored.attestation = null;
+    try system_review.validateSystemSpec(scratch.allocator(), authored, diagnostic);
     var rendered: std.Io.Writer.Allocating = .init(scratch.allocator());
     try system_review.writeSystemSpecJson(scratch.allocator(), &rendered.writer, spec);
-    return parseManifestForRefresh(allocator, try allocator.dupe(u8, rendered.written()));
+    const json = try allocator.dupe(u8, rendered.written());
+    errdefer allocator.free(json);
+    return .{ .parsed = try parseManifestForRefresh(allocator, json), .json = json };
 }
 
 const PreflightError = @typeInfo(@typeInfo(@TypeOf(dossierPreflightImpl)).@"fn".return_type.?).error_union.error_set;
@@ -5063,4 +5101,129 @@ test "an auto interface derives its contacts from two evaluated boards" {
         ,
     });
     try std.testing.expectError(error.InvalidSystemSexp, loadManifest(allocator, project, "twin"));
+}
+
+// spec: system-review - approving a workspace whose contract is a (system …) source and approving the JSON manifest it converts from leave the identical spec, so an attestation does not depend on which manifest spelling a workspace keeps
+test "attesting a contract source and attesting its JSON twin leave one spec" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    const manifest_json =
+        \\{
+        \\  "schema": "netlisp-system-review-v1",
+        \\  "name": "demo",
+        \\  "title": "Demo",
+        \\  "part_number": "SYS-1",
+        \\  "revision": "A",
+        \\  "boards": [{"name":"board","role":"main","source":"src/board.sexp","part_number":"PCB-1","revision":"A"}],
+        \\  "documents": [{"id":"release-checklist","title":"Release checklist","path":"src/systems/demo/release.md","classification":"checklist","required":true}]
+        \\}
+    ;
+    var diagnostic: system_review.Diagnostic = .{};
+    var authored = try system_review.parseSystemSpec(allocator, manifest_json, &diagnostic);
+    defer authored.deinit();
+
+    // The same workspace as a contract source — exactly what the converter
+    // prints, so this is the migration an operator actually performs.
+    var converted: std.Io.Writer.Allocating = .init(allocator);
+    try system_sexp.write(allocator, &converted.writer, authored.value);
+
+    // One attestation, computed once. Its two collections are deliberately
+    // supplied out of canonical order: neither serializer may preserve it.
+    const attestation = system_review.Attestation{
+        .system_lock_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        .attested_by = "writer@example.com",
+        .attested_at = "2026-01-02T03:04:05Z",
+        .inputs = &.{
+            .{ .path = "src/systems/demo/release.md", .sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+            .{ .path = "src/board.sexp", .sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        },
+        .documents = &.{
+            .{ .id = "release-checklist", .path = "src/systems/demo/release.md", .sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", .checklist = .{ .total = 2, .complete = 2, .open = 0 } },
+        },
+    };
+    var as_json: std.Io.Writer.Allocating = .init(allocator);
+    try system_review.writeAttestationJson(allocator, &as_json.writer, attestation);
+    var as_form: std.Io.Writer.Allocating = .init(allocator);
+    try system_sexp.writeAttestationForm(allocator, &as_form.writer, attestation);
+
+    // Write it into each manifest the way the HTTP attestation endpoint does.
+    const attested_json = try patchTopLevelAttestationForTest(allocator, manifest_json, as_json.written());
+    const attested_sexp = (try system_sexp.withAttestation(allocator, converted.written(), as_form.written())).?;
+
+    // Both re-read to the same spec, canonical JSON byte for byte.
+    var from_json = try parseManifestForRefresh(allocator, attested_json);
+    defer from_json.deinit();
+    const from_sexp = try system_sexp.parse(allocator, attested_sexp, null, &diagnostic);
+
+    var json_render: std.Io.Writer.Allocating = .init(allocator);
+    try system_review.writeSystemSpecJson(allocator, &json_render.writer, from_json.value);
+    var sexp_render: std.Io.Writer.Allocating = .init(allocator);
+    try system_review.writeSystemSpecJson(allocator, &sexp_render.writer, from_sexp);
+    try std.testing.expectEqualStrings(json_render.written(), sexp_render.written());
+    try std.testing.expect(std.mem.indexOf(u8, sexp_render.written(), "\"system_lock_sha256\": \"" ++ "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc") != null);
+}
+
+/// The JSON attestation splice the HTTP endpoint performs, restated here so
+/// the equality test above compares two real writes rather than one write and
+/// one hand-built manifest. Deliberately naive: the endpoint's span patcher is
+/// tested against adversarial JSON in its own module.
+fn patchTopLevelAttestationForTest(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    attestation_json: []const u8,
+) ![]const u8 {
+    const close = std.mem.lastIndexOfScalar(u8, source, '}').?;
+    return std.fmt.allocPrint(allocator, "{s},\n  \"attestation\": {s}\n{s}", .{
+        std.mem.trimEnd(u8, source[0..close], " \t\r\n"),
+        attestation_json,
+        source[close..],
+    });
+}
+
+// spec: system-review - a contract source whose stored attestation no longer parses still loads as the authored contract, and one whose contract itself is broken is refused with its diagnostic
+test "a broken stored attestation is dropped while a broken contract is refused" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/demo");
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", allocator);
+
+    const authored =
+        \\(system "demo" (title "Demo") (part-number "D-1") (revision "A")
+        \\  (board "board" (role main) (source "src/board.sexp") (part-number "PCB-1") (revision "A"))
+        \\  (document "release-checklist" (title "C")
+        \\    (path "src/systems/demo/c.md") (classification checklist)))
+    ;
+    var diagnostic: system_review.Diagnostic = .{};
+    const clean = try parseSexpContract(allocator, project, authored, .full, &diagnostic);
+    try std.testing.expectEqualStrings("Demo", clean.parsed.value.title);
+    try std.testing.expect(clean.parsed.value.attestation == null);
+
+    // An approval whose form no longer satisfies the grammar — the shape a
+    // hand-edited or half-written attestation takes — leaves the workspace
+    // readable so a writer can reach the editor and re-approve.
+    var broken: std.Io.Writer.Allocating = .init(allocator);
+    try broken.writer.writeAll(authored[0 .. authored.len - 1]);
+    try broken.writer.writeAll("\n  (attestation (attested-by \"someone\")))");
+    const recovered = try parseSexpContract(allocator, project, broken.written(), .full, &diagnostic);
+    try std.testing.expectEqualStrings("Demo", recovered.parsed.value.title);
+    try std.testing.expect(recovered.parsed.value.attestation == null);
+
+    // A contract that is broken outside its attestation has nothing to
+    // recover, and both entry points report the parser's own refusal.
+    const nonsense = "(system \"demo\" (title \"Demo\") (nope))";
+    try std.testing.expectError(
+        error.InvalidSystemSexp,
+        parseSexpContract(allocator, project, nonsense, .full, &diagnostic),
+    );
+    try std.testing.expectError(
+        error.InvalidSystemSexp,
+        parseSexpContractImpl(allocator, project, nonsense, .identity_only, &diagnostic),
+    );
+    try std.testing.expectEqual(system_review.DiagnosticCode.unknown_sexp_form, diagnostic.code);
 }
