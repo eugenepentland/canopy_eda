@@ -65,6 +65,14 @@ pub const si_scales = [_]SiScale{
 /// scale, only readability (`100nF` == `100n`, `3.3V` == `3.3`).
 pub const si_unit_letters: []const u8 = "VAFHR";
 
+/// The percent sign closing a numeric literal (`10%`, `0.1%`). Like a unit
+/// letter it carries NO scale — `10%` is the number 10 that remembers it was
+/// written as a percentage, not 0.1. Tolerances are authored, compared, and
+/// printed in percent everywhere in this language (`(expect 2.105 5%)`,
+/// `(tolerance "10%")`, the parts-table `(tolerance …)` column), so the
+/// magnitude a reader wrote is the magnitude every consumer wants.
+pub const percent_sign: u8 = '%';
+
 /// Every way the lexer can reject its input. Exhaustive: `readString` raises
 /// `UnterminatedString`, `next` raises `UnexpectedCharacter`, and every other
 /// scan path (`readNumber`/`readAtom`/`readOperator`) is total. `parser.zig`
@@ -266,6 +274,15 @@ pub const Tokenizer = struct {
             var k: u2 = 0;
             while (k < suffix_len) : (k += 1) self.advance();
             return Token{ .tag = .si_val, .text = self.source[start..self.pos], .span = s };
+        }
+        // Percent literal: `10%`, `0.1%`. Only when the sign ENDS the token,
+        // so `(% a b)` (an operator at a form head) and any `%`-prefixed
+        // spelling are untouched.
+        if (self.peek()) |ch| {
+            if (ch == percent_sign and !isAtomContinue(self.peekAt(1))) {
+                self.advance();
+                return Token{ .tag = .si_val, .text = self.source[start..self.pos], .span = s };
+            }
         }
         // If followed by an atom-continuation char, this wasn't a number at
         // all — it's an identifier like "204928-0301.stp" or "12.5abc".
@@ -532,6 +549,33 @@ test "tokenize si suffix boundary cases" {
         const tok = try t.next();
         try std.testing.expectEqual(case.tag, tok.tag);
         try std.testing.expectEqualStrings(case.text, tok.text);
+    }
+}
+
+// spec: sexpr/tokenizer - A trailing percent sign closes a numeric literal while a standalone percent stays an operator
+test "tokenize percent literals" {
+    var t = Tokenizer.init("(tolerance 10% 0.1%) (% a b) (x 50%)");
+    const expected = [_]struct { tag: TokenTag, text: []const u8 }{
+        .{ .tag = .lparen, .text = "(" },
+        .{ .tag = .atom, .text = "tolerance" },
+        .{ .tag = .si_val, .text = "10%" },
+        .{ .tag = .si_val, .text = "0.1%" },
+        .{ .tag = .rparen, .text = ")" },
+        .{ .tag = .lparen, .text = "(" },
+        .{ .tag = .atom, .text = "%" },
+        .{ .tag = .atom, .text = "a" },
+        .{ .tag = .atom, .text = "b" },
+        .{ .tag = .rparen, .text = ")" },
+        .{ .tag = .lparen, .text = "(" },
+        .{ .tag = .atom, .text = "x" },
+        .{ .tag = .si_val, .text = "50%" },
+        .{ .tag = .rparen, .text = ")" },
+        .{ .tag = .eof, .text = "" },
+    };
+    for (expected) |want| {
+        const tok = try t.next();
+        try std.testing.expectEqual(want.tag, tok.tag);
+        try std.testing.expectEqualStrings(want.text, tok.text);
     }
 }
 

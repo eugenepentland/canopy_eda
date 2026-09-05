@@ -6,6 +6,7 @@
 const std = @import("std");
 const ast = @import("../sexpr/ast.zig");
 const env_mod = @import("env.zig");
+const attrs_mod = @import("attrs.zig");
 const evaluator_mod = @import("evaluator.zig");
 const Evaluator = evaluator_mod.Evaluator;
 const EvalError = evaluator_mod.EvalError;
@@ -83,6 +84,10 @@ pub const ResolvedComponent = struct {
     pinout: []const u8,
     properties: []const env_mod.Property,
     attrs: []const []const u8,
+    /// The authored typed attributes, kept alongside `properties` (which
+    /// already contains them) so a later parts-table selection that overwrites
+    /// a rating can still be compared against what the design asked for.
+    typed_attrs: []const env_mod.Property = &.{},
     docs: env_mod.ComponentDocs = .{},
     /// The library part's `(thermal …)` envelope, carried through so every
     /// instance built from this component reaches the thermal analyzer with
@@ -111,6 +116,10 @@ pub fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent {
         .component_instance => |ci| ci.attrs,
         else => &.{},
     };
+    const typed: []const env_mod.Property = switch (val) {
+        .component_instance => |ci| ci.typed_attrs,
+        else => &.{},
+    };
     if (self.component_cache.get(family)) |cd| {
         return .{
             .family = family,
@@ -118,8 +127,9 @@ pub fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent {
             .footprint = cd.footprint_name,
             .symbol = cd.symbol_name,
             .pinout = cd.pinout_name,
-            .properties = cd.properties,
+            .properties = withTypedAttributes(self, cd.properties, typed),
             .attrs = attrs,
+            .typed_attrs = typed,
             .docs = cd.docs,
             .thermal = cd.thermal,
             .requirements = cd.requirements,
@@ -133,9 +143,54 @@ pub fn resolveComponent(self: *Evaluator, val: Value) ?ResolvedComponent {
         .footprint = "",
         .symbol = "",
         .pinout = "",
-        .properties = &.{},
+        .properties = withTypedAttributes(self, &.{}, typed),
         .attrs = attrs,
+        .typed_attrs = typed,
     };
+}
+
+/// The library component's properties with the instantiation's typed
+/// attributes layered on top.
+///
+/// The authored rating wins over a library default under the same key: the
+/// design just said `(cap-0402 "1uF" (rating 25V))` about THIS placement,
+/// which is strictly more specific than whatever the family declares for all
+/// of them. A parts-table selection later overrides both — the selected row is
+/// the physical part, and `erc.checkTypedAttributeMismatch` reports the case
+/// where it disagrees with what was asked for instead of letting it pass in
+/// silence.
+///
+/// `esr`/`esl` additionally land as the PDN model numbers
+/// (`pdn-esr-ohm` / `pdn-esl-h`) `placement/pdn_impedance` already reads, so
+/// an authored override reaches the impedance screen without teaching it a
+/// second spelling.
+fn withTypedAttributes(
+    self: *Evaluator,
+    base: []const env_mod.Property,
+    typed: []const env_mod.Property,
+) []const env_mod.Property {
+    if (typed.len == 0) return base;
+    var merged: std.ArrayList(env_mod.Property) = .empty;
+    for (base) |property| {
+        if (hasProperty(typed, property.key)) continue;
+        merged.append(self.allocator, property) catch return base;
+    }
+    for (typed) |property| {
+        merged.append(self.allocator, property) catch return base;
+        const slot = attrs_mod.slotForKey(property.key) orelse continue;
+        const model = attrs_mod.modelProperty(slot, property.value) orelse continue;
+        if (hasProperty(base, model.key) or hasProperty(merged.items, model.key)) continue;
+        const rendered = std.fmt.allocPrint(self.allocator, "{d}", .{model.value}) catch continue;
+        merged.append(self.allocator, .{ .key = model.key, .value = rendered }) catch return base;
+    }
+    return merged.toOwnedSlice(self.allocator) catch base;
+}
+
+fn hasProperty(properties: []const env_mod.Property, key: []const u8) bool {
+    for (properties) |property| {
+        if (std.ascii.eqlIgnoreCase(property.key, key)) return true;
+    }
+    return false;
 }
 
 /// Evaluate an `(instance "REF" (component …) (pin …) …)` form into an
@@ -195,6 +250,7 @@ pub fn buildInstance(self: *Evaluator, form_children: []const Node, env: *Env) E
         .pinout = resolved.pinout,
         .properties = resolved.properties,
         .attrs = resolved.attrs,
+        .typed_attrs = resolved.typed_attrs,
         .docs = resolved.docs,
         .requirements = resolved.requirements,
         .requirements_ignored = resolved.requirements_ignored,
@@ -800,6 +856,7 @@ pub fn instanceFromValue(self: *Evaluator, val: Value, ref_des: []const u8, sour
         .pinout = resolved.pinout,
         .properties = resolved.properties,
         .attrs = resolved.attrs,
+        .typed_attrs = resolved.typed_attrs,
         .docs = resolved.docs,
         .requirements = resolved.requirements,
         .requirements_ignored = resolved.requirements_ignored,

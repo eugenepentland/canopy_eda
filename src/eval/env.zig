@@ -25,6 +25,11 @@ pub const Value = union(enum) {
         value: []const u8,
         /// Schematic-level attributes (e.g., "np0", "x7r" for dielectric type)
         attrs: []const []const u8 = &.{},
+        /// The subset of those attributes that `eval/attrs.zig` could place in
+        /// a typed slot, keyed by the slot's property name. Authored keyed
+        /// (`(rating 25V)`) and bare (`"25V"`) attributes both land here, which
+        /// is what makes the two spellings mean the same thing downstream.
+        typed_attrs: []const Property = &.{},
     },
     /// A block definition: a named, optionally-parameterized circuit.
     block_def: BlockDef,
@@ -672,6 +677,12 @@ pub const Instance = struct {
     electrical: []const ElectricalDecl = &.{},
     /// Schematic-level attributes (e.g., "np0", "x7r" for dielectric type)
     attrs: []const []const u8 = &.{},
+    /// The authored typed attributes (`voltage`, `dielectric`, `tolerance`,
+    /// `power`, `current`, `tempco`, `esr`, `esl`), keyed by property name.
+    /// They are already merged into `properties`; this is the record of what
+    /// the DESIGN asked for, kept so a parts-table row that overrides a rating
+    /// can be reported as a disagreement rather than silently winning.
+    typed_attrs: []const Property = &.{},
     /// `(check (max-distance …))` requirements resolved against this
     /// placement — see `DistanceRule`. Empty for every part that declares
     /// none, which is almost all of them.

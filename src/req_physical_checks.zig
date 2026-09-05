@@ -177,9 +177,15 @@ fn envelopeFor(block: *const DesignBlock, net: []const u8) ?Envelope {
 }
 
 /// A capacitor's authored voltage rating in volts, or null when it carries
-/// none. The parts-table row resolved onto `properties` wins; the authored
-/// attribute list is the fallback, so the rule still answers on a design whose
-/// BOM has not been resolved yet (`netlisp check` on a fresh tree).
+/// none. The `voltage` PROPERTY is the source: it holds either the rating the
+/// design authored — `(cap-0402 "1uF" (rating 25V))` and the bare `"25V"` both
+/// land there via `eval/attrs.zig` — or the one a resolved parts row carries,
+/// with the row winning because it is the physical part. `erc` reports the
+/// case where the two disagree.
+///
+/// The attribute-text scan below survives only as the fallback for an
+/// attribute nothing could classify (a `"25 V dc"`-style spelling): every
+/// recognised one is already a property by the time this runs.
 fn capVoltageRating(inst: Instance) ?f64 {
     for (inst.properties) |prop| {
         if (!std.ascii.eqlIgnoreCase(prop.key, "voltage")) continue;

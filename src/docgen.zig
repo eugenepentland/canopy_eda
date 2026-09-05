@@ -25,6 +25,7 @@ const infra_fs = @import("infra/fs.zig");
 const forms = @import("eval/forms.zig");
 const fmt_mod = @import("eval/fmt.zig");
 const tokenizer_mod = @import("sexpr/tokenizer.zig");
+const attrs_mod = @import("eval/attrs.zig");
 const block_types = @import("render_block_types.zig");
 const check_grammar = @import("eval/check_grammar.zig");
 const thermal = @import("eval/thermal.zig");
@@ -143,7 +144,23 @@ fn renderTo(writer: anytype) !void {
         if (i > 0) try writer.writeAll(", ");
         try writer.print("`{c}`", .{u});
     }
-    try writer.writeAll(".\n");
+    try writer.print(
+        ". A trailing `{c}` closes a literal the same way (`10%`, `0.1%`) and " ++
+            "likewise carries no scale — `10%` is the number 10 that remembers " ++
+            "its spelling, not 0.1.\n",
+        .{tokenizer_mod.percent_sign},
+    );
+    try writer.writeAll(
+        \\
+        \\A suffixed literal keeps its source text. The value is still a plain
+        \\number in arithmetic, but anywhere it is written back out as a part
+        \\value it renders by its unit: `(pullup "SDA" 4.7k …)` is a 4.7k
+        \\resistor, not a `4700` one, and `(cap-0402 100nF)` is the same as
+        \\`(cap-0402 "100nF")` rather than `0.0000001`.
+        \\
+    );
+
+    try renderTypedAttributes(writer);
 
     try renderScopeForms(writer);
 
@@ -152,6 +169,44 @@ fn renderTo(writer: anytype) !void {
     try renderClassifierKeywords(writer);
 
     try renderReferenceAppendices(writer);
+}
+
+/// Render the "Typed attributes" section from `eval/attrs.zig`'s slot table —
+/// the same table evaluation classifies against, so a new slot cannot reach
+/// the language without reaching its reference.
+fn renderTypedAttributes(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Typed attributes on a family instantiation
+        \\
+        \\A component-family call takes a value and then any number of
+        \\attributes, written bare or keyed — `(cap-0402 "1uF" x7r "10%" "25V")`
+        \\and `(cap-0402 "1uF" (dielectric x7r) (tolerance 10%) (rating 25V))`
+        \\mean exactly the same thing. Each attribute that can be placed lands
+        \\on the instance as the property below, which is the one source the
+        \\BOM, `lib/parts/` row selection, the rating checks, the PDN screen and
+        \\the KiCad export read. An unknown keyed attribute is an error with a
+        \\did-you-mean; a repeated one is an error. A bare attribute that fits
+        \\no slot (`DNP`, `green`, `jumper`, `600R@100MHz`) stays a raw
+        \\attribute, untouched.
+        \\
+        \\| Keys | Property | Selects a parts row |
+        \\| --- | --- | --- |
+        \\
+    );
+    inline for (@typeInfo(attrs_mod.Slot).@"enum".field_names, 0..) |_, index| {
+        const slot: attrs_mod.Slot = @fromBackingInt(@intCast(index));
+        var first = true;
+        for (attrs_mod.keyed_spellings) |spelling| {
+            if (spelling.slot != slot) continue;
+            try writer.print("{s}`{s}`", .{ if (first) "| " else ", ", spelling.key });
+            first = false;
+        }
+        try writer.print(" | `{s}` | {s} |\n", .{
+            slot.propertyKey(),
+            if (slot.isSelectionColumn()) "yes" else "no — an analysis override",
+        });
+    }
 }
 
 /// Render the "Design-scope forms" section from `forms.scope_form_docs`, the

@@ -86,7 +86,37 @@ converts to mm (1 mil = 0.0254 mm).
 | `n` | 10^-9 |  |
 | `p` | 10^-12 |  |
 
-Unit letters (scale-free): `V`, `A`, `F`, `H`, `R`.
+Unit letters (scale-free): `V`, `A`, `F`, `H`, `R`. A trailing `%` closes a literal the same way (`10%`, `0.1%`) and likewise carries no scale — `10%` is the number 10 that remembers its spelling, not 0.1.
+
+A suffixed literal keeps its source text. The value is still a plain
+number in arithmetic, but anywhere it is written back out as a part
+value it renders by its unit: `(pullup "SDA" 4.7k …)` is a 4.7k
+resistor, not a `4700` one, and `(cap-0402 100nF)` is the same as
+`(cap-0402 "100nF")` rather than `0.0000001`.
+
+## Typed attributes on a family instantiation
+
+A component-family call takes a value and then any number of
+attributes, written bare or keyed — `(cap-0402 "1uF" x7r "10%" "25V")`
+and `(cap-0402 "1uF" (dielectric x7r) (tolerance 10%) (rating 25V))`
+mean exactly the same thing. Each attribute that can be placed lands
+on the instance as the property below, which is the one source the
+BOM, `lib/parts/` row selection, the rating checks, the PDN screen and
+the KiCad export read. An unknown keyed attribute is an error with a
+did-you-mean; a repeated one is an error. A bare attribute that fits
+no slot (`DNP`, `green`, `jumper`, `600R@100MHz`) stays a raw
+attribute, untouched.
+
+| Keys | Property | Selects a parts row |
+| --- | --- | --- |
+| `rating`, `voltage` | `voltage` | yes |
+| `dielectric` | `dielectric` | yes |
+| `tolerance` | `tolerance` | yes |
+| `power` | `power` | yes |
+| `current` | `current` | yes |
+| `tempco`, `tcr` | `tempco` | yes |
+| `esr` | `esr` | no — an analysis override |
+| `esl` | `esl` | no — an analysis override |
 
 ## Design-scope forms
 

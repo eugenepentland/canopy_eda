@@ -240,6 +240,7 @@ fn appendPart(
         .pinout = resolved.pinout,
         .properties = resolved.properties,
         .attrs = resolved.attrs,
+        .typed_attrs = resolved.typed_attrs,
         .docs = resolved.docs,
         .thermal = .{ .decl = resolved.thermal },
         .requirements = resolved.requirements,
@@ -259,8 +260,16 @@ fn stringArg(self: *Evaluator, node: Node, env: *Env, what: []const u8) EvalErro
     };
 }
 
+/// The part value a shorthand writes onto its instance.
+///
+/// `Node.valueText` answers first, so a unit-bearing literal keeps its source
+/// spelling: `(pullup "SDA" 100nF "V_3V3")` is a capacitor written where the
+/// resistor value goes, and only the retained `F` can say so — decoded to a
+/// bare f64 it reached the BOM as the meaningless `0.0000001` and passed the
+/// declared-kind check in silence. A number with no suffix (`(r 1000)`) has
+/// nothing to retain and still renders as its digits.
 fn valueText(self: *Evaluator, node: Node) EvalError![]const u8 {
-    if (node.asText()) |text| return text;
+    if (node.valueText()) |text| return text;
     if (node.asNumber()) |number| return std.fmt.allocPrint(self.allocator, "{d}", .{number}) catch EvalError.OutOfMemory;
     self.setError(node.span, "component value must be a number or value token");
     return EvalError.TypeError;
@@ -390,12 +399,38 @@ test "a shorthand resistor value of the wrong kind is rejected" {
     defer env.deinit();
     var instances: std.ArrayList(Instance) = .empty;
     var pin_nets: std.ArrayList(PinNetDecl) = .empty;
-    // Quoted, because a bare `100nF` tokenizes as the NUMBER 1e-7 and reaches
-    // the shorthand as digits with no unit left to contradict anything.
-    const nodes = try parser.parse(allocator, "(pullup \"SDA\" \"100nF\" \"V_3V3\") (pullup \"SCL\" 4.7k \"V_3V3\")");
+    // Quoted and bare must both be caught: a bare `100nF` decodes to the
+    // number 1e-7, and until the literal's spelling travelled with it the
+    // shorthand saw digits with no unit left to contradict anything.
+    const nodes = try parser.parse(allocator, "(pullup \"SDA\" \"100nF\" \"V_3V3\") (pullup \"SCL\" 4.7k \"V_3V3\") (pullup \"SCK\" 100nF \"V_3V3\")");
     try testing.expectError(EvalError.TypeError, emit(&eval, .pullup, nodes[0].asList().?, &env, &instances, &pin_nets));
     try testing.expect(std.mem.indexOf(u8, eval.last_error.?.message, "is not a resistance value") != null);
     // The right kind still lowers normally.
     try emit(&eval, .pullup, nodes[1].asList().?, &env, &instances, &pin_nets);
     try testing.expectEqual(@as(usize, 1), instances.items.len);
+    try testing.expectError(EvalError.TypeError, emit(&eval, .pullup, nodes[2].asList().?, &env, &instances, &pin_nets));
+}
+
+// spec: eval/micro_forms - Every shorthand writes a unit-bearing literal's own spelling as the part value
+test "shorthand values keep the unit they were written with" {
+    const allocator = std.heap.page_allocator;
+    var eval = try testEvaluator(allocator);
+    defer eval.deinit();
+    var env = Env.init(allocator, null);
+    defer env.deinit();
+    var instances: std.ArrayList(Instance) = .empty;
+    var pin_nets: std.ArrayList(PinNetDecl) = .empty;
+    const nodes = try parser.parse(allocator, "(pullup \"SDA\" 4.7k \"V_3V3\")" ++
+        " (pulldown \"EN\" 10k)" ++
+        " (divider \"V_12V\" \"SENSE\" \"GND\" 47k 10k)" ++
+        " (led \"PWR\" \"V_3V3\" green (r 1k))");
+    try emit(&eval, .pullup, nodes[0].asList().?, &env, &instances, &pin_nets);
+    try emit(&eval, .pulldown, nodes[1].asList().?, &env, &instances, &pin_nets);
+    try emit(&eval, .divider, nodes[2].asList().?, &env, &instances, &pin_nets);
+    try emit(&eval, .led, nodes[3].asList().?, &env, &instances, &pin_nets);
+    // `4700`/`47000` was what every one of these wrote before the literal kept
+    // its suffix — a value string no `lib/parts/` row carries.
+    const expected = [_][]const u8{ "4.7k", "10k", "47k", "10k", "1k", "green" };
+    try testing.expectEqual(expected.len, instances.items.len);
+    for (expected, instances.items) |want, inst| try testing.expectEqualStrings(want, inst.value);
 }

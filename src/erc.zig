@@ -25,10 +25,13 @@ const lod = @import("diagram/lod.zig");
 const membership = @import("diagram/membership.zig");
 const component_classification = @import("component_classification.zig");
 const canonical_module_check = @import("canonical_module_check.zig");
+const attrs_mod = @import("eval/attrs.zig");
+const parts_mod = @import("parts.zig");
 const lib_limits = @import("lib_limits.zig");
 const stdlib = @import("stdlib.zig");
 const DesignBlock = env_mod.DesignBlock;
 const Instance = env_mod.Instance;
+const Property = env_mod.Property;
 const Net = env_mod.Net;
 
 pub const Severity = checks.Severity;
@@ -85,6 +88,7 @@ pub const ViolationKind = enum {
     components_not_grouped,
     verification_orphaned,
     diff_pair_half_connected,
+    attribute_row_mismatch,
 };
 
 /// One electrical-rule-check finding. `kind` selects the rule, `severity`
@@ -112,6 +116,7 @@ pub fn runErc(allocator: std.mem.Allocator, block: *const DesignBlock, project_d
     try checkUnconnectedPorts(allocator, block, &violations);
     try checkDiffPortPairs(allocator, block, &violations);
     try checkMissingValues(allocator, block, &violations);
+    try checkTypedAttributeMismatch(allocator, block, project_dir, &violations);
     try checkMissingFootprints(allocator, block, &violations);
     try checkMissingDecoupling(allocator, block, &violations);
     try checkDecouplingBindingValidity(allocator, block, &violations);
@@ -1270,6 +1275,68 @@ fn checkMissingValues(
     }
 }
 
+/// Report every typed attribute the design authored that the part actually
+/// selected from `lib/parts/` fails to meet.
+///
+/// `(cap-0402 "1uF" (rating 25V))` is a requirement: this placement needs a
+/// 25 V part. The parts table narrows on that attribute, but its lookup is
+/// deliberately lenient — when no row carries the requested rating it falls
+/// back to a value-only match, and the selected row's own `(voltage …)` then
+/// overwrites the authored one in `properties` (the BOM wins by design; the
+/// row is the physical part). Until this check, that substitution was
+/// invisible: the design asked for 25 V, the board got whatever the table had,
+/// and every downstream rating check read the substituted number.
+///
+/// A row is allowed to be BETTER than what was asked (`attrs.satisfies`), so a
+/// 50 V part where 25 V was asked is silent; only a substitution that fails
+/// the requirement is reported. A `warning`, not an `error`: the board is
+/// still buildable, and the author is the one who decides whether to add a row
+/// or relax the attribute.
+fn checkTypedAttributeMismatch(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    violations: *std.ArrayList(Violation),
+) !void {
+    if (project_dir.len == 0) return;
+    var parts_db = parts_mod.PartsDb.init(allocator, project_dir);
+    defer parts_db.deinit();
+    const all_instances = try collectAllInstances(allocator, block);
+    defer allocator.free(all_instances);
+    for (all_instances) |inst| {
+        if (inst.typed_attrs.len == 0) continue;
+        const part = parts_db.lookup(inst.component, inst.value, inst.attrs) orelse continue;
+        for (inst.typed_attrs) |authored| {
+            const slot = attrs_mod.slotForKey(authored.key) orelse continue;
+            const selected = rowRating(part, slot) orelse continue;
+            if (attrs_mod.satisfies(slot, authored.value, selected)) continue;
+            const msg = std.fmt.allocPrint(
+                allocator,
+                "{s}: design authors {s} {s} but the selected part {s} is {s}, which does not meet it — add a matching row to lib/parts/{s}.sexp or change the authored attribute",
+                .{ inst.ref_des, authored.key, authored.value, part.mpn, selected, inst.component },
+            ) catch continue;
+            try violations.append(allocator, .{
+                .kind = .attribute_row_mismatch,
+                .severity = .warning,
+                .message = msg,
+                .ref_des = inst.ref_des,
+            });
+        }
+    }
+}
+
+/// The selected row's own value for a slot, under any of the column spellings
+/// the library uses for it. Null when the row says nothing about that rating,
+/// which is silence rather than disagreement.
+fn rowRating(part: *const parts_mod.PartEntry, slot: attrs_mod.Slot) ?[]const u8 {
+    for (attrs_mod.rowColumns(slot)) |column| {
+        for (part.attrs) |attribute| {
+            if (std.ascii.eqlIgnoreCase(attribute.key, column)) return attribute.value;
+        }
+    }
+    return null;
+}
+
 /// True when the instance carries a component property `key` with a
 /// non-empty value (properties flow in from the lib component file).
 fn hasNonEmptyProperty(inst: Instance, key: []const u8) bool {
@@ -2135,6 +2202,49 @@ fn reqsFor(
 }
 
 // ── config-strap direct-tie tests ────────────────────────────────────
+
+// spec: erc - a parts row that fails an authored typed attribute is reported instead of substituted in silence
+test "a selected part that contradicts an authored rating is reported" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/parts");
+    const row =
+        "(parts \"cap-0402\"\n" ++
+        "  (part \"1uF\" (dielectric \"x5r\") (voltage \"16V\")\n" ++
+        "    (manufacturer \"M\") (mpn \"ROW-1uF\") (preferred)))\n";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/parts/cap-0402.sexp", .data = row });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    // C1 asks for x7r at 25 V; the only row is an x5r at 16 V, and the lenient
+    // lookup takes it. C2 asks for exactly what the row carries.
+    const authored = [_]Property{ .{ .key = "dielectric", .value = "x7r" }, .{ .key = "voltage", .value = "25V" } };
+    const matching = [_]Property{.{ .key = "dielectric", .value = "x5r" }};
+    const instances = [_]Instance{
+        .{ .ref_des = "C1", .component = "cap-0402", .value = "1uF", .footprint = "c-0402", .symbol = "", .typed_attrs = &authored },
+        .{ .ref_des = "C2", .component = "cap-0402", .value = "1uF", .footprint = "c-0402", .symbol = "", .typed_attrs = &matching },
+    };
+    const block = DesignBlock{
+        .name = "probe",
+        .instances = &instances,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    var violations: std.ArrayList(Violation) = .empty;
+    try checkTypedAttributeMismatch(alloc, &block, project, &violations);
+    try std.testing.expectEqual(@as(usize, 2), violations.items.len);
+    for (violations.items) |violation| try std.testing.expectEqualStrings("C1", violation.ref_des);
+    try std.testing.expect(std.mem.indexOf(u8, violations.items[0].message, "authors dielectric x7r") != null);
+    try std.testing.expect(std.mem.indexOf(u8, violations.items[0].message, "ROW-1uF is x5r") != null);
+    try std.testing.expect(std.mem.indexOf(u8, violations.items[0].message, "does not meet it") != null);
+    try std.testing.expect(std.mem.indexOf(u8, violations.items[1].message, "authors voltage 25V") != null);
+}
 
 // spec: erc - a config strap tied directly to a rail is an error unless pulled through a resistor or blessed
 test "config strap tied directly to a rail requires a pull resistor or a blessing" {

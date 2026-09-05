@@ -72,7 +72,11 @@ fn printNode(writer: anytype, node: Node, indent: u32) !void {
             try writer.writeByte('"');
         },
         .int => |i| try writer.print("{d}", .{i}),
-        .float => |f| try printFloat(writer, f),
+        // A suffixed literal prints as it was written. Re-deriving the text
+        // from the f64 would rewrite `100nF` as `0.0000001` in any source the
+        // printer rewrites in place, throwing away the unit that says which
+        // physical quantity the number is.
+        .float => |f| if (node.literal) |text| try writer.writeAll(text) else try printFloat(writer, f),
         .unit_val => |u| {
             try printFloat(writer, u);
             try writer.writeAll("mm");
@@ -125,6 +129,7 @@ fn estimateWidth(node: Node, depth: u32) ?usize {
             break :blk s.len;
         },
         .float => |f| blk: {
+            if (node.literal) |text| break :blk text.len;
             var buf: [64]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch break :blk fallback_float_width;
             break :blk s.len;
@@ -199,6 +204,19 @@ test "print long nested lists multiline" {
     defer alloc.free(output);
 
     try std.testing.expect(std.mem.indexOf(u8, output, "\n") != null);
+}
+
+// spec: sexpr/printer - Prints a suffixed numeric literal with the unit it was written with
+test "print keeps a literal's unit" {
+    const parser = @import("parser.zig");
+    const alloc = std.testing.allocator;
+    const nodes = try parser.parse(alloc, "(cap-0402 100nF 10% 4.7k 2.5)");
+    defer parser.freeNodes(alloc, nodes);
+    const out = try print(alloc, nodes);
+    defer alloc.free(out);
+    // Re-deriving the text from the f64 would print `0.0000001` here, which is
+    // the same number and a different part.
+    try std.testing.expectEqualStrings("(cap-0402 100nF 10% 4.7k 2.5)", out);
 }
 
 // spec: sexpr/printer - Round-trips parse to print to parse producing identical AST

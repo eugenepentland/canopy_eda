@@ -939,6 +939,7 @@ pub fn emitDecoupleItems(
                     .footprint = resolved.footprint,
                     .symbol = resolved.symbol,
                     .attrs = resolved.attrs,
+                    .typed_attrs = resolved.typed_attrs,
                     .source_offset = dec_comp_offset,
                     .id = identity.id,
                     // The binding this shorthand IS — the host ref and the pad
@@ -1088,6 +1089,7 @@ pub fn emitBulkDecouples(
             .footprint = resolved.footprint,
             .symbol = resolved.symbol,
             .attrs = resolved.attrs,
+            .typed_attrs = resolved.typed_attrs,
             .source_offset = source_offset,
             .id = cap_id,
             .bind = .{ .decouple = .{ .rail = true } },
