@@ -289,6 +289,7 @@ src/config.zig::digikeyMaxInFlight | fn digikeyMaxInFlight(allocator: std.mem.Al
 src/config.zig::digikeyMinIntervalMs | fn digikeyMinIntervalMs(allocator: std.mem.Allocator) u64
 src/config.zig::gitAutocommitEnabled | fn gitAutocommitEnabled(allocator: std.mem.Allocator) bool
 src/config.zig::libDir | fn libDir(allocator: std.mem.Allocator) ?[]u8
+src/config.zig::stateDir | fn stateDir(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::stdlibDir | fn stdlibDir(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::wardAuthServerUrl | fn wardAuthServerUrl(allocator: std.mem.Allocator) ?[]u8
 src/config.zig::wardCacheTtlSecs | fn wardCacheTtlSecs(allocator: std.mem.Allocator, default: i64) i64
@@ -1958,6 +1959,8 @@ src/paths.zig::beginRequest | fn beginRequest() void
 src/paths.zig::designSiblingPath | fn designSiblingPath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ext: []const u8, ) PathError![]u8
 src/paths.zig::designSourcePath | fn designSourcePath( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) PathError![]u8
 src/paths.zig::designSourcePathUnique | fn designSourcePathUnique( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) UniquePathError![]u8
+src/paths.zig::setStateRoot | fn setStateRoot(dir: ?[]const u8) void
+src/paths.zig::stateDir | fn stateDir(project_dir: []const u8) []const u8
 src/pdf.zig::Anchor enum_
 src/pdf.zig::Arc struct_
 src/pdf.zig::Doc struct_

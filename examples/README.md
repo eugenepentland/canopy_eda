@@ -344,7 +344,17 @@ file is the design, and the page re-renders when it changes.
 
 Serving or laying out a project makes the tool write runtime state beside it —
 `logs/` for the interaction log, `history/` for layout snapshots. Both are
-git-ignored here; the tracked example is `src/` and `lib/` only.
+git-ignored here; the tracked example is `src/` and `lib/` only. To keep it out
+of the project entirely, put that output somewhere else:
+
+```bash
+zig build run -- serve --project-dir examples/blinky-breakout \
+    --state-dir ~/.cache/netlisp/blinky-state
+```
+
+`--state-dir <d>` (or `NETLISP_STATE_DIR`) works on every command and moves
+only what the tool writes while running; sources, sidecars and exports stay
+where they are.
 
 ## 5. Lay it out and route it
 

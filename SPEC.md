@@ -2,6 +2,18 @@
 
 CLI-driven electronic design automation for schematic capture using S-expression syntax.
 
+## CLI global flags
+
+- the process-wide directory flags are consumed before dispatch so a command never reads one of their values as a positional
+- completeness-waiver: empty inputs (a flag with no value drops the flag alone; an empty argv is returned unchanged)
+- completeness-waiver: large inputs (argv is bounded by the operating system's own limit and each entry is only borrowed)
+- completeness-waiver: unauthorized access (the flags name directories the invoking user already has authority over)
+- completeness-waiver: i/o failure (the filter touches no filesystem; the directories it installs are opened by their readers)
+- completeness-waiver: concurrent access (both roots are installed once, before any command or thread dispatches)
+- completeness-waiver: malformed encoding (argv entries are compared as bytes and never decoded)
+- completeness-waiver: integer overflow (a single forward pass over argv with no arithmetic on its length)
+- completeness-waiver: panic-free (an allocation failure returns the unfiltered argv rather than failing the run)
+
 ## CLI allocation lifetime
 
 - one-shot CLI commands keep process-lifetime evaluation storage on the automatically cleaned process arena
@@ -7862,6 +7874,7 @@ is what makes the predicate exact rather than approximately right.
 - the pcb-describe board facts list every authored keepout region in world millimetres with its side, blocked families, allowed nets and reason
 - The PCB blob emits each pad's rotation, roundrect ratio, oval slot, and through-hole flag
 - The layout sidecar is snapshotted into history and listed newest-first
+- An installed runtime-state root moves history/ off the project, leaving its sources and sidecars in place
 - Layout snapshots are pruned to the newest retention cap
 - Source-snapshot listing skips the reserved layouts subdir
 - The layout sidecar carries an optimistic-concurrency rev, emitted only when non-zero

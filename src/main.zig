@@ -32,6 +32,7 @@ const plugin_tokens = @import("serve/plugin_tokens.zig");
 const build_id = @import("build_id.zig");
 const build_options = @import("build_options");
 const stdlib = @import("stdlib.zig");
+const paths = @import("paths.zig");
 
 /// Process capabilities installed from `std.process.Init` for infrastructure
 /// adapters imported throughout the application graph.
@@ -106,6 +107,54 @@ fn installLibraryRoots(allocator: std.mem.Allocator, args: []const []const u8) v
     stdlib.setRoots(lib_dir, stdlib_dir);
 }
 
+/// Install the root the runtime state the tool WRITES resolves through —
+/// `serve`'s `logs/` and the layout/edit tools' `history/`: `--state-dir`
+/// first, then `NETLISP_STATE_DIR`. Called once here beside
+/// `installLibraryRoots`, for the same reason: both writers take a project
+/// directory and nothing else, and this is set once at startup.
+///
+/// Design sources, sidecars, the library and every export stay where they are.
+/// The point is a TRACKED project — `examples/` — surviving `serve` and the
+/// layout tools with a clean `git status`.
+fn installStateRoot(allocator: std.mem.Allocator, args: []const []const u8) void {
+    const flag: ?[]const u8 = optionalArg(args, state_dir_flag);
+    paths.setStateRoot(if (flag) |f| f else config.stateDir(allocator));
+}
+
+const state_dir_flag = "--state-dir";
+
+/// The flags `main` consumes for the whole process rather than a command:
+/// every command sees argv WITHOUT them, so a directory value can never be
+/// mistaken for a command's positional design name.
+const global_value_flags = [_][]const u8{ "--lib-dir", state_dir_flag };
+
+/// `args` minus each `global_value_flags` entry and the value that follows it.
+/// Returns `args` itself (no allocation) when none is present — the normal
+/// case — and on any allocation failure, since dropping the filter is
+/// strictly better than failing to run.
+fn withoutGlobalFlags(allocator: std.mem.Allocator, args: []const []const u8) []const []const u8 {
+    var present = false;
+    for (args) |a| {
+        for (global_value_flags) |f| {
+            if (std.mem.eql(u8, a, f)) present = true;
+        }
+    }
+    if (!present) return args;
+    var kept: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const is_global = for (global_value_flags) |f| {
+            if (std.mem.eql(u8, args[i], f)) break true;
+        } else false;
+        if (is_global) {
+            i += 1; // and its value
+            continue;
+        }
+        kept.append(allocator, args[i]) catch return args;
+    }
+    return kept.toOwnedSlice(allocator) catch args;
+}
+
 /// CLI entry point: parses `argv[1]` as the subcommand name and dispatches
 /// to the matching `cmd*` handler in `commands.zig` (or one of the local
 /// `convert-*` / `parse` / `mint-plugin-token` helpers). Prints the usage
@@ -132,8 +181,10 @@ pub fn main(init: std.process.Init) !void {
     // A release build carries its tag at compile time (`-Dbuild-id`); every
     // other binary resolves its identity from the deploy marker or git.
     process_build_id = build_options.build_id orelse build_id.load(init.io, arena, ".");
-    const args = try init.minimal.args.toSlice(arena);
-    installLibraryRoots(arena, args);
+    const raw_args = try init.minimal.args.toSlice(arena);
+    installLibraryRoots(arena, raw_args);
+    installStateRoot(arena, raw_args);
+    const args = withoutGlobalFlags(arena, raw_args);
 
     if (args.len < 2) {
         try printUsage();
@@ -621,6 +672,13 @@ fn printUsage() !void {
         \\  An advisory assertion (raised by the frequency-plan / PLL analyses) prints
         \\  as WARN and blocks nothing.
         \\
+        \\Runtime state (any command above):
+        \\  --state-dir <d>        Write runtime output — serve's logs/, the layout and
+        \\                         edit tools' history/ — under <d> instead of beside the
+        \\                         project (env: NETLISP_STATE_DIR). Design sources,
+        \\                         sidecars and exports do not move; this is what lets a
+        \\                         tracked project be served and laid out clean.
+        \\
         \\Library resolution (any command above):
         \\  --lib-dir <d>          Search <d>/lib/... after the project's own lib/ (env: NETLISP_LIB_DIR)
         \\  NETLISP_STDLIB_DIR=<d> Use <d> instead of the standard library bundled into this binary
@@ -628,6 +686,32 @@ fn printUsage() !void {
         \\                         See docs/standard-library.md for what is bundled.
         \\
     );
+}
+
+// spec: CLI global flags - the process-wide directory flags are consumed before dispatch so a command never reads one of their values as a positional
+test "global directory flags never reach a command as positionals" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // Every command parser treats a non `--` token as its positional design
+    // name, so a state/library directory left in argv would BE the design.
+    const with = [_][]const u8{ "--project-dir", "examples/blinky-breakout", "--state-dir", "/var/tmp/state", "blinky-breakout" };
+    const kept = withoutGlobalFlags(arena, &with);
+    try std.testing.expectEqual(@as(usize, 3), kept.len);
+    try std.testing.expectEqualStrings("--project-dir", kept[0]);
+    try std.testing.expectEqualStrings("examples/blinky-breakout", kept[1]);
+    try std.testing.expectEqualStrings("blinky-breakout", kept[2]);
+
+    // Both global flags, in either order, and the design still survives.
+    const both = [_][]const u8{ "--lib-dir", "/opt/shared", "design", "--state-dir", "/var/tmp/state" };
+    const kept_both = withoutGlobalFlags(arena, &both);
+    try std.testing.expectEqual(@as(usize, 1), kept_both.len);
+    try std.testing.expectEqualStrings("design", kept_both[0]);
+
+    // The common case allocates nothing: the same slice comes straight back.
+    const plain = [_][]const u8{ "--project-dir", "p", "design" };
+    try std.testing.expectEqual(@as(usize, 3), withoutGlobalFlags(arena, &plain).len);
 }
 
 // spec: CLI allocation lifetime - one-shot CLI commands keep process-lifetime evaluation storage on the automatically cleaned process arena
