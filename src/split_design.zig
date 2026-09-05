@@ -286,7 +286,7 @@ fn writeScope(w: *std.Io.Writer, block: *const env_mod.DesignBlock) std.Io.Write
     try w.print("scope kicad-pcb {any}\n", .{block.kicad_pcb_path});
     for (block.net_classes) |c| try w.print("scope net-class {any}\n", .{c});
     for (block.net_class_pins) |c| try w.print("scope net-class-pin {any}\n", .{c});
-    for (block.net_envelopes) |c| try w.print("scope net-envelope {any}\n", .{c});
+    for (block.envelopes.published) |c| try w.print("scope net-envelope {any}\n", .{c});
     for (block.pdn_intents) |c| try w.print("scope pdn {any}\n", .{c});
     for (block.fabrication_layers) |c| try w.print("scope fabrication-layer {any}\n", .{c});
     for (block.groups) |g| try w.print("scope group {any}\n", .{g});

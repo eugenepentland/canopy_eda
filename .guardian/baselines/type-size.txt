@@ -10,7 +10,7 @@
 13 src/eval/env.zig|BoardSpec
 15 src/eval/env.zig|Check
 9 src/eval/env.zig|ClassRf
-31 src/eval/env.zig|DesignBlock
+32 src/eval/env.zig|DesignBlock
 13 src/eval/env.zig|DesignRulesSpec
 9 src/eval/env.zig|ElectricalDecl
 28 src/eval/env.zig|Instance
@@ -86,7 +86,7 @@
 24 src/render_pcb_png.zig|Options
 14 src/render_svg/context.zig|FlatInst
 18 src/render_svg/context.zig|RenderCtx
-12 src/review.zig|ReviewDoc
+13 src/review.zig|ReviewDoc
 10 src/review.zig|SectionReport
 14 src/review.zig|Summary
 9 src/serve.zig|ServerState

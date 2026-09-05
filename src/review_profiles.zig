@@ -438,6 +438,11 @@ pub const Context = struct {
     forms: Forms = .{},
     /// Demand at least one `(requirement …)` on the part (release strictness).
     require_requirements: bool = false,
+    /// Ref-deses that a DESIGN-owned `(requirement … (on "REF") (check …))`
+    /// rule judges. A design rule satisfies the demand above exactly as a
+    /// library one does: the obligation is that the part is covered by a
+    /// cited, executable rule, not that the coverage was inherited.
+    design_ruled_refs: []const []const u8 = &.{},
 };
 
 /// Evaluate every mechanically visible profile obligation of one placed
@@ -464,7 +469,8 @@ pub fn evaluate(
         .key = class.key(),
         .items = &items,
     };
-    if (ctx.require_requirements) try evaluation.requirements();
+    if (ctx.require_requirements and !env.containsString(ctx.design_ruled_refs, inst.ref_des))
+        try evaluation.requirements();
     try evaluation.supply(ctx.block);
     try evaluation.levels();
     try evaluation.categories(class);

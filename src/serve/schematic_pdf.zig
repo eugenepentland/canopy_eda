@@ -35,6 +35,7 @@ const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const bom = @import("../bom.zig");
 const erc_mod = @import("../erc.zig");
 const req_checks = @import("../req_checks.zig");
+const req_design_rules = @import("../req_design_rules.zig");
 const review_mod = @import("../review.zig");
 const export_pdf = @import("../export_pdf.zig");
 const pdf_mod = @import("../pdf.zig");
@@ -150,6 +151,7 @@ fn composeFor(
     var check_results = req_checks.runChecks(allocator, &eval, nb.block) catch
         std.StringHashMapUnmanaged([]req_checks.Result).empty;
     req_checks.applyVerifications(&check_results, nb.block, nb.block.instances);
+    const design_rules = req_design_rules.runVerified(allocator, &eval, nb.block);
 
     var doc = try review_mod.buildReview(
         allocator,
@@ -157,7 +159,7 @@ fn composeFor(
         nb.block,
         eval.assertions.items,
         violations,
-        &check_results,
+        .{ .checks = &check_results, .design_rules = design_rules },
     );
     // `buildReview` reads the block alone; the cooling-scenario ladder needs the
     // project directory and the design's saved layouts, which this handler has.

@@ -9,7 +9,9 @@ const component_classification = @import("component_classification.zig");
 const env_mod = @import("eval/env.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 const infra_fs = @import("infra/fs.zig");
+const net_name = @import("net_name.zig");
 const req_checks = @import("req_checks.zig");
+const req_design_rules = @import("req_design_rules.zig");
 const review_profiles = @import("review_profiles.zig");
 
 const DesignBlock = env_mod.DesignBlock;
@@ -80,6 +82,18 @@ const RequirementDetails = struct {
     text: []const u8 = "",
     citation: ?env_mod.NoteRef = null,
     datasheet: []const u8 = "",
+    /// Which authority wrote the rule: a component library, or the design
+    /// itself. Gating is identical — this is what lets a reviewer tell an
+    /// inherited datasheet obligation from a rule this board set for itself.
+    source: env_mod.RuleSource = .library,
+    /// What a design rule judged: the flattened net a `(net-rule …)` glob
+    /// matched, the glob itself when it matched nothing, or the `(on "REF")`
+    /// target. Empty for a library requirement, whose target IS `ref_des`.
+    target: []const u8 = "",
+    /// Sub-block path of the block that owns a design rule (`""` at the root),
+    /// and the section path it was authored under. Both display-only.
+    block_path: []const u8 = "",
+    scope: []const u8 = "",
 };
 
 /// One normalized requirement or datasheet-review outcome returned by every
@@ -120,9 +134,15 @@ pub const Report = struct {
     findings: []const Finding,
     errors: usize,
     warnings: usize,
+    /// The design-owned rule outcomes the design-rule findings were built
+    /// from. The report OWNS them because the findings borrow strings out of
+    /// them (`requirement.target`, `requirement.block_path`), so freeing them
+    /// at the end of `run` would hand every caller a dangling target name.
+    design_rules: []const req_design_rules.Outcome = &.{},
 
     pub fn deinit(self: Report, allocator: std.mem.Allocator) void {
         deinitFindings(allocator, self.findings);
+        req_design_rules.deinit(allocator, self.design_rules);
     }
 };
 
@@ -145,6 +165,10 @@ pub fn run(
     defer req_checks.deinit(allocator, &results);
     req_checks.applyVerifications(&results, block, block.instances);
 
+    const rules = try req_design_rules.run(allocator, eval, block);
+    errdefer req_design_rules.deinit(allocator, rules);
+    req_design_rules.applyVerifications(rules, block);
+
     var findings: std.ArrayList(Finding) = .empty;
     errdefer {
         for (findings.items) |finding| allocator.free(finding.message);
@@ -161,8 +185,10 @@ pub fn run(
         .forms = forms,
         .results = &results,
         .findings = &findings,
+        .design_ruled_refs = try designRuledRefs(arena.allocator(), rules),
     };
     try walkBlock(walk, block);
+    try appendDesignRuleFindings(allocator, rules, profile, &findings);
     if (profile == .release) try appendEvalWarnings(allocator, eval, &findings);
 
     var errors: usize = 0;
@@ -176,6 +202,7 @@ pub fn run(
         .findings = try findings.toOwnedSlice(allocator),
         .errors = errors,
         .warnings = warnings,
+        .design_rules = rules,
     };
 }
 
@@ -190,6 +217,10 @@ const Walk = struct {
     forms: review_profiles.Forms,
     results: *const std.StringHashMapUnmanaged([]req_checks.Result),
     findings: *std.ArrayList(Finding),
+    /// Ref-deses a design-owned `(on "REF")` rule covers — they satisfy the
+    /// release profile's cited-requirement demand exactly as a library rule on
+    /// the same part would.
+    design_ruled_refs: []const []const u8 = &.{},
 };
 
 fn walkBlock(walk: Walk, block: *const DesignBlock) std.mem.Allocator.Error!void {
@@ -237,6 +268,7 @@ fn appendProfileFindings(walk: Walk, inst: Instance, block: *const DesignBlock) 
         .project_dir = walk.project_dir,
         .forms = walk.forms,
         .require_requirements = walk.profile == .release,
+        .design_ruled_refs = walk.design_ruled_refs,
     });
     defer allocator.free(items);
     var moved: usize = 0;
@@ -313,6 +345,69 @@ fn appendRequirementFindings(
                 .datasheet = if (requirement.ref) |ref| ref.pdf else "",
             },
         });
+    }
+}
+
+/// Every ref-des a design-owned `(on "REF")` rule judges, in the ref-des space
+/// the preflight walk sees (a sub-block target's leaf, since ref-deses are
+/// globally unique once the block is materialized).
+fn designRuledRefs(
+    arena: std.mem.Allocator,
+    rules: []const req_design_rules.Outcome,
+) std.mem.Allocator.Error![]const []const u8 {
+    var refs: std.ArrayList([]const u8) = .empty;
+    for (rules) |rule| {
+        if (rule.netScoped()) continue;
+        for (rule.targets) |target| try refs.append(arena, net_name.leaf(target.name));
+    }
+    return refs.items;
+}
+
+/// One finding per THING a design rule judged — the instance an `(on …)` rule
+/// named, or each net a `(net-rule …)` glob matched — because a gate has to
+/// name what failed. The rule's rolled-up verdict is what the review document
+/// shows one row for and what a `(verifies …)` addresses; here, where a finding
+/// carries a severity, per-target is the only granularity that does not either
+/// hide the failing net or count one rule's failure several times over.
+fn appendDesignRuleFindings(
+    allocator: std.mem.Allocator,
+    rules: []const req_design_rules.Outcome,
+    profile: Profile,
+    findings: *std.ArrayList(Finding),
+) std.mem.Allocator.Error!void {
+    for (rules) |rule| {
+        for (rule.targets) |target| {
+            // A sign-off closes every target of the rule it signed: the
+            // reviewer judged the RULE, not one of its nets.
+            const status = if (rule.status == .verified) req_checks.Status.verified else target.status;
+            const message = if (rule.status == .verified and rule.verification != null)
+                try allocator.dupe(u8, rule.verification.?.rationale)
+            else if (rule.netScoped())
+                try std.fmt.allocPrint(allocator, "{s}: {s}", .{ target.name, target.message })
+            else
+                try allocator.dupe(u8, target.message);
+            try appendOwnedFinding(allocator, findings, .{
+                .kind = .requirement,
+                .status = findingStatus(status),
+                .severity = requirementSeverity(status, profile),
+                // A net rule has no part to attribute to; an (on "REF") rule
+                // does, and naming it here is what lets the change filters and
+                // the per-part review grouping pick the finding up.
+                .ref_des = if (rule.netScoped()) "" else target.name,
+                .component = "",
+                .message = message,
+                .requirement = .{
+                    .id = rule.rule.id,
+                    .text = rule.rule.text,
+                    .citation = rule.rule.ref,
+                    .datasheet = if (rule.rule.ref) |ref| ref.pdf else "",
+                    .source = .design,
+                    .target = target.name,
+                    .block_path = rule.block_path,
+                    .scope = rule.rule.scope,
+                },
+            });
+        }
     }
 }
 
@@ -594,4 +689,73 @@ test "appendRequirementFindings cleans message when append fails" {
         error.OutOfMemory,
         appendRequirementFindings(allocator, inst, .authoring, &results, &findings),
     );
+}
+
+// spec: preflight - design-owned rules are gated exactly like library requirements and satisfy the release profile's cited-requirement demand
+test "design rules gate like library rules in every profile" {
+    const allocator = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "lib/components");
+    try tmp.dir.createDirPath(std.testing.io, "lib/pinouts");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/pinouts/ldo.sexp",
+        .data = "(pinout \"ldo\" (pin 1 \"VIN\") (pin 2 \"GND\") (pin 5 \"VOUT\"))",
+    });
+    // A part with NO library requirements at all: the release profile's
+    // "at least one cited requirement" demand would normally fire on it, and
+    // the design rule below is what answers it.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lib/components/ldo.sexp",
+        .data = "(component \"ldo\" (pinout \"ldo\") (footprint \"sot23-5\") (class ldo))",
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+
+    var eval = Evaluator.init(allocator, project);
+    defer eval.deinit();
+    const value = try eval.evalSource(
+        \\(import ldo)
+        \\(design-block "board"
+        \\  (instance "U1" ldo (pin 1 "V_5V0") (pin 2 "GND") (pin 5 "V_3V3"))
+        \\  (requirement "The LDO input sits inside its recommended range"
+        \\    (on "U1")
+        \\    (ref "bench-notes.pdf" (page 1) (quote "5 V in"))
+        \\    (check (voltage-range (pin "VIN") (min 2.7) (max 5.5))))
+        \\  (net-rule "The output rail is classed" (nets "V_3V3") (in-net-class)))
+    );
+    const block = try designBlockOf(value);
+
+    for ([_]Profile{ .authoring, .preflight, .release }) |profile| {
+        const report = try run(allocator, &eval, block, project, profile);
+        defer report.deinit(allocator);
+        var design_findings: usize = 0;
+        var net_rule_errors: usize = 0;
+        var missing_requirements = false;
+        for (report.findings) |finding| {
+            if (finding.kind == .profile_incomplete and
+                std.mem.indexOf(u8, finding.message, "no (requirement …) rules") != null)
+                missing_requirements = true;
+            if (finding.requirement.source != .design) continue;
+            design_findings += 1;
+            if (std.mem.eql(u8, finding.requirement.target, "V_3V3") and finding.severity == .@"error")
+                net_rule_errors += 1;
+        }
+        // One finding per judged target: the (on "U1") instance and the one
+        // net "V_3V3" matched.
+        try std.testing.expectEqual(@as(usize, 2), design_findings);
+        // A failing design rule is an error in EVERY profile, exactly as a
+        // failing library check is — `requirementSeverity` is the one mapping.
+        try std.testing.expectEqual(@as(usize, 1), net_rule_errors);
+        // And the design rule discharges the release profile's demand for a
+        // cited requirement on this part, which carries no library rules.
+        try std.testing.expect(!missing_requirements);
+    }
+}
+
+/// Unwrap an evaluated top-level form as the design block it must be.
+fn designBlockOf(value: env_mod.Value) !*env_mod.DesignBlock {
+    return switch (value) {
+        .design_block => |b| b,
+        else => error.TestNotADesign,
+    };
 }

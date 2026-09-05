@@ -512,6 +512,13 @@ src/eval/attrs.zig::rowColumns | fn rowColumns(slot: Slot) []const []const u8
 src/eval/attrs.zig::satisfies | fn satisfies(slot: Slot, authored: []const u8, selected: []const u8) bool
 src/eval/attrs.zig::slotForKey | fn slotForKey(key: []const u8) ?Slot
 src/eval/attrs.zig::suggestKey | fn suggestKey(key: []const u8) ?[]const u8
+src/eval/authored_rules.zig::PredicateDoc struct_
+src/eval/authored_rules.zig::globMatches | fn globMatches(glob: []const u8, name: []const u8) bool
+src/eval/authored_rules.zig::parseNetRule | fn parseNetRule( self: *Evaluator, children: []const Node, env: *Env, scope: []const u8, ) EvalError!?DesignRule
+src/eval/authored_rules.zig::parsePredicate | fn parsePredicate(node: Node) ?NetPredicate
+src/eval/authored_rules.zig::parseRequirement | fn parseRequirement( self: *Evaluator, children: []const Node, env: *Env, scope: []const u8, ) EvalError!?DesignRule
+src/eval/authored_rules.zig::predicate_docs value
+src/eval/authored_rules.zig::predicate_keyword_list value
 src/eval/board_keepout.zig::edge_tolerance_mm value
 src/eval/board_keepout.zig::parseAll | fn parseAll( self: *Evaluator, form_children: []const Node, w: f64, h: f64, ) EvalError![]const env.BoardKeepoutSpec
 src/eval/board_keepout.zig::sideFromAtom | fn sideFromAtom(word: []const u8) ?env.BoardKeepoutSide
@@ -571,6 +578,7 @@ src/eval/env.zig::BoardKeepoutSpec struct_
 src/eval/env.zig::BoardRole enum_
 src/eval/env.zig::BoardSpec struct_
 src/eval/env.zig::BoardThermalAssemblySpec struct_
+src/eval/env.zig::Body union_
 src/eval/env.zig::CalcBlock struct_
 src/eval/env.zig::CalcResult struct_
 src/eval/env.zig::Check union_
@@ -584,6 +592,7 @@ src/eval/env.zig::DatasheetReviewNa struct_
 src/eval/env.zig::DatasheetReviewStatus enum_
 src/eval/env.zig::DecoupleBind struct_
 src/eval/env.zig::DesignBlock struct_
+src/eval/env.zig::DesignRule struct_
 src/eval/env.zig::DesignRulesSpec struct_
 src/eval/env.zig::DistanceKind enum_
 src/eval/env.zig::DistanceRule struct_
@@ -616,6 +625,7 @@ src/eval/env.zig::NetClassSpec struct_
 src/eval/env.zig::NetEnvelope struct_
 src/eval/env.zig::NetEnvelopeDecl struct_
 src/eval/env.zig::NetEnvelopeTable struct_
+src/eval/env.zig::NetPredicate union_
 src/eval/env.zig::NetTie struct_
 src/eval/env.zig::Note struct_
 src/eval/env.zig::NoteRef struct_
@@ -662,6 +672,7 @@ src/eval/env.zig::Revision struct_
 src/eval/env.zig::RevisionChange struct_
 src/eval/env.zig::RoughGroup struct_
 src/eval/env.zig::RoughSpec struct_
+src/eval/env.zig::RuleSource enum_
 src/eval/env.zig::Section struct_
 src/eval/env.zig::SectionNote struct_
 src/eval/env.zig::SectionPort struct_
@@ -710,6 +721,7 @@ src/eval/env.zig::isTruthy | fn isTruthy(self: Value) bool
 src/eval/env.zig::parseNoteRef | fn parseNoteRef(node: ast.Node) ?NoteRef
 src/eval/env.zig::put | fn put(self: *Env, name: []const u8, value: Value) std.mem.Allocator.Error!void
 src/eval/env.zig::requirementIdForText | fn requirementIdForText(allocator: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error![]const u8
+src/eval/env.zig::sourceName | fn sourceName(self: NetPredicate) []const u8
 src/eval/evaluator.zig::AltFunc struct_
 src/eval/evaluator.zig::AuthoredRef struct_
 src/eval/evaluator.zig::BusDef struct_
@@ -4038,6 +4050,7 @@ src/req_checks.zig::Result struct_
 src/req_checks.zig::Status enum_
 src/req_checks.zig::applyVerifications | fn applyVerifications( map: *std.StringHashMapUnmanaged([]Result), block: *const DesignBlock, instances: []const Instance, ) void
 src/req_checks.zig::deinit | fn deinit( allocator: std.mem.Allocator, m: *std.StringHashMapUnmanaged([]Result), ) void
+src/req_checks.zig::evalCheck | fn evalCheck( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, inst: Instance, chk: Check, ) Result
 src/req_checks.zig::fail | fn fail(allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) Result
 src/req_checks.zig::instancePinOnNet | fn instancePinOnNet(block: *const DesignBlock, inst: Instance, net_name: []const u8) bool
 src/req_checks.zig::netBase value
@@ -4054,6 +4067,13 @@ src/req_checks.zig::resistorIsDcEquivalent | fn resistorIsDcEquivalent(ohms: f64
 src/req_checks.zig::runChecks | fn runChecks( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, ) std.mem.Allocator.Error!std.StringHashMapUnmanaged([]Result)
 src/req_derived_checks.zig::Result struct_
 src/req_derived_checks.zig::evaluate | fn evaluate( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, inst: Instance, check: env.Check, ) Result
+src/req_design_rules.zig::Outcome struct_
+src/req_design_rules.zig::TargetResult struct_
+src/req_design_rules.zig::applyVerifications | fn applyVerifications(outcomes: []Outcome, root: *const DesignBlock) void
+src/req_design_rules.zig::deinit | fn deinit(allocator: std.mem.Allocator, outcomes: []const Outcome) void
+src/req_design_rules.zig::netScoped | fn netScoped(self: Outcome) bool
+src/req_design_rules.zig::run | fn run( allocator: std.mem.Allocator, eval: *Evaluator, root: *const DesignBlock, ) std.mem.Allocator.Error![]Outcome
+src/req_design_rules.zig::runVerified | fn runVerified( allocator: std.mem.Allocator, eval: *Evaluator, root: *const DesignBlock, ) []const Outcome
 src/req_physical_checks.zig::evalCapRating | fn evalCapRating( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, inst: Instance, check: CapRatingCheck, ) Result
 src/req_physical_checks.zig::evalMaxDistance | fn evalMaxDistance( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, inst: Instance, check: MaxDistanceCheck, ) Result
 src/req_physical_checks.zig::evalSequence | fn evalSequence( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, inst: Instance, check: SequenceCheck, ) Result
@@ -4063,6 +4083,7 @@ src/review.zig::AssertionStatus enum_
 src/review.zig::BomEntry struct_
 src/review.zig::BomGroup struct_
 src/review.zig::ComponentRequirementEntry struct_
+src/review.zig::Evidence struct_
 src/review.zig::MissingMpn struct_
 src/review.zig::PortSummary struct_
 src/review.zig::PowerReport struct_
@@ -4076,7 +4097,7 @@ src/review.zig::Status enum_
 src/review.zig::Summary struct_
 src/review.zig::TestPointEntry struct_
 src/review.zig::buildPowerTree | fn buildPowerTree( allocator: std.mem.Allocator, block: *const DesignBlock, ) std.mem.Allocator.Error!PowerTree
-src/review.zig::buildReview | fn buildReview( allocator: std.mem.Allocator, design_name: []const u8, block: *const DesignBlock, assertions: []const AssertionResult, violations: []const erc_mod.Violation, check_results: ?*const std.StringHashMapUnmanaged([]req_checks.Result), ) ReviewError!ReviewDoc
+src/review.zig::buildReview | fn buildReview( allocator: std.mem.Allocator, design_name: []const u8, block: *const DesignBlock, assertions: []const AssertionResult, violations: []const erc_mod.Violation, evidence: Evidence, ) ReviewError!ReviewDoc
 src/review.zig::isoTimestamp | fn isoTimestamp(allocator: std.mem.Allocator, unix_s: i64) std.mem.Allocator.Error![]const u8
 src/review.zig::slugify | fn slugify(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]const u8
 src/review_assessment.zig::Applicability enum_

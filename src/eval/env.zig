@@ -326,6 +326,11 @@ pub const Verification = struct {
     /// of `Instance.ref_des`, so the sign-off survives ref-des renumbering and
     /// sub-block renames. Set by the `(verifies (req (id <hex>) …) …)` form.
     target_id: []const u8 = "",
+    /// True when the sign-off targets a DESIGN-owned rule rather than a part:
+    /// `(verifies (req design-rule <id>) …)`. Both `ref_des` and `target_id`
+    /// are empty then — a design rule belongs to a block, not to a placement —
+    /// and `req_id` is matched against `DesignRule.id`.
+    design_rule: bool = false,
     /// Requirement ID — either explicit `(id …)` from the component file or
     /// the CRC32-derived fallback. Matched against `Requirement.id`.
     req_id: []const u8,
@@ -400,6 +405,74 @@ pub const Requirement = struct {
     /// freezing first will break links, so we recommend running
     /// `netlisp freeze-requirement-ids` once a design starts using verifies.
     id: []const u8 = "",
+};
+
+/// Which authority a requirement rule came from: `library` for a rule a
+/// component's `lib/components/<name>.sexp` declares and every design placing
+/// the part inherits, `design` for a rule the design (or one of its modules)
+/// wrote about itself. The two are gated identically — the distinction exists
+/// so a reviewer can tell an inherited datasheet obligation from a rule this
+/// board's author chose to hold itself to.
+pub const RuleSource = enum { library, design };
+
+/// One predicate of a design-owned `(net-rule …)`, judged against a single
+/// matched net. Each is a property of the net itself, not of a placed part —
+/// which is why they live here and not in `Check`.
+pub const NetPredicate = union(enum) {
+    /// `(min-bulk-uf F)` — the capacitance summed over every capacitor
+    /// bridging this net and a ground net must be at least F µF.
+    min_bulk_uf: f64,
+    /// `(declared-envelope)` — `eval/net_envelopes` must carry an entry for
+    /// this net, authored or derived.
+    declared_envelope,
+    /// `(in-net-class)` — some `(net-class … (nets …))` must list this net.
+    in_net_class,
+    /// `(max-fanout N)` — the net may land on at most N pins.
+    max_fanout: u32,
+
+    /// Source spelling of this predicate's head atom, for diagnostics and the
+    /// generated reference. Derived from the tag so the two cannot drift.
+    pub fn sourceName(self: NetPredicate) []const u8 {
+        return switch (self) {
+            .min_bulk_uf => "min-bulk-uf",
+            .declared_envelope => "declared-envelope",
+            .in_net_class => "in-net-class",
+            .max_fanout => "max-fanout",
+        };
+    }
+};
+
+/// A rule the DESIGN owns, as opposed to one a component library hands it.
+/// Authored at design-block, section, sub-section or module scope; evaluated
+/// by `req_design_rules.zig` into the same requirement-result pipeline library
+/// requirements flow through, so `netlisp check`, the review document, the
+/// `run_checks` tool and the `(verifies …)` sign-off treat both identically.
+pub const DesignRule = struct {
+    /// What the rule asserts.
+    pub const Body = union(enum) {
+        /// `(requirement "…" (on "REF") (check …))` — an ordinary check
+        /// primitive aimed at one placed instance. `target` is a ref-des in
+        /// the rule's containing block, or `"sub/REF"` for one inside a
+        /// sub-block (judged in that sub-block's block, exactly as a library
+        /// requirement on the same part would be).
+        on_instance: struct { target: []const u8, check: Check },
+        /// `(net-rule "…" (nets GLOB…) predicate…)` — every net matched by
+        /// any glob must satisfy every predicate.
+        net_scoped: struct { globs: []const []const u8, predicates: []const NetPredicate },
+    };
+
+    text: []const u8,
+    ref: ?NoteRef = null,
+    /// 8-char hex id. An explicit `(id "…")` wins; otherwise the CRC32 of
+    /// `text`, exactly as `Requirement.id` derives from the component text, so
+    /// a `(verifies …)` sign-off survives every edit that leaves the rule's
+    /// own sentence alone.
+    id: []const u8 = "",
+    /// Section path the rule was authored under: `""` at design-block scope,
+    /// `"Power"` inside a section, `"Power/LDO"` inside a sub-section. Display
+    /// only — a rule is judged against its containing BLOCK regardless.
+    scope: []const u8 = "",
+    body: Body,
 };
 
 /// Compute the auto-derived 8-char hex requirement ID from the requirement
@@ -2455,6 +2528,12 @@ pub const DesignBlock = struct {
     /// Design-side `(verifies …)` sign-offs that answer library requirements
     /// the netlist alone can't verify.
     verifications: []const Verification = &.{},
+    /// Design-owned rules — `(requirement … (on "REF") (check …))` and
+    /// `(net-rule …)` — authored anywhere in this block's body, including
+    /// inside its `(section …)` bodies (each rule records the section path it
+    /// came from in `DesignRule.scope`; the rule is judged against THIS block
+    /// either way). Empty for every design that authors none.
+    authored_rules: []const DesignRule = &.{},
     /// Derived power rails, populated by `eval/rails.build` at the tail of
     /// `evalDesignBlock`. Empty for blocks with no regulator sub-blocks or
     /// board-edge power ports.

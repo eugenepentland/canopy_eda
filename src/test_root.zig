@@ -76,6 +76,7 @@ test {
     _ = @import("erc.zig");
     _ = @import("erc_interface.zig");
     _ = @import("escape.zig");
+    _ = @import("eval/authored_rules.zig");
     _ = @import("eval/board_keepout.zig");
     _ = @import("eval/board_role_cases.zig");
     _ = @import("eval/builders.zig");
@@ -393,6 +394,7 @@ test {
     _ = @import("render_svg/section_inset.zig");
     _ = @import("req_checks_cases.zig");
     _ = @import("req_derived_checks.zig");
+    _ = @import("req_design_rules.zig");
     _ = @import("req_physical_checks.zig");
     _ = @import("req_physical_checks_cases.zig");
     _ = @import("review.zig");

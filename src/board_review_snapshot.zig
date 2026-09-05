@@ -35,6 +35,7 @@ const pdf = @import("pdf.zig");
 const render_pcb_png = @import("render_pcb_png.zig");
 const optimizer = @import("placement/optimizer.zig");
 const req_checks = @import("req_checks.zig");
+const req_design_rules = @import("req_design_rules.zig");
 const review = @import("review.zig");
 const review_json = @import("review_json.zig");
 const review_md = @import("review_md.zig");
@@ -499,6 +500,7 @@ fn buildImpl(
     const violations = try erc.runErc(allocator, named.block, project_dir);
     var checks = try req_checks.runChecks(allocator, &evaluator, named.block);
     req_checks.applyVerifications(&checks, named.block, named.block.instances);
+    const design_rules = req_design_rules.runVerified(allocator, &evaluator, named.block);
 
     var doc = try review.buildReview(
         allocator,
@@ -506,7 +508,7 @@ fn buildImpl(
         named.block,
         evaluator.assertions.items,
         violations,
-        &checks,
+        .{ .checks = &checks, .design_rules = design_rules },
     );
     doc.power.scenarios = try thermal_api.scenariosFor(
         allocator,

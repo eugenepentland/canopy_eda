@@ -35,6 +35,7 @@ const render_schematic_png = @import("render_schematic_png.zig");
 const pdf_mod = @import("pdf.zig");
 const review_mod = @import("review.zig");
 const req_checks = @import("req_checks.zig");
+const req_design_rules = @import("req_design_rules.zig");
 const notes = @import("serve/notes.zig");
 const thermal_api = @import("serve/thermal_api.zig");
 const system_review_package = @import("system_review_package.zig");
@@ -1210,7 +1211,11 @@ fn buildReviewFor(
     var results = req_checks.runChecks(allocator, eval, block) catch
         std.StringHashMapUnmanaged([]req_checks.Result).empty;
     req_checks.applyVerifications(&results, block, block.instances);
-    var doc = review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, &results) catch {
+    const design_rules = req_design_rules.runVerified(allocator, eval, block);
+    var doc = review_mod.buildReview(allocator, name, block, eval.assertions.items, violations, .{
+        .checks = &results,
+        .design_rules = design_rules,
+    }) catch {
         exit.fatal("Review build error\n", .{});
     };
     // `buildReview` reads the block alone; the cooling-scenario ladder needs the
