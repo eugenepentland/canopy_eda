@@ -4807,10 +4807,39 @@ src/serve/pcb_fence.zig::run | fn run( alloc: std.mem.Allocator, project_dir: []
 src/serve/pcb_keepout_json.zig::write | fn write( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, ) (std.mem.Allocator.Error || std.Io.Writer.Error)!void
 src/serve/pcb_keepout_json.zig::writeBlockFamilies | fn writeBlockFamilies(w: *std.Io.Writer, blocks: env.PerimeterKeepoutBlocks) std.Io.Writer.Error!void
 src/serve/pcb_layout_import.zig::writeImportedStarredLayout | fn writeImportedStarredLayout( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, imported: import_layout.Imported, ) bool
+src/serve/pcb_layout_mcp.zig::McpExistingCopper struct_
+src/serve/pcb_layout_mcp.zig::addTracksFixture | fn addTracksFixture(parts: []optimizer.Part, nets: []const export_kicad.FlatNet, rules: []const optimizer.NetRule) optimizer.Placement
+src/serve/pcb_layout_mcp.zig::addTracksParts | fn addTracksParts() [2]optimizer.Part
+src/serve/pcb_layout_mcp.zig::add_tracks_nets value
+src/serve/pcb_layout_mcp.zig::add_tracks_pad value
+src/serve/pcb_layout_mcp.zig::mcpAddTracks | fn mcpAddTracks( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpArgStr | fn mcpArgStr(args_val: ?std.json.Value, key: []const u8) ?[]const u8
+src/serve/pcb_layout_mcp.zig::mcpArgStrList | fn mcpArgStrList(alloc: std.mem.Allocator, args_val: ?std.json.Value, key: []const u8) []const []const u8
+src/serve/pcb_layout_mcp.zig::mcpCleanRouteTopology | fn mcpCleanRouteTopology( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpClearRoutes | fn mcpClearRoutes( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpExistingCopper | fn mcpExistingCopper( alloc: std.mem.Allocator, routed: router.RouteResult, selected: []const bool, ) std.mem.Allocator.Error!McpExistingCopper
+src/serve/pcb_layout_mcp.zig::mcpFail | fn mcpFail(out: *std.ArrayList(u8), alloc: std.mem.Allocator, msg: []const u8) (std.mem.Allocator.Error || std.Io.Writer.Error)!bool
+src/serve/pcb_layout_mcp.zig::mcpNormalizeJunctions | fn mcpNormalizeJunctions( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpPersistWorking | fn mcpPersistWorking( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, entry_in: SavedLayout, star: bool, ) sidecar_store.StoreError!void
+src/serve/pcb_layout_mcp.zig::mcpReadWorking | fn mcpReadWorking( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layout_arg: ?[]const u8, ) ?SavedLayout
+src/serve/pcb_layout_mcp.zig::mcpRepairLandTransit | fn mcpRepairLandTransit( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpRoutePcb | fn mcpRoutePcb( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpSavePcbLayout | fn mcpSavePcbLayout( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpSavedRoutesFrom value
+src/serve/pcb_layout_mcp.zig::mcpSetBoardOutline | fn mcpSetBoardOutline( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpSetCopperZones | fn mcpSetCopperZones( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpSetPartPoses | fn mcpSetPartPoses( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpStitchGroundPads | fn mcpStitchGroundPads( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpWorkingName | fn mcpWorkingName( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layout_arg: ?[]const u8, ) []const u8
+src/serve/pcb_layout_mcp.zig::mcpWriteStrArray | fn mcpWriteStrArray(w: *std.Io.Writer, items: []const []const u8) std.Io.Writer.Error!void
+src/serve/pcb_layout_mcp.zig::mcp_err_missing_name value
+src/serve/pcb_layout_mcp.zig::normalizeJunctionsApi | fn normalizeJunctionsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_mcp.zig::scopeFixture | fn scopeFixture(parts: *[1]optimizer.Part) struct { placement: optimizer.Placement, block: env_mod.DesignBlock }
 src/serve/pcb_layout_page.zig::CacheSlot value
 src/serve/pcb_layout_page.zig::DeferredJob struct_
 src/serve/pcb_layout_page.zig::FabAuthored struct_
 src/serve/pcb_layout_page.zig::FabReleaseTestSupport struct_
+src/serve/pcb_layout_page.zig::FabSelectionTestSupport struct_
 src/serve/pcb_layout_page.zig::FabView struct_
 src/serve/pcb_layout_page.zig::FabViewError value
 src/serve/pcb_layout_page.zig::GroupKnobs struct_
@@ -4863,29 +4892,33 @@ src/serve/pcb_layout_page.zig::loadSyncLayout | fn loadSyncLayout( alloc: std.me
 src/serve/pcb_layout_page.zig::loadSyncPerimeterMask | fn loadSyncPerimeterMask( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, name: []const u8, ) ?SyncPerimeterMask
 src/serve/pcb_layout_page.zig::loadSyncRoutes | fn loadSyncRoutes(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?SavedRoutes
 src/serve/pcb_layout_page.zig::loadSyncVias | fn loadSyncVias( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, name: []const u8, ) ?[]const SyncVia
-src/serve/pcb_layout_page.zig::mcpAddTracks | fn mcpAddTracks( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
-src/serve/pcb_layout_page.zig::mcpArgStrList | fn mcpArgStrList(alloc: std.mem.Allocator, args_val: ?std.json.Value, key: []const u8) []const []const u8
-src/serve/pcb_layout_page.zig::mcpCleanRouteTopology | fn mcpCleanRouteTopology( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
-src/serve/pcb_layout_page.zig::mcpClearRoutes | fn mcpClearRoutes( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
-src/serve/pcb_layout_page.zig::mcpNormalizeJunctions | fn mcpNormalizeJunctions( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
-src/serve/pcb_layout_page.zig::mcpPersistWorking | fn mcpPersistWorking( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, entry_in: SavedLayout, star: bool, ) sidecar_store.StoreError!void
-src/serve/pcb_layout_page.zig::mcpReadWorking | fn mcpReadWorking( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layout_arg: ?[]const u8, ) ?SavedLayout
-src/serve/pcb_layout_page.zig::mcpRepairLandTransit | fn mcpRepairLandTransit( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_page.zig::mcpAddTracks value
+src/serve/pcb_layout_page.zig::mcpArgStrList value
+src/serve/pcb_layout_page.zig::mcpCleanRouteTopology value
+src/serve/pcb_layout_page.zig::mcpClearRoutes value
+src/serve/pcb_layout_page.zig::mcpNormalizeJunctions value
+src/serve/pcb_layout_page.zig::mcpPersistWorking value
+src/serve/pcb_layout_page.zig::mcpProtectedWrite | fn mcpProtectedWrite(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) sidecar_store.StoreError!void
+src/serve/pcb_layout_page.zig::mcpReadWorking value
+src/serve/pcb_layout_page.zig::mcpRepairLandTransit value
 src/serve/pcb_layout_page.zig::mcpRestoreLayoutSnapshot | fn mcpRestoreLayoutSnapshot( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
-src/serve/pcb_layout_page.zig::mcpRoutePcb | fn mcpRoutePcb( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
-src/serve/pcb_layout_page.zig::mcpSavePcbLayout | fn mcpSavePcbLayout( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_page.zig::mcpRoutePcb value
+src/serve/pcb_layout_page.zig::mcpSavePcbLayout value
 src/serve/pcb_layout_page.zig::mcpSavedRoutesFrom value
-src/serve/pcb_layout_page.zig::mcpSetBoardOutline | fn mcpSetBoardOutline( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
-src/serve/pcb_layout_page.zig::mcpSetCopperZones | fn mcpSetCopperZones( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
-src/serve/pcb_layout_page.zig::mcpSetPartPoses | fn mcpSetPartPoses( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
-src/serve/pcb_layout_page.zig::mcpStitchGroundPads | fn mcpStitchGroundPads( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
-src/serve/pcb_layout_page.zig::mcpWorkingName | fn mcpWorkingName( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layout_arg: ?[]const u8, ) []const u8
+src/serve/pcb_layout_page.zig::mcpSetBoardOutline value
+src/serve/pcb_layout_page.zig::mcpSetCopperZones value
+src/serve/pcb_layout_page.zig::mcpSetPartPoses value
+src/serve/pcb_layout_page.zig::mcpStitchGroundPads value
+src/serve/pcb_layout_page.zig::mcpWorkingName value
 src/serve/pcb_layout_page.zig::moved | fn moved(self: StoreRevCheck) bool
 src/serve/pcb_layout_page.zig::nameParam | fn nameParam(req: *httpz.Request, res: *httpz.Response) ?[]const u8
+src/serve/pcb_layout_page.zig::netIndexByName | fn netIndexByName(placement: optimizer.Placement, name: []const u8) ?i32
 src/serve/pcb_layout_page.zig::no_block_msg value
 src/serve/pcb_layout_page.zig::no_sub_msg value
-src/serve/pcb_layout_page.zig::normalizeJunctionsApi | fn normalizeJunctionsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::normalizeJunctionsApi value
 src/serve/pcb_layout_page.zig::outlineForBody | fn outlineForBody( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, submitted: ?SavedOutline, ) optimizer.OutlineSource
+src/serve/pcb_layout_page.zig::outline_open value
+src/serve/pcb_layout_page.zig::parseJsonObject | fn parseJsonObject(req: *httpz.Request, res: *httpz.Response) ?std.json.Value
 src/serve/pcb_layout_page.zig::parseLayouts value
 src/serve/pcb_layout_page.zig::parseSavedRoutes value
 src/serve/pcb_layout_page.zig::parseScenario | fn parseScenario(s: ?[]const u8) ?thermal_scenarios.Scenario
@@ -4905,9 +4938,11 @@ src/serve/pcb_layout_page.zig::pcbRouteApi | fn pcbRouteApi(ctx: *Server, req: *
 src/serve/pcb_layout_page.zig::pcbScoreApi | fn pcbScoreApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbScoreBatchApi | fn pcbScoreBatchApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::pcbSettingsApi | fn pcbSettingsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_page.zig::pin_key_fmt value
 src/serve/pcb_layout_page.zig::placement_err_msg value
 src/serve/pcb_layout_page.zig::pngFailure | fn pngFailure(e: PngError) PngFail
 src/serve/pcb_layout_page.zig::pngRequestFromQuery | fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngRequest
+src/serve/pcb_layout_page.zig::posesFromPlacement | fn posesFromPlacement(alloc: std.mem.Allocator, p: optimizer.Placement) ?[]PartPose
 src/serve/pcb_layout_page.zig::prepareRouteFromJson | fn prepareRouteFromJson( alloc: std.mem.Allocator, in: RoutePrepInputs, eval: *Evaluator, module_res: *?modules_mod.ResolvedBlock, ) RoutePrepError!RoutePrep
 src/serve/pcb_layout_page.zig::queryFlag value
 src/serve/pcb_layout_page.zig::queryOpt value
@@ -4934,6 +4969,7 @@ src/serve/pcb_layout_page.zig::route_source_agent value
 src/serve/pcb_layout_page.zig::route_source_autorouter value
 src/serve/pcb_layout_page.zig::route_source_human value
 src/serve/pcb_layout_page.zig::route_source_imported value
+src/serve/pcb_layout_page.zig::routesWithPerimeter | fn routesWithPerimeter(alloc: std.mem.Allocator, placement: optimizer.Placement, base: ?SavedRoutes) ?SavedRoutes
 src/serve/pcb_layout_page.zig::saveNamedLayoutApi | fn saveNamedLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::savePcbCourtyardApi | fn savePcbCourtyardApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_layout_page.zig::setDefaultLayoutApi | fn setDefaultLayoutApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
@@ -4943,6 +4979,7 @@ src/serve/pcb_layout_page.zig::sidecar_max_bytes value
 src/serve/pcb_layout_page.zig::solveForRequest | fn solveForRequest( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, opts: PngRequest, eval: *Evaluator, module_res: *?modules_mod.ResolvedBlock, ) PngError!SolvedRequest
 src/serve/pcb_layout_page.zig::standaloneDossierReviewBoardHtml | fn standaloneDossierReviewBoardHtml(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, fv: FabView) HandlerError![]const u8
 src/serve/pcb_layout_page.zig::standaloneReleaseAssemblyHtml | fn standaloneReleaseAssemblyHtml( ctx: *Server, req: *httpz.Request, name: []const u8, block: *const env_mod.DesignBlock, fv: FabView, identity: standalone_assembly.ReleaseIdentity, ) HandlerError![]const u8
+src/serve/pcb_layout_page.zig::starFirstEver | fn starFirstEver(layouts: []SavedLayout) void
 src/serve/pcb_layout_page.zig::subBlockPoseByOriginKey | fn subBlockPoseByOriginKey( alloc: std.mem.Allocator, project_dir: []const u8, sub_block: env_mod.SubBlock, ) ?SubBlockSeeds
 src/serve/pcb_layout_page.zig::subSlug value
 src/serve/pcb_layout_page.zig::thermalCopper | fn thermalCopper(solved: SolvedRequest) thermal_scenarios.Copper
@@ -4950,6 +4987,7 @@ src/serve/pcb_layout_page.zig::thermalFan | fn thermalFan(solved: SolvedRequest)
 src/serve/pcb_layout_page.zig::thermalHeatsink | fn thermalHeatsink(solved: SolvedRequest, bt: thermal.BoardThermal) ?thermal_scenarios.Heatsink
 src/serve/pcb_layout_page.zig::unknownLayoutMsg | fn unknownLayoutMsg( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, sub: ?[]const u8, want: []const u8, ) []const u8
 src/serve/pcb_layout_page.zig::viasForPoses | fn viasForPoses( alloc: std.mem.Allocator, block: *const env_mod.DesignBlock, project_dir: []const u8, seed: optimizer.PoseSeed, params: optimizer.Params, ) ?[]const SyncVia
+src/serve/pcb_layout_page.zig::write value
 src/serve/pcb_layout_page.zig::writeFreshRfPathsJson | fn writeFreshRfPathsJson(w: *std.Io.Writer, outcomes: []const rf_port_report.Outcome, nets: []const export_kicad.FlatNet) std.Io.Writer.Error!void
 src/serve/pcb_layout_page.zig::writeJsonStr value
 src/serve/pcb_layout_page.zig::writeLayoutsFileJsonRev value

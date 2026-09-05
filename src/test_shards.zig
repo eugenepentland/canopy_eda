@@ -562,6 +562,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.navbar.test.",
         "serve.pages.test.",
         "serve.pcb_fence.test.",
+        "serve.pcb_layout_mcp.test.",
         "serve.pcb_layout_sync.test.",
         "serve.pcb_rules_json.test.",
         "serve.rough_best.test.",
