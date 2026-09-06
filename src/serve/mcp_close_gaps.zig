@@ -795,10 +795,11 @@ const HopKey = struct {
     fy: f64,
     tx: f64,
     ty: f64,
+    surface_only: bool = false,
 
     fn eql(self: HopKey, other: HopKey) bool {
         return self.net_i == other.net_i and self.fx == other.fx and self.fy == other.fy and
-            self.tx == other.tx and self.ty == other.ty;
+            self.tx == other.tx and self.ty == other.ty and self.surface_only == other.surface_only;
     }
 };
 
@@ -806,7 +807,7 @@ const HopKey = struct {
 /// free sentinels of its own start point).
 fn hopKey(gap: router.Gap) HopKey {
     const to = gap.to orelse gap.from;
-    return .{ .net_i = gap.net_i, .fx = gap.from.x, .fy = gap.from.y, .tx = to.x, .ty = to.y };
+    return .{ .net_i = gap.net_i, .fx = gap.from.x, .fy = gap.from.y, .tx = to.x, .ty = to.y, .surface_only = gap.surface_only };
 }
 
 /// A round's outcome.
@@ -1321,15 +1322,49 @@ const Work = struct {
         for (self.placement.parts, 0..) |p, i| try index.put(self.alloc, p.ref_des, i);
         for (open) |o| {
             if (!self.wanted(o.net)) continue;
-            const net_i = netIndex(self.placement, o.net) orelse continue;
-            const plane = self.planeCarried(o.net);
-            const before = gaps.items.len;
-            if (plane) try self.addStitches(&gaps, &index, o, net_i);
-            if (bridgesNow(round, plane, gaps.items.len - before)) try self.addBridges(&gaps, &index, o, net_i);
+            try self.planNetHops(&gaps, &index, o, round);
             if (gaps.items.len >= max_hops_per_round) break;
         }
         std.mem.sort(router.Gap, gaps.items, self, hardestFirst);
         return gaps.items;
+    }
+
+    /// A fixed via allowance may be smaller than the number of plane islands.
+    /// Try joining those islands on their existing face before spending barrels.
+    /// Later rounds retain ordinary stitching and multilayer bridge fallbacks.
+    fn planNetHops(
+        self: *Work,
+        gaps: *std.ArrayList(router.Gap),
+        index: *std.StringHashMapUnmanaged(usize),
+        o: fab_readiness.OpenNet,
+        round: usize,
+    ) std.mem.Allocator.Error!void {
+        const net_i = netIndex(self.placement, o.net) orelse return;
+        const plane = self.planeCarried(o.net);
+        const before = gaps.items.len;
+        if (plane) try self.addStitches(gaps, index, o, net_i);
+        const stitches = gaps.items.len - before;
+        if (round == 0 and plane) {
+            if (self.remainingViaLimit(net_i)) |limit| if (stitches > limit) {
+                var joins: std.ArrayList(router.Gap) = .empty;
+                for (o.gaps) |g| {
+                    const from = padPoint(self.placement, index, g.from) orelse continue;
+                    const to = padPoint(self.placement, index, g.to) orelse continue;
+                    var gap = router.Gap{ .net_i = net_i, .from = from, .to = to, .surface_only = true };
+                    if (from.layer != to.layer) {
+                        gap = self.alternateBridge(index, o, g, net_i) orelse continue;
+                        gap.surface_only = true;
+                    }
+                    if (!self.deadEnd(gap)) try joins.append(self.alloc, gap);
+                }
+                if (joins.items.len > 0) {
+                    gaps.shrinkRetainingCapacity(before);
+                    try gaps.appendSlice(self.alloc, joins.items);
+                    return;
+                }
+            };
+        }
+        if (bridgesNow(round, plane, stitches)) try self.addBridges(gaps, index, o, net_i);
     }
 
     /// Order one round's hops hardest-first. Every hop in a round contends for
@@ -1473,16 +1508,19 @@ const Work = struct {
     /// rung. All retained vias spend the authored total, including earlier calls.
     fn remainingPolicies(self: *Work) std.mem.Allocator.Error![]const route_policy.NetPolicy {
         const policies = try self.alloc.dupe(route_policy.NetPolicy, self.plan.net);
-        for (policies, 0..) |*policy, ni| {
-            const limit = policy.max_vias orelse continue;
-            if (ni >= self.placement.nets.len) continue;
-            var present: usize = 0;
-            for (self.vias.items) |v| if (std.mem.eql(u8, v.net, self.placement.nets[ni].name)) {
-                present += 1;
-            };
-            policy.max_vias = limit - @as(u16, @intCast(@min(present, limit)));
-        }
+        for (policies, 0..) |*policy, ni| policy.max_vias = self.remainingViaLimit(ni);
         return policies;
+    }
+
+    fn remainingViaLimit(self: *Work, net_i: usize) ?u16 {
+        if (net_i >= self.plan.net.len) return null;
+        const limit = self.plan.net[net_i].max_vias orelse return null;
+        if (net_i >= self.placement.nets.len) return limit;
+        var present: u16 = 0;
+        for (self.vias.items) |via| if (std.mem.eql(u8, via.net, self.placement.nets[net_i].name)) {
+            present +|= 1;
+        };
+        return limit -| present;
     }
 
     /// Every round, retry and collateral repair uses the same authored hard
@@ -1760,9 +1798,9 @@ const Work = struct {
             if (self.budget.stopped()) break;
             const live = try self.liveCopper();
             const legs = [_]router.Gap{
-                .{ .net_i = gap.net_i, .from = gap.from, .to = candidate.first },
-                .{ .net_i = gap.net_i, .from = candidate.first, .to = candidate.second },
-                .{ .net_i = gap.net_i, .from = candidate.second, .to = to },
+                .{ .net_i = gap.net_i, .from = gap.from, .to = candidate.first, .surface_only = gap.surface_only },
+                .{ .net_i = gap.net_i, .from = candidate.first, .to = candidate.second, .surface_only = gap.surface_only },
+                .{ .net_i = gap.net_i, .from = candidate.second, .to = to, .surface_only = gap.surface_only },
             };
             const paths = try self.closeGaps(
                 .{ .tracks = live.routes.tracks, .vias = live.routes.vias, .zones = self.router_zones },
@@ -3093,22 +3131,7 @@ const Work = struct {
         for (nets, 0..) |net_i, n| {
             for (open) |o| {
                 if (netIndex(self.placement, o.net) != net_i) continue;
-                const plane = self.planeCarried(o.net);
-                const before = gaps.items.len;
-                if (plane) try self.addStitches(&gaps, &index, o, net_i);
-                // The SAME rule the ordinary rounds plan a plane-carried net by
-                // (`bridgesNow`), and for the same reason — one this phase was
-                // quietly breaking. A pour-carried net rejoins by dropping a via
-                // into its own pour; asking for a surface trace across the
-                // pocket in the same breath spends a channel the stitch never
-                // needed. Measured on board-a: restoring `V_6VA` by bridge
-                // lays copper straight back across the `B.Cu` GND pour it had
-                // just been lifted off, re-severing the very pour whose
-                // continuity closes the `GND` seed — the transaction put its own
-                // blocker back and then rolled itself back for failing to close.
-                if (bridgesNow(round, plane, gaps.items.len - before)) {
-                    try self.addBridges(&gaps, &index, o, net_i);
-                }
+                try self.planNetHops(&gaps, &index, o, round);
             }
             if (n + 1 == lead) lead_end = gaps.items.len;
         }
@@ -6105,4 +6128,64 @@ test "close_open_nets repairs a surface bypass despite a closed remote via path"
     parts[1].side = .top;
     try testing.expectEqual(@as(usize, 0), try work.repairBypasses());
     try testing.expectEqual(@as(usize, 1), (try work.missingBypasses()).len);
+}
+
+// spec: Web Server - A via-limited poured rail joins surface islands before spending an insufficient stitch allowance
+test "close_open_nets joins power islands before spending scarce vias" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const a = arena_i.allocator();
+    var parts = [_]optimizer.Part{ vacatePart("R1", 2, 5), vacatePart("R2", 8, 5) };
+    const nets = [_]export_kicad.FlatNet{vacateNet("PWR", "R1", "R2")};
+    const zones = [_]pour.UserZone{.{
+        .net = "PWR",
+        .layer = 1,
+        .poly = &.{ .{ 1, 1 }, .{ 9, 1 }, .{ 9, 9 }, .{ 1, 9 } },
+    }};
+    var work = Work{
+        .alloc = a,
+        .placement = gapFixture(&parts, &nets),
+        .params = .{},
+        .zones = &zones,
+        .router_zones = try zoneSources(a, gapFixture(&parts, &nets), &zones),
+        .rules = .{},
+        .tracks = .empty,
+        .vias = .empty,
+        .plan = .{ .net = &.{.{ .max_vias = 1 }} },
+    };
+    work.error_ceiling = try work.geometryErrors();
+    work.plan.net = &.{.{ .max_vias = 2 }};
+    const ample = try work.planRound(0);
+    try testing.expectEqual(@as(usize, 2), ample.len);
+    try testing.expect(ample[0].to == null);
+    work.plan.net = &.{.{ .max_vias = 1 }};
+    const gaps = try work.planRound(0);
+    try testing.expectEqual(@as(usize, 1), gaps.len);
+    try testing.expect(gaps[0].to != null and gaps[0].surface_only);
+    const kept = try work.runRound(gaps);
+    try testing.expectEqual(@as(usize, 1), kept.hops);
+    try testing.expectEqual(@as(usize, 0), work.vias.items.len);
+    try testing.expectEqual(@as(usize, 0), try work.openNetCount());
+    try testing.expectEqual(@as(usize, 0), try work.geometryErrors());
+}
+
+// spec: Web Server - A refused surface-only join does not memoize failure of an ordinary multilayer bridge
+test "close_open_nets surface refusal leaves ordinary fallback eligible" {
+    var work = Work{
+        .alloc = testing.allocator,
+        .placement = undefined,
+        .params = .{},
+        .zones = &.{},
+        .router_zones = &.{},
+        .rules = .{},
+        .tracks = .empty,
+        .vias = .empty,
+    };
+    defer work.dead_ends.deinit(testing.allocator);
+    const ordinary = router.Gap{ .net_i = 0, .from = .{ .x = 2, .y = 5, .layer = 0 }, .to = .{ .x = 8, .y = 5, .layer = 0 } };
+    var surface = ordinary;
+    surface.surface_only = true;
+    try work.dead_ends.append(testing.allocator, hopKey(surface));
+    try testing.expect(work.deadEnd(surface));
+    try testing.expect(!work.deadEnd(ordinary));
 }

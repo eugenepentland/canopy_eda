@@ -1099,3 +1099,26 @@ test "closeGaps draws its terminal stub against the board's own vias" {
     const need = vias[0].dia / 2 + sig_width / 2 + sig_clearance;
     try testing.expect(minTrackPointGap(path.tracks, vias[0].x, vias[0].y) >= need - clearance_eps);
 }
+
+// spec: placement/router - A surface-only gap preserves authored layers and cannot restrict a later ordinary gap in the same batch
+test "gap policy surface join does not leak into later ordinary hops" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const a = arena_i.allocator();
+    const placement = try walledPlacement(a);
+    const walls = wallTracks();
+    var surface = walledGap();
+    surface.surface_only = true;
+    const paths = try closeGaps(a, placement, .{}, .{ .tracks = walls[0..1] }, &.{ surface, walledGap() }, .{
+        .ripup = false,
+        .shape = .off,
+    });
+    try testing.expect(paths[0] == null);
+    try testing.expect(paths[1] != null);
+    try testing.expectEqual(@as(usize, 2), paths[1].?.vias.len);
+    const forbidden = try closeGaps(a, placement, .{}, .{}, &.{surface}, .{
+        .ripup = false,
+        .constraints = .{ .net = &.{.{ .allowed_layers = 2 }} },
+    });
+    try testing.expect(forbidden[0] == null);
+}

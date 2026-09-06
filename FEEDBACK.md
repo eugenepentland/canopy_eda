@@ -987,3 +987,8 @@ New from the wave:
 - **blocker:** `prepare-release.sh` passed the full tests and ReleaseSafe build at `cd5e0663`, then rejected all three Canvas zoom attempts: zoom-in p95 57.2, 45.6 and 65.2 ms against 45 ms. The branch changes no renderer assets or browser harness, but remains unmerged under the release gate. The timing phase took about eleven minutes.
 - **idea:** On a timing retry, check the completed Canvas repetitions before running the WebGPU repetitions; when Canvas already fails an absolute limit, stop that attempt and retain its metrics. This would avoid repeating a second renderer's expensive work on attempts that cannot pass.
 - **status:** open; source and solver tests pass, browser performance verification does not
+
+
+## 2026-09-06 · codex · power-island release queue and integration base
+- **friction:** `prepare-release.sh` waited 281 seconds behind another live release. That release advanced main from 2428ef3ad to a5d0aef5 as this branch's gate began, so I stopped my superseded test process group after 78 seconds, let fail-fast cancel its paired build, and rebased before restarting verification. The resulting exit-143 artifact says tests failed even though this was an intentional integration-base cancellation.
+- **idea:** Revalidate the integration base after acquiring the shared gate and offer a typed cancellation path that stops both child groups. This would avoid compiling a branch already known to need a rebase and distinguish cancellation from a regression in release evidence.
