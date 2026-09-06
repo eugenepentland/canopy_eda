@@ -1061,7 +1061,9 @@ test "PCB hand router defers adaptive electrical width without hiding hard width
 test "PCB editor defers every server-only power DRC kind by prefix" {
     const markers = [_][]const u8{
         "function drcPowerKindDeferred(k)",
-        "k.indexOf(\"power width\")===0||k.indexOf(\"via current\")===0",
+        "k.indexOf(\"power width\")===0",
+        "k.indexOf(\"power voltage\")===0",
+        "k.indexOf(\"via current\")===0",
         "if(drcPowerKindDeferred(d.k))return true;",
         "if(d.k&&d.k.indexOf(\"via current\")===0)return tag+d.k+on+",
         "if(d.k&&d.k.indexOf(\"power width\")===0)return tag+d.k+on+",

@@ -338,6 +338,7 @@ test {
     _ = @import("placement/progress.zig");
     _ = @import("placement/rf_path_solver.zig");
     _ = @import("placement/rf_port_finish.zig");
+    _ = @import("placement/rf_pad_route.zig");
     _ = @import("placement/rf_port_frames.zig");
     _ = @import("placement/rf_shadow.zig");
     _ = @import("placement/rf_taper_paths.zig");

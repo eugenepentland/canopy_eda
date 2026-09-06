@@ -226,6 +226,7 @@ pub const shards: []const []const []const u8 = &.{
         "placement.power_voltage_regression.test.",
         "power_integrity_json.test.",
         "placement.rf_port_finish.test.",
+        "placement.rf_pad_route.test.",
         "placement.rough_routability.test.",
         "placement.route_grid.test.",
         "placement.route_session.test.stu",
