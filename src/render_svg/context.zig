@@ -68,11 +68,16 @@ const IslandAnchorInputs = struct {
 /// the span of its pin stubs, on the pin-stub column. A series part turned
 /// toward this group lands on its NEAREST stub, so the lane meets the stub tie
 /// head-on instead of jogging onto the group's connection bus.
+/// `produces_rail` marks a group whose pin names say the hub SOURCES the net
+/// on it (`hub.groupProducesRail`): a regulator's OUT / OUTS / VOUT. A return
+/// may turn toward such a row even when the rail is shared with other hubs —
+/// the reader is looking at where that rail is made.
 pub const FunctionalPinRow = struct {
     cy: f64,
     first_stub_y: f64,
     last_stub_y: f64,
     stub_x: f64,
+    produces_rail: bool = false,
 };
 
 const RenderScratch = struct {
