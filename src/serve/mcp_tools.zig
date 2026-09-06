@@ -2846,6 +2846,34 @@ test "tools table matches tools_list_result.json" {
     try std.testing.expect(try jsonMatchesToolTable(std.testing.allocator));
 }
 
+// spec: serve/mcp_tools - Every advertised tool schema closes its object, so a misspelled argument name is refused rather than ignored
+test "every advertised schema closes its object" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // `serve/tool_schema` refuses an undeclared argument only where the schema
+    // SAYS the object is closed. Seven package tools left theirs open, so a
+    // misspelled argument to them was still silently ignored — the same defect
+    // the validator was added to close, surviving in the document rather than
+    // in the code. This keeps the property for every tool added later.
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, tools_list_result, .{});
+    var open: usize = 0;
+    var checked: usize = 0;
+    for (parsed.object.get("tools").?.array.items) |t| {
+        const schema = t.object.get("inputSchema").?.object;
+        checked += 1;
+        const closed = switch (schema.get("additionalProperties") orelse std.json.Value{ .null = {} }) {
+            .bool => |b| !b,
+            else => false,
+        };
+        if (!closed) open += 1;
+    }
+    // A scan that found no tools would make the assertion below vacuous.
+    try std.testing.expect(checked > 50);
+    try std.testing.expectEqual(@as(usize, 0), open);
+}
+
 /// The declared description of `name` in the embedded tool list, or null when
 /// the list carries no such tool. (test helper)
 fn toolDescription(a: std.mem.Allocator, name: []const u8) !?[]const u8 {

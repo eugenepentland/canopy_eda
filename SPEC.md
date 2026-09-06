@@ -7687,6 +7687,7 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 - build tool severity arg filters the erc[] array to the named severity
 - build response carries eval warnings in a warnings[] array separate from erc[]
 - The tools registration table and the embedded tools_list_result.json declare exactly the same tool names
+- Every advertised tool schema closes its object, so a misspelled argument name is refused rather than ignored
 - get_schematic defaults to a compact summary far smaller than the full scene graph
 - build, list_instances, and get_net resolve allocator-owned refdes from the same stable-ID BOM ledger
 - flatten makes list_instances include sub-block children with prefixed refs and origins
