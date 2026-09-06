@@ -48,6 +48,13 @@ guardian_runtime.db
 # lay it out or export it. The tracked part of an example is src/ and lib/;
 # everything below is regenerated on demand.
 /examples/*/history/
+# Runtime interaction logs. `/examples/*/logs/` was already ignored for exactly
+# this reason; the ROOT one is written by a server started with `project_dir:
+# "."`, which is what the deploy hook's own health probe does. Leaving it
+# untracked made the deploy dirty the worktree that the NEXT deploy then refuses
+# — observed 2026-09-06, when a merge's release preparation aborted on `?? logs/`
+# and production stayed on the previous binary.
+/logs/
 /examples/*/logs/
 /examples/*/auth/
 /examples/*/out/
