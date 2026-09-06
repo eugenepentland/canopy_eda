@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# A git hook exports GIT_DIR (and friends) to everything it spawns; this
+# script builds throwaway repositories, so those variables would silently
+# redirect every git command below at the real repository. Scrub them first.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PRUNER="$ROOT/.githooks/prune-worktree-caches.sh"

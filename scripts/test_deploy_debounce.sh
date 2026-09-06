@@ -18,6 +18,10 @@
 # Not wired into `zig build test` — the suite is the Zig unit binary and these
 # are shell/systemd seams. Run it by hand when touching any of the scripts.
 set -uo pipefail
+# A git hook exports GIT_DIR (and friends) to everything it spawns; this
+# script builds throwaway repositories, so those variables would silently
+# redirect every git command below at the real repository. Scrub them first.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$(cd "$HERE/../.githooks" && pwd)"
