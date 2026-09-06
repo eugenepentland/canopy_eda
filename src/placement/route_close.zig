@@ -58,12 +58,10 @@ const routed_copper = @import("routed_copper.zig");
 
 /// Knobs on one reconciliation pass.
 pub const Options = struct {
-    /// Hard policy from the enclosing route. Retained vias are the original
-    /// caller-owned copper; every generated via already on the board spends
-    /// the same allowance as the joins this reconciliation adds.
+    /// Authored total via limits from the enclosing route. Existing and newly
+    /// generated vias spend the same allowance as later reconciliation joins.
     constraints: struct {
         net: []const route_policy.NetPolicy = &.{},
-        retained_vias: []const route_policy.ExistingVia = &.{},
         reserved: []const route_policy.ReservedLane = &.{},
     } = .{},
     /// Also plan hops for nets the ROUTER reported as failed. Off by default:
@@ -103,48 +101,42 @@ pub const Options = struct {
 pub fn remainingPolicies(
     alloc: std.mem.Allocator,
     policies: []const route_policy.NetPolicy,
-    retained: []const route_policy.ExistingVia,
     present: []const router.Via,
 ) std.mem.Allocator.Error![]const route_policy.NetPolicy {
     const out = try alloc.dupe(route_policy.NetPolicy, policies);
     for (out, 0..) |*policy, ni| {
         const limit = policy.max_vias orelse continue;
         const net: i32 = @intCast(ni);
-        var old_count: usize = 0;
         var count: usize = 0;
-        for (retained) |v| if (v.net == net) {
-            old_count += 1;
-        };
         for (present) |v| if (v.net == net) {
             count += 1;
         };
-        policy.max_vias = limit - @as(u16, @intCast(@min(count -| old_count, limit)));
+        policy.max_vias = limit - @as(u16, @intCast(@min(count, limit)));
     }
     return out;
 }
 
-// spec: placement/router - reconciliation counts generated vias against the original allowance while retaining existing vias
-test "gap policy subtracts generated vias while preserving the retained allowance" {
+// spec: placement/router - reconciliation counts all retained and generated vias against the authored total limit
+test "gap policy subtracts all vias while preserving the retained allowance" {
     var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_inst.deinit();
     const alloc = arena_inst.allocator();
     const policies = [_]route_policy.NetPolicy{
-        .{ .allowed_layers = 3, .max_vias = 1 }, .{},
+        .{ .allowed_layers = 3, .max_vias = 2 }, .{},
     };
-    const retained = [_]route_policy.ExistingVia{.{ .x = 0, .y = 0, .dia = 0.6, .drill = 0.3, .net = 0 }};
     const present = [_]router.Via{
         .{ .x = 0, .y = 0, .dia = 0.6, .drill = 0.3, .net = 0 },
         .{ .x = 2, .y = 0, .dia = 0.6, .drill = 0.3, .net = 0 },
         .{ .x = 3, .y = 0, .dia = 0.6, .drill = 0.3, .net = 1 },
     };
-    const before = try remainingPolicies(alloc, &policies, &retained, present[0..1]);
+    const before = try remainingPolicies(alloc, &policies, present[0..1]);
     try std.testing.expectEqual(@as(?u16, 1), before[0].max_vias);
-    const after = try remainingPolicies(alloc, &policies, &retained, &present);
+    const after = try remainingPolicies(alloc, &policies, &present);
     try std.testing.expectEqual(@as(?u16, 0), after[0].max_vias);
     try std.testing.expectEqual(@as(u64, 3), after[0].allowed_layers);
     try std.testing.expectEqual(@as(?u16, null), after[1].max_vias);
-    const stripped = try remainingPolicies(alloc, &policies, &retained, &.{});
-    try std.testing.expectEqual(@as(?u16, 1), stripped[0].max_vias);
+    const stripped = try remainingPolicies(alloc, &policies, &.{});
+    try std.testing.expectEqual(@as(?u16, 2), stripped[0].max_vias);
 }
 
 /// The clock and the memory ONE gate pass runs under.
@@ -552,7 +544,7 @@ fn closeEach(
             .reserved_lanes = board_in.stop.constraints.reserved,
         }, &.{gap}, .{
             .constraints = .{
-                .net = try remainingPolicies(arena, board_in.stop.constraints.net, board_in.stop.constraints.retained_vias, board.vias),
+                .net = try remainingPolicies(arena, board_in.stop.constraints.net, board.vias),
                 .terminal_via = board_in.stop.terminal_via,
             },
             .ripup = false,

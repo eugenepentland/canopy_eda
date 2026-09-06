@@ -503,6 +503,20 @@ fn thermalFirstViaOrder(
     return order;
 }
 
+/// Plane and finishing passes run outside routeNet's transactional via gate.
+/// Consult the authored total against the copper currently present, so retained
+/// barrels and earlier passes spend the same allowance.
+fn canAddNetVia(ctx: *const Ctx, vias: []const Via, net: i32) bool {
+    const ni = std.math.cast(usize, net) orelse return false;
+    if (ni >= ctx.net_policy.len) return true;
+    const limit = ctx.net_policy[ni].max_vias orelse return true;
+    var count: usize = 0;
+    for (vias) |via| {
+        if (via.net == net) count += 1;
+    }
+    return count < limit;
+}
+
 /// Fill an exposed plane pad before any ordinary stitch is attempted. Sites
 /// never leave the pad: a partial legal array is better than fanning thermal
 /// drills into surrounding routing channels. Every accepted barrel is stamped
@@ -530,6 +544,7 @@ fn placeThermalViaArray(
                 covered += 1;
                 continue;
             }
+            if (!canAddNetVia(ctx, vias.items, ni)) continue;
             if (!groundViaPointClear(ctx, vias.items, tracks, pos, ni)) continue;
             try vias.append(ctx.arena, .{ .x = pos[0], .y = pos[1], .dia = ctx.params.via_dia, .drill = ctx.params.via_drill, .net = ni });
             stampViaOcc(ctx, pos[0], pos[1], ni);
@@ -603,6 +618,7 @@ fn planeNetCopper(
         if (padInPour(pour, c)) continue;
         tally.needed = true;
         if (web.served(i)) continue;
+        if (!canAddNetVia(ctx, vias.items, ni)) continue;
         const cc = [2]f64{ c.x, c.y };
         // The cluster's shared barrel belongs IN the bypass cap's land (see
         // `Web.capLand`), so the run carries the rail on to the pin and no
@@ -796,6 +812,17 @@ fn replayReferenceCopper(
     if (!policy.replay_reference_copper) return false;
     if (!after_failed_synthesis and (policy.waypoints.len > 0 or policy.branches.len > 0)) return false;
     const net: i32 = @intCast(net_i);
+    if (policy.max_vias) |limit| {
+        var remaining: usize = limit;
+        for (vias.items) |via| {
+            if (via.net == net) remaining -|= 1;
+        }
+        for (ctx.guide_vias) |via| {
+            if (via.net != net) continue;
+            if (remaining == 0) return false;
+            remaining -= 1;
+        }
+    }
     var emitted = false;
     for (ctx.guide_tracks) |guide| {
         if (guide.net != net or guide.layer >= ctx.occ.len) continue;
@@ -2725,6 +2752,7 @@ fn routeEscapeStubs(
         if (stub.net < 0 or !netEnabled(ctx, @intCast(stub.net))) continue;
         ctx.preferred_layers = 0;
         ctx.allowed_layers = 0;
+        if (!canAddNetVia(ctx, vias.items, stub.net)) continue;
         const part = placement.parts[stub.part];
         setNetParams(ctx, placement, @intCast(stub.net));
         // The finish passes probe against the COMPLETE board copper (the maze
@@ -2787,6 +2815,7 @@ fn stitchReturnPaths(
         const signal_via = vias.items[i];
         if (isGndVia(placement, signal_via.net)) continue;
         if (hasNearbyGroundVia(placement, vias.items, signal_via)) continue;
+        if (!canAddNetVia(ctx, vias.items, ground_net)) break;
         const at = findStitchVia(
             ctx,
             vias.items,
@@ -2869,6 +2898,7 @@ fn stitchGroundPads(
             if (plane_stitch.packageTieObstacle(placement, pad_i)) continue;
             const centre = [2]f64{ (pad.x0 + pad.x1) / 2, (pad.y0 + pad.y1) / 2 };
             if (groundPadHasNearbyVia(vias.items, ni, centre, max_distance)) continue;
+            if (!canAddNetVia(ctx, vias.items, ni)) break;
             const in_pour = pad.layer < pour.len and pour[pad.layer];
             const at = if (in_pour) blk: {
                 // The authored same-face GND pour is the pad→via connection;
@@ -3545,6 +3575,15 @@ pub fn routeNet(
     const track_mark = tracks.items.len;
     const via_mark = vias.items.len;
     const saved_allow_vias = ctx.allow_vias;
+    const saved_via_limit = ctx.max_vias;
+    defer ctx.max_vias = saved_via_limit;
+    if (saved_via_limit) |limit| {
+        var present: u16 = 0;
+        for (vias.items) |via| if (via.net == net) {
+            present +|= 1;
+        };
+        ctx.max_vias = limit -| present;
+    }
     const saved_direct_budget = ctx.direct_budget;
     ctx.zone_partial = false;
     ctx.tree_partial = false;
@@ -3597,7 +3636,14 @@ pub fn routeNet(
         if (!routed) {
             ctx.zone_partial = ctx.zone_partial or primary_zone_partial;
             ctx.tree_partial = ctx.tree_partial or primary_tree_partial;
-            if (ctx.zone_partial or ctx.tree_partial) return false;
+            if (ctx.zone_partial or ctx.tree_partial) {
+                if (ctx.max_vias) |limit| if (vias.items.len - via_mark > limit) {
+                    rollbackDirectRun(run, track_mark, via_mark);
+                    ctx.zone_partial = false;
+                    ctx.tree_partial = false;
+                };
+                return false;
+            }
             rollbackDirectRun(run, track_mark, via_mark);
             routed = try escapeDirectRescue(ctx, net, ordered_pts, tracks, vias);
         }
@@ -3609,12 +3655,36 @@ pub fn routeNet(
     if (ctx.max_vias) |limit| if (vias.items.len - via_mark > @as(usize, limit)) {
         rollbackDirectRun(run, track_mark, via_mark);
         if (!saved_allow_vias) return false;
-        ctx.allow_vias = false;
-        const retried = try routeNetAttempt(ctx, net, ordered_pts, tracks, vias);
-        if (!retried) rollbackDirectRun(run, track_mark, via_mark);
-        return retried;
+        return try retryViaBudget(run, ordered_pts, track_mark, via_mark, limit);
     };
     return try detour_guard.detourGuard(run, ordered_pts, track_mark, via_mark);
+}
+
+/// Try the remaining nonzero via allowance before falling back to no new
+/// layer changes. Copper and partial flags roll back together on every refusal.
+fn retryViaBudget(
+    run: DirectRun,
+    pts: []const NetPt,
+    track_mark: usize,
+    via_mark: usize,
+    limit: u16,
+) std.mem.Allocator.Error!bool {
+    const ctx = run.ctx;
+    const saved_bias = ctx.via_cost.bias_mm;
+    defer ctx.via_cost.bias_mm = saved_bias;
+    const span = ctx.grid.g * @as(f64, @floatFromInt(ctx.grid.nx + ctx.grid.ny));
+    for ([_]f64{ 1, 4, 0 }) |scale| {
+        if (routeCancelled(ctx)) return false;
+        ctx.allow_vias = limit > 0 and scale > 0;
+        ctx.via_cost.bias_mm = @max(saved_bias, span * scale);
+        const routed = try routeNetAttempt(ctx, run.net, pts, run.tracks, run.vias);
+        if (routed and run.vias.items.len - via_mark <= limit) return true;
+        rollbackDirectRun(run, track_mark, via_mark);
+        ctx.zone_partial = false;
+        ctx.tree_partial = false;
+        if (limit == 0) break;
+    }
+    return false;
 }
 
 /// This net's authored `(branches …)` tree, or EMPTY when it has none — the one
@@ -4612,6 +4682,7 @@ pub const shortName = net_name.leaf;
 const testing = std.testing;
 
 // spec: placement/router - maze-routes a two-pad net into connected track segments
+// spec: placement/router - retained same-net vias spend a whole-board route budget while foreign vias do not
 test "route connects a simple two-pad net" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -4706,6 +4777,32 @@ test "route connects a simple two-pad net" {
     try testing.expectEqual(@as(usize, 0), rejected.routed);
     try testing.expectEqual(@as(usize, 0), rejected.tracks.len);
     try testing.expectEqual(@as(usize, 0), rejected.vias.len);
+
+    // A retained via is part of the authored total. The two-transition guide
+    // cannot add two more to an existing one under a cap of two.
+    var retained_placement = placement;
+    retained_placement.maxy = 3;
+    const total_two = [_]route_policy.NetPolicy{.{ .waypoints = &guide_points, .max_vias = 2 }};
+    var retained_via = [_]route_policy.ExistingVia{.{ .x = 1.5, .y = 2, .dia = 0.4, .drill = 0.2, .net = 0 }};
+    const budget_pts = [_]NetPt{ .{ .x = 0, .y = 0, .layer = 0 }, .{ .x = 3, .y = 0, .layer = 0 } };
+    for ([_]i32{ 0, 7 }) |retained_net| {
+        retained_via[0].net = retained_net;
+        const core = try testRouteCore(try routeCoreStart(arena, retained_placement, .{}, .{
+            .net = &total_two,
+            .existing_vias = &retained_via,
+            .selected_nets = &.{false},
+        }, .off));
+        setNetParams(core.ctx, retained_placement, 0);
+        setNetRoutePolicy(core.ctx, 0, &budget_pts);
+        const connected = try routeNet(core.ctx, 0, &budget_pts, core.tracks, core.vias);
+        try testing.expect(retainedViasEchoed(core.vias.items, &retained_via, retained_net));
+        if (retained_net == 0) {
+            try testing.expect(core.vias.items.len <= 2);
+        } else {
+            try testing.expect(connected);
+            try testing.expectEqual(@as(usize, 3), core.vias.items.len);
+        }
+    }
 
     // A false selected-net mask skips the net entirely; retained copper still
     // passes through unchanged for leave-one-net experiment composition.
@@ -5402,6 +5499,7 @@ test "plane net stitch order follows authored wave priority" {
     try testing.expectEqualSlices(usize, &.{ 3, 1, 0, 2 }, &hot_order);
 }
 
+// spec: placement/router - plane and finishing vias share the authored total with retained copper
 // spec: placement/router - a plane-less stackup routes ground as real copper instead of dropping plane vias
 test "plane-less stackup maze-routes the ground net" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
@@ -5435,6 +5533,37 @@ test "plane-less stackup maze-routes the ground net" {
     const legacy = try route(arena, placement, .{});
     try testing.expectEqual(@as(usize, 1), legacy.routed);
     try testing.expect(legacy.vias.len >= 2);
+
+    const limited = try routeWithOptions(arena, placement, .{}, .{
+        .net = &.{.{ .max_vias = 1 }},
+    });
+    try testing.expect(limited.vias.len <= 1);
+    const forbidden = try routeWithOptions(arena, placement, .{}, .{
+        .net = &.{.{ .max_vias = 0 }},
+    });
+    try testing.expectEqual(@as(usize, 0), forbidden.vias.len);
+
+    // Thermal arrays reuse occupied sites and spend only the remaining total.
+    var ctx = try testRouteCtx(arena, placement, .{});
+    ctx.net_policy = &.{.{ .max_vias = 2 }};
+    const array = ThermalArray{
+        .pad = .{ .x0 = -0.45, .y0 = -0.45, .x1 = 0.45, .y1 = 0.45 },
+        .centre = .{ 0, 0 },
+        .cols = 2,
+        .rows = 2,
+        .pitch_x = 0.6,
+        .pitch_y = 0.6,
+    };
+    // A roomy standalone land allows all four sites without the via cap.
+    ctx.params.via_dia = 0.2;
+    ctx.params.via_drill = 0.1;
+    var array_vias: std.ArrayList(Via) = .empty;
+    const covered = try placeThermalViaArray(&ctx, &array_vias, &.{}, 0, array);
+    try testing.expectEqual(@as(usize, 2), covered);
+    try testing.expectEqual(@as(usize, 2), try placeThermalViaArray(&ctx, &array_vias, &.{}, 0, array));
+    try testing.expectEqual(@as(usize, 2), array_vias.items.len);
+    ctx.net_policy = &.{};
+    try testing.expectEqual(@as(usize, 4), try placeThermalViaArray(&ctx, &array_vias, &.{}, 0, array));
 
     // Declared plane-less stackup: GND maze-routes as surface copper.
     placement.rules.plane_nets = &.{};
@@ -5584,6 +5713,14 @@ test "plane vias clear retained opposite-face tracks" {
     // copper layer is an artifact, even though its reference was accepted.
     try testing.expectEqual(@as(usize, 0), replayed.vias.len);
     try testing.expectEqualSlices(usize, &.{0}, replayed.reference_replayed);
+    const capped_replay = try routeWithOptions(arena, placement, .{}, .{
+        .net = &.{ .{ .replay_reference_copper = true, .max_vias = 0 }, .{} },
+        .selected_nets = &selected,
+        .existing_tracks = &retained,
+        .guides = .{ .vias = &guide_vias },
+    });
+    try testing.expectEqual(@as(usize, 0), capped_replay.vias.len);
+    try testing.expectEqual(@as(usize, 0), capped_replay.reference_replayed.len);
 }
 
 // spec: placement/router - a scoped route echoes retained out-of-scope copper byte-identical; no finish pass rewrites an unselected net
@@ -6712,6 +6849,12 @@ test "route stitches a useful signal via with a ground via" {
     try testing.expect(sig != null and gnd != null);
     // The stitch via sits within the return-path radius of the signal via…
     try testing.expect(std.math.hypot(gnd.?.x - sig.?.x, gnd.?.y - sig.?.y) <= return_path_radius_mm);
+    const capped = try routeWithOptions(arena, placement, .{}, .{
+        .net = &.{ .{}, .{ .max_vias = 0 } },
+    });
+    try testing.expectEqual(@as(usize, 1), capped.vias.len);
+    try testing.expectEqual(@as(i32, 0), capped.vias[0].net);
+    try testing.expectEqual(@as(usize, 1), returnPathViolations(placement, capped, return_path_radius_mm));
     // …so the routed board reports no return-path discontinuity.
     try testing.expectEqual(@as(usize, 0), returnPathViolations(placement, r, return_path_radius_mm));
 }
@@ -6761,6 +6904,10 @@ test "route adds final ground-pad stitches after an outer pour skipped plane via
     try testing.expectEqual(@as(usize, 1), routed.vias.len);
     try testing.expect(groundPadHasNearbyVia(routed.vias, 0, .{ 0, 0 }, 1.0));
     try testing.expect(groundPadHasNearbyVia(routed.vias, 0, .{ 0.8, 0 }, 1.0));
+    const capped = try routeWithOptions(arena, placement, placement.rules.design.routeParams(), .{
+        .net = &.{.{ .max_vias = 0 }},
+    });
+    try testing.expectEqual(@as(usize, 0), capped.vias.len);
 }
 
 // spec: placement/router - names the nets that failed to route in RouteResult.failed
@@ -8047,4 +8194,39 @@ test "a deferred repair corridor cannot escape authored layer and via limits" {
     var vias: std.ArrayList(Via) = .empty;
     _ = try routeNet(core.ctx, 0, &pts, &tracks, &vias);
     try testing.expect(vias.items.len <= budgeted[0].max_vias.?);
+}
+
+// spec: placement/router - an incomplete subtree exceeding the remaining via allowance is rolled back rather than retained
+test "via budget rolls back an over-budget partial tree" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = walledClockParts(&pads);
+    const placement = walledClockBoard(&parts);
+    var sealed_east = walled_clock_zones[1];
+    sealed_east.layer = 1;
+    const walls = [_]route_policy.ExistingZone{ walled_clock_zones[0], walled_clock_zones[1], sealed_east };
+    const pts = [_]NetPt{ .{ .x = -3, .y = 0, .layer = 0 }, .{ .x = 0, .y = 0, .layer = 0 }, .{ .x = 3, .y = 0, .layer = 0 } };
+    for ([_]u16{ 3, 1 }) |limit| {
+        const policies = [_]route_policy.NetPolicy{.{ .allowed_layers = 3, .max_vias = limit }};
+        const core = try testRouteCore(try routeCoreStart(arena, placement, .{}, .{
+            .net = &policies,
+            .selected_nets = &.{false},
+            .existing_zones = &walls,
+        }, .off));
+        setNetParams(core.ctx, placement, 0);
+        setNetRoutePolicy(core.ctx, 0, &pts);
+        var tracks: std.ArrayList(Track) = .empty;
+        var vias: std.ArrayList(Via) = .empty;
+        try testing.expect(!try routeNet(core.ctx, 0, &pts, &tracks, &vias));
+        if (limit == 3) {
+            try testing.expect(core.ctx.tree_partial);
+            try testing.expectEqual(@as(usize, 2), vias.items.len);
+        } else {
+            try testing.expect(!core.ctx.tree_partial);
+            try testing.expectEqual(@as(usize, 0), vias.items.len);
+            try testing.expectEqual(@as(usize, 0), tracks.items.len);
+        }
+    }
 }

@@ -12,7 +12,7 @@ The best generated-copper candidates currently stand at:
 | Board | Connected nets | Geometry errors | Remaining acceptance work |
 | --- | --- | --- | --- |
 | Black Canyon RF | 59/59 | 0 | No missing authored surface bonds after local capacitor moves and automatic repair; DRC warnings and release review |
-| Barracuda RF | 130/130 | 0 | Local fanout trial connects LOCK_DET; total via-budget mismatch and warning review remain; no missing authored bypass bonds |
+| Barracuda RF | 130/130 | 0 | SPI_SCK reduced from 15 to 6 vias; three other via-cap violations and warning review remain; no missing authored bypass bonds |
 | Barracuda Base | 99/183 | 1 | Open nets, 26 missing authored bypass bonds, and a hairline gap |
 
 Allocation-safe finishing (`e5981dfe`) preserves Black Canyon's connected result
@@ -1060,3 +1060,94 @@ All 225 component poses, outlines, texts, pours and saved RF paths are unchanged
 The repair is still an agent-selected local window and ordered native finishing
 sequence; a single DSL-driven automatic replay remains unfinished. Barracuda Base
 remains at 99/183 with one hairline gap and 26 missing bypass bonds.
+
+
+## Total via-budget accounting — 2026-09-06
+
+The connected RF candidate hid four violations of authored `(max-vias …)`
+limits. Incremental finishing treated retained vias as free on each invocation;
+whole-net retries and module handoff also disagreed about whether the policy
+was a total or a remaining allowance. The current feature makes whole-net and
+seed policies totals, and lowers gap-repair policies to the remaining allowance
+once per transaction. Over-budget partial trees roll back. Plane, thermal,
+escape, return-stitch, ground-pad and reference-replay passes check their total;
+coupled differential legs check both members before either is committed.
+
+`get_layout_progress` now reports `via-budget-exceeded` or
+`via-budget-unverified` in the routing stage. Geometry DRC and connectivity
+remain separate measurements. Standalone fence/stitch tools without a lowered
+route plan still require this final saved-copper audit; these changes do not
+prove every geometry-producing API enforces the plan before writing.
+
+A native whole-net clear and automatic finish reduced RF `SPI_SCK` from 15 to
+6 vias, keeping 130/130 connected and no missing bypass bonds. The published
+candidate is `autorouter-review-20260906-via-budget`: 1017 physical tracks,
+439 vias, zero geometry errors and 461 warnings. It has 988 persisted tracks;
+the physical report includes derived copper. This experiment used verified
+`b21f82ad`, starting SCK with zero vias, so its ten-new-via allowance was also
+the total allowance. It is not a fresh full-board run of this feature engine.
+
+The new progress audit reports 127/130 routing requirements satisfied:
+`V_24V_CLEAN` has 4 vias against 2, `SPI_LMX_CSN` 5 against 3, and `V_1V8A`
+8 against 4. A separate chip-select clear/finish trial kept zero of one hop
+and reported a policy refusal; it remains an isolated 129/130 candidate.
+No authored limits were relaxed. Frozen experiment files and reports are in
+`/tmp/autorouter-via-budget-20260906`.
+
+A guided-repair fixture also exposed a separate limitation: the ordinary
+router can prune a retained isolated via, and the guided acceptance gate then
+rejects the candidate because frozen copper changed. The budget changes do
+not resolve that preservation/cleanup disagreement. Next work must improve
+constrained RF repair and close Base's remaining 84 nets and geometry error,
+then verify all three boards against the authored constraints and warnings.
+
+
+### Via-budget release status
+
+Feature commits `64aaf72a` and `cd5e0663` are isolated on
+`codex/route-via-budget`. The full test suite and ReleaseSafe build passed at
+`cd5e0663` (137 s and 136 s). Release preparation then failed all three Canvas
+zoom timing attempts: zoom-in p95 was 57.2, 45.6 and 65.2 ms against 45 ms;
+the first attempt also missed the zoom-out limit. Renderer assets and the
+browser harness are unchanged by this feature, but deployment remains blocked
+until the required gate passes. No merge or production restart was performed.
+The isolated build and full logs remain in
+`.git/release-failures/cd5e0663cbec8e43f654d4c2c8c084b965faffb1-20260906-073303-3685575`.
+The saved RF candidate remains reviewable in the running server; its new
+routing-progress check is available in the isolated feature build.
+
+
+## Searching within a nonzero via allowance — 2026-09-06
+
+A complete cheapest path could exceed a via limit even when a longer legal
+path existed. Whole-net routing previously retried with no vias at all; gap
+repair rejected the candidate. Both now try two bounded increases to the
+layer-change cost before refusing the connection. Whole-net routing retains
+its zero-via fallback. The added cost is outside corridor discounts and also
+reaches the shape rescue. Every accepted path still passes its hard layer and
+via policy; retries restore pricing and roll back rejected copper. These are
+bounded searches, not an exhaustive proof that no feasible path exists.
+
+The regression fixture forces three vias on the ordinary shortest path and
+one on a longer valid detour. It failed before this change and passes for both
+gap and whole-net routing afterward; the new copper also passes geometry DRC.
+The focused via/policy suite and full-shard inventory passed 311 tests.
+
+On frozen Barracuda RF copper, native automatic finishing now closes
+`SPI_LMX_CSN` with three vias instead of five, meeting its authored limit.
+The path grows from 43.4 to 44.7 mm. Independent inspection with the previously
+verified ReleaseSafe executable reports 130/130 connected, 1015 physical tracks,
+437 vias, zero geometry errors, 461 warnings and no missing bypass bonds.
+The saved candidate has 982 persisted tracks; derived copper explains the
+physical total. The feature progress check improves from 127/130 to 128/130:
+`V_24V_CLEAN` remains at four vias against two and `V_1V8A` at eight against four.
+An isolated clear/repair trial of the 24 V rail left it open and was not promoted.
+No authored limit was relaxed.
+
+Review candidate: `autorouter-review-20260906-via-search`. The named snapshot
+was imported through the native save tool after all 1005 frozen library/board
+source files matched the live project; the existing starred layout is retained.
+Evidence, the working-source patch and Debug executable SHA-256 are in
+`/tmp/autorouter-via-search-20260906`. This is an incremental repair experiment,
+not a fresh full-board run. Release verification of the combined branch follows
+this change; the earlier release failure above applies to its earlier commit.

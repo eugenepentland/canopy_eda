@@ -798,11 +798,9 @@ fn retryLatticeGuided(
         retry_options.selected_nets = selected;
         retry_options.existing_tracks = tracks.items;
         retry_options.existing_vias = vias.items;
-        // A repair corridor still obeys the enclosing hard layer/via policy.
-        // Copper generated earlier in this transaction has already spent part
-        // of its via allowance, even though it is frozen during this retry.
-        const remaining = try route_close.remainingPolicies(alloc, base_options.net, base_options.existing_vias, baseline.vias);
-        const retry_policies = try alloc.dupe(route_policy.NetPolicy, remaining);
+        // This is a whole-net route, so keep the authored total. routeNet counts
+        // its retained vias; lowering here would subtract them a second time.
+        const retry_policies = try alloc.dupe(route_policy.NetPolicy, base_options.net);
         applyDeferredRepair(&retry_policies[net_i]);
         retry_options.net = retry_policies;
         retry_options.stop.max_route_ms = 0;
@@ -4245,7 +4243,7 @@ fn unblockGapCandidate(
         .zones = run.options.existing_zones,
         .reserved_lanes = run.options.guides.reserved,
     }, &.{request}, .{
-        .constraints = .{ .net = try route_close.remainingPolicies(alloc, run.options.net, run.options.existing_vias, trial_base.vias) },
+        .constraints = .{ .net = try route_close.remainingPolicies(alloc, run.options.net, trial_base.vias) },
         .ripup = false,
         .judge = .{ .ctx = null, .keep = route_close.additiveOnly },
         .raster = .{
@@ -4589,7 +4587,7 @@ fn unblockShapeHop(
         .zones = run.options.existing_zones,
         .reserved_lanes = run.options.guides.reserved,
     }, &.{request}, .{
-        .constraints = .{ .net = try route_close.remainingPolicies(run.alloc, run.options.net, run.options.existing_vias, board.vias) },
+        .constraints = .{ .net = try route_close.remainingPolicies(run.alloc, run.options.net, board.vias) },
         .ripup = false,
         .shape = .only,
         .judge = .{ .ctx = null, .keep = route_close.additiveOnly },
@@ -5652,7 +5650,6 @@ fn gateReconcile(
     return route_close.reconcile(alloc, placement, params, raw, options.existing_zones, .{
         .constraints = .{
             .net = options.net,
-            .retained_vias = options.existing_vias,
             .reserved = options.guides.reserved,
         },
         .only_nets = options.selected_nets,

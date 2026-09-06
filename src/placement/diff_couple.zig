@@ -450,6 +450,17 @@ fn commitPairLegs(
 ) std.mem.Allocator.Error!bool {
     const ctx = run.ctx;
     const marks = [2]usize{ run.tracks.items.len, run.vias.items.len };
+    // The centreline was routed under the leader's budget. Both generated legs
+    // must also fit their own total, including retained barrels on either net.
+    for ([2]usize{ pair.p, pair.n }) |net| {
+        if (net >= ctx.net_policy.len) continue;
+        const limit = ctx.net_policy[net].max_vias orelse continue;
+        var remaining: usize = limit;
+        for (run.vias.items) |via| {
+            if (via.net == net) remaining -|= 1;
+        }
+        if (legs.vias.len > remaining) return false;
+    }
     const need = ctx.params.track_width + ctx.params.clearance - router.clearance_eps;
     const gap = diff_route.minOppositeGap(legs);
     if (gap < need) {
@@ -1094,6 +1105,48 @@ pub fn recouple(run: router.EscalateRun, pair: diff_pairs.DiffPair) std.mem.Allo
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+// spec: placement/router - coupled pair vias respect both members' total budgets before committing either leg
+test "coupled via budget includes retained barrels on the follower" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "P", .pins = &.{} }, .{ .name = "N", .pins = &.{} },
+    };
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -3,
+        .miny = -3,
+        .maxx = 3,
+        .maxy = 3,
+        .generated = true,
+    };
+    const built = try router.buildRouteCtx(arena, placement, .{}, &.{}, 1);
+    try testing.expect(built == .ok);
+    var ctx = built.ok;
+    var policies = [_]@import("route_policy.zig").NetPolicy{ .{ .max_vias = 1 }, .{ .max_vias = 1 } };
+    ctx.net_policy = &policies;
+    var tracks: std.ArrayList(router.Track) = .empty;
+    var vias: std.ArrayList(router.Via) = .empty;
+    const retained = router.Via{ .x = 0, .y = 2, .net = 1, .dia = 0.6, .drill = 0.3 };
+    try vias.append(arena, retained);
+    var idx = std.StringHashMapUnmanaged(usize).empty;
+    const run = router.CoupledRun{ .ctx = &ctx, .placement = placement, .idx_of = &idx, .tracks = &tracks, .vias = &vias };
+    const pair = diff_pairs.DiffPair{ .p = 0, .n = 1, .gap = 0.4 };
+    const legs = diff_route.Legs{ .segs = &.{}, .vias = &.{.{ .p = .{ .x = -1, .y = 0 }, .n = .{ .x = 1, .y = 0 } }} };
+    try testing.expect(!try commitPairLegs(run, pair, legs));
+    try testing.expectEqualSlices(router.Via, &.{retained}, vias.items);
+    policies[1].max_vias = 2;
+    try testing.expect(try commitPairLegs(run, pair, legs));
+    try testing.expectEqual(@as(usize, 3), vias.items.len);
+}
 
 // spec: placement/router - a coupled diff pair applies KiCad's edge-to-edge via gap independently of its trace gap
 test "dp_coupled pair via spread honors the KiCad via gap" {

@@ -3461,7 +3461,7 @@ src/placement/route_close.zig::reconcile | fn reconcile( arena: std.mem.Allocato
 src/placement/route_close.zig::refusals | fn refusals(self: *const HopMemo, net_i: usize) usize
 src/placement/route_close.zig::refuse | fn refuse(self: *HopMemo, gap: router.Gap, wide: bool) std.mem.Allocator.Error!void
 src/placement/route_close.zig::refuseShape | fn refuseShape(self: *HopMemo, gap: router.Gap) std.mem.Allocator.Error!void
-src/placement/route_close.zig::remainingPolicies | fn remainingPolicies( alloc: std.mem.Allocator, policies: []const route_policy.NetPolicy, retained: []const route_policy.ExistingVia, present: []const router.Via, ) std.mem.Allocator.Error![]const route_policy.NetPolicy
+src/placement/route_close.zig::remainingPolicies | fn remainingPolicies( alloc: std.mem.Allocator, policies: []const route_policy.NetPolicy, present: []const router.Via, ) std.mem.Allocator.Error![]const route_policy.NetPolicy
 src/placement/route_close.zig::sealed | fn sealed(self: *const HopMemo, net_i: usize) bool
 src/placement/route_close.zig::seen | fn seen(self: *const HopMemo, gap: router.Gap, wide: bool) bool
 src/placement/route_close.zig::shapeRefusals | fn shapeRefusals(self: *const HopMemo, net_i: usize) usize

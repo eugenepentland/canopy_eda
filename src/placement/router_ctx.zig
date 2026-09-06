@@ -2086,19 +2086,26 @@ pub const Ctx = struct {
     /// first pass so a short signal net (e.g. a feedback tap) stays on the
     /// surface instead of diving to L2 the moment a via is marginally cheaper.
     allow_vias: bool = true,
-    /// Ceiling (mm) on what one maze layer change may cost, or null for the
-    /// lattice price alone.
-    ///
-    /// The ordinary price is `grid.g * via_cost_mult` — denominated in GRID
-    /// PITCHES, which keeps the cost model scale-free but makes the same
-    /// physical via cost four times more on a wide-track net's coarse lattice
-    /// (measured: 1.91 mm at the LDO fixture's 0.477 mm pitch) than on a
-    /// fine-pitch net's (0.51 mm at 0.127 mm). `detourGuard`'s retry caps it at
-    /// a physical figure so a connection that already detoured is re-searched
-    /// with vias priced by what they cost the BOARD. A `@min`, never a
-    /// replacement: the retry can only ever be more via-friendly than the
-    /// attempt it is second-guessing, never less.
-    via_cost_cap_mm: ?f64 = null,
+    /// Per-attempt layer-change pricing; ordinary routes use the lattice cost.
+    via_cost: struct {
+        /// Ceiling (mm) on what one maze layer change may cost, or null for the
+        /// lattice price alone.
+        ///
+        /// The ordinary price is `grid.g * via_cost_mult` — denominated in GRID
+        /// PITCHES, which keeps the cost model scale-free but makes the same
+        /// physical via cost four times more on a wide-track net's coarse lattice
+        /// (measured: 1.91 mm at the LDO fixture's 0.477 mm pitch) than on a
+        /// fine-pitch net's (0.51 mm at 0.127 mm). `detourGuard`'s retry caps it at
+        /// a physical figure so a connection that already detoured is re-searched
+        /// with vias priced by what they cost the BOARD. A `@min`, never a
+        /// replacement: the retry can only ever be more via-friendly than the
+        /// attempt it is second-guessing, never less.
+        cap_mm: ?f64 = null,
+        /// Additive layer-change price used only after a route exceeds its hard
+        /// via allowance. Applied after corridor discounts, so a bounded retry can
+        /// prefer a longer path with fewer vias without changing legal geometry.
+        bias_mm: f64 = 0,
+    } = .{},
     /// Net-indexed policy for this run plus the effective masks of the current
     /// net. All-zero defaults preserve the legacy search cost and reachability.
     net_policy: []const route_policy.NetPolicy = &.{},

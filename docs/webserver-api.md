@@ -1122,6 +1122,16 @@ this mode. Omitting `include_tracks` keeps the existing via-only operation.
 Use this on a separate candidate, then `close_open_nets` to reconnect both the
 original target and every displaced net before accepting the repair.
 
+An authored `(max-vias N)` counts the net's total vias, including retained
+copper and earlier finishing calls. Whole-board routing, module seed acceptance
+and residual repairs share that limit; duplicate seeds do not spend it twice.
+Plane/thermal drops and the core finishing passes also count retained vias;
+coupled differential routing checks both members before committing the pair.
+An over-budget partial subtree is discarded. Existing over-budget copper is
+reported by the routing progress stage as `via-budget-exceeded`, even when its
+net is connected; missing via-count evidence gives `via-budget-unverified`.
+These are route-plan completion blockers, separate from geometric DRC findings.
+
 ```jsonc
 add_tracks {
   "name": "barracuda",

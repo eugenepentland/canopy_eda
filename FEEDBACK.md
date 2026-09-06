@@ -970,3 +970,20 @@ New from the wave:
 - **friction:** `netlisp build` writes nothing without `--output-dir`, so "build twice and diff the tree" does not exercise the ID-pinning path at all. Verifying that a repeat build does not reassign identities means driving the server edit path; there is no CLI seam for it.
 - **workaround:** `examples/blinky-breakout` is the only public board small enough to use as a fixture, and it needs a `git init` before system-level composition will get past project-state capture. Worth saying in the example's README, since the hermetic-example story is the reason it exists.
 - **correction (same session):** the `git init` above is wrong — it was a red herring from bisecting around the containment failure. A non-git project composes a system review fine; `project_status` reports `unavailable` and the composition proceeds. The whole recipe is two copies of the example board, a `(system …)` contract naming both, and one required active checklist document.
+
+## 2026-09-06 · codex · total via-budget routing
+- **friction:** A positive `retryLatticeGuided` regression repeatedly failed at the frozen-copper gate after the route had connected its two pads. Its retained isolated via was removed by topology cleanup; test output did not name that rejection because the route's info logs are suppressed in focused tests. Temporary raw-result and gate diagnostics exposed the reason.
+- **idea:** Return a typed guided-candidate rejection reason (changed frozen copper, no connectivity gain, geometry failure or timeout) to tests and route diagnostics, so a policy regression can verify the reason rather than infer it from the final failed-net count.
+- **status:** open
+
+
+## 2026-09-06 · codex · via-budget shard registration
+- **friction:** The new `placement.router.test.via budget rolls back an over-budget partial tree` ran in the focused `via` filter but matched no full-suite shard prefix. The release gate caught this after 124 seconds and cancelled the concurrent ReleaseSafe build; 5,355 other tests had passed.
+- **idea:** Include `shard manifest runs every named test exactly once` automatically in focused test runs. Its source inventory can catch an unclaimed test before the final release gate without running the rest of the suite.
+- **status:** mitigated by assigning the new prefix in `src/test_shards.zig`
+
+
+## 2026-09-06 · codex · via-budget release timing blocker
+- **blocker:** `prepare-release.sh` passed the full tests and ReleaseSafe build at `cd5e0663`, then rejected all three Canvas zoom attempts: zoom-in p95 57.2, 45.6 and 65.2 ms against 45 ms. The branch changes no renderer assets or browser harness, but remains unmerged under the release gate. The timing phase took about eleven minutes.
+- **idea:** On a timing retry, check the completed Canvas repetitions before running the WebGPU repetitions; when Canvas already fails an absolute limit, stop that attempt and retain its metrics. This would avoid repeating a second renderer's expensive work on attempts that cannot pass.
+- **status:** open; source and solver tests pass, browser performance verification does not

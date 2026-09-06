@@ -220,6 +220,76 @@ test "gap policy refuses a forbidden layer detour and a two-via path over budget
     try testing.expectEqual(GapReason.policy, log.seen[0].why);
 }
 
+/// The top wall forces an early layer change; the bottom wall can be crossed
+/// either with two more vias or by a longer detour around its northern end.
+fn viaBudgetDetourPlacement(arena: std.mem.Allocator) std.mem.Allocator.Error!optimizer.Placement {
+    var placement = try walledPlacement(arena);
+    placement.parts[1].side = .bottom;
+    placement.board_rect = .{ .minx = -1, .miny = -4, .w = 12, .h = 10 };
+    return placement;
+}
+
+fn viaBudgetDetourWalls() [2]Track {
+    return .{
+        .{ .x1 = 2, .y1 = -10, .x2 = 2, .y2 = 10, .layer = 0, .width = 0.2, .net = 1 },
+        .{ .x1 = 5, .y1 = -10, .x2 = 5, .y2 = 4, .layer = 1, .width = 0.2, .net = 1 },
+    };
+}
+
+// spec: placement/router - a via-limited gap retries a longer legal path with a nonzero via allowance instead of rejecting the cheaper excessive-via path
+test "gap via budget finds the longer one-via detour" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const placement = try viaBudgetDetourPlacement(arena);
+    const walls = viaBudgetDetourWalls();
+    var gap = walledGap();
+    gap.to.?.layer = 1;
+    const board = router.GapBoard{ .tracks = &walls };
+    const ordinary = try closeGaps(arena, placement, .{}, board, &.{gap}, .{ .ripup = false, .shape = .off });
+    try testing.expect(ordinary[0] != null);
+    try testing.expectEqual(@as(usize, 3), ordinary[0].?.vias.len);
+    const limited = try closeGaps(arena, placement, .{}, board, &.{gap}, .{
+        .ripup = false,
+        .shape = .off,
+        .constraints = .{ .net = &.{.{ .max_vias = 1 }} },
+    });
+    try testing.expect(limited[0] != null);
+    const path = limited[0].?;
+    try testing.expectEqual(@as(usize, 1), path.vias.len);
+    try testing.expectEqual(@as(usize, 0), path.ripped.len);
+    try testing.expect(touchesPoint(path.tracks, 0, 0));
+    try testing.expect(touchesPoint(path.tracks, 10, 0));
+    var checked_tracks: std.ArrayList(Track) = .empty;
+    try checked_tracks.appendSlice(arena, &walls);
+    try checked_tracks.appendSlice(arena, path.tracks);
+    const drc = @import("drc.zig");
+    const findings = try drc.checkForNet(arena, placement, .{
+        .tracks = checked_tracks.items,
+        .vias = path.vias,
+        .routed = 1,
+        .total = 1,
+    }, 0.127, 0);
+    // The fixture's foreign walls deliberately extend beyond the outline.
+    // Every error involving the new SIG copper must still be absent.
+    for (findings) |finding| try testing.expect(finding.severity != .err or
+        (finding.who.net_a == 1 and finding.who.net_b != 0));
+
+    const retained = [_]route_policy.ExistingTrack{
+        .{ .x1 = 2, .y1 = -10, .x2 = 2, .y2 = 10, .layer = 0, .width = 0.2, .net = 1 },
+        .{ .x1 = 5, .y1 = -10, .x2 = 5, .y2 = 4, .layer = 1, .width = 0.2, .net = 1 },
+    };
+    const whole = try router.routeWithOptions(arena, placement, .{}, .{
+        .net = &.{ .{ .max_vias = 1 }, .{} },
+        .selected_nets = &.{ true, false },
+        .existing_tracks = &retained,
+        .effort = .one_shot,
+        .grid_scale = 1,
+    });
+    try testing.expectEqual(@as(usize, 0), whole.failed.len);
+    try testing.expectEqual(@as(usize, 1), whole.vias.len);
+}
+
 // spec: placement/router - a gap batch spends via allowance only on accepted hops and does not reset it for later requests
 test "gap policy shares the batch via allowance and refunds vetoed hops" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
