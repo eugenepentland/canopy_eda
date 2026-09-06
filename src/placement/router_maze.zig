@@ -772,9 +772,9 @@ pub fn dijkstra(
         // (On a 2-signal board this is exactly the old `1 - layer` step.)
         if (ctx.allow_vias and n_layers > 1 and viaAllowed(ctx, n, net, vias.items)) {
             // The lattice price for a layer change, under whatever ceiling the
-            // caller set (`Ctx.via_cost_cap_mm`; null = the price to the bit).
+            // caller set (`Ctx.via_cost.cap_mm`; null = the price to the bit).
             const lattice = grid.g * via_cost_mult;
-            const via_step = if (ctx.via_cost_cap_mm) |cap| @min(lattice, cap) else lattice;
+            const via_step = if (ctx.via_cost.cap_mm) |cap| @min(lattice, cap) else lattice;
             for (0..n_layers) |to_layer| if (to_layer != layer)
                 try relaxStep(ctx, search, net, from, to_layer, n, via_step);
         }
@@ -878,7 +878,8 @@ fn relaxStep(
     // Congestion surcharge, and zero unless the negotiated-congestion sandbox is
     // armed: OUTSIDE the corridor multiplier, because a shared resource costs
     // what it costs whether or not the step also happens to hug a twin.
-    const nd = search.state.dist[from_key] + eff * mult +
+    const via_bias = if (from_layer != to_layer) ctx.via_cost.bias_mm else 0;
+    const nd = search.state.dist[from_key] + eff * mult + via_bias +
         congestion.price(ctx.congest, to_key, ctx.occ[to_layer][tn], net, ctx.grid.g);
     if (nd < search.state.dist[to_key]) {
         try search.state.settle(to_key, nd, @intCast(from_key));

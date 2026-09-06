@@ -339,7 +339,7 @@ pub fn shapeInput(run: DirectRun, ask: ShapeAsk) std.mem.Allocator.Error!?cdt_la
         .start = .{ .at = .{ ask.from.x, ask.from.y }, .layer = ask.from.layer },
         .goal = .{ .at = .{ ask.to.x, ask.to.y }, .layer = ask.to.layer },
         .via_sites = sites,
-        .via_cost_mm = ctx.grid.g * via_cost_mult,
+        .via_cost_mm = ctx.grid.g * via_cost_mult + ctx.via_cost.bias_mm,
     };
 }
 

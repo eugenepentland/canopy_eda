@@ -450,6 +450,7 @@ Public functions: solve
 - gap closing honors authored layer restrictions and new-via limits before accepting or absorbing copper
 - gap closing refuses an opposite-face bridge when the net has no new-via allowance
 - reconciliation counts all retained and generated vias against the authored total limit
+- a via-limited gap retries a longer legal path with a nonzero via allowance instead of rejecting the cheaper excessive-via path
 - a gap batch spends via allowance only on accepted hops and does not reset it for later requests
 
 Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJunctions, glossFinishedTracks, foldNetBranches, cleanupBoard

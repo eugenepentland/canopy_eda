@@ -1115,3 +1115,39 @@ The isolated build and full logs remain in
 `.git/release-failures/cd5e0663cbec8e43f654d4c2c8c084b965faffb1-20260906-073303-3685575`.
 The saved RF candidate remains reviewable in the running server; its new
 routing-progress check is available in the isolated feature build.
+
+
+## Searching within a nonzero via allowance — 2026-09-06
+
+A complete cheapest path could exceed a via limit even when a longer legal
+path existed. Whole-net routing previously retried with no vias at all; gap
+repair rejected the candidate. Both now try two bounded increases to the
+layer-change cost before refusing the connection. Whole-net routing retains
+its zero-via fallback. The added cost is outside corridor discounts and also
+reaches the shape rescue. Every accepted path still passes its hard layer and
+via policy; retries restore pricing and roll back rejected copper. These are
+bounded searches, not an exhaustive proof that no feasible path exists.
+
+The regression fixture forces three vias on the ordinary shortest path and
+one on a longer valid detour. It failed before this change and passes for both
+gap and whole-net routing afterward; the new copper also passes geometry DRC.
+The focused via/policy suite and full-shard inventory passed 311 tests.
+
+On frozen Barracuda RF copper, native automatic finishing now closes
+`SPI_LMX_CSN` with three vias instead of five, meeting its authored limit.
+The path grows from 43.4 to 44.7 mm. Independent inspection with the previously
+verified ReleaseSafe executable reports 130/130 connected, 1015 physical tracks,
+437 vias, zero geometry errors, 461 warnings and no missing bypass bonds.
+The saved candidate has 982 persisted tracks; derived copper explains the
+physical total. The feature progress check improves from 127/130 to 128/130:
+`V_24V_CLEAN` remains at four vias against two and `V_1V8A` at eight against four.
+An isolated clear/repair trial of the 24 V rail left it open and was not promoted.
+No authored limit was relaxed.
+
+Review candidate: `autorouter-review-20260906-via-search`. The named snapshot
+was imported through the native save tool after all 1005 frozen library/board
+source files matched the live project; the existing starred layout is retained.
+Evidence, the working-source patch and Debug executable SHA-256 are in
+`/tmp/autorouter-via-search-20260906`. This is an incremental repair experiment,
+not a fresh full-board run. Release verification of the combined branch follows
+this change; the earlier release failure above applies to its earlier commit.

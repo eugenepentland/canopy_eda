@@ -191,7 +191,7 @@ pub fn closeGaps(
             // `finishRoute` straighten pass, so gloss it here — otherwise the
             // metal a nearly-done board GAINS is the only metal on it that
             // keeps its staircases (see `straighten.glossHop`).
-            if (try closeOneGap(&physical.state, gap)) |raw| {
+            if (try closeGapWithinPolicy(&physical.state, gap)) |raw| {
                 const path = try straighten.glossHop(.{
                     .ctx = &ctx,
                     .placement = placement,
@@ -340,6 +340,32 @@ fn shapeHop(
         drawn_v.len,
     });
     return .{ .tracks = drawn_t, .vias = drawn_v };
+}
+
+/// A cheapest path may use too many vias while a longer legal path exists.
+/// Reprice only that refusal, using two bounded searches against the unchanged
+/// live board. Every candidate still passes the ordinary policy/gloss/judge.
+fn closeGapWithinPolicy(state: *GapState, gap: Gap) std.mem.Allocator.Error!?GapPath {
+    const ctx = state.ctx;
+    const first = (try closeOneGap(state, gap)) orelse return null;
+    if (gap_policy.allows(first, ctx.allowed_layers, ctx.max_vias)) return first;
+    state.reason = .policy;
+    const limit = ctx.max_vias orelse return null;
+    if (limit == 0 or first.vias.len <= limit) return null;
+    const saved_bias = ctx.via_cost.bias_mm;
+    defer ctx.via_cost.bias_mm = saved_bias;
+    const span = ctx.grid.g * @as(f64, @floatFromInt(ctx.grid.nx + ctx.grid.ny));
+    for ([_]f64{ 1, 4 }) |scale| {
+        if (routeCancelled(ctx)) return null;
+        ctx.via_cost.bias_mm = @max(saved_bias, span * scale);
+        // No candidate has been absorbed. Restore even a rejected rip attempt's
+        // grid before asking the next search to see the standing copper.
+        stampGapBoard(ctx, try liveCopper(state, &.{}), state.routing_net);
+        const candidate = (try closeOneGap(state, gap)) orelse continue;
+        if (gap_policy.allows(candidate, ctx.allowed_layers, ctx.max_vias)) return candidate;
+    }
+    state.reason = .policy;
+    return null;
 }
 
 fn closeOneGap(state: *GapState, gap: Gap) std.mem.Allocator.Error!?GapPath {

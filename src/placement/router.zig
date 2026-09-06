@@ -3655,12 +3655,36 @@ pub fn routeNet(
     if (ctx.max_vias) |limit| if (vias.items.len - via_mark > @as(usize, limit)) {
         rollbackDirectRun(run, track_mark, via_mark);
         if (!saved_allow_vias) return false;
-        ctx.allow_vias = false;
-        const retried = try routeNetAttempt(ctx, net, ordered_pts, tracks, vias);
-        if (!retried) rollbackDirectRun(run, track_mark, via_mark);
-        return retried;
+        return try retryViaBudget(run, ordered_pts, track_mark, via_mark, limit);
     };
     return try detour_guard.detourGuard(run, ordered_pts, track_mark, via_mark);
+}
+
+/// Try the remaining nonzero via allowance before falling back to no new
+/// layer changes. Copper and partial flags roll back together on every refusal.
+fn retryViaBudget(
+    run: DirectRun,
+    pts: []const NetPt,
+    track_mark: usize,
+    via_mark: usize,
+    limit: u16,
+) std.mem.Allocator.Error!bool {
+    const ctx = run.ctx;
+    const saved_bias = ctx.via_cost.bias_mm;
+    defer ctx.via_cost.bias_mm = saved_bias;
+    const span = ctx.grid.g * @as(f64, @floatFromInt(ctx.grid.nx + ctx.grid.ny));
+    for ([_]f64{ 1, 4, 0 }) |scale| {
+        if (routeCancelled(ctx)) return false;
+        ctx.allow_vias = limit > 0 and scale > 0;
+        ctx.via_cost.bias_mm = @max(saved_bias, span * scale);
+        const routed = try routeNetAttempt(ctx, run.net, pts, run.tracks, run.vias);
+        if (routed and run.vias.items.len - via_mark <= limit) return true;
+        rollbackDirectRun(run, track_mark, via_mark);
+        ctx.zone_partial = false;
+        ctx.tree_partial = false;
+        if (limit == 0) break;
+    }
+    return false;
 }
 
 /// This net's authored `(branches …)` tree, or EMPTY when it has none — the one
