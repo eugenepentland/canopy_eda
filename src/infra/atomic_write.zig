@@ -32,7 +32,10 @@
 //! missing step is what this module adds, so everything else stays shared rather
 //! than copied. Copying is the mistake the eight hand-rolled tmp+rename variants
 //! in this tree already made, and `serve/board_backup.zig`'s fixed `<path>.tmp`
-//! is what it costs: two concurrent writers of one path collide on that name.
+//! was what it cost: two concurrent writers of one path collided on that name.
+//! That one has since been fixed — `board_backup.writeFileAtomic` stages
+//! through this module now, and carries its own regression test for the
+//! collision — so the example is history, not an outstanding defect.
 //!
 //! What this does NOT give you is mutual exclusion. Atomicity means no reader
 //! ever sees a torn file; it says nothing about two writers that each read the
@@ -357,8 +360,9 @@ test "two concurrent writers staging one target use distinct temporaries and the
     try second.write("(design-block \"second\")");
 
     // Target plus one temporary per writer. A fixed `<path>.tmp` name — the
-    // shape `serve/board_backup.zig` still carries — would have collided these
-    // two into one file, and each writer would be appending into the other's.
+    // shape `serve/board_backup.zig` carried before it moved onto this module —
+    // would have collided these two into one file, and each writer would be
+    // appending into the other's.
     try std.testing.expectEqual(@as(usize, 3), try countEntriesForTest(tmp.dir));
 
     try first.commit();

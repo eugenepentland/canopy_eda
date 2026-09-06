@@ -179,6 +179,13 @@ names a test or harness. The condition is gone; the guarantee is not.
   assembly HTML with no `/static/` references, the release and DRC reports, plus
   `in-request layout ABA invalidates HTTP readiness and export` for the
   stale-input refusal.
+- **C07 ERC/requirements consistency** — the recorded gap is fixed. A
+  net-envelope contradiction (`(net-envelope "VIN_5V" (rated 4.9 5.1))` against a
+  derived 4.5–5.5 V) is reported identically, with the same sentence, by
+  `netlisp check` (as an `error assertion` finding), by `netlisp tool run_checks`
+  (as `assertion_failures`) and by `netlisp build`, which refuses to emit and
+  points at `check`. The 2026-09-05 FEEDBACK entry saying these were invisible to
+  `check` no longer holds.
 - **C06 DSL identity** — three consecutive `netlisp build` runs leave the tree
   byte-identical, and flipping a `when` branch adds/removes only that branch's
   instance without disturbing the ref-des of its neighbours. The deeper property
