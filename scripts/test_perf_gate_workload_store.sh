@@ -271,6 +271,20 @@ ck "it exits with the resolution's verdict" "$status" "3"
 ck_has "it says nothing was measured" "$out" "no stored workload snapshot"
 ck "it measured nothing" "$(measured_markers)" ""
 
+echo "a baseline pinning an implausible identity is not acted on"
+python3 - "$PAGE_BASELINE" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+doc["designs"] = {"commit": "../../escape", "fingerprint": "../../escape:m:l:b", "dirty": False,
+                  "source": "git-archive+workload-bundles"}
+open(sys.argv[1], "w").write(json.dumps(doc, indent=2) + "\n")
+PY
+run_gate; status=$?
+ck "enforce refuses with the identity code" "$status" "3"
+ck_has "it names the implausible identity" "$out" "pins a designs identity with unexpected characters"
+ck_lacks "it never went looking for a snapshot named after it" "$out" "no stored workload snapshot"
+ck "nothing escaped the store directory" "$(ls -1 "$T"/*.tar 2>/dev/null | wc -l | tr -d ' ')" "0"
+
 echo "a contended recording is refused and saves no snapshot"
 rm -rf "$STORE"
 touch "$T/contended"

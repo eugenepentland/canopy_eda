@@ -280,6 +280,15 @@ if git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         fingerprint=*) recorded_fingerprint="${line#fingerprint=}" ;;
       esac
     done < <(node scripts/perf_gate_designs_identity.js recorded "$BASELINE" || true)
+    # A fingerprint is hex and colons. Anything else is a hand-edited or
+    # corrupt baseline, and it would reach a store path and a git revision
+    # below — refuse to act on it and let the identity check name the file.
+    case "$recorded_fingerprint$recorded_commit" in
+      *[!0-9a-zA-Z:._-]*)
+        echo "perf_gate: $BASELINE pins a designs identity with unexpected characters — ignoring it" >&2
+        recorded_fingerprint=""
+        ;;
+    esac
     if [ -n "$recorded_fingerprint" ] && [ "$recorded_fingerprint" != "$live_fingerprint" ]; then
       recorded_slug="$(workload_slug "$recorded_fingerprint")"
       if restore_workload_snapshot "$recorded_fingerprint"; then
