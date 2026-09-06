@@ -6699,6 +6699,9 @@ Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenr
 - pin connectivity checks accept physical pin ids as well as pinout function names
 - runChecks frees a partial result on map allocation failure
 - decoupling-per-pin requires distinct physical capacitors
+- a declared rated span outside the part's limits fails even when the nominal is inside them
+- a port stating only one of the two voltage declarations is judged on the one it makes
+- a boundary value exactly on a part's limit is inside it
 - voltage-not-above compares the control worst-case maximum against the supply worst-case minimum plus margin
 
 ## net_analysis
