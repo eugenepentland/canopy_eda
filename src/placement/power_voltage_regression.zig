@@ -102,6 +102,19 @@ test "voltage budget refuses missing inputs and disconnected returns" {
     board.rules.physical.rails = &missing;
     var result = try pi.routedPowerRequirements(a, board, routed);
     try testing.expectEqualStrings("missing-maximum-load-current", result.voltage[0].reason);
+    missing[0].any_typ_load = false;
+    result = try pi.routedPowerRequirements(a, board, routed);
+    try testing.expectEqualStrings("missing-maximum-load-current", result.voltage[0].reason);
+    const unknown_widths = result.tracks;
+    // An explicitly zero envelope also leaves unresolved copper unsized;
+    // never publish a partially initialized optional width record.
+    missing[0].any_max_load = true;
+    missing[0].load_max_a = 0;
+    result = try pi.routedPowerRequirements(a, board, routed);
+    for (result.tracks, unknown_widths) |zero, unknown| {
+        try testing.expect(zero == null);
+        try testing.expect(unknown == null);
+    }
     missing = rails;
     missing[0].source_terminals = &.{"missing/VOUT"};
     result = try pi.routedPowerRequirements(a, board, routed);

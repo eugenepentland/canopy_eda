@@ -1457,16 +1457,18 @@ fn fillTrackWidths(
         // upper bound on any one branch, and the caller can see from
         // `envelope`/`reason` that it is a bound rather than a measurement.
         if (!charged.resolved) {
+            const width_mm = trackWidthForAmps(placement, track, amps) orelse continue;
             out[route_index] = .{
-                .width_mm = trackWidthForAmps(placement, track, amps) orelse continue,
+                .width_mm = width_mm,
                 .envelope = true,
                 .reason = charged.axis.status.name(),
             };
             continue;
         }
         if (!std.math.isFinite(amps) or amps < 0) continue;
+        const width_mm = if (amps == 0) 0 else trackWidthForAmps(placement, track, amps) orelse continue;
         out[route_index] = .{
-            .width_mm = if (amps == 0) 0 else trackWidthForAmps(placement, track, amps) orelse continue,
+            .width_mm = width_mm,
             .envelope = false,
         };
     }
@@ -1670,8 +1672,10 @@ fn routedPowerRequirementsFromSurfaces(
         // this conductor, so it is screened at the envelope with its status as
         // the reason.
         const charged: Charged = .{ .axis = axis, .envelope_a = envelope_a, .resolved = axis.status == .solved };
-        fillTrackWidths(placement, routed, family, charged, widths);
-        fillViaCurrents(placement, routed, family, charged, barrels);
+        if (envelope != null) {
+            fillTrackWidths(placement, routed, family, charged, widths);
+            fillViaCurrents(placement, routed, family, charged, barrels);
+        }
         if (budget.limit_v != 0) try assessVoltage(alloc, .{
             .placement = placement,
             .routed = routed,
