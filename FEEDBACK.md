@@ -950,3 +950,9 @@ New from the wave:
 - **idea:** During merge verification, flag baseline rows that decrease while their measured source is unchanged, so a stale feature baseline cannot silently undo accepted metadata and block the next task.
 - **workaround:** Restore only `src/system_review.zig|SystemSpec` to the value already recorded in `f73fa1ea`; rerun the full gate.
 - **status:** mitigated
+
+## 2026-09-06 · codex · rough placement intent — release follow-up
+- **blocker:** The corrected branch passed the full 88-check Guardian gate, all 5,221 tests, and its ReleaseSafe build, but all three automatic Barracuda browser zoom attempts failed Canvas timing thresholds. The final attempt measured zoom-in p95/max at 86 ms against 45/55 ms, and zoom-out p95 at 52.9 ms against 45 ms. The approximately 14-minute browser retry phase left the engine fix unmerged despite measured LMX routing improving from 26/27 to 27/27 nets.
+- **friction:** My first comparison watcher launched the staging executable as soon as `build.status` passed, before `prepare-release.sh` stripped it. That caused `strip` to fail with Text file busy and required another release run. This was a comparison-setup error; copying the executable to a task-owned path avoids holding the packaging target open.
+- **idea:** Document that staging candidates remain mutable until `verified` exists; functional comparison tools should use an independent executable copy, while deployment must still require the completed release gate.
+- **status:** open
