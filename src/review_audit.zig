@@ -27,6 +27,10 @@ const review_profiles = @import("review_profiles.zig");
 /// Which saved layout to audit; null means the starred one.
 pub const Options = struct {
     layout: ?[]const u8 = null,
+    /// A preflight run to share instead of performing one. The Board Review
+    /// Card composes these facts beside `part_review`'s sheet over the same
+    /// evaluation, and both need the same release-profile report.
+    preflight_cache: ?*preflight.Cache = null,
 };
 
 /// Everything `render` can fail with beyond allocation.
@@ -1044,7 +1048,14 @@ pub fn collectFactsFor(
 
     const violations = try erc_mod.runErc(arena, block, project_dir);
     facts.violations = violations;
-    const report = try preflight.run(arena, eval, block, project_dir, .release);
+    // `runFor`, not `run`: the design NAME is what resolves the system whose
+    // `(brief …)` governs this board, so a brief-driven finding reaches the
+    // audit's register and the card's schematic tallies rather than being
+    // produced only on the surfaces that already pass a name.
+    const report = if (options.preflight_cache) |cache|
+        try cache.get(arena, eval, block)
+    else
+        try preflight.runFor(arena, eval, block, project_dir, .release, name);
     var forms: review_profiles.Forms = .{};
     for (eval.pll_reports.items) |pll| {
         forms.pll_any = true;

@@ -296,6 +296,10 @@ pub const CollectError = std.mem.Allocator.Error || error{ EvaluateFailed, NotAD
 /// What to screen at. The ambient only reaches the thermal row.
 pub const Options = struct {
     ambient_c: ?f64 = null,
+    /// A preflight run to share instead of performing one, so a caller that
+    /// also collects `review_audit`'s facts over the same evaluation pays for
+    /// one release-profile pass rather than two.
+    preflight_cache: ?*preflight.Cache = null,
 };
 
 // ── Verdict mapping ───────────────────────────────────────────────────────
@@ -433,7 +437,10 @@ pub fn collectFor(
         else => {},
     };
 
-    const report = try preflight.runFor(arena, eval, block, project_dir, .release, name);
+    const report = if (options.preflight_cache) |cache|
+        try cache.get(arena, eval, block)
+    else
+        try preflight.runFor(arena, eval, block, project_dir, .release, name);
     const rating = try ratingReportFor(arena, block, brief_checks.deratingForBoard(arena, project_dir, name));
     const evidence = Evidence{
         .arena = arena,

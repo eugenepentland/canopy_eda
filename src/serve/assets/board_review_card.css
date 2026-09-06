@@ -1,0 +1,70 @@
+/* Board Review Card view — layered on board_review.css, which owns the dark
+   palette, the shell, the toolbar and the filter pills. */
+.card-shell{max-width:1660px}
+.card-links{margin:0 0 14px}
+.card-links a{padding:6px 9px;border:1px solid #3a4554;border-radius:6px;text-decoration:none;background:#1d2530}
+.card-reference-link{border-color:#4a4030 !important;background:#241f16 !important;color:#e0c485 !important}
+.card-head{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin-bottom:14px}
+.card-progress{color:var(--muted);margin:0}
+.card-error{color:#ff948d;margin:0}
+.card-idline{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 10px}
+.card-idline h2{font-size:18px;margin:0}
+.card-facts{display:flex;flex-wrap:wrap;gap:8px;margin:0}
+.fact{background:#15171b;border:1px solid #292d35;border-radius:7px;padding:6px 10px;font-size:12px;color:#c6cbd3}
+.fact strong{display:block;color:#e7e9ee;font-size:13px;font-variant-numeric:tabular-nums}
+.fact small{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.05em}
+.fact.blocking strong{color:var(--fail)}
+.fact.releasable strong{color:var(--pass)}
+.fact.not-releasable strong{color:var(--fail)}
+.card-ambient{color:var(--muted);font-size:12px;margin:10px 0 0}
+
+/* Verdict vocabulary — one colour per word, used by pills, stripes and rows. */
+.pill{font-size:11px;text-transform:uppercase;letter-spacing:.04em;border:1px solid #46505d;border-radius:99px;padding:2px 9px;white-space:nowrap}
+.v-pass{color:#8cdfaa;border-color:#38664b;background:#17261d}
+.v-fail{color:#ff9992;border-color:#743d3b;background:#2b1919}
+.v-unproven{color:#eab95e;border-color:#684f27;background:#26200f}
+.v-waived{color:#c6a6e8;border-color:#54406d;background:#211a2b}
+.v-not_applicable{color:#aab0b9;border-color:#4a505a;background:#1d2025}
+.v-not_declared{color:#f0a06a;border-color:#7a4b2c;background:#291b12}
+.v-manual{color:#a9c9f4;border-color:#3b5879;background:#192536}
+
+.card-legend{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px;color:var(--muted);font-size:11px;align-items:center}
+.stripe{display:flex;gap:2px;flex:1;min-width:220px;overflow:hidden;border-radius:6px}
+.stripe-seg{font-size:11px;padding:3px 8px;white-space:nowrap;text-align:center;border-radius:5px;flex-grow:1;flex-basis:0}
+.stripe-empty{color:var(--muted);font-size:11px}
+
+#card-categories{display:grid;gap:10px}
+.cat-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;scroll-margin-top:70px}
+.cat-card[hidden]{display:none}
+.cat-card>summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:12px;padding:12px 16px;background:#1c1f25;flex-wrap:wrap}
+.cat-card>summary::-webkit-details-marker{display:none}
+.cat-card>summary:before{content:"›";font-size:22px;color:#8b929e;transition:transform .12s}
+.cat-card[open]>summary:before{transform:rotate(90deg)}
+.cat-title{font-size:15px;margin:0;min-width:190px}
+.rows-wrap{overflow-x:auto}
+.rows-table{border-collapse:collapse;width:100%;font-size:12px}
+.rows-table th,.rows-table td{border-top:1px solid #292d34;padding:8px 10px;text-align:left;vertical-align:top}
+.rows-table th{background:#17191e;color:#b9c8dc;font-weight:650;position:sticky;top:0}
+.card-row[hidden]{display:none}
+.card-row td.col-check{white-space:nowrap}
+.row-id{font:600 11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#a9c7f2;background:#202d3d;border:1px solid #334960;border-radius:4px;padding:2px 5px;display:inline-block}
+.row-policy{display:block;margin-top:4px;font-size:10px;color:#7f8792;text-transform:uppercase;letter-spacing:.04em}
+.row-policy.blocking{color:#e08b84}
+.row-subject{color:#dfe2e7}
+.row-scope{display:block;font-size:10px;color:#7f8792;text-transform:uppercase;letter-spacing:.04em}
+.row-evidence{color:#98a0ab;font-size:11px}
+.closes-with{font:11px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;color:#add0ff;white-space:pre-wrap;word-break:break-word}
+.row-record{display:block;margin-top:4px;font-size:11px;color:#c6a6e8}
+
+.card-block{margin-top:18px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:0;overflow:hidden}
+.card-block:empty{display:none}
+.card-block h2{font-size:15px;margin:0;padding:13px 16px;background:#1c1f25}
+.card-block .block-body{padding:12px 16px;overflow-x:auto}
+.parts-table{border-collapse:collapse;width:100%;font-size:12px}
+.parts-table th,.parts-table td{border-top:1px solid #292d34;padding:7px 9px;text-align:left;vertical-align:top}
+.parts-table th{background:#17191e;color:#b9c8dc;font-weight:650}
+.parts-table td.col-ref{font:600 12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:nowrap}
+.chip-link{display:inline-block;text-decoration:none;border:1px solid #46505d;border-radius:99px;padding:2px 9px;font-size:11px;white-space:nowrap}
+.kv{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 8px}
+.ladder-stage{font-size:11px}
+@media(max-width:900px){.card-shell{padding:14px}.cat-title{min-width:0}.stripe{min-width:100%}}
