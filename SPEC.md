@@ -519,6 +519,8 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - the router's fence-corridor width agrees with the via-fence generator's outermost resolved row
 - routes corners as 45° diagonals rather than 90° bends
 - straightEscapePair accepts an axis-aligned pad pair that faces along the hop, rejecting a diagonal, a perpendicular-facing, a coincident, or a cross-layer pair
+- facing cross-layer RF pads use two collinear segments and one via before the escape maze
+- the straight one-via quality probe refuses obstacles, forbidden transitions and non-collinear terminals
 - LoopRouter measures a real per-leg trace length that detours foreign pads
 - counts signal vias lacking a nearby ground stitching via as return-path discontinuities
 - stitches each signal via's return path with a nearby GND plane via

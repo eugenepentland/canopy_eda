@@ -3781,6 +3781,11 @@ pub fn routeNetAttempt(
         const direct = DirectRun{ .ctx = ctx, .net = net, .tracks = tracks, .vias = vias };
         const unshaped = !escapeActive(ctx);
         const axis_direct = pts.len == 2 and pad_exit.straightEscapePair(escTerm(pts[0]), escTerm(pts[1]));
+        // A cross-face RF hop can keep the same straight escape, with its
+        // single via ON that line. Probe this before the escape-shaped maze;
+        // the general via lattice may accept a needless off-axis detour.
+        const straight_via = pts.len == 2 and (!unshaped or netSpan(pts) <= direct_span_mm);
+        if (straight_via and (try router_direct.tryStraightOneVia(direct, pts[0], pts[1]))) return true;
         // A plain (non-escape) net only pays the direct synthesis when its
         // terminal span is small: the direct primitives' exact-clearance
         // lattice sweeps measured ~90 % of autorouter wall time on long

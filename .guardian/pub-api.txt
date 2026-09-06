@@ -3865,6 +3865,7 @@ src/placement/router_direct.zig::tryGuidedRoute | fn tryGuidedRoute( run: Direct
 src/placement/router_direct.zig::tryGuidedTree | fn tryGuidedTree( run: DirectRun, pts: []const NetPt, branches: []const route_policy.GuideBranch, ) std.mem.Allocator.Error!bool
 src/placement/router_direct.zig::tryMazeGuidedTree | fn tryMazeGuidedTree( run: DirectRun, pts: []const NetPt, waypoints: []const route_policy.Waypoint, ) std.mem.Allocator.Error!bool
 src/placement/router_direct.zig::trySharedGuidedTree | fn trySharedGuidedTree( run: DirectRun, pts: []const NetPt, waypoints: []const route_policy.Waypoint, ) std.mem.Allocator.Error!bool
+src/placement/router_direct.zig::tryStraightOneVia | fn tryStraightOneVia(run: DirectRun, from: NetPt, to: NetPt) std.mem.Allocator.Error!bool
 src/placement/router_direct.zig::tryTwoViaSeededMaze | fn tryTwoViaSeededMaze(run: DirectRun, from: NetPt, to: NetPt) std.mem.Allocator.Error!bool
 src/placement/router_gap_close.zig::GapState value
 src/placement/router_gap_close.zig::buildGapCtx | fn buildGapCtx( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, divisor: f64, window: ?GapWindow, ) std.mem.Allocator.Error!CtxResult

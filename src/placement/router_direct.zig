@@ -1740,6 +1740,7 @@ pub fn tryTwoViaSeededMaze(run: DirectRun, from: NetPt, to: NetPt) std.mem.Alloc
 /// offset while still keeping the transition close to a terminal.
 fn tryDirectOneVia(run: DirectRun, from: NetPt, to: NetPt) std.mem.Allocator.Error!bool {
     if (!run.ctx.allow_vias) return false;
+    if (try tryStraightOneVia(run, from, to)) return true;
     const anchors = [2]NetPt{ from, to };
     const max_ring: i64 = @intCast(@max(1, numeric.toCount(@ceil(direct_one_via_radius_mm / direct_via_grid_mm))));
     var ring: i64 = 1;
@@ -1755,6 +1756,40 @@ fn tryDirectOneVia(run: DirectRun, from: NetPt, to: NetPt) std.mem.Allocator.Err
     return try tryViaSeededMaze(run, from, to);
 }
 
+/// Prefer a collinear layer transition over the first routable lattice dogleg.
+/// Only the layer changes at the via. A component-centre radial direction is
+/// not a pad exit constraint: on a long connector it points along the pin row,
+/// even though the legal straight escape crosses that row. Use the pad centres
+/// and exact copper clearance, with the RF direct tier's trace-width tolerance.
+pub fn tryStraightOneVia(run: DirectRun, from: NetPt, to: NetPt) std.mem.Allocator.Error!bool {
+    if (from.layer == to.layer or !run.ctx.allow_vias) return false;
+    if (run.ctx.max_vias == 0) return false;
+    if (!layerInMask(run.ctx.allowed_layers, from.layer) or !layerInMask(run.ctx.allowed_layers, to.layer)) return false;
+    const a = [2]f64{ from.x, from.y };
+    const b = [2]f64{ to.x, to.y };
+    const length = std.math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (length < 1e-9) return false;
+    if (@min(@abs(b[0] - a[0]), @abs(b[1] - a[1])) > run.ctx.params.track_width) return false;
+    // Bound this quality probe independently of board size. Try the midpoint
+    // first, then sites toward each pad, preserving exact off-grid alignment.
+    const steps = @min(@as(usize, 120), @max(@as(usize, 2), numeric.toCount(@ceil(length / direct_via_grid_mm))));
+    for (0..steps) |i| {
+        const offset = @as(f64, @floatFromInt((i + 1) / 2)) / @as(f64, @floatFromInt(steps));
+        const t = 0.5 + (if (i % 2 == 0) offset else -offset);
+        if (t <= 0 or t >= 1) continue;
+        const pos = [2]f64{ a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]) };
+        if (!directViaClear(run, pos)) continue;
+        if (!clearDoglegSegment(run.path(from.layer), a, pos)) continue;
+        if (!clearDoglegSegment(run.path(to.layer), pos, b)) continue;
+        try emitDoglegSegment(run.path(from.layer), a, pos, run.tracks);
+        try emitDoglegSegment(run.path(to.layer), pos, b, run.tracks);
+        try run.vias.append(run.ctx.arena, .{ .x = pos[0], .y = pos[1], .dia = run.ctx.params.via_dia, .drill = run.ctx.params.via_drill, .net = run.net });
+        stampViaOcc(run.ctx, pos[0], pos[1], run.net);
+        return true;
+    }
+    return false;
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -1766,6 +1801,62 @@ const copperCompacted = router_ctx.copperCompacted;
 const rebuildCopperIndex = router_ctx.rebuildCopperIndex;
 const viaAllowed = router_ctx.viaAllowed;
 const viaClearsPadDrills = router_ctx.viaClearsPadDrills;
+
+// spec: placement/router - facing cross-layer RF pads use two collinear segments and one via before the escape maze
+test "straight one-via RF routing precedes the escape maze" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var ctx = samePadBoreCtx(arena, &.{}, &.{});
+    ctx.occ = try allocLayerGrids(arena, 2, ctx.grid.nx * ctx.grid.ny);
+    ctx.resv = try allocLayerGrids(arena, 2, ctx.grid.nx * ctx.grid.ny);
+    const pts = [_]NetPt{
+        .{ .x = 5.013, .y = 5.027, .layer = 1, .out = .{ -0.15, 0.99 } },
+        .{ .x = 6.333, .y = 5.027, .layer = 0, .out = .{ -1, 0 } },
+    };
+    ctx.rf.escape_mm = 0.5;
+    ctx.rf.escape_pts = &pts;
+    ctx.manhattan.max_freq_hz = 4e9;
+    var tracks: std.ArrayList(Track) = .empty;
+    var vias: std.ArrayList(Via) = .empty;
+    try testing.expect(try router.routeNet(&ctx, 1, &pts, &tracks, &vias));
+    try testing.expectEqual(@as(usize, 2), tracks.items.len);
+    try testing.expectEqual(@as(usize, 1), vias.items.len);
+    try testing.expectApproxEqAbs(pts[0].y, vias.items[0].y, 1e-9);
+    for (tracks.items) |track| {
+        try testing.expectApproxEqAbs(pts[0].y, track.y1, 1e-9);
+        try testing.expectApproxEqAbs(pts[0].y, track.y2, 1e-9);
+        try testing.expect(track.x2 > track.x1);
+    }
+    try testing.expectEqual(@as(u8, 1), tracks.items[0].layer);
+    try testing.expectEqual(@as(u8, 0), tracks.items[1].layer);
+}
+
+// spec: placement/router - the straight one-via quality probe refuses obstacles, forbidden transitions and non-collinear terminals
+test "straight one-via RF routing refuses blocked or forbidden transitions" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const wall = [_]PadObs{.{ .x0 = 5.6, .y0 = 4, .x1 = 5.8, .y1 = 6, .net = 2, .thru = true }};
+    var ctx = samePadBoreCtx(arena, &wall, &.{});
+    var tracks: std.ArrayList(Track) = .empty;
+    var vias: std.ArrayList(Via) = .empty;
+    const run = DirectRun{ .ctx = &ctx, .net = 1, .tracks = &tracks, .vias = &vias };
+    const from = NetPt{ .x = 5, .y = 5, .layer = 1, .out = .{ 1, 0 } };
+    var to = NetPt{ .x = 6.32, .y = 5, .layer = 0, .out = .{ -1, 0 } };
+    try testing.expect(!try tryStraightOneVia(run, from, to));
+    ctx.obs = &.{};
+    ctx.max_vias = 0;
+    try testing.expect(!try tryStraightOneVia(run, from, to));
+    ctx.max_vias = null;
+    ctx.allowed_layers = 1;
+    try testing.expect(!try tryStraightOneVia(run, from, to));
+    ctx.allowed_layers = 0;
+    to.y = 6;
+    try testing.expect(!try tryStraightOneVia(run, from, to));
+    try testing.expectEqual(@as(usize, 0), tracks.items.len);
+    try testing.expectEqual(@as(usize, 0), vias.items.len);
+}
 
 /// A routing context carrying ONE through pad on net 1 — the board-a shape:
 /// `buck_6v/U22` pad 5, a 0.30 mm land over a 0.20 mm bore, on the same rail
