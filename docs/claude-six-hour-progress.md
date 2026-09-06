@@ -29,7 +29,7 @@ correctness**, which no sibling worktree touches.
 | --- | --- | --- |
 | A01 CLI help + arg safety | **verified, committed** | `cac63843` |
 | A02 bulk net-envelope surface | **verified, committed** | `0bdef86f` + `dcd7ca4f` |
-| A03 bench-route checkpoint | **verified, committed** | `5b7a2a71` |
+| A03 bench-route checkpoint | **verified, committed** | `5b7a2a71` + the consumer-side twin |
 | C12 test-registration gate | **verified, committed** | `d4ba1587` + `7c4d111a` |
 | C09 tool schema vs dispatch | **verified, committed** | `73059345` + `357e417b` |
 | A11 review-surface reconciliation | **verified, committed** (rating fix) | `19e1c152` |
@@ -83,6 +83,15 @@ are the same bytes (verified: all 48 fields equal). A failed board is a row with
 **Verified on an isolated fixture copy**: SIGKILL as soon as the first row
 landed → `run` header + the first board's full 16/16 row survive, 0 unparseable
 records, no `complete` line.
+
+### A03 follow-up — the consumer keeps its rows too (`0dbd90ea`)
+
+`5b7a2a71` fixed the Zig harness; `scripts/route_corpus_bench.py` — the
+documented driver for the same measurement, and the recorded workaround for that
+very failure — still wrote its `--json` once at the end. `--jsonl` now appends
+each board as it finishes, in the SAME record shape, so one reader handles a
+file from either harness. Verified with a SIGKILL mid-corpus: `run, board`
+survive, 0 unparseable records, no `complete` line.
 
 ### C12 — all three test registrations fail the build (`d4ba1587`, `7c4d111a`)
 
