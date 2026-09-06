@@ -99,6 +99,7 @@ pub const shards: []const []const []const u8 = &.{
         "main.test.",
         "serve_args.test.",
         "dump_args.test.",
+        "test_manifest.test.",
         "envelope_dump.test.",
         "bench_checkpoint.test.",
         "panelize.test.",

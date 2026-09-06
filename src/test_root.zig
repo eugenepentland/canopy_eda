@@ -3,6 +3,7 @@
 const std = @import("std");
 const infra_fs = @import("infra/fs.zig");
 const test_shards = @import("test_shards.zig");
+const test_manifest = @import("test_manifest.zig");
 
 // main.zig owns the aggregate import list for now; rooting tests here keeps the
 // build graph free to compile the production artifact and test suite as
@@ -38,6 +39,7 @@ test {
     _ = @import("serve/package_tools.zig");
     _ = @import("serve/package_component.zig");
     _ = @import("dump_args.zig");
+    _ = @import("test_manifest.zig");
     _ = @import("envelope_dump.zig");
     _ = @import("bench_checkpoint.zig");
     _ = @import("bench_route.zig");
@@ -617,83 +619,14 @@ fn readRepoFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 // against itself: read every `test "..."` in src/, spell each one the way the
 // compiler names it, and require exactly one shard to claim it.
 
-/// One fully-qualified test name, spelled the way Zig names it for
-/// `--test-filter`: the source path relative to src/ with separators as dots,
-/// then `.test.`, then the declared name.
-const QualifiedName = []const u8;
-
-/// Reads every named test in src/ into `arena`.
-///
-/// Deliberately a raw source scan and not a Zig parse: the compiler's own list
-/// is exactly what a shard filter already produced, so deriving the expectation
-/// from it would check the manifest against itself. Unnamed `test { }` blocks
-/// are skipped — the compiler links them into every filtered binary whatever
-/// the filters say, so no shard has to claim them.
-fn collectQualifiedNames(
-    arena: std.mem.Allocator,
-    out: *std.ArrayList(QualifiedName),
-) !void {
-    var src = try infra_fs.cwd().openDir("src", .{ .iterate = true });
-    defer src.close();
-    var walker = try src.walk(arena);
-    defer walker.deinit();
-
-    while (try walker.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
-        const source = try src.readFileAlloc(arena, entry.path, 4 * 1024 * 1024);
-        const prefix = try qualifiedPrefix(arena, entry.path);
-        try appendNamedTests(arena, out, prefix, source);
-    }
-}
-
-/// `placement/router.zig` → `placement.router.test.`
-fn qualifiedPrefix(arena: std.mem.Allocator, rel_path: []const u8) ![]const u8 {
-    const stem = rel_path[0 .. rel_path.len - ".zig".len];
-    const dotted = try arena.dupe(u8, stem);
-    std.mem.replaceScalar(u8, dotted, std.fs.path.sep, '.');
-    return std.mem.concat(arena, u8, &.{ dotted, ".test." });
-}
-
-/// Appends `prefix ++ <declared name>` for every `test "..." {` in `source`.
-/// Only a declaration at the start of a line counts, which is what makes the
-/// scan agree with the compiler on this tree: the same rule reproduces the
-/// suite's test count exactly.
-fn appendNamedTests(
-    arena: std.mem.Allocator,
-    out: *std.ArrayList(QualifiedName),
-    prefix: []const u8,
-    source: []const u8,
-) !void {
-    var rest = source;
-    var at_line_start = true;
-    while (rest.len != 0) {
-        if (at_line_start and std.mem.startsWith(u8, rest, "test \"")) {
-            const body = rest["test \"".len..];
-            const end = std.mem.indexOfScalar(u8, body, '"') orelse return;
-            try out.append(arena, try std.mem.concat(arena, u8, &.{ prefix, body[0..end] }));
-            rest = body[end..];
-            at_line_start = false;
-            continue;
-        }
-        at_line_start = rest[0] == '\n';
-        rest = rest[1..];
-    }
-}
-
-/// How many shards would compile `name` into their binary.
-fn claimingShards(name: QualifiedName) usize {
-    var claims: usize = 0;
-    for (test_shards.shards) |shard| {
-        for (shard) |filter| {
-            if (std.mem.indexOf(u8, name, filter) != null) {
-                claims += 1;
-                break;
-            }
-        }
-    }
-    return claims;
-}
+/// The scan and the claim rule live in `test_manifest.zig`, which
+/// `netlisp check-test-manifest` and therefore every `zig build` also runs. One
+/// implementation, two callers: a build-time check that disagreed with this
+/// test-time one would be worse than neither.
+const QualifiedName = test_manifest.QualifiedName;
+const collectQualifiedNames = test_manifest.collectQualifiedNames;
+const appendNamedTests = test_manifest.appendNamedTests;
+const claimingShards = test_manifest.claimingShards;
 
 // spec: Development pipeline - Runs the unit-test suite as concurrent shards whose filters claim every named test, including local-first routing regressions, exactly once
 

@@ -28,6 +28,7 @@ const power_flow_cli = @import("power_flow_cli.zig");
 const gerber_dump = @import("gerber_dump.zig");
 const netlist_dump = @import("netlist_dump.zig");
 const envelope_dump = @import("envelope_dump.zig");
+const test_manifest = @import("test_manifest.zig");
 const export_pinmap = @import("export_pinmap.zig");
 const export_spice = @import("export_spice.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
@@ -430,7 +431,26 @@ fn dispatchDumpCommand(
         try envelope_dump.cmdEnvelopes(allocator, args);
         return true;
     }
+    if (std.mem.eql(u8, command, "check-test-manifest")) {
+        try cmdCheckTestManifest(allocator);
+        return true;
+    }
     return false;
+}
+
+/// Check `src/test_shards.zig` still claims every named test in `src/`.
+///
+/// A source scan, not a compile: it answers in the time a directory walk takes,
+/// which is why `zig build` can run it beside the generated-docs check. A module
+/// missing from the manifest otherwise compiles green and its tests silently
+/// never run — the failure a release gate used to spend two minutes to find.
+fn cmdCheckTestManifest(allocator: std.mem.Allocator) !void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    var out: std.Io.Writer.Allocating = .init(arena_state.allocator());
+    const intact = try test_manifest.checkAndReport(arena_state.allocator(), &out.writer);
+    try writeStdout(out.written());
+    if (!intact) exit.failure();
 }
 
 /// Regenerate (or, with `--check`, verify) the auto-generated language
@@ -666,6 +686,7 @@ fn printUsage() !void {
         \\  netlisp convert-pinout <file> [--filter <name>]  Generate pinout from KiCad .kicad_sym
         \\  netlisp merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]  Merge alt functions (CSV or ST open-pin-data XML)
         \\  netlisp gen-language-docs [--output <path>] [--check]  Regenerate (or verify with --check) docs/language-forms.md from the dispatch tables
+        \\  netlisp check-test-manifest             Check src/test_shards.zig still claims every named test in src/ exactly once (a source scan; `zig build` runs it)
         \\  netlisp version                          Print the runtime build id (the netlisp commit, or the current checkout's HEAD)
         \\  netlisp help                            Show this help
         \\

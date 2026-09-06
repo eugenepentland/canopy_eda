@@ -6409,6 +6409,22 @@ src/target_unblock.zig::restoreSlice | fn restoreSlice(lim: Limits, elements: us
 src/target_unblock.zig::sliceDeadline | fn sliceDeadline(now: i128, board_deadline: i128, targets_left: usize, lim: Limits) ?i128
 src/target_unblock.zig::targetOf | fn targetOf(net_i: usize, shape: OpenShape) ?Target
 src/target_unblock.zig::transactionClosed | fn transactionClosed(open: []const []const u8, named: []const []const u8) bool
+src/test_manifest.zig::QualifiedName value
+src/test_manifest.zig::Report struct_
+src/test_manifest.zig::ScanError value
+src/test_manifest.zig::Unclaimed struct_
+src/test_manifest.zig::appendNamedTests | fn appendNamedTests( arena: std.mem.Allocator, out: *std.ArrayList(QualifiedName), prefix: []const u8, source: []const u8, ) std.mem.Allocator.Error!void
+src/test_manifest.zig::audit | fn audit(arena: std.mem.Allocator) ScanError!Report
+src/test_manifest.zig::auditIn | fn auditIn(arena: std.mem.Allocator, root: infra_fs.Dir) ScanError!Report
+src/test_manifest.zig::checkAndReport | fn checkAndReport(arena: std.mem.Allocator, w: *std.Io.Writer) std.Io.Writer.Error!bool
+src/test_manifest.zig::checkAndReportIn | fn checkAndReportIn( arena: std.mem.Allocator, root: infra_fs.Dir, w: *std.Io.Writer, ) std.Io.Writer.Error!bool
+src/test_manifest.zig::claimingShards | fn claimingShards(name: QualifiedName) usize
+src/test_manifest.zig::collectQualifiedNames | fn collectQualifiedNames( arena: std.mem.Allocator, out: *std.ArrayList(QualifiedName), ) ScanError!void
+src/test_manifest.zig::collectQualifiedNamesIn | fn collectQualifiedNamesIn( arena: std.mem.Allocator, root: infra_fs.Dir, out: *std.ArrayList(QualifiedName), ) ScanError!void
+src/test_manifest.zig::min_expected_tests value
+src/test_manifest.zig::ok | fn ok(self: Report) bool
+src/test_manifest.zig::qualifiedPrefix | fn qualifiedPrefix(arena: std.mem.Allocator, rel_path: []const u8) std.mem.Allocator.Error![]const u8
+src/test_manifest.zig::writeReport | fn writeReport(w: *std.Io.Writer, report: Report) std.Io.Writer.Error!bool
 src/test_shards.zig::shards value
 src/testpoint_silkscreen.zig::Label struct_
 src/testpoint_silkscreen.zig::collectWithKeepouts | fn collectWithKeepouts( alloc: std.mem.Allocator, placement: optimizer.Placement, excluded_refs: []const []const u8, keepouts: []const subcircuit_silkscreen.Keepout, annotations: []const subcircuit_silkscreen.Annotation, user_texts: []const font.BoardText, ) std.mem.Allocator.Error![]Label

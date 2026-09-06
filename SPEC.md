@@ -1032,6 +1032,40 @@ bounds is reported as an explicit unknown rather than as zero volts.
 - completeness-waiver: integer overflow (no arithmetic beyond formatting already-computed bounds and counts)
 - completeness-waiver: panic-free (an absent envelope is the documented unknown state, not a failure; a design that fails to resolve degrades to a row and the next design)
 
+## test manifest
+
+Public functions: collectQualifiedNames, collectQualifiedNamesIn, qualifiedPrefix, appendNamedTests, claimingShards, audit, auditIn, writeReport, checkAndReport, checkAndReportIn
+
+A new test-bearing module needs BOTH an import in `src/test_root.zig` and a
+filter in `src/test_shards.zig`, and the two failures used to cost very
+different amounts to find. Missing from the test root, Guardian's
+`test-reachability` fails `zig build` in seconds. Missing from the shard
+manifest, the module compiled, its tests existed, no shard's filter selected
+them, and every shard reported PASS — only a full or affected test run reached
+the invariant test that catches it, which is how a release gate once spent 118
+seconds to report five missing registrations. The scan here is pure source text
+plus the manifest's own literals, so `netlisp check-test-manifest` runs on every
+`zig build` beside the generated-docs check, and `src/test_root.zig`'s invariant
+test calls the same functions rather than carrying a second copy of the rule.
+
+- only a test declaration at the start of a line is collected, and an unnamed test block is not
+- a source path becomes the dotted prefix the compiler names its tests with
+- this tree's shard manifest claims every named test exactly once and carries no dead filter
+- a test no shard claims is reported as unclaimed rather than passing silently
+- a scan that found almost no tests fails rather than reporting a vacuous pass
+- a scan pointed at a tree with no src directory reports the read failure as a usage error rather than an empty pass
+- the shard count fits the per-name claim set
+- the split module/name match agrees with a literal substring search over the real manifest
+
+- completeness-waiver: empty inputs (a scan that finds fewer tests than the tree is known to hold fails as a wrong working directory, which is the behaviour under test)
+- completeness-waiver: large inputs (each source file is read under an explicit byte cap into a caller-owned arena released in bulk)
+- completeness-waiver: unauthorized access (a read-only walk of the repository's own src/ directory, which the invoking user already has authority over)
+- completeness-waiver: concurrent access (one process scans a source tree it does not write)
+- completeness-waiver: i/o failure (an unreadable src/ is reported as a usage error and a failing verdict, never as zero problems)
+- completeness-waiver: malformed encoding (the scan compares bytes; a test name is copied verbatim between its quotes and never decoded)
+- completeness-waiver: integer overflow (the only arithmetic is a claim count bounded by the shard count)
+- completeness-waiver: panic-free (every path returns a value or a returned error; the failing verdict is a bool, not an assertion)
+
 ## netlist-dump
 
 Public functions: cmdNetlistDump
