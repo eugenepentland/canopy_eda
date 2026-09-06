@@ -39,6 +39,9 @@ correctness**, which no sibling worktree touches.
 | C11 persistence failures | **already-safe** — fault-injected, no defect (evidence below) |
 | A09 offline fab-release fixture | **already-implemented** (evidence below) |
 | C06 DSL identity | **verified at the observable level** (evidence below) |
+| C07 finding consistency | **already-consistent** — check/build/tools agree (evidence below) |
+| C08 evidence freshness | **already-safe** — every input invalidates (evidence below) |
+| C16 hermetic examples | **already-hermetic** under `env -i` (evidence below) |
 | A05 A06 A07 A12, B01–B06 | **owned-elsewhere** — skipped on file collision |
 
 ## Completed changes
@@ -186,6 +189,22 @@ names a test or harness. The condition is gone; the guarantee is not.
   (as `assertion_failures`) and by `netlisp build`, which refuses to emit and
   points at `check`. The 2026-09-05 FEEDBACK entry saying these were invisible to
   `check` no longer holds.
+- **C08 review-evidence freshness** — every input class invalidates its dependent
+  evidence, checked one input at a time on isolated copies of the example:
+  a comment-only edit to the `.sexp` moves `source_sha256` (+4 more), a
+  `.layouts.json` edit moves `layout_sha256` (+5), a `.bom` edit moves
+  `bom_evidence_sha256` (+5), and a newly added `.checks.sexp` moves the
+  consumed-inputs and read-set digests. No under-invalidation anywhere.
+  Worth knowing: `source_sha256` also moves for sidecar-only changes, so it is
+  broader than its name reads — conservative, never the dangerous direction.
+- **C16 hermetic examples** — `examples/blinky-breakout` copied to a scratch
+  directory and driven under `env -i PATH=… HOME=/nonexistent` from a cwd that is
+  neither the project nor the repo: `build --output-dir`, `check --profile
+  release`, `export-kicad`, `gerber-dump --digest`, `run_fab_readiness` and
+  `envelopes` all succeed, and the source tree is byte-identical throughout. No
+  private-library, working-directory or source-write assumption. (Before
+  `0d6dcf87` the same example could not compose a SYSTEM review at all — that was
+  the one real hermeticity defect, and it is fixed.)
 - **C06 DSL identity** — three consecutive `netlisp build` runs leave the tree
   byte-identical, and flipping a `when` branch adds/removes only that branch's
   instance without disturbing the ref-des of its neighbours. The deeper property
