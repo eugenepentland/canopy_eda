@@ -4299,6 +4299,7 @@ src/render_svg/context.zig::LonePinRole enum_
 src/render_svg/context.zig::MergeAwareSplit struct_
 src/render_svg/context.zig::PinGroup struct_
 src/render_svg/context.zig::RenderCtx struct_
+src/render_svg/context.zig::RenderedRowSpan struct_
 src/render_svg/context.zig::Side enum_
 src/render_svg/context.zig::adjAppend | fn adjAppend(self: *RenderCtx, ref_des: []const u8, entry: AdjEntry) std.mem.Allocator.Error!void
 src/render_svg/context.zig::buildAdjacency | fn buildAdjacency(self: *RenderCtx) std.mem.Allocator.Error!void
