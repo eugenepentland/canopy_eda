@@ -10,6 +10,7 @@ const FlatInst = ctx_mod.FlatInst;
 const Endpoint = ctx_mod.Endpoint;
 const escape = @import("../escape.zig");
 const net_name = @import("../net_name.zig");
+const rails_mod = @import("../eval/rails.zig");
 /// Case-insensitive substring search. One implementation, shared with the
 /// section-name classifier that first needed it — this file used to carry the
 /// same scan with `toLower` written out by hand.
@@ -340,6 +341,37 @@ pub fn isHubRef(ref_des: []const u8) bool {
 pub fn isGroundNet(name: []const u8) bool {
     for (na.schematic_ground_names) |g| if (std.mem.eql(u8, name, g)) return true;
     return std.mem.startsWith(u8, name, "VSS");
+}
+
+/// Whether a net is a *signal* for Functional-view layout: neither empty, nor a
+/// ground rail, nor a supply rail. The test reads the net's LEAF name, because
+/// a sub-block's rail reaches the renderer path-qualified (`dsa/VDD_F`) and a
+/// prefix test on the whole spelling called every module-internal supply a
+/// signal — which turned a VDD pull-up into a "signal return", closed it with
+/// a jog onto the rail's bus, and let a bias resistor reorder the pin groups.
+/// One implementation: `connection`, `hub` and `render_html` each carried a
+/// copy of this loop, and every copy had the same blind spot.
+pub fn isFunctionalSignalNet(net: []const u8) bool {
+    const local = net_name.leaf(net);
+    if (local.len == 0 or isGroundNet(local)) return false;
+    for (rails_mod.schematic_supply_prefixes) |prefix| {
+        if (std.ascii.startsWithIgnoreCase(local, prefix)) return false;
+    }
+    return true;
+}
+
+// spec: render_svg - A sub-block's path-qualified supply rail is still a supply, not a signal return
+test "functional signal classification sees through a sub-block path" {
+    const testing = std.testing;
+    try testing.expect(isFunctionalSignalNet("PAR_CTRL"));
+    try testing.expect(isFunctionalSignalNet("dsa/PAR_CTRL"));
+    try testing.expect(isFunctionalSignalNet("LMX_VTUNE"));
+    try testing.expect(!isFunctionalSignalNet("VDD_F"));
+    try testing.expect(!isFunctionalSignalNet("dsa/VDD_F"));
+    try testing.expect(!isFunctionalSignalNet("ldo/V_3V3"));
+    try testing.expect(!isFunctionalSignalNet("dsa/GND"));
+    try testing.expect(!isFunctionalSignalNet(""));
+    try testing.expect(!isFunctionalSignalNet("dsa/"));
 }
 
 /// Strip the "subblock/" path from a ref-des — turns "ldo/U1" into "U1"

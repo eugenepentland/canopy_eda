@@ -68,10 +68,7 @@ fn deferredSeriesInst(
 ) ?FlatInst {
     if (!self.render_scratch.functional_layout or !self.render_scratch.defer_branch_terminals) return null;
     if (branch.chain.len != 1 or !std.mem.eql(u8, branch.chain[0].symbol, "generic-res")) return null;
-    const target_y = switch (side) {
-        .left => self.render_scratch.functional_left_pin_y.get(baseNetName(branch.terminal)),
-        .right => self.render_scratch.functional_right_pin_y.get(baseNetName(branch.terminal)),
-    } orelse return null;
+    const target_y = functionalPinY(self, side, branch.terminal) orelse return null;
     if (target_y > by and index + 1 == branch_count) return branch.chain[0];
     if (target_y < by and index == 0) return branch.chain[0];
     return null;
@@ -93,10 +90,11 @@ fn deferredBoundaryTermination(
 }
 
 fn functionalPinY(self: *const RenderCtx, side: ctx_mod.Side, net: []const u8) ?f64 {
-    return switch (side) {
+    const row = switch (side) {
         .left => self.render_scratch.functional_left_pin_y.get(baseNetName(net)),
         .right => self.render_scratch.functional_right_pin_y.get(baseNetName(net)),
-    };
+    } orelse return null;
+    return row.cy;
 }
 
 /// A passive-only island can join two hub pins through separate spokes. When

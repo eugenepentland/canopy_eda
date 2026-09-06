@@ -5,7 +5,6 @@
 
 const std = @import("std");
 const env_mod = @import("../eval/env.zig");
-const rails_mod = @import("../eval/rails.zig");
 const PinRef = env_mod.PinRef;
 const ctx_mod = @import("context.zig");
 const RenderCtx = ctx_mod.RenderCtx;
@@ -86,6 +85,9 @@ const Classified = struct {
     conn: AdjEntry,
     terminal: []const u8,
     externally_visible: bool,
+    return_dir: ReturnDirection = .none,
+    /// The destination row's centre when `return_dir` is not `.none`.
+    return_y: f64 = 0,
 };
 
 /// Feedback-loop closure is deliberately gated by the hub pin's function, not
@@ -200,6 +202,59 @@ pub fn renderGroupedConnectionsDeferred(
     return renderGroupedConnectionsImpl(self, w, render, deferred);
 }
 
+const GroupClassification = struct {
+    hub_ref: []const u8,
+    group: PinGroup,
+    pin_net: []const u8,
+    side: Side,
+    py: f64,
+};
+
+/// Resolve every connection out of one pin group to the terminal it reaches:
+/// a net label, or the far end of the spoke chain hanging off the pin. Drops
+/// insignificant nets, spokes another row already drew, and the pin's own net
+/// unless the reader has somewhere to follow it (`shouldShowOwnNet`).
+fn classifyGroupConnections(self: *RenderCtx, of: GroupClassification) RenderError!std.ArrayList(Classified) {
+    var classified: std.ArrayList(Classified) = .empty;
+    for (of.group.conns) |conn| {
+        switch (conn.endpoint) {
+            .net => |net| {
+                const term = baseNetName(net);
+                if (!self.significant_nets.contains(term)) continue;
+                const own = std.mem.eql(u8, term, baseNetName(of.pin_net));
+                if (own and !shouldShowOwnNet(self, term, of.hub_ref)) continue;
+                // A net that already turns through a vertical series part
+                // closes on this group's pin stubs (`inlineAnchorBody`), so
+                // its own-net row would only reserve an empty slot that the
+                // lane then has to jog across to reach.
+                if (own and self.render_scratch.functional_layout and
+                    self.render_scratch.functional_inline_nets.contains(term)) continue;
+                const heading = functionalReturnHeading(self, of.side, term, of.py);
+                try classified.append(self.allocator, .{
+                    .conn = conn,
+                    .terminal = term,
+                    .externally_visible = terminalIsExternallyVisible(self, term),
+                    .return_dir = heading.dir,
+                    .return_y = heading.y,
+                });
+            },
+            .pin => |p| {
+                if (self.rendered_spokes.contains(p.ref_des)) continue;
+                const term = try getConnTerminal(self, conn.endpoint, of.hub_ref, conn.pin);
+                const heading = functionalReturnHeading(self, of.side, term, of.py);
+                try classified.append(self.allocator, .{
+                    .conn = conn,
+                    .terminal = term,
+                    .externally_visible = terminalIsExternallyVisible(self, term),
+                    .return_dir = heading.dir,
+                    .return_y = heading.y,
+                });
+            },
+        }
+    }
+    return classified;
+}
+
 fn renderGroupedConnectionsImpl(
     self: *RenderCtx,
     w: anytype,
@@ -228,32 +283,13 @@ fn renderGroupedConnectionsImpl(
     const canon_key = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ hub_ref, first_pin_id });
     const pin_net_name = self.pin_canonical_nets.get(canon_key) orelse "";
 
-    var classified: std.ArrayList(Classified) = .empty;
-
-    for (group.conns) |conn| {
-        switch (conn.endpoint) {
-            .net => |net| {
-                const term = baseNetName(net);
-                if (!self.significant_nets.contains(term)) continue;
-                const own = std.mem.eql(u8, term, baseNetName(pin_net_name));
-                if (own and !shouldShowOwnNet(self, term, hub_ref)) continue;
-                try classified.append(self.allocator, .{
-                    .conn = conn,
-                    .terminal = term,
-                    .externally_visible = terminalIsExternallyVisible(self, term),
-                });
-            },
-            .pin => |p| {
-                if (self.rendered_spokes.contains(p.ref_des)) continue;
-                const term = try getConnTerminal(self, conn.endpoint, hub_ref, conn.pin);
-                try classified.append(self.allocator, .{
-                    .conn = conn,
-                    .terminal = term,
-                    .externally_visible = terminalIsExternallyVisible(self, term),
-                });
-            },
-        }
-    }
+    var classified = try classifyGroupConnections(self, .{
+        .hub_ref = hub_ref,
+        .group = group,
+        .pin_net = pin_net_name,
+        .side = side,
+        .py = py,
+    });
 
     try deduplicateGroupedSpokes(self, Classified, &classified, hub_ref);
 
@@ -279,6 +315,12 @@ fn renderGroupedConnectionsImpl(
     };
     std.mem.sortUnstable(Classified, classified.items, sort_ctx, struct {
         fn lt(order: TerminalSortCtx, a: Classified, b: Classified) bool {
+            // A return heading for a pin row above goes first, one heading
+            // below goes last: only the edge row can turn toward it. Among
+            // returns heading the same way, the NEAREST destination takes the
+            // edge — the lowest row above, or the highest row below.
+            if (a.return_dir != b.return_dir) return @backingInt(a.return_dir) < @backingInt(b.return_dir);
+            if (a.return_dir != .none and a.return_y != b.return_y) return a.return_y > b.return_y;
             return terminalLessThan(
                 order.functional,
                 order.pin_net,
@@ -343,12 +385,14 @@ fn renderGroupedConnectionsImpl(
             classified.items.len,
             cy,
         );
+        self.render_scratch.functional_series_column_x = stub_x;
         self.render_scratch.rendered_connection_end_y = null;
         const branch_start = self.render_scratch.deferred_branch_terminals.items.len;
         const end_x = try renderConnBody(self, w, entry.conn.endpoint, hub_ref, entry.conn.pin, conn_stub_x, conn_stub_y, cy, side, internal_net);
         const rendered_end_y = self.render_scratch.rendered_connection_end_y;
         const end_y = rendered_end_y orelse cy;
         self.render_scratch.functional_series_target_y = null;
+        self.render_scratch.functional_series_column_x = null;
         try appendDeferredBranchRun(
             self,
             deferred,
@@ -776,14 +820,76 @@ test "vertical passive labels face away from the hub" {
     try testing.expect(std.mem.indexOf(u8, right.written(), "<text x=\"109.0\" y=\"124.0\" text-anchor=\"start\"") != null);
 }
 
-fn isFunctionalSignalTerminal(net: []const u8) bool {
-    if (net.len == 0 or isGroundNet(net)) return false;
-    for (rails_mod.schematic_supply_prefixes) |prefix| {
-        if (std.ascii.startsWithIgnoreCase(net, prefix)) return false;
+const isFunctionalSignalTerminal = draw.isFunctionalSignalNet;
+
+/// The Functional-view pin row `terminal` lands on when it is another pin
+/// group of this hub on the same side; null otherwise.
+fn functionalPinRow(self: *const RenderCtx, side: Side, terminal: []const u8) ?ctx_mod.FunctionalPinRow {
+    if (!self.render_scratch.functional_layout) return null;
+    return switch (side) {
+        .left => self.render_scratch.functional_left_pin_y.get(baseNetName(terminal)),
+        .right => self.render_scratch.functional_right_pin_y.get(baseNetName(terminal)),
+    };
+}
+
+/// Whether `net` takes part in Functional-view layout as a signal: the groups
+/// it joins are ordered side by side, never split across the two columns, and
+/// a series part between them may turn toward its destination row. A signal
+/// always does. A supply rail does only when it is private to this hub — a
+/// module's filtered `VDD_F`, whose only pins are this IC's — because a shared
+/// rail's label is what lets the reader find it on the other sheets; see
+/// "deferred terminals do not close a supply pull-up as feedback". Ground
+/// never does. One rule for `hub`, `render_html` and this file.
+pub fn functionalLayoutNet(self: *const RenderCtx, net: []const u8) bool {
+    const base = baseNetName(net);
+    if (base.len == 0 or isGroundNet(draw.shortNetName(base))) return false;
+    return isFunctionalSignalTerminal(base) or !directNetNeedsLabel(self, base);
+}
+
+/// Whether a series part may turn toward `terminal`'s pin row at all.
+fn functionalReturnTurns(self: *const RenderCtx, terminal: []const u8) bool {
+    return functionalLayoutNet(self, terminal);
+}
+
+/// No other pin row of this side may lie between the turning row and its
+/// destination: the lane runs down the pin-stub column, so a group in between
+/// would read as wired into it.
+fn rowsClearBetween(self: *const RenderCtx, side: Side, from_y: f64, to_y: f64) bool {
+    const rows = switch (side) {
+        .left => &self.render_scratch.functional_left_pin_y,
+        .right => &self.render_scratch.functional_right_pin_y,
+    };
+    const lo = @min(from_y, to_y);
+    const hi = @max(from_y, to_y);
+    var it = rows.valueIterator();
+    while (it.next()) |row| {
+        if (row.cy > lo and row.cy < hi) return false;
     }
     return true;
 }
 
+/// Where a connection's terminal sits relative to its own group's centre —
+/// the row order puts a return on the edge nearest its destination, so the
+/// series part can turn straight toward it.
+const ReturnDirection = enum(u8) { above = 0, none = 1, below = 2 };
+
+const ReturnHeading = struct {
+    dir: ReturnDirection = .none,
+    y: f64 = 0,
+};
+
+fn functionalReturnHeading(self: *const RenderCtx, side: Side, terminal: []const u8, py: f64) ReturnHeading {
+    if (!functionalReturnTurns(self, terminal)) return .{};
+    const row = functionalPinRow(self, side, terminal) orelse return .{};
+    if (row.cy > py) return .{ .dir = .below, .y = row.cy };
+    if (row.cy < py) return .{ .dir = .above, .y = row.cy };
+    return .{};
+}
+
+/// The destination row a series connection turns toward, or null when it
+/// stays horizontal: the terminal must be a pin row of this side, the
+/// connection must sit on the edge of its group facing that row, and no other
+/// group may lie between them.
 fn functionalSeriesTargetY(
     self: *RenderCtx,
     side: Side,
@@ -792,15 +898,20 @@ fn functionalSeriesTargetY(
     connection_count: usize,
     cy: f64,
 ) ?f64 {
-    if (!self.render_scratch.functional_layout) return null;
-    if (!isFunctionalSignalTerminal(baseNetName(terminal))) return null;
-    const target_y = switch (side) {
-        .left => self.render_scratch.functional_left_pin_y.get(baseNetName(terminal)),
-        .right => self.render_scratch.functional_right_pin_y.get(baseNetName(terminal)),
-    } orelse return null;
-    if (target_y > cy and index + 1 == connection_count) return target_y;
-    if (target_y < cy and index == 0) return target_y;
-    return null;
+    if (!functionalReturnTurns(self, terminal)) return null;
+    const row = functionalPinRow(self, side, terminal) orelse return null;
+    const target_y = row.cy;
+    // The part is one body long and must end before the destination's
+    // nearest stub; a row fan that overran its band would otherwise put the
+    // body across that stub.
+    const at_edge = if (target_y > cy)
+        index + 1 == connection_count and row.first_stub_y - cy >= passive_bw
+    else if (target_y < cy)
+        index == 0 and cy - row.last_stub_y >= passive_bw
+    else
+        false;
+    if (!at_edge or !rowsClearBetween(self, side, cy, target_y)) return null;
+    return target_y;
 }
 
 fn isDirectCandidate(groups: []const DeferredGroup, idx: usize) bool {
@@ -824,6 +935,115 @@ fn isDirectCandidate(groups: []const DeferredGroup, idx: usize) bool {
     const is_signal_return = has_return and isFunctionalSignalTerminal(baseNetName(group.terminal));
     return matching >= 2 and ((has_output_anchor and (has_feedback_return or is_signal_return)) or
         candidateHasLocalIslandBranch(groups, group));
+}
+
+/// Where a turned series return lands: the destination group's nearest pin
+/// stub, on the pin-stub column, so the lane meets the stub tie head-on. Null
+/// when no row was recorded for the net (a caller that built no row index).
+fn inlineAnchorY(self: *const RenderCtx, group: DeferredGroup, body: BranchBody) ?f64 {
+    const row = functionalPinRow(self, group.side, group.terminal) orelse return null;
+    return if (body.cy < row.cy) row.first_stub_y else row.last_stub_y;
+}
+
+/// Close every turned series return in `group` on its pin-stub column before
+/// the outside lanes are chosen: a straight lane from the part's far end to
+/// the destination group's nearest stub, labelled beside the part when the
+/// net needs a label. A closed body leaves the group, so a net that ALSO
+/// returns from other rows still gets its outside lane for those — merging
+/// them onto the column ran a lane along the stub ends of every row between.
+fn closeInlineReturns(self: *RenderCtx, w: anytype, groups: []DeferredGroup) RenderError!void {
+    for (groups, 0..) |*group, gi| {
+        var kept: std.ArrayList(BranchBody) = .empty;
+        var closed = false;
+        for (group.results) |body| {
+            const anchor_y = if (body.inline_direct_lane) inlineAnchorY(self, group.*, body) else null;
+            const target_y = anchor_y orelse {
+                try kept.append(self.allocator, body);
+                continue;
+            };
+            closed = true;
+            if (target_y != body.cy) try drawNetWire(w, body.end_x, body.cy, body.end_x, target_y, group.terminal);
+            if (directNetNeedsLabel(self, group.terminal)) {
+                try branch_mod.drawTerminal(self, w, body.end_x, body.cy, group.terminal, switch (group.side) {
+                    .left => "end",
+                    .right => "start",
+                });
+            } else {
+                try writeDebugPin(w, body.end_x, body.cy);
+            }
+            try absorbAnchorRows(self, w, groups, gi, group.*, body.end_x);
+        }
+        if (closed) group.results = try kept.toOwnedSlice(self.allocator);
+    }
+}
+
+/// The destination group may have drawn its own net as a plain row before the
+/// return turned toward it — the net reaches another hub, so the row earned
+/// a label the moment that group rendered. A row inside the group's stub span
+/// now belongs to the column lane: wire it across and drop it, or it closes a
+/// second time as a lone label beside the one the turned part already has.
+fn absorbAnchorRows(
+    self: *RenderCtx,
+    w: anytype,
+    groups: []DeferredGroup,
+    closed_idx: usize,
+    closed: DeferredGroup,
+    column_x: f64,
+) RenderError!void {
+    const row = functionalPinRow(self, closed.side, closed.terminal) orelse return;
+    for (groups, 0..) |*other, oi| {
+        if (oi == closed_idx or !sameDeferredNet(closed, other.*)) continue;
+        if (!std.mem.eql(u8, baseNetName(other.source_net), baseNetName(other.terminal))) continue;
+        var kept: std.ArrayList(BranchBody) = .empty;
+        var absorbed = false;
+        for (other.results) |body| {
+            if (body.inline_direct_lane or body.cy < row.first_stub_y or body.cy > row.last_stub_y) {
+                try kept.append(self.allocator, body);
+                continue;
+            }
+            if (body.end_x != column_x) try drawNetWire(w, body.end_x, body.cy, column_x, body.cy, closed.terminal);
+            absorbed = true;
+        }
+        if (absorbed) other.results = try kept.toOwnedSlice(self.allocator);
+    }
+}
+
+const label_char_width: f64 = 7.0;
+const label_lane_clearance: f64 = 6.0;
+
+/// One outside lane: the side it runs on, the rows it spans, and its x.
+const LaneSpan = struct {
+    side: Side,
+    first_y: f64,
+    last_y: f64,
+    x: f64,
+};
+
+/// An outside lane sits one `feedback_lane_gap` beyond the terminal column,
+/// which clears a ground glyph but not a net label: text anchored at the
+/// terminal column extends AWAY from the hub, straight across the lane. Push
+/// the lane past every label drawn on a row inside the lane's span.
+fn laneClearOfLabels(
+    self: *const RenderCtx,
+    groups: []const DeferredGroup,
+    candidates: []const bool,
+    lane: LaneSpan,
+) f64 {
+    var x = lane.x;
+    for (groups, 0..) |other, i| {
+        if (candidates[i] or !sameSide(other.side, lane.side) or other.results.len == 0) continue;
+        const term = other.terminal;
+        if (isGroundNet(baseNetName(term)) or !self.significant_nets.contains(term)) continue;
+        // `terminalGroups` labels a run of one terminal on its LAST row.
+        const label_y = other.results[other.results.len - 1].cy;
+        if (label_y <= lane.first_y or label_y >= lane.last_y) continue;
+        const width = @as(f64, @floatFromInt(baseNetName(term).len)) * label_char_width;
+        x = switch (lane.side) {
+            .left => @min(x, other.term_x - draw.net_label_gap - width - label_lane_clearance),
+            .right => @max(x, other.term_x + draw.net_label_gap + width + label_lane_clearance),
+        };
+    }
+    return x;
 }
 
 /// A qualified `.local.` terminal is the SVG-only second attachment for one
@@ -1050,6 +1270,8 @@ pub fn renderDeferredTerminals(
         }
     }
 
+    try closeInlineReturns(self, w, groups.items);
+
     const handled = try self.allocator.alloc(bool, groups.items.len);
     @memset(handled, false);
     try renderBoundaryTerminations(self, w, groups.items, handled);
@@ -1086,43 +1308,71 @@ pub fn renderDeferredTerminals(
         }
         if (already_drawn) continue;
 
-        var bodies: std.ArrayList(BranchBody) = .empty;
-        var lane_x = switch (group.side) {
+        try renderDirectCandidate(self, w, groups.items, candidates, group, has_feedback_return);
+    }
+}
+
+/// Draw one direct connection: gather every candidate body on the net, pick
+/// the lane that closes them, and emit the bodies, lane and label.
+///
+/// The lane is the shared outside lane (one `feedback_lane_gap` past the
+/// terminal column, pushed past any label it would cross), or the branch-tree
+/// bus for a shared passive island. Turned series returns were already closed
+/// on their pin-stub column by `closeInlineReturns`.
+fn renderDirectCandidate(
+    self: *RenderCtx,
+    w: anytype,
+    groups: []const DeferredGroup,
+    candidates: []const bool,
+    group: DeferredGroup,
+    has_feedback_return: bool,
+) RenderError!void {
+    var bodies: std.ArrayList(BranchBody) = .empty;
+    var lane_x = switch (group.side) {
+        .left => far_x_sentinel,
+        .right => -far_x_sentinel,
+    };
+    for (groups, 0..) |other, j| {
+        if (!candidates[j] or !sameDeferredNet(group, other)) continue;
+        try bodies.appendSlice(self.allocator, other.results);
+        lane_x = switch (group.side) {
+            .left => @min(lane_x, other.term_x - feedback_lane_gap),
+            .right => @max(lane_x, other.term_x + feedback_lane_gap),
+        };
+    }
+
+    std.mem.sortUnstable(BranchBody, bodies.items, {}, bodyRowLessThan);
+    if (bodies.items.len == 0) return;
+    if (candidateHasLocalIslandBranch(groups, group)) {
+        lane_x = switch (group.side) {
             .left => far_x_sentinel,
             .right => -far_x_sentinel,
         };
-        for (groups.items, 0..) |other, j| {
-            if (!candidates[j] or !sameDeferredNet(group, other)) continue;
-            try bodies.appendSlice(self.allocator, other.results);
+        for (bodies.items) |body| {
             lane_x = switch (group.side) {
-                .left => @min(lane_x, other.term_x - feedback_lane_gap),
-                .right => @max(lane_x, other.term_x + feedback_lane_gap),
+                .left => @min(lane_x, body.end_x - branch_tree_bus_gap),
+                .right => @max(lane_x, body.end_x + branch_tree_bus_gap),
             };
         }
-
-        std.mem.sortUnstable(BranchBody, bodies.items, {}, struct {
-            fn lt(_: void, a: BranchBody, b: BranchBody) bool {
-                if (a.cy != b.cy) return a.cy < b.cy;
-                return a.end_x < b.end_x;
-            }
-        }.lt);
-        if (bodies.items.len == 0) continue;
-        const has_local_island_branch = candidateHasLocalIslandBranch(groups.items, group);
-        if (has_local_island_branch) {
-            lane_x = switch (group.side) {
-                .left => far_x_sentinel,
-                .right => -far_x_sentinel,
-            };
-            for (bodies.items) |body| {
-                lane_x = switch (group.side) {
-                    .left => @min(lane_x, body.end_x - branch_tree_bus_gap),
-                    .right => @max(lane_x, body.end_x + branch_tree_bus_gap),
-                };
-            }
-        }
-        lane_x = inlineDirectLane(bodies.items) orelse lane_x;
-        try renderDirectBodies(self, w, bodies.items, group, lane_x, has_feedback_return);
     }
+    if (inlineDirectLane(bodies.items)) |inline_x| {
+        // A turned part whose destination row was never recorded (a caller
+        // without the row index) still defines the lane its net closes on.
+        lane_x = inline_x;
+    } else {
+        lane_x = laneClearOfLabels(self, groups, candidates, .{
+            .side = group.side,
+            .first_y = bodies.items[0].cy,
+            .last_y = bodies.items[bodies.items.len - 1].cy,
+            .x = lane_x,
+        });
+    }
+    try renderDirectBodies(self, w, bodies.items, group, lane_x, has_feedback_return);
+}
+
+fn bodyRowLessThan(_: void, a: BranchBody, b: BranchBody) bool {
+    if (a.cy != b.cy) return a.cy < b.cy;
+    return a.end_x < b.end_x;
 }
 
 // spec: render_svg - A feedback divider return and its output pin on the same hub side draw as one outside rail with a single net label
@@ -1396,6 +1646,36 @@ test "functional shared bias resistor moves beside its destination pin" {
     try testing.expect(std.mem.indexOf(u8, got.written(), "x1=\"190.0\" y1=\"180.0\" x2=\"204.0\" y2=\"180.0\"") != null);
     try testing.expect(std.mem.indexOf(u8, got.written(), "points=\"204.0,120.0 204.0,120.0 204.0,180.0 204.0,180.0\"") != null);
     try testing.expect(std.mem.indexOf(u8, got.written(), ">R50 50R</text>") != null);
+}
+
+// spec: render_svg - An outside direct-return lane is pushed past any net label drawn on a row it spans
+test "direct return lane clears a net label between its rows" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = RenderCtx.init(a);
+    try ctx.significant_nets.put(a, "OUT_A", {});
+    try ctx.significant_nets.put(a, "DEBUG_TP", {});
+
+    const a_return = [_]BranchBody{.{ .end_x = 210.0, .cy = 100.0, .terminal = "OUT_A" }};
+    const label_row = [_]BranchBody{.{ .end_x = 250.0, .cy = 140.0, .terminal = "DEBUG_TP" }};
+    const a_output = [_]BranchBody{.{ .end_x = 250.0, .cy = 180.0, .terminal = "OUT_A" }};
+    var deferred: DeferredTerminals = .{};
+    try deferred.runs.append(a, .{ .results = &a_return, .term_x = 180.0, .side = .left, .source_net = "RET_A", .source_is_feedback = false });
+    try deferred.runs.append(a, .{ .results = &label_row, .term_x = 180.0, .side = .left, .source_net = "DEBUG_TP", .source_is_feedback = false });
+    try deferred.runs.append(a, .{ .results = &a_output, .term_x = 180.0, .side = .left, .source_net = "OUT_A", .source_is_feedback = false });
+
+    var got: std.Io.Writer.Allocating = .init(a);
+    try renderDeferredTerminals(&ctx, &got.writer, &deferred, true);
+
+    // The DEBUG_TP label sits at x=162 (180 - net_label_gap) and runs left
+    // for eight characters. The ordinary lane at 156 would cut through it, so
+    // the lane moves to 162 - 8*7 - 6 = 100 and the label stays whole.
+    try testing.expect(std.mem.indexOf(u8, got.written(), "x=\"162.0\" y=\"144.0\" text-anchor=\"end\"") != null);
+    try testing.expect(std.mem.indexOf(u8, got.written(), "156.0,100.0") == null);
+    try testing.expect(std.mem.indexOf(u8, got.written(), "points=\"100.0,100.0 100.0,100.0 100.0,180.0 100.0,180.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, got.written(), "x1=\"210.0\" y1=\"100.0\" x2=\"100.0\" y2=\"100.0\"") != null);
 }
 
 // spec: render_svg - The Original schematic view keeps feedback endpoints label-connected without an outside cross-pin rail
@@ -2110,6 +2390,7 @@ pub fn renderConnBody(
                         .side = side,
                         .source_net = net_name,
                         .target_y = target_y,
+                        .column_x = self.render_scratch.functional_series_column_x orelse stub_x,
                     });
                     self.render_scratch.rendered_connection_end_y = vertical_endpoint.y;
                     return vertical_endpoint.x;
@@ -2151,15 +2432,21 @@ const VerticalSeriesRender = struct {
     side: Side,
     source_net: []const u8,
     target_y: f64,
+    /// The group's pin-stub column. Equals `stub_x` for a single connection;
+    /// a multi-connection group hands in its bus as `stub_x` and the part
+    /// steps back onto the column so its lane meets the neighbour's stub tie.
+    column_x: f64,
 };
 
 const VerticalEndpoint = struct { x: f64, y: f64 };
 
 fn drawVerticalSeriesPassive(w: anytype, render: VerticalSeriesRender) RenderError!VerticalEndpoint {
-    const component_x = render.stub_x;
+    const component_x = render.column_x;
     const end_y = render.cy + (if (render.target_y > render.cy) passive_bw else -passive_bw);
 
-    try drawNetWire(w, render.stub_x, render.stub_y, component_x, render.cy, render.source_net);
+    if (render.stub_x != component_x or render.stub_y != render.cy) {
+        try drawNetWire(w, render.stub_x, render.stub_y, component_x, render.cy, render.source_net);
+    }
     try drawVerticalPassive(w, render.inst, component_x, render.cy, end_y, render.side);
     return .{ .x = component_x, .y = end_y };
 }
