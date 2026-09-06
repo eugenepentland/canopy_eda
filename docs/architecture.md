@@ -263,7 +263,8 @@ independent check, `netlisp export-elmer-thermal` writes an Elmer FEM case and
 ### Reviews and release gating
 
 - **Checks with a profile.** `netlisp check --profile authoring|preflight|release` runs one finding model (`src/preflight.zig`) over ERC, executable component requirements, design-owned rules and datasheet-review records. `authoring` reports, `preflight` gates, `release` additionally demands the component-class review obligations and a cited requirement on every active part.
-- **Board Review Audit.** `netlisp review-audit` / the `review_audit` tool generates a Markdown document a reviewer dispositions: the identity block with release token and digests, the release-profile check summary, one row per active part with its class profile and unmet items, the completion ladder, the fabrication gate with DRC counts by kind, open notes and a findings register.
+- **Board Review Card.** `netlisp review-card` / the `review_card` tool / `GET /api/review-card/:name` compose one board's whole unit review as ONE value (`src/review_card.zig`): the twelve fixed review categories with a count stripe each, every row citing a check id from the review registry with a verdict in the seven-word vocabulary (`pass`, `fail`, `unproven`, `waived`, `not_applicable`, `not_declared`, `manual`), the per-part table, the fabrication block, the layout ladder and the board answer. A category whose input the board never declared reports `not_declared` rows naming the missing form rather than staying silent.
+- **Board Review Audit.** `netlisp review-audit` / the `review_audit` tool render that same card as a Markdown document a reviewer dispositions: the identity block with release token and digests, the release-profile check summary, one row per active part with its class profile and unmet items, the completion ladder, the fabrication gate with DRC counts by kind, open notes and a findings register.
 - **Waiver register.** A release's DRC waivers are only evidence while their counts match the run that produced them; `src/waiver_register.zig` re-reads the register and compares.
 - **System review.** `(system …)` contracts declare which boards form a product and which connector contacts join them. `netlisp system-check` reports readiness; `netlisp export-system-review` produces a watermarked ZIP with combined Markdown, a searchable PDF and a self-contained offline HTML dossier, and no fabrication CAM.
 
@@ -510,7 +511,7 @@ you are doing:
 
 | Group | Commands |
 | --- | --- |
-| **Evaluate and check** | `parse`, `build`, `check [--profile authoring\|preflight\|release] [--variant V]`, `system-check`, `review-audit` |
+| **Evaluate and check** | `parse`, `build`, `check [--profile authoring\|preflight\|release] [--variant V]`, `system-check`, `review-audit`, `review-card` |
 | **Query a design (JSON)** | `designs`, `instances`, `net`, `free-pins`, `schematic`, `describe`, `library`, `power-flow`, `netlist-dump` |
 | **Language** | `reference [section]`, `gen-language-docs [--check]` |
 | **Structured tools** | `tool list`, `tool <name> [--args JSON\|--args-file F] [--output F]` |

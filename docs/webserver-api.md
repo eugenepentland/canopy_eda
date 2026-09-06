@@ -476,12 +476,46 @@ Auth in full: [auth.md](auth.md).
   because the ref is a path segment the store's query folding cannot see.
   `X-Netlisp-Part-Review-Cache: hit|miss|bypass` reports which happened. CLI
   twin: `part_review`, sharing this body.
+- **Board review card**: `GET /api/review-card/:name[?layout=<saved>]` — one
+  board's whole unit review (`src/review_card.zig`, served by
+  `src/serve/review_card_api.zig`) as read-only JSON. The body carries
+  `identity` and `digests` (the board, the reviewed layout, the tree state, the
+  release token and the content digests the evidence is bound to), `schematic`
+  (the release-profile and ERC tallies and the open-note count), the twelve
+  fixed review `categories[]` in registry order — `identity`, `connectivity`,
+  `supply_voltages`, `power_budget`, `decoupling`, `sequencing_levels`,
+  `component_ratings`, `thermal`, `datasheet_compliance`, `bom`, `layout`,
+  `domain_analyses` — each with a count `stripe` and its `rows[]`, `parts[]`
+  (one row per active part: class, datasheet review, requirement tally, unmet
+  class-profile items and the part's review chip), `fab` (the gate verdict, its
+  finding ids and the board statistics), `layout` (the completion ladder and the
+  DRC tallies by kind) and `overall` (the worst verdict, how many open rows
+  block a release at each policy, and whether the board is releasable).
+  Every row cites a check `id` from the review registry — the "Review checks"
+  catalogue `docs/language-forms.md` renders from `src/review_registry.zig` —
+  and carries the `scope` and `subject` it is about, the `result` the engine
+  returned, a `verdict` in the shared seven-word vocabulary (`pass`, `fail`,
+  `unproven`, `waived`, `not_applicable`, `not_declared`, `manual`), the
+  `evidence` that produced it, the `closes_with` form that closes it, its
+  `policy` (`blocking`, `waivable`, `advisory`) and the `record` a waived row is
+  closed by. The id decides the category, scope, policy and closing form, so a
+  row cannot drift from the catalogue. A category whose input the board never
+  declared reports `not_declared` rows naming the missing form rather than
+  staying silent. `?layout=` reviews a NAMED saved layout (a different board to
+  the DRC, the ladder and the gate) and is keyed into the cache rather than
+  bypassing it; unknown design → 404. Read-only, retained in
+  `src/serve/read_cache.zig` against the evaluator read-set;
+  `X-Netlisp-Review-Card-Cache: hit|miss|bypass` reports which happened. CLI
+  twins: the `review_card` tool and `netlisp review-card`, sharing this body;
+  the `review_audit` tool and `netlisp review-audit` render the same card as the
+  standard's Markdown audit.
 - **Thermal facts**: `GET /api/thermal/:name[?ambient=NN][?layout=<saved>]` — the lumped
   steady-state thermal screening (`src/eval/thermal.zig`) as read-only JSON:
   `ambient_c`, the board `verdict`
   (`passive_ok`/`needs_airflow`/`needs_heatsink`/`over_limit`/`insufficient_data`),
   the `limiting_ref` it hangs on, the `max_ambient`/`min_ambient` window with the
-  part setting each end, coverage `counts`, and a `parts[]` row per part
+  part setting each end, coverage `counts`, an `ambient_source` object saying
+  where the screening ambient came from, and a `parts[]` row per part
   (power/theta/limits/result; unknown figures are `null`, never 0). `:name` is a
   design or a bare `lib/modules` module (percent-decoded, resolved standalone
   through its parameter defaults); an unknown name is 404 plain text and a
@@ -496,8 +530,17 @@ Auth in full: [auth.md](auth.md).
   with the sentence saying so instead of the default board's numbers, and naming
   the starred layout folds to the default board so both spellings share one
   cached solve. `GET /api/thermal-field/:name` (the board overlay's heat field)
-  takes the same argument. CLI twin: `describe_thermal`, sharing this
-  endpoint's whole body (`src/serve/thermal_api.zig`).
+  takes the same argument. **Without `?ambient`, the screen runs at the ambient
+  the governing system brief states** (`(brief (environment (ambient MIN MAX)))`
+  on the system that declares this board — its MAX), falling back to the 25 °C
+  bench default when no brief governs it. `ambient_source` carries `system`,
+  `ambient_min_c`, `ambient_max_c`, `cooling`, `scenario`, `note` and
+  `overridden`: every field but the last is `null` when nothing declared one,
+  `note` is non-null only when the screened scenario is a conservative stand-in
+  for a cooling case the solver cannot model (`sealed-conduction`), and
+  `overridden` is `true` when `?ambient` was supplied, so a client can tell a
+  what-if from the product's own envelope. CLI twin: `describe_thermal`, sharing
+  this endpoint's whole body (`src/serve/thermal_api.zig`).
 
   The retained solve (`src/serve/thermal_cache.zig`) skips the relaxation, not
   the design evaluation each request opens with — so the finished RESPONSE is
@@ -870,6 +913,14 @@ Tools include:
   be told different junction temperatures for the same design, ambient and
   layout. It
   resolves a design or a bare `lib/modules` module and touches nothing on disk.
+- **Board review card (read-only)**: `review_card` `{name, layout?}` — the CLI
+  twin of `GET /api/review-card/:name[?layout=]`, returning the identical bytes
+  through one shared body: the twelve review categories with their count
+  stripes and rows (each citing a registry check id, with a verdict in the
+  seven-word vocabulary), the per-part table, the fabrication block, the layout
+  ladder and the board answer. `netlisp review-card [--layout N] [--output F]
+  [--markdown] <design>` prints the same JSON, or the audit's Markdown form.
+  Read-only.
 - **Per-part review (read-only)**: `part_review` `{name, ref?}` — the CLI twin
   of `GET /api/part-review/:name[/:ref]`, returning the identical bytes through
   one shared body. With `ref` it answers that placed part's whole review
@@ -887,7 +938,12 @@ Tools include:
   kind, open notes, and a findings register with empty Disposition cells.
   The CLI twin is `netlisp review-audit [--layout N] [--output F] <board>`;
   the document parses under the system-review Markdown rules, so it can be
-  registered as a board-scoped review document. `run_checks` and `build`
+  registered as a board-scoped review document. It is rendered FROM the Board
+  Review Card, so every stage row's Check cell now reads `<registry id> — <the
+  check>` and a "Review card" section carries the category count stripe;
+  regenerating with `--output` still carries the reviewer's filled
+  Disposition/Owner/Date cells forward onto every row the new evidence renders
+  identically. `run_checks` and `build`
   accept `profile:"release"` — preflight plus the component-class profile
   obligations (`profile_incomplete`), a cited-requirement demand on every
   active part, and evaluator warnings as findings.

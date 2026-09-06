@@ -109,6 +109,10 @@ const export_system_review_usage =
     "Usage: netlisp export-system-review [--project-dir <d>] <system-name> [--output <file.zip>]\n";
 const review_audit_usage =
     "Usage: netlisp review-audit [--project-dir <d>] [--layout <name>] [--output <file.md>] <design-name>\n";
+const review_card_usage =
+    "Usage: netlisp review-card [--project-dir <d>] [--layout <name>] [--output <file>] [--markdown] <design-name>\n" ++
+    "Prints the Board Review Card as JSON; --markdown prints the same card in the\n" ++
+    "review-audit's Markdown form.\n";
 
 const SystemReviewArgs = struct {
     project_dir: []const u8 = ".",
@@ -415,7 +419,7 @@ pub fn checkReport(allocator: std.mem.Allocator, args: []const []const u8) Comma
     const w = &w_buf.writer;
     var counts = try writeCheckErc(w, violations, parsed.severity);
     counts.include(try writeCheckAssertions(w, &eval, parsed.severity));
-    const report = try preflight.run(allocator, &eval, block, parsed.project_dir, parsed.profile);
+    const report = try preflight.runFor(allocator, &eval, block, parsed.project_dir, parsed.profile, parsed.design);
     defer report.deinit(allocator);
     counts.include(try writeCheckFindings(w, report.findings, parsed.severity));
     try w.print("\n{d} violation(s)\n", .{counts.shown});
@@ -496,6 +500,81 @@ pub fn cmdReviewAudit(allocator: std.mem.Allocator, args: []const []const u8) Co
     } else {
         try std.Io.File.stdout().writeStreamingAll(infra_fs.currentIo(), markdown);
     }
+}
+
+/// Parsed `netlisp review-card` arguments.
+const ReviewCardArgs = struct {
+    project_dir: []const u8 = ".",
+    layout: ?[]const u8 = null,
+    output: ?[]const u8 = null,
+    markdown: bool = false,
+    name: []const u8 = "",
+};
+
+/// Parse `netlisp review-card` arguments, or null when the vector is not one
+/// this command can answer (which prints the usage).
+fn parseReviewCardArgs(args: []const []const u8) ?ReviewCardArgs {
+    var parsed: ReviewCardArgs = .{};
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], project_dir_flag) and i + 1 < args.len) {
+            parsed.project_dir = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--layout") and i + 1 < args.len) {
+            parsed.layout = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--output") and i + 1 < args.len) {
+            parsed.output = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--markdown")) {
+            parsed.markdown = true;
+        } else if (std.mem.startsWith(u8, args[i], "--") or parsed.name.len != 0) {
+            return null;
+        } else parsed.name = args[i];
+    }
+    if (parsed.name.len == 0) return null;
+    return parsed;
+}
+
+/// `netlisp review-card <name>` — the Board Review Card: the twelve review
+/// categories with their count stripes, every row citing a registry check id
+/// with a verdict, the per-part table, the fabrication block and the ladder.
+/// JSON by default (the bytes `GET /api/review-card/:name` returns), or the
+/// review-audit's Markdown form with `--markdown`.
+pub fn cmdReviewCard(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
+    const parsed = parseReviewCardArgs(args) orelse exit.fatal(review_card_usage, .{});
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const card = @import("review_card.zig").collect(scratch.allocator(), parsed.project_dir, parsed.name, .{
+        .layout = parsed.layout,
+    }) catch |err| {
+        exit.fatal("Review card failed: {s}\n", .{@errorName(err)});
+    };
+    const body = renderReviewCard(scratch.allocator(), card, parsed.markdown) catch |err| {
+        exit.fatal("Review card failed: {s}\n", .{@errorName(err)});
+    };
+    if (parsed.output) |path| {
+        infra_fs.cwd().writeFile(.{ .sub_path = path, .data = body }) catch |err| {
+            exit.fatal(cannot_write_fmt, .{ path, err });
+        };
+        std.debug.print("Wrote {s} ({d} bytes)\n", .{ path, body.len });
+        return;
+    }
+    try std.Io.File.stdout().writeStreamingAll(infra_fs.currentIo(), body);
+}
+
+/// The card in the form the caller asked for: the audit Markdown, or the JSON
+/// every other surface answers with.
+fn renderReviewCard(
+    arena: std.mem.Allocator,
+    card: @import("review_card.zig").Card,
+    markdown: bool,
+) ![]const u8 {
+    if (markdown) return @import("review_audit.zig").renderCard(arena, card);
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try @import("review_card.zig").writeCardJson(&out.writer, card);
+    try out.writer.writeByte('\n');
+    return out.written();
 }
 
 /// Parsed argument vector for `netlisp build`. Kept as a pure struct so the
@@ -1528,6 +1607,35 @@ test "parseBuildArgs: --output-dir without --push does not push" {
     try std.testing.expect(!got.want_push);
     try std.testing.expectEqualStrings("/tmp/out", got.output_dir.?);
     try std.testing.expectEqualStrings("lt3045", got.design.?);
+}
+
+// spec: review-card - the review-card CLI parses its flags and names the error a card it cannot compose failed with
+test "cmdReviewCard parses its flags and reports why a card cannot be composed" {
+    const parsed = parseReviewCardArgs(&.{ "--project-dir", "p", "--layout", "L1", "--output", "card.json", "--markdown", "barracuda" }).?;
+    try std.testing.expectEqualStrings("p", parsed.project_dir);
+    try std.testing.expectEqualStrings("L1", parsed.layout.?);
+    try std.testing.expectEqualStrings("card.json", parsed.output.?);
+    try std.testing.expectEqualStrings("barracuda", parsed.name);
+    try std.testing.expect(parsed.markdown);
+    // No design name, an unknown flag and two positionals are all usage errors.
+    try std.testing.expect(parseReviewCardArgs(&.{"--markdown"}) == null);
+    try std.testing.expect(parseReviewCardArgs(&.{ "--nope", "b" }) == null);
+    try std.testing.expect(parseReviewCardArgs(&.{ "one", "two" }) == null);
+
+    // The three failures `cmdReviewCard` turns into a message, at the seam it
+    // reads them from: an unknown design, a name that escapes the project, and
+    // a source file that declares no design block.
+    const alloc = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    defer alloc.free(project_dir);
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/bare.sexp", .data = "42" });
+    const review_card = @import("review_card.zig");
+    try std.testing.expectError(error.EvaluateFailed, review_card.collect(alloc, project_dir, "nope", .{}));
+    try std.testing.expectError(error.InvalidName, review_card.collect(alloc, project_dir, "../etc/passwd", .{}));
+    try std.testing.expectError(error.NotADesign, review_card.collect(alloc, project_dir, "bare", .{}));
 }
 
 // spec: id_insert - a CLI export pins the ids its evaluation minted, so a second export of an untouched design reproduces the same identity

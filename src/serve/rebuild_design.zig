@@ -146,7 +146,7 @@ fn collectValidation(
     assertions: []const AssertionFailure,
 ) BuildValidation {
     const erc = erc_mod.runErc(ctx.allocator, block, ctx.project_dir) catch &[_]erc_mod.Violation{};
-    const report = preflight.run(ctx.allocator, eval, block, ctx.project_dir, ctx.profile) catch
+    const report = preflight.runFor(ctx.allocator, eval, block, ctx.project_dir, ctx.profile, ctx.name) catch
         return .{
             .assertions = assertions,
             .erc = erc,

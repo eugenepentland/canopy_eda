@@ -416,6 +416,7 @@ in their template.
 | `(voltage 11.4 12.6)` | Low and high edges of the input voltage window, in volts. |
 | `(transient 15)` | Survivable input transient, in volts. |
 | `(current-max 1.2)` | Maximum input current the product may draw, in amps. |
+| `(feeds "V_12V")` | Board net the input power lands on. Binds the (voltage LO HI) window to that net's proven envelope for the unit checks; without it the binding falls back to the first (interface "NAME") whose name matches a board port. |
 | `(temperature-grade industrial)` | commercial, industrial, extended or automotive — the grade every part must meet. |
 | `(derating "NASA EEE-INST-002")` | Named derating standard the rating screens work to. Free text: the citation is what a reviewer reads. |
 | `(ipc-class 2)` | IPC-A-610 class, 1 to 3. |
@@ -660,6 +661,15 @@ never gave the engine an input) and `manual`.
 | `reviewed-input-evidence-incomplete` | unit | board | The release names the reviewed inputs it was cut from. | attach the reviewed-input evidence the release lock asks for | blocking |
 | `cache-layout` | unit | board | The cached layout the release reads matches the design it was saved from. | re-save the layout so the cached poses match the design | blocking |
 | `build-warning-free` | unit | board | Evaluating the design emits no warning. | fix the evaluator warning at the source span it names | blocking |
+| `source-tree-clean` | unit | board | The project tree carries no uncommitted change when the release evidence is taken. | commit or revert the working tree, then take the evidence again | blocking |
+| `layout-frozen` | unit | board | The reviewed layout is frozen: its parts are placed and locked and every sub-block layout is starred. | lock the placement and star each sub-block's layout | blocking |
+| `release-gate-clear` | unit | board | The fabrication-readiness gate reports no blocking error for the reviewed layout. | close every gate error the readiness run names | blocking |
+| `design-notes-closed` | unit | board | Every design note raised against the board is closed. | close the note, or restate it as a checklist item | advisory |
+| `release-differential-reviewed` | unit | board | The fabrication package is diffed against the previous release and every change is intended. | record the differential in the audit's Disposition cell | advisory |
+| `source-revision-unavailable` | unit | board | The release can read the source revision the package is cut from. | run the release from a checkout whose revision the tool can read | blocking |
+| `source-worktree-dirty` | unit | board | The worktree the package is cut from carries no uncommitted change. | commit or revert the working tree, then cut the package again | blocking |
+| `source-snapshot-changed` | unit | board | The source did not change under the release while the package was being cut. | re-cut the package from a settled tree | blocking |
+| `source-bundle-ambiguous` | unit | board | Exactly one source bundle describes the release. | leave one source bundle beside the release and delete the others | blocking |
 | `system-identity-complete` | system | system | The system declares title, part number and revision. | (title …) (part-number …) (revision …) in src/systems/<name>/system.sexp | blocking |
 | `system-board-reviews` | system | system | Every board the system claims has a current board review. | run and record the board review for each (board …) | blocking |
 | `system-fabrication-ready` | system | system | Every board the system claims passes its own fabrication gate. | clear each board's blocking fabrication findings | blocking |
@@ -671,6 +681,7 @@ never gave the engine an input) and `manual`.
 
 | Check | Layer | Scope | Asserts | Closes with | Policy |
 | --- | --- | --- | --- | --- | --- |
+| `erc-clean` | unit | board | The electrical-rule check reports no error and no warning on the board. | close every violation the check reports, kind by kind | blocking |
 | `net-not-floating` | unit | net | Every net reaches at least two pins or is declared a block port. | wire the net, or declare it with (port …) | blocking |
 | `pin-connected` | unit | pin | Every pad of every placed part is wired or explicitly dispositioned. | wire the pad, or mark it with (nc …) | blocking |
 | `no-connect-dispositioned` | unit | pin | Every deliberately unconnected pad carries a reason. | (nc "PIN" "reason") on the instance | waivable |
@@ -697,6 +708,7 @@ never gave the engine an input) and `manual`.
 | `check-not-connected` | library | pin | The named pin is left unconnected, as the datasheet demands. | (requirement "…" (check (not-connected (pin "P")))) | blocking |
 | `check-pin-not-floating` | library | pin | The named pin is tied to a defined level rather than left floating. | (requirement "…" (check (pin-not-floating (pin "P")))) | blocking |
 | `check-pins-on-same-net` | library | pin | Every listed pin function of the placement resolves to one net. | (requirement "…" (check (pins-on-same-net (pins "A" "B" …)))) | blocking |
+| `interface-esd-protection` | unit | net | Every externally exposed interface the system brief names carries a protection-class part when the brief declares an ESD class. | place a TVS/ESD part on the interface net, or a part with (class protection) | blocking |
 
 ### Supply voltages
 
@@ -710,6 +722,7 @@ never gave the engine an input) and `manual`.
 | `interface-voltage-domain` | system | net | A contract signal joins two board nets of the same declared potential. | align the rails, or declare the translation the contract needs | blocking |
 | `check-voltage-range` | library | pin | The voltage on the named pin's net lies inside the datasheet window. | (requirement "…" (check (voltage-range (pin "V") (min L) (max H)))) | blocking |
 | `check-voltage-not-above` | library | pin | The highest voltage on one pin's net stays within a margin of another's lowest. | (requirement "…" (check (voltage-not-above (pin "A") (pin "B") (margin M)))) | blocking |
+| `brief-input-power-envelope` | unit | net | The board net the system brief's input power feeds proves an envelope covering the brief's (voltage LO HI) window and any (transient V) it must survive. | (port … (rated LO HI)) or (net-envelope "NET" (rated LO HI)) on the input net, and (input-power … (feeds "NET")) in the brief | blocking |
 
 ### Power budget and copper
 
@@ -758,6 +771,8 @@ never gave the engine an input) and `manual`.
 | `component-underrated` | unit | part | No part sees an applied voltage, power or current above its rating. | up-rate the part, or reduce the applied stress | blocking |
 | `component-rating-margin` | unit | part | Every rated part keeps the derating margin the screen asks for. | up-rate the part, or record the accepted margin | waivable |
 | `check-cap-rating` | library | part | Every capacitor bridging the named pins is rated the required multiple of its working voltage. | (requirement "…" (check (cap-rating (pin "A") (pin "B") (min-ratio X)))) | blocking |
+| `part-temperature-grade` | unit | part | Every placed part's declared temperature grade meets or exceeds the grade the system brief requires. | (temperature-grade industrial) on the component, the call site, or the parts-table row | blocking |
+| `component-derating-standard` | unit | part | Applied stress stays inside the fraction of each part's rating that the derating standard named by the system brief allows. | select a higher-rated part, or state the programme's own standard in (derating "…") | blocking |
 
 ### Thermal
 
@@ -767,6 +782,8 @@ never gave the engine an input) and `manual`.
 | `thermal-theta-ja-declared` | library | part | Every active part declares its junction-to-ambient resistance and maximum junction temperature. | (thermal (theta-ja C/W) (tj-max C)) in the component body | blocking |
 | `thermal-junction-margin` | unit | part | Every part's junction temperature stays under its limit at the screened ambient. | cut the dissipation, improve theta-ja, or move up the cooling ladder | blocking |
 | `thermal-board-cooling-scenario` | unit | board | The board's screened cooling scenario is the one the release is built for. | (board (heatsink …)) or the airflow the release assumes | waivable |
+| `thermal-brief-ambient` | unit | board | The thermal screen runs at the ambient the governing system brief states, in the scenario its declared cooling case maps to. | (brief (environment (ambient MIN MAX) (cooling …))) on the system that owns the board | advisory |
+| `part-operating-range` | unit | part | Every placed part's rated ambient range covers the whole ambient window the system brief states. | (thermal (operating MIN MAX)) in the component body, or a part rated over the brief window | blocking |
 
 ### Datasheet compliance
 
@@ -776,6 +793,8 @@ never gave the engine an input) and `manual`.
 | `datasheet-review-complete` | library | part | Every active part has a complete datasheet review bound to the exact PDF digest. | (datasheet-review (datasheet …) (sha256 …) (status complete) …) | blocking |
 | `datasheet-review-categories` | library | part | The review answers every category the part's class requires. | (category KEY) or (category-na KEY "rationale") in the review record | blocking |
 | `part-requirements-authored` | library | part | Every active part carries at least one cited datasheet requirement. | (requirement "…" (ref …) (check …)) or (ignore-requirements) for an inert part | blocking |
+| `verification-evidence-incomplete` | unit | board | The release carries the verification evidence its lock names. | attach the verification evidence the release lock asks for | blocking |
+| `class-profile-items-met` | unit | part | Every active part meets every item of the component-class profile it was judged under. | author the declaration each unmet item names, or (class …) the part correctly | blocking |
 | `requirement-check` | library | part | Every requirement on a placed part passes its machine check or is signed off with a citation. | fix the design, or (verifies (req (id …) …) "rationale") in the design's checks file | blocking |
 | `verification-bound` | unit | part | Every authored sign-off names a requirement that still exists. | retarget or delete the orphaned (verifies …) record | blocking |
 | `check-pullup-range` | library | pin | A resistor in the datasheet's range bridges the named pin's net and the target net. | (requirement "…" (check (pullup-range (pin "P") (net "N") (min-ohms L) (max-ohms H)))) | blocking |
@@ -792,6 +811,9 @@ never gave the engine an input) and `manual`.
 | `bom-spec-unmatched` | unit | part | Every authored passive spec matches a row of the design's parts table. | reconcile the call-site attributes with the parts-table row | blocking |
 | `bom-spec-library-missing` | unit | part | The library the passive spec screen reads is present. | add the parts-table or component library the gate names | blocking |
 | `attribute-row-matches-parts-table` | unit | part | A placement's typed attributes agree with the parts-table row it resolves to. | edit the attributes or the parts-table row so they agree | blocking |
+| `bom-selection-drift` | unit | part | Every placement's fitted identity still matches the selection the BOM sidecar recorded. | rebuild the BOM, or restore the selection the design authored | blocking |
+| `bom-evidence-incomplete` | unit | board | The release carries the BOM evidence its lock names. | attach the BOM evidence the release lock asks for | blocking |
+| `bom-lifecycle-stock-dated` | unit | part | Every purchasable placement is a lifecycle-active part with a dated stock check. | record the lifecycle and stock date, or replace the part | waivable |
 | `centroid-parity` | unit | board | The assembly centroid lists exactly the placements the netlist does. | re-save the layout so every placement has a pose | blocking |
 | `dnp-in-centroid` | unit | board | No do-not-populate part appears in the assembly centroid. | mark the part (dnp), or remove it from the assembly output | blocking |
 
@@ -829,6 +851,8 @@ never gave the engine an input) and `manual`.
 | `drc-perimeter-keepout` | unit | board | Nothing sits inside the board's authored perimeter exclusion band. | move the feature out of (board … (perimeter-fence … (keepout …))) | blocking |
 | `drc-board-keepout` | unit | board | Nothing sits inside a named mechanical keepout region. | move the feature out of (board … (keepout "NAME" (rect …))) | blocking |
 | `net-open` | unit | net | Every net's drawn copper forms one connected island. | route the missing link between the islands | blocking |
+| `layout-evidence-incomplete` | unit | board | The release carries the layout evidence its lock names. | attach the layout evidence the release lock asks for | blocking |
+| `layout-ladder-complete` | unit | board | Every rung of the layout completion ladder is done on the reviewed layout. | finish the open items the rung lists | blocking |
 | `drc` | unit | board | The release run reports zero DRC errors. | fix the copper the DRC errors name | blocking |
 | `drc-warn` | unit | board | Every DRC warning category is waived with a current count. | fix the copper, or record the category in drc-waivers.md | waivable |
 | `drc-missing` | unit | board | A DRC run exists for the layout the release is cut from. | run the design-rule check on the saved layout | blocking |

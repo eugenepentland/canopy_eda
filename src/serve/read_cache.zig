@@ -101,6 +101,18 @@ pub const part_review: Config = .{
     .max_bytes = 16 * 1024 * 1024,
 };
 
+/// `GET /api/review-card/:name` — one board's whole unit review. `?layout=`
+/// reviews a different saved board (different DRC, ladder and gate), so it is
+/// keyed rather than bypassed. A card of a large board runs to a few hundred
+/// kilobytes and costs an evaluation plus the release check run, so the store
+/// is worth more than the entry count suggests.
+pub const review_card: Config = .{
+    .header = "X-Netlisp-Review-Card-Cache",
+    .keyed_params = &.{"layout"},
+    .max_entries = 64,
+    .max_bytes = 32 * 1024 * 1024,
+};
+
 /// `GET /thermal/:name` — the page's five view parameters are keyed. `?row=`
 /// is not: it answers the cells of a DIFFERENT board than the one on screen,
 /// solved against a baseline this store's dependency set does not describe.

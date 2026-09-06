@@ -40,6 +40,7 @@ const power_budget = @import("eval/power_budget.zig");
 const preflight = @import("preflight.zig");
 const review_datasheet_inventory = @import("review_datasheet_inventory.zig");
 const review_profiles = @import("review_profiles.zig");
+const brief_checks = @import("brief_checks.zig");
 const review_thermal = @import("review_thermal.zig");
 const thermal = @import("eval/thermal.zig");
 
@@ -406,6 +407,22 @@ pub fn collectWith(
         .design_block => |b| b,
         else => return error.NotADesign,
     };
+    return collectFor(arena, eval, block, project_dir, name, options);
+}
+
+/// The same review, over a design the CALLER already evaluated into an
+/// evaluator it keeps alive. The Board Review Card composes this review beside
+/// the audit's facts over ONE evaluation — evaluating the same file twice into
+/// one evaluator would double the analysis reports it collects — so this is the
+/// seam that takes the block rather than the path.
+pub fn collectFor(
+    arena: std.mem.Allocator,
+    eval: *Evaluator,
+    block: *const env.DesignBlock,
+    project_dir: []const u8,
+    name: []const u8,
+    options: Options,
+) CollectError!Board {
     const bom_path = try paths.designSiblingPath(arena, project_dir, name, ".bom");
     // A `.bom` sidecar that is missing or unreadable is a NORMAL state — the
     // design may never have been built — and every identity the review needs is
@@ -416,9 +433,8 @@ pub fn collectWith(
         else => {},
     };
 
-    const ambient = options.ambient_c orelse thermal.default_ambient_c;
-    const report = try preflight.run(arena, eval, block, project_dir, .release);
-    const rating = try ratingReportFor(arena, block);
+    const report = try preflight.runFor(arena, eval, block, project_dir, .release, name);
+    const rating = try ratingReportFor(arena, block, brief_checks.deratingForBoard(arena, project_dir, name));
     const evidence = Evidence{
         .arena = arena,
         .project_dir = project_dir,
@@ -426,7 +442,7 @@ pub fn collectWith(
         .forms = formsOf(eval),
         .report = report,
         .rails = try power_budget.analyze(arena, block),
-        .heat = try thermal.analyze(arena, block, ambient),
+        .heat = try brief_checks.analyzeGoverned(arena, block, project_dir, name, options.ambient_c),
         .ratings = rating.errors,
         .rating_warnings = rating.warnings,
         .specs = try fab_schematic_gate.selectionReport(arena, block, project_dir, false),
@@ -437,7 +453,7 @@ pub fn collectWith(
     try walkParts(evidence, block, "", &parts);
     return .{
         .design = name,
-        .ambient_c = ambient,
+        .ambient_c = evidence.heat.ambient_c,
         .parts = try parts.toOwnedSlice(arena),
     };
 }
@@ -467,6 +483,7 @@ fn formsOf(eval: *const Evaluator) review_profiles.Forms {
 fn ratingReportFor(
     arena: std.mem.Allocator,
     block: *const env.DesignBlock,
+    derating: ?brief_checks.Derating,
 ) std.mem.Allocator.Error!fab_readiness.Report {
     var instances: std.ArrayList(flat_netlist.FlatInstance) = .empty;
     try flat_netlist.collectInstances(arena, block, "", &instances);
@@ -496,7 +513,7 @@ fn ratingReportFor(
             .rail_model = model,
         } },
     };
-    return fab_readiness.ratingReport(arena, placement, false);
+    return fab_readiness.ratingReport(arena, placement, false, derating);
 }
 
 fn walkParts(

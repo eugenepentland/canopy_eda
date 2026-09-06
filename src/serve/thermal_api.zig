@@ -24,6 +24,7 @@ const infra_fs = @import("../infra/fs.zig");
 const log = @import("../infra/log.zig");
 const json_writer = @import("../json_writer.zig");
 const Evaluator = @import("../eval/evaluator.zig").Evaluator;
+const brief_checks = @import("../brief_checks.zig");
 const review_thermal = @import("../review_thermal.zig");
 const thermal = @import("../eval/thermal.zig");
 const thermal_cache = @import("thermal_cache.zig");
@@ -82,8 +83,11 @@ pub fn thermalJson(
     };
     const nb = try mcp_tools.evalNamedBlock(alloc, project_dir, name, &eval);
 
-    const ambient = ambient_c orelse thermal.default_ambient_c;
-    const result = try thermal.analyze(alloc, nb.block, ambient);
+    // The screen runs at the ambient the governing system brief states, unless
+    // the caller asked for one: `describe_thermal` and the endpoint therefore
+    // answer for the product's own envelope, and say so in `ambient_source`.
+    const result = try brief_checks.analyzeGoverned(alloc, nb.block, project_dir, name, ambient_c);
+    const ambient = result.ambient_c;
     const scenarios = try scenariosFor(alloc, project_dir, name, result, ambient, layout);
     var aw: std.Io.Writer.Allocating = .init(alloc);
     try review_thermal.writeFactsJson(&aw.writer, result, scenarios);
@@ -409,7 +413,6 @@ pub fn thermalFieldApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
     const name_raw = req.param("name") orelse return plainError(res, http_not_found, err_not_found);
     const name = try urlcodec.decodeAlloc(alloc, name_raw);
     const ambient_opt = ambientFromQuery(req) catch return plainError(res, http_bad_request, err_ambient);
-    const ambient = ambient_opt orelse thermal.default_ambient_c;
 
     var eval = Evaluator.init(alloc, ctx.project_dir);
     defer eval.deinit();
@@ -417,7 +420,8 @@ pub fn thermalFieldApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) 
         error.OutOfMemory => return error.OutOfMemory,
         else => return plainError(res, http_not_found, err_not_found),
     };
-    const bt = try thermal.analyze(alloc, nb.block, ambient);
+    const bt = try brief_checks.analyzeGoverned(alloc, nb.block, ctx.project_dir, name, ambient_opt);
+    const ambient = bt.ambient_c;
     const solved = try solveFor(alloc, ctx.project_dir, name, bt, layoutFromQuery(req));
 
     const q = req.query() catch null;

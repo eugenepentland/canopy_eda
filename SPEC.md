@@ -258,9 +258,11 @@ candidate for deployment.
 - The library-fact envelope rules remain claimed by the shard manifest
 - The saved-pose identity tests remain claimed by the shard manifest
 - The per-part review tests remain claimed by the shard manifest
+- The Board Review Card tests remain claimed by the shard manifest
 - The review-check registry tests remain claimed by the shard manifest
 - Panelization export tests remain claimed by the shard manifest
 - The system brief and goal evaluations remain claimed by the shard manifest
+- The brief-driven unit-check tests remain claimed by the shard manifest
 - The anonymous-wiring tests remain claimed by exactly one shard
 - Bridges every test-bearing module into the shard import graph so filters alone decide a shard's contents
 - Rejects a shard filter that no longer names a test in the tree
@@ -6237,6 +6239,8 @@ own column headers are free to use the Greek letter.
 - with a cooling ladder the ambient window's hot end is the governing scenario's ceiling and names the cooling it assumes, adding the still-air ceiling whenever passive operation is not viable
 - the shared JSON body carries the board-coupled verdict as its own additive key, null when there is no ladder, while the package-level verdict key keeps its meaning untouched
 - the shared JSON body carries the scenario ladder as absolute degrees per rung, including its physical heatsink interface, shared-plate temperature and directional package path, or a null ladder beside the sentence saying why there is none
+- the provenance line names the governing system brief, its ambient window and the scenario its cooling case is read at, says outright when nothing declared one, and marks a caller-dialled ambient as a what-if
+- the shared JSON body carries the ambient provenance as its own object, null-valued in every field when nothing declared one
 - completeness-waiver: empty inputs (a board with no rows renders prose and no table, and an unknown figure is a dash or a JSON null, both covered by the bullets above)
 - completeness-waiver: large inputs (one linear pass over the already-computed rows; a bigger board only lengthens the slice it formats)
 - completeness-waiver: unauthorized access (pure formatting over a value the caller already holds; it opens nothing and exposes no surface of its own)
@@ -6453,6 +6457,14 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - the generated brief and goals sections render the declared envelope and every goal's verdict, and say so plainly when the system declares neither
 - the system workspace page renders the brief panel and the goals table above its document list
 - the brief governing a board is the first system by name that declares it, and a board no system declares has none
+- a board with no governing brief keeps the bench ambient and produces no brief-driven observation
+- the screening plan takes the brief's ambient maximum and maps its declared cooling case to a solver scenario
+- a sealed-conduction brief is screened in still air and every surface is told the scenario is a conservative stand-in
+- a named derating standard selects its published factors while the house default and an unknown standard change nothing
+- temperature grades are ordered so a stricter grade satisfies a looser demand
+- an active part whose rated ambient range does not cover the brief window fails, and one declaring none is not-declared rather than passing
+- the brief's input-power window is bound to a board net by (feeds "NET") or by an interface named after a board port, and an envelope narrower than the window fails
+- a declared ESD class demands a protection-class part on every interface net the brief names
 - a contract declaring no status, brief or goal hashes exactly as it did before those forms existed, so adopting them re-attests only the systems that use them
 - an identity-only parse drops an (auto) interface it has no evaluator for instead of refusing the contract, so a listing surface never pays a board evaluation per workspace
 - approving a workspace whose contract is a (system …) source and approving the JSON manifest it converts from leave the identical spec, so an attestation does not depend on which manifest spelling a workspace keeps
@@ -7636,6 +7648,7 @@ is what makes the predicate exact rather than approximately right.
 ## Web Server
 
 - GET /api/part-review/:name answers one chip per placed part and /:ref answers that part's sheet or 404
+- GET /api/review-card/:name answers the composed Board Review Card and 404s an unknown design
 - The schematic BOM card carries a Review column whose cell names the group's ref-deses so the viewer can fill one verdict chip per row
 - Saving from an explicit source project creates a separate review candidate, retains complete layout metadata, refuses name collisions, and preserves the destination star
 
@@ -8508,6 +8521,7 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 - a series element is charged the branch its own rail data declares, and the whole rail's worst case only when the design declared no branch
 - a rail with no per-branch declaration still charges every series element its whole worst-case load
 - a zero-ohm configuration strap to ground carries no rail current, while a jumper any rail reaches or a ground-to-ground link stays unproven
+- a derating standard named by the system brief screens applied stress against a fraction of each rating, and the house default screens exactly as before
 - a series magnetic sealed inside a module inherits that module's declared input current, and keeps none of it on a leg the declaration never covered
 - a net a ferrite bead ties to a rail is that rail's node for current as well as voltage, so a module-internal series element behind the bead is charged the rail
 - saved rounded outlines must exactly match authored dimensions, radius, polygon, and native arcs
@@ -9063,6 +9077,24 @@ export never invents them.
 - completeness-waiver: concurrent access (collection owns its evaluator and arena; nothing is written)
 - completeness-waiver: malformed encoding (readiness and ladder JSON that fails to parse leaves those sections unavailable)
 - completeness-waiver: integer overflow (counts are tallied from bounded slices with no input-derived arithmetic)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
+## review-card
+
+- the card carries all twelve review categories in registry order and every row cites a registered check
+- a rail whose consumers carry no (i-max …) reports a not-declared power-budget row naming the missing form
+- the composer names the reason it could not review instead of answering an empty card
+- the stripe tallies every verdict and reports the worst one
+- a governing system brief sets the ambient the card screens at and turns its brief-driven checks into rows
+- review_card is a registered read-only CLI tool answering with the endpoint's own bytes
+- the review-card CLI parses its flags and names the error a card it cannot compose failed with
+- completeness-waiver: empty inputs (a design that declares no rail, no analysis form and no layout still gets a row per category saying so, rather than an empty card)
+- completeness-waiver: large inputs (every category is built from slices the evaluation already bounded; no fixed-size output buffer)
+- completeness-waiver: unauthorized access (the card reads the caller's project directory through the same evaluator, gate and check run the CLI already exposes, and writes nothing)
+- completeness-waiver: i/o failure (an unavailable fabrication gate or ladder leaves those rows unproven instead of aborting the composition)
+- completeness-waiver: concurrent access (composition owns its arena and its evaluator; the retained body is validated against the read-set it was computed from)
+- completeness-waiver: malformed encoding (every string is written through json_writer's escaper, and the audit form clips and neutralizes each Markdown cell)
+- completeness-waiver: integer overflow (verdict counts are tallied from bounded slices with no input-derived arithmetic)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
 ## part-review

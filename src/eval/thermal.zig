@@ -382,11 +382,43 @@ pub const PartCounts = struct {
     unknown_power: usize = 0,
 };
 
+/// Where the ambient the screen ran at came from, and what cooling case the
+/// product declares. Empty `system` means nothing declared one and the screen
+/// used the bench default — the `not-declared` provenance every review surface
+/// renders rather than implying the 25 °C was chosen for this board.
+///
+/// It travels ON the analysis rather than beside it so all six thermal
+/// surfaces (the review panels, the markdown report, the PDF, the review JSON,
+/// `GET /api/thermal/:name` and `describe_thermal`) read one field instead of
+/// each being handed a provenance separately and one of them being forgotten.
+pub const AmbientSource = struct {
+    /// The system whose `(brief …)` set the ambient. Empty ⇒ not declared.
+    system: []const u8 = "",
+    /// Cold end of the declared ambient window (°C).
+    ambient_min_c: ?f64 = null,
+    /// Hot end of it (°C) — the ambient the screen runs at unless a caller
+    /// overrode it, kept separately so an override can still name the target.
+    ambient_max_c: ?f64 = null,
+    /// The brief's `(cooling …)` word, empty when it declares none.
+    cooling: []const u8 = "",
+    /// The screened scenario that cooling case maps to, empty when none.
+    scenario: []const u8 = "",
+    /// Why `scenario` is the nearest conservative stand-in rather than a model
+    /// of the declared case. Empty ⇒ the scenario IS the declared case, so a
+    /// reader can never mistake an approximation for a solve.
+    note: []const u8 = "",
+    /// True when the caller dialled in an ambient of its own, so the figure is
+    /// a what-if and NOT the declared number.
+    overridden: bool = false,
+};
+
 /// The whole analysis: every interesting part, the verdict, and the ambient
 /// window the board is good for.
 pub const BoardThermal = struct {
     /// Ambient the per-part junction temperatures were computed at (°C).
     ambient_c: f64,
+    /// Where that ambient came from. Default ⇒ nothing declared one.
+    ambient_source: AmbientSource = .{},
     /// Parts that dissipate something or declare thermal data, in design order.
     parts: []const PartThermal = &.{},
     verdict: Verdict = .insufficient_data,
