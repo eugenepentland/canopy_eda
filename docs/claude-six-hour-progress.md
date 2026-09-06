@@ -39,6 +39,8 @@ correctness**, which no sibling worktree touches.
 | C11 persistence failures | **already-safe** — fault-injected, no defect (evidence below) |
 | A09 offline fab-release fixture | **already-implemented** (evidence below) |
 | C06 DSL identity | **verified at the observable level** (evidence below) |
+| C01 KiCad netlist membership | **covered now**; through-KiCad half blocked (no `kicad-cli`) | `f103e6af` |
+| C10 script-context escaping | **already-guarded** — verified at the real sink (evidence below) |
 | C07 finding consistency | **already-consistent** — check/build/tools agree (evidence below) |
 | C08 evidence freshness | **already-safe** — every input invalidates (evidence below) |
 | C16 hermetic examples | **already-hermetic** under `env -i` (evidence below) |
@@ -189,6 +191,24 @@ names a test or harness. The condition is gone; the guarantee is not.
   (as `assertion_failures`) and by `netlisp build`, which refuses to emit and
   points at `check`. The 2026-09-05 FEEDBACK entry saying these were invisible to
   `check` no longer holds.
+- **C10 I/O boundaries (script-context escaping)** — the DRIFT-SEC-001 class is
+  guarded and holds, checked against the real sink with a payload proven to
+  reach it. A section description containing
+  `</script><script>alert(2)</script>` reaches `/schematics/:name` 5 times and
+  comes out as `\u003c/script>\u003cscript>alert(2)` inside the JSON script blob
+  (so the block cannot be terminated early — zero raw `</script>` in it) and as
+  `&lt;/script&gt;…` in the HTML body. **The first run of this probe was
+  vacuous** and worth recording as a method note: the same payload produces a
+  clean result on `/pcb-layout/:name` only because it never reaches that page
+  at all (0 occurrences). A note-borne payload likewise did not reach either
+  page, so notes remain unexercised.
+- **C01 KiCad round trip** — the netlisp half is now covered (`f103e6af`, below);
+  the through-KiCad half is environmentally blocked: `scripts/verify_kicad_sch.sh`
+  needs `kicad-cli`, which is not installed here. Neither KiCad harness is wired
+  as an `[[external]]` gate, and `scripts/test_kicad_sync_layout.py` cannot
+  become one as written — it defaults to `projects/designs` / `barracuda-base`
+  and performs a real push-to-KiCad sync, so it needs the live library and
+  mutates it.
 - **C08 review-evidence freshness** — every input class invalidates its dependent
   evidence, checked one input at a time on isolated copies of the example:
   a comment-only edit to the `.sexp` moves `source_sha256` (+4 more), a
