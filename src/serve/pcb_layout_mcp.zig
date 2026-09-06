@@ -1759,6 +1759,14 @@ fn landTransitCountForNet(violations: []const drc.Violation, net: i32) usize {
     return count;
 }
 
+fn danglingCountForNet(violations: []const drc.Violation, net: i32) usize {
+    var count: usize = 0;
+    for (violations) |violation| {
+        if (violation.kind == .dangling_copper and violation.who.net_a == net) count += 1;
+    }
+    return count;
+}
+
 fn padBoxGap(a: router.PadObs, b: router.PadObs) f64 {
     const dx = @max(@max(a.x0 - b.x1, b.x0 - a.x1), 0);
     const dy = @max(@max(a.y0 - b.y1, b.y0 - a.y1), 0);
@@ -1825,9 +1833,32 @@ const LandRepairEvaluation = struct {
     tally: fab_readiness.Tally,
 };
 
+/// The `dangling_copper` reading either side of one refused candidate, kept so
+/// the tool can name what it declined to do instead of silently keeping the old
+/// copper.
+const LandRepairDangling = struct {
+    before: usize,
+    after: usize,
+
+    fn growth(self: LandRepairDangling) usize {
+        return self.after - self.before;
+    }
+};
+
 const LandRepairBoard = struct {
     tracks: *std.ArrayList(router.Track),
     evaluation: LandRepairEvaluation,
+    /// The worst dangling-copper growth any candidate for the net currently
+    /// under repair was refused for, or null when nothing was refused for that
+    /// reason. `repairLandTransitNet` clears it before each net.
+    dangling_refusal: ?LandRepairDangling = null,
+};
+
+/// One net whose repair the dangling-copper clause turned down, as the tool
+/// reports it.
+const LandRepairRefusal = struct {
+    net: []const u8,
+    dangling: LandRepairDangling,
 };
 
 const LandRepairNetResult = struct {
@@ -1835,6 +1866,7 @@ const LandRepairNetResult = struct {
     rejected: bool = false,
     segments_reanchored: usize = 0,
     tracks_pruned: usize = 0,
+    dangling_refusal: ?LandRepairDangling = null,
 };
 
 const LandRepairContext = struct {
@@ -1866,9 +1898,46 @@ fn evaluateLandRepair(
     };
 }
 
-fn landRepairSafe(candidate: LandRepairEvaluation, baseline: LandRepairEvaluation) bool {
+/// How much `dangling_copper` this candidate ADDS to one net, or null when it
+/// adds none.
+///
+/// `land_transit.anchorSegment` rewrites an offending segment into
+/// `a → p → centre → q → b` and keeps both original endpoints, so nothing is
+/// torn off — but where the neighbouring copper already lapped the land, the
+/// detour through the centre duplicates a path the pad itself was already
+/// providing, and every piece of that loop becomes a deletion-invariant
+/// section. On examples/blinky-breakout the whole-board pass turned 5
+/// `land_transit` findings into 13 `dangling_copper` ones that way and called
+/// it a success, because both kinds are warn-severity and the gate counted only
+/// errors. A repair that spends more copper hygiene than it buys is not a
+/// repair.
+fn landRepairDanglingGrowth(
+    candidate: LandRepairEvaluation,
+    baseline: LandRepairEvaluation,
+    net: i32,
+) ?LandRepairDangling {
+    const reading = LandRepairDangling{
+        .before = danglingCountForNet(baseline.violations, net),
+        .after = danglingCountForNet(candidate.violations, net),
+    };
+    return if (reading.after > reading.before) reading else null;
+}
+
+fn landRepairSafe(candidate: LandRepairEvaluation, baseline: LandRepairEvaluation, net: i32) bool {
     return candidate.errors <= baseline.errors and candidate.tally.routed >= baseline.tally.routed and
-        candidate.tally.total == baseline.tally.total;
+        candidate.tally.total == baseline.tally.total and
+        landRepairDanglingGrowth(candidate, baseline, net) == null;
+}
+
+/// Record why a candidate for `net` was turned down, when the reason was the
+/// dangling-copper clause. Keeps the largest growth seen, so the reported
+/// before/after is the worst thing the tool declined to persist.
+fn noteLandRepairRefusal(board: *LandRepairBoard, candidate: LandRepairEvaluation, net: i32) void {
+    const grown = landRepairDanglingGrowth(candidate, board.evaluation, net) orelse return;
+    if (board.dangling_refusal) |seen| {
+        if (grown.growth() <= seen.growth()) return;
+    }
+    board.dangling_refusal = grown;
 }
 
 fn landRepairReduced(candidate: LandRepairEvaluation, baseline: LandRepairEvaluation, net: i32) bool {
@@ -1891,10 +1960,11 @@ fn pruneLandTransitTracks(
         const snapshot = try ctx.alloc.dupe(router.Track, board.tracks.items);
         _ = board.tracks.orderedRemove(track_i);
         const candidate = try evaluateLandRepair(ctx, board.tracks.items);
-        if (landRepairReduced(candidate, board.evaluation, net) and landRepairSafe(candidate, board.evaluation)) {
+        if (landRepairReduced(candidate, board.evaluation, net) and landRepairSafe(candidate, board.evaluation, net)) {
             board.evaluation = candidate;
             pruned += 1;
         } else {
+            noteLandRepairRefusal(board, candidate, net);
             board.tracks.* = std.ArrayList(router.Track).fromOwnedSlice(snapshot);
             track_i += 1;
         }
@@ -1913,21 +1983,23 @@ fn tryWholeLandTransitRepair(
     const snapped = route_cleanup.snapLandTransitEndpoints(ctx.pads, board.tracks, ctx.selected);
     ctx.selected[net_i] = false;
     var candidate = try evaluateLandRepair(ctx, board.tracks.items);
-    if (landTransitCountForNet(candidate.violations, net) == 0 and landRepairSafe(candidate, board.evaluation)) {
+    if (landTransitCountForNet(candidate.violations, net) == 0 and landRepairSafe(candidate, board.evaluation, net)) {
         board.evaluation = candidate;
         return snapped.segments_reanchored;
     }
 
+    noteLandRepairRefusal(board, candidate, net);
     board.tracks.* = std.ArrayList(router.Track).fromOwnedSlice(snapshot);
     const second_snapshot = try ctx.alloc.dupe(router.Track, board.tracks.items);
     ctx.selected[net_i] = true;
     const repaired = try route_cleanup.reanchorLandTransit(ctx.alloc, ctx.pads, board.tracks, ctx.selected);
     ctx.selected[net_i] = false;
     candidate = try evaluateLandRepair(ctx, board.tracks.items);
-    if (landTransitCountForNet(candidate.violations, net) == 0 and landRepairSafe(candidate, board.evaluation)) {
+    if (landTransitCountForNet(candidate.violations, net) == 0 and landRepairSafe(candidate, board.evaluation, net)) {
         board.evaluation = candidate;
         return repaired.segments_reanchored;
     }
+    noteLandRepairRefusal(board, candidate, net);
     board.tracks.* = std.ArrayList(router.Track).fromOwnedSlice(second_snapshot);
     return null;
 }
@@ -1951,11 +2023,12 @@ fn repairLandTransitByPad(
             ctx.selected[net_i] = false;
             if (repaired.segments_reanchored == 0) continue;
             const candidate = try evaluateLandRepair(ctx, board.tracks.items);
-            if (landRepairReduced(candidate, board.evaluation, net) and landRepairSafe(candidate, board.evaluation)) {
+            if (landRepairReduced(candidate, board.evaluation, net) and landRepairSafe(candidate, board.evaluation, net)) {
                 board.evaluation = candidate;
                 segments += repaired.segments_reanchored;
                 progressed = true;
             } else {
+                noteLandRepairRefusal(board, candidate, net);
                 board.tracks.* = std.ArrayList(router.Track).fromOwnedSlice(snapshot);
             }
         }
@@ -1981,10 +2054,11 @@ fn repairLandTransitByPair(
             ctx.selected[net_i] = false;
             if (repaired.segments_reanchored == 0) continue;
             const candidate = try evaluateLandRepair(ctx, board.tracks.items);
-            if (landRepairReduced(candidate, board.evaluation, net) and landRepairSafe(candidate, board.evaluation)) {
+            if (landRepairReduced(candidate, board.evaluation, net) and landRepairSafe(candidate, board.evaluation, net)) {
                 board.evaluation = candidate;
                 segments += repaired.segments_reanchored;
             } else {
+                noteLandRepairRefusal(board, candidate, net);
                 board.tracks.* = std.ArrayList(router.Track).fromOwnedSlice(snapshot);
             }
         }
@@ -1999,6 +2073,7 @@ fn repairLandTransitNet(
 ) std.mem.Allocator.Error!LandRepairNetResult {
     const net: i32 = @intCast(net_i);
     var result = LandRepairNetResult{};
+    board.dangling_refusal = null;
     result.tracks_pruned = try pruneLandTransitTracks(ctx, net, board);
     result.changed = result.tracks_pruned > 0;
     if (landTransitCountForNet(board.evaluation.violations, net) == 0) return result;
@@ -2012,6 +2087,10 @@ fn repairLandTransitNet(
     result.segments_reanchored += try repairLandTransitByPair(ctx, net_i, board);
     result.changed = result.changed or result.segments_reanchored > 0;
     result.rejected = landTransitCountForNet(board.evaluation.violations, net) > 0;
+    // A refusal exists to explain copper the tool KEPT, so it is reported only
+    // while the finding the refused candidate would have removed is still on
+    // the board. A net some other candidate went on to clean needs no excuse.
+    if (result.rejected) result.dangling_refusal = board.dangling_refusal;
     return result;
 }
 
@@ -2431,7 +2510,13 @@ pub fn normalizeJunctionsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Resp
 /// Repair persisted same-net copper that laps an SMD land instead of entering
 /// it through the pad centre. Each affected net is an independent transaction:
 /// the rewrite is kept only when it removes every land-transit finding on that
-/// net, does not increase error-severity DRC, and does not lose a connected net.
+/// net, does not increase error-severity DRC, does not lose a connected net,
+/// and does not grow that net's `dangling_copper` count. That last clause is
+/// what stops the tool trading one warning for three: both kinds are
+/// warn-severity, so an error-only gate scored a centre-detour that duplicated
+/// the pad's own connection as an improvement. A net refused for it is named in
+/// `refused` with its before/after dangling reading, rather than the old copper
+/// being kept without a word.
 pub fn mcpRepairLandTransit(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
@@ -2482,6 +2567,7 @@ pub fn mcpRepairLandTransit(
     const tracks_before = tracks.items.len;
     var accepted: std.ArrayList([]const u8) = .empty;
     var rejected: std.ArrayList([]const u8) = .empty;
+    var refused: std.ArrayList(LandRepairRefusal) = .empty;
     var segments_reanchored: usize = 0;
     var tracks_pruned: usize = 0;
 
@@ -2496,6 +2582,8 @@ pub fn mcpRepairLandTransit(
             try accepted.append(alloc, net.name);
         }
         if (result.rejected) try rejected.append(alloc, net.name);
+        if (result.dangling_refusal) |reading|
+            try refused.append(alloc, .{ .net = net.name, .dangling = reading });
     }
 
     var current = restored;
@@ -2553,7 +2641,17 @@ pub fn mcpRepairLandTransit(
     try mcpWriteStrArray(w, accepted.items);
     try w.writeAll(",\"rejected\":");
     try mcpWriteStrArray(w, rejected.items);
-    try w.writeAll("}");
+    try w.writeAll(",\"refused\":[");
+    for (refused.items, 0..) |entry, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"net\":");
+        try writeJsonStr(w, entry.net);
+        try w.print(
+            ",\"dangling_before\":{d},\"dangling_after\":{d}}}",
+            .{ entry.dangling.before, entry.dangling.after },
+        );
+    }
+    try w.writeAll("]}");
     try out.appendSlice(alloc, aw.written());
     return true;
 }
@@ -3085,6 +3183,172 @@ test "mcp stitch_ground_pads upgrades saved copper and is idempotent" {
     try std.testing.expect(std.mem.indexOf(u8, second.items, "\"warnings_before\":0,\"warnings_after\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, second.items, "\"vias_added\":0,\"tracks_added\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, second.items, "\"changed\":false,\"rolled_back\":false") != null);
+}
+
+/// One `repair_land_transit` board: 0402 caps on a real two-pad footprint, with
+/// the caller supplying the instances, the saved poses, and the saved copper.
+/// The two tests below need boards that differ only in how the offending
+/// segment sits against the land, so everything that decides the outcome is in
+/// the caller's three strings.
+const LandTransitFixture = struct {
+    /// `(instance …)` forms for the design block.
+    instances: []const u8,
+    /// The saved row's `parts` array body.
+    parts: []const u8,
+    /// The saved row's `tracks` array body.
+    tracks: []const u8,
+};
+
+fn writeLandTransitFixture(
+    alloc: std.mem.Allocator,
+    dir: std.Io.Dir,
+    fixture: LandTransitFixture,
+) !void {
+    try dir.createDirPath(std.testing.io, "lib/components");
+    try dir.createDirPath(std.testing.io, "lib/footprints");
+    try dir.createDirPath(std.testing.io, "src");
+    try dir.writeFile(std.testing.io, .{ .sub_path = "lib/components/cap.sexp", .data =
+        \\(component-family cap
+        \\  (param-type capacitance)
+        \\  (footprint "0402"))
+    });
+    // A 0.56 x 0.62 land is well under `land_transit.paddle_min_half_mm` on
+    // both axes, so the ray rule judges it.
+    try dir.writeFile(std.testing.io, .{ .sub_path = "lib/footprints/0402.sexp", .data =
+        \\(footprint "0402"
+        \\  (pad 1 smd roundrect (pos -0.48 0.00) (size 0.56 0.62))
+        \\  (pad 2 smd roundrect (pos 0.48 0.00) (size 0.56 0.62))
+        \\  (courtyard (rect -0.91 -0.46 0.91 0.46)))
+    });
+    try dir.writeFile(std.testing.io, .{
+        .sub_path = "src/landrep.sexp",
+        .data = try std.fmt.allocPrint(alloc,
+            \\(design-block "Land Repair"
+            \\  (import cap)
+            \\  (board (size 12 12))
+            \\  (design-rules (stackup 2))
+            \\{s})
+        , .{fixture.instances}),
+    });
+    try dir.writeFile(std.testing.io, .{
+        .sub_path = "src/landrep.layouts.json",
+        .data = try std.fmt.allocPrint(
+            alloc,
+            "{{\"default\":\"routed\",\"layouts\":[{{\"name\":\"routed\",\"kind\":\"manual\",\"ts\":2," ++
+                "\"default\":true,\"parts\":[{s}],\"routes\":{{\"tracks\":[{s}],\"vias\":[]}}}}]}}",
+            .{ fixture.parts, fixture.tracks },
+        ),
+    });
+}
+
+// spec: serve/mcp_tools - repair_land_transit keeps a net's rewrite only when that net's dangling_copper count does not grow, so one land-transit warning is never traded for redundant copper
+// spec: serve/mcp_tools - repair_land_transit names every net whose rewrite the dangling-copper clause refused, with that net's before/after dangling reading
+test "repair_land_transit refuses a rewrite that manufactures redundant copper" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    // C1 pad 1 (SIG) lands at (4.52, 5) with its land spanning x 4.24..4.76.
+    // SIG leaves it westward along the centre ray to (4.20, 5) and turns north
+    // there — the corner sits in the land's own flank corridor, so the vertical
+    // leg is a land transit. Re-anchoring that leg routes it out to the pad
+    // centre and straight back, duplicating the escape the pad already carries:
+    // two deletion-invariant sections bought with one warning.
+    try writeLandTransitFixture(alloc, tmp.dir, .{
+        .instances =
+        \\  (instance "C1" (cap "10nF") (pin 1 "SIG") (pin 2 "GND"))
+        \\  (instance "C2" (cap "10nF") (pin 1 "SIG") (pin 2 "GND"))
+        ,
+        .parts =
+        \\{"ref":"C1","x":5,"y":5,"rot":0},{"ref":"C2","x":3.72,"y":3,"rot":180}
+        ,
+        .tracks =
+        \\{"x1":4.52,"y1":5,"x2":4.20,"y2":5,"l":0,"w":0.2,"net":"SIG"},
+        \\{"x1":4.20,"y1":5,"x2":4.20,"y2":3,"l":0,"w":0.2,"net":"SIG"},
+        \\{"x1":5.48,"y1":5,"x2":5.48,"y2":7,"l":0,"w":0.2,"net":"GND"},
+        \\{"x1":5.48,"y1":7,"x2":3.24,"y2":7,"l":0,"w":0.2,"net":"GND"},
+        \\{"x1":3.24,"y1":7,"x2":3.24,"y2":3,"l":0,"w":0.2,"net":"GND"}
+        ,
+    });
+
+    const args = try std.json.parseFromSliceLeaky(
+        std.json.Value,
+        alloc,
+        "{\"name\":\"landrep\",\"layout\":\"routed\"}",
+        .{},
+    );
+    var out: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try mcpRepairLandTransit(alloc, project, args, &out));
+
+    // The land transit survives, because the only rewrite on offer costs more
+    // hygiene than it returns.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"warnings_before\":1,\"warnings_after\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"segments_reanchored\":0,\"tracks_pruned\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"tracks_before\":5,\"tracks_after\":5") != null);
+    // …and the tool says so, rather than keeping the old copper without a word.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        out.items,
+        "\"accepted\":[],\"rejected\":[\"SIG\"],\"refused\":[{\"net\":\"SIG\",\"dangling_before\":0,\"dangling_after\":2}]",
+    ) != null);
+    const kept = mcpReadWorking(alloc, project, "landrep", "routed").?.routes.?;
+    try std.testing.expectEqual(@as(usize, 5), kept.tracks.len);
+    try std.testing.expectEqual(@as(f64, 4.20), kept.tracks[1].x1);
+    try std.testing.expectEqual(@as(f64, 4.20), kept.tracks[1].x2);
+}
+
+// spec: serve/mcp_tools - repair_land_transit persists a re-anchoring that removes the net's land transit without adding dangling copper
+test "repair_land_transit persists a rewrite that costs no dangling copper" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    // The same land, this time crossed by copper that only passes through on
+    // its way from C2's pad to C3's, 0.08 mm off the centre ray. Nothing else
+    // touches the land, so splitting the run at the centre buys a clean land
+    // and strands nothing.
+    try writeLandTransitFixture(alloc, tmp.dir, .{
+        .instances =
+        \\  (instance "C1" (cap "10nF") (pin 1 "SIG") (pin 2 "GND"))
+        \\  (instance "C2" (cap "10nF") (pin 1 "SIG") (pin 2 "GND"))
+        \\  (instance "C3" (cap "10nF") (pin 1 "SIG") (pin 2 "GND"))
+        ,
+        .parts =
+        \\{"ref":"C1","x":5,"y":5,"rot":180},{"ref":"C2","x":5.08,"y":2,"rot":180},
+        \\{"ref":"C3","x":5.08,"y":8,"rot":180}
+        ,
+        .tracks =
+        \\{"x1":5.56,"y1":2,"x2":5.56,"y2":8,"l":0,"w":0.2,"net":"SIG"},
+        \\{"x1":4.52,"y1":5,"x2":2.5,"y2":5,"l":0,"w":0.2,"net":"GND"},
+        \\{"x1":2.5,"y1":5,"x2":2.5,"y2":2,"l":0,"w":0.2,"net":"GND"},
+        \\{"x1":2.5,"y1":2,"x2":4.60,"y2":2,"l":0,"w":0.2,"net":"GND"},
+        \\{"x1":2.5,"y1":5,"x2":2.5,"y2":8,"l":0,"w":0.2,"net":"GND"},
+        \\{"x1":2.5,"y1":8,"x2":4.60,"y2":8,"l":0,"w":0.2,"net":"GND"}
+        ,
+    });
+
+    const args = try std.json.parseFromSliceLeaky(
+        std.json.Value,
+        alloc,
+        "{\"name\":\"landrep\",\"layout\":\"routed\"}",
+        .{},
+    );
+    var out: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try mcpRepairLandTransit(alloc, project, args, &out));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"warnings_before\":1,\"warnings_after\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"segments_reanchored\":1,\"tracks_pruned\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"tracks_before\":6,\"tracks_after\":9") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"accepted\":[\"SIG\"],\"rejected\":[],\"refused\":[]") != null);
+    try std.testing.expectEqual(
+        @as(usize, 9),
+        mcpReadWorking(alloc, project, "landrep", "routed").?.routes.?.tracks.len,
+    );
 }
 
 // spec: Web Server - the outline write paths reject a self-intersecting or zero-area polygon but accept a concave one

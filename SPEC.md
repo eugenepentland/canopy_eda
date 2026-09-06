@@ -7348,6 +7348,9 @@ Public functions: read, fetch
 - CLI virtual-file mutations refuse .layouts.json sidecars and direct callers to protected PCB layout tools
 - restore_layout_snapshot restores protected PCB layout history after snapshotting the current sidecar and bumping its revision
 - stitch_ground_pads applies the autorouter's final ground-reference pass transactionally to a saved layout
+- repair_land_transit keeps a net's rewrite only when that net's dangling_copper count does not grow, so one land-transit warning is never traded for redundant copper
+- repair_land_transit names every net whose rewrite the dangling-copper clause refused, with that net's before/after dangling reading
+- repair_land_transit persists a re-anchoring that removes the net's land transit without adding dangling copper
 - attach_datasheet links a stored PDF into the library component, refuses a filename absent from lib/datasheets, and reports an already-linked stem instead of duplicating it
 - The pose tools describe x/y as the footprint origin, the point the placement transform actually adds pad offsets to
 
