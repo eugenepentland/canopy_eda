@@ -975,3 +975,9 @@ New from the wave:
 - **friction:** A positive `retryLatticeGuided` regression repeatedly failed at the frozen-copper gate after the route had connected its two pads. Its retained isolated via was removed by topology cleanup; test output did not name that rejection because the route's info logs are suppressed in focused tests. Temporary raw-result and gate diagnostics exposed the reason.
 - **idea:** Return a typed guided-candidate rejection reason (changed frozen copper, no connectivity gain, geometry failure or timeout) to tests and route diagnostics, so a policy regression can verify the reason rather than infer it from the final failed-net count.
 - **status:** open
+
+
+## 2026-09-06 · codex · via-budget shard registration
+- **friction:** The new `placement.router.test.via budget rolls back an over-budget partial tree` ran in the focused `via` filter but matched no full-suite shard prefix. The release gate caught this after 124 seconds and cancelled the concurrent ReleaseSafe build; 5,355 other tests had passed.
+- **idea:** Include `shard manifest runs every named test exactly once` automatically in focused test runs. Its source inventory can catch an unclaimed test before the final release gate without running the rest of the suite.
+- **status:** mitigated by assigning the new prefix in `src/test_shards.zig`

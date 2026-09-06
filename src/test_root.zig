@@ -651,6 +651,7 @@ test "shard manifest runs every named test exactly once" {
     try std.testing.expectEqual(@as(usize, 1), claimingShards("shape_sketch.test.outline sketch compiles an ordered line profile"));
     try std.testing.expectEqual(@as(usize, 1), claimingShards("serve.shape_sketch_json.test.outline sketch JSON round trips stable entities and dimensions"));
     try std.testing.expectEqual(@as(usize, 1), claimingShards("main.test.one-shot CLI allocator releases process-lifetime storage in bulk"));
+    try std.testing.expectEqual(@as(usize, 1), claimingShards("placement.router.test.via budget rolls back an over-budget partial tree"));
 
     for (names.items) |name| {
         const claims = claimingShards(name);

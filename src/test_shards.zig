@@ -491,6 +491,7 @@ pub const shards: []const []const []const u8 = &.{
         "placement.route_cleanup.test.",
         "placement.route_policy.test.",
         "placement.router.test.bud",
+        "placement.router.test.via ",
         "placement.router.test.dif",
         "placement.router.test.out",
         "placement.topo_plan.test.a s",
