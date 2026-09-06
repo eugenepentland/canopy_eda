@@ -7,7 +7,7 @@
 - Execution worktree and branch: `.claude/worktrees/claude-sprint-0906` / `claude/sprint-0906`
 - Allowance basis / starting use / latest observed use: **not measurable from
   inside this session.** No usage telemetry tool is exposed here (`/usage` is an
-  interactive terminal command, not a tool call), so this sprint is run on the
+  interactive terminal command, not a tool call), so this sprint runs on the
   **time budget only**. The user's stated "~50% of allowance" is recorded but
   cannot be tracked or converted; context-window occupancy is deliberately NOT
   used as a proxy.
@@ -15,124 +15,219 @@
 
 ## Ownership check (done at start)
 
-18 sibling worktrees exist. Most recent commits: `rough-intent` 05:21,
-`power-voltage-budget` 04:44, `p3-perf-baseline` 03:31. Files they hold and this
-sprint therefore avoids: `src/placement/*` (rough-intent, black-canyon-rf-straight,
-internal-cutouts, pour-gap-everywhere, pad-size-aware-tapers),
-`src/serve/pcb_layout_mcp.zig` + `src/serve/pcb_layout_page.zig` (net-rename-copper,
-trace-selection-priority), `src/serve/mcp_tools.zig` (alloc-waivers),
+18 sibling worktrees. Files they hold, and this sprint therefore avoided:
+`src/placement/*` (rough-intent, black-canyon-rf-straight, internal-cutouts,
+pour-gap-everywhere, pad-size-aware-tapers), `src/serve/pcb_layout_mcp.zig` +
+`pcb_layout_page.zig` (net-rename-copper, trace-selection-priority),
 `src/serve/assets/pcb_board.js` (three worktrees), `src/export_fab.zig`
-(jlc-export-format), `src/export_gerber.zig` (internal-cutouts, pour-gap-everywhere).
+(jlc-export-format), `src/export_gerber.zig` (internal-cutouts,
+pour-gap-everywhere). That ruled out A05/A06/A07/A12 and most of the B queue by
+file collision. Lane taken: **CLI / inspection tooling / registry + review
+correctness**, which no sibling worktree touches.
 
-That rules out A05/A06/A07/A12 and most of the B queue by file collision.
-Selected lane: **CLI / inspection tooling / benchmark durability**, which no
-sibling worktree touches.
-
-| Item | State | Current evidence / commit | Next action |
-| --- | --- | --- | --- |
-| A01 | **verified, committed** | `cac63843` | integrate at closeout |
-| A02 | **verified, committed** | `0bdef86f` (extraction) + `dcd7ca4f` (`netlisp envelopes`) | integrate at closeout |
-| A03 | **verified, committed** | `5b7a2a71` (`bench-route --jsonl`) | integrate at closeout |
-| C12 | **verified, committed** | `d4ba1587` (`netlisp check-test-manifest` on every build) | integrate at closeout |
-| C09 | selected | structured tools: advertised schema vs actual dispatch | audit |
-| A05 A06 A07 A12 | owned-elsewhere | files held by net-rename-copper / black-canyon-rf-straight / rough-intent | skip |
-| B01 B02 B03 B06 | owned-elsewhere | `src/placement/*` held by 5 worktrees; heavy board runs also contend for the gate lock | skip |
+| Item | State | Evidence / commit |
+| --- | --- | --- |
+| A01 CLI help + arg safety | **verified, committed** | `cac63843` |
+| A02 bulk net-envelope surface | **verified, committed** | `0bdef86f` + `dcd7ca4f` |
+| A03 bench-route checkpoint | **verified, committed** | `5b7a2a71` |
+| C12 test-registration gate | **verified, committed** | `d4ba1587` + `7c4d111a` |
+| C09 tool schema vs dispatch | **verified, committed** | `73059345` |
+| A11 review-surface reconciliation | **verified, committed** (rating fix) | `19e1c152` |
+| A04 system readiness | **partly fixed, partly reproduced, partly disproved** | `33dfdde9` + `0d6dcf87` + `83e09a77` |
+| C15 ledger reconciliation | **verified, committed** | `83e09a77` |
+| C05 parser/printer | **already-covered** — no defect found (evidence below) |
+| C11 persistence failures | **already-safe** — fault-injected, no defect (evidence below) |
+| A09 offline fab-release fixture | **already-implemented** (evidence below) |
+| C06 DSL identity | **verified at the observable level** (evidence below) |
+| A05 A06 A07 A12, B01–B06 | **owned-elsewhere** — skipped on file collision |
 
 ## Completed changes
 
-### A01 — `serve` command line decided before anything is opened (`cac63843`)
+### A01 — `serve` decides its command line before opening anything (`cac63843`)
 
-**Problem (reproduced on the base build, evidence below).** `netlisp serve --help`
-started the server: it created `<project>/logs/interactions-2026-09-06.jsonl`,
-bound the port and blocked until killed (`timeout` exit 124). `--port abc`,
-`--port 99999` and a valueless `--port` all silently served on 7050. An unknown
-flag (`--allow-remoote`) was ignored, so an operator who believed they had
-disabled the auth gate had not.
+`netlisp serve --help` started the server: it created
+`<project>/logs/interactions-<date>.jsonl`, bound the port and blocked until
+killed. `--port abc`, `--port 99999` and a valueless `--port` silently served on
+7050; `--allow-remoote` was ignored, so an operator who believed they had
+disabled the auth gate had not. `src/serve_args.zig` is now a pure
+`parse(argv, auth_dir_env)`; `dispatchServe` opens a socket only for `.run`.
+Verified on a disposable project: `--help` exits 0 leaving the directory
+byte-identical, five malformed forms exit 1 writing nothing, and
+`--port 7188 --skip-warmup` still answers HTTP 200. 8 unit tests.
 
-**Behaviour now.** `src/serve_args.zig` is a pure `parse(argv, auth_dir_env)`
-returning `.help` / `.invalid` / `.run`; `dispatchServe` opens a socket only for
-`.run`. `--help`/`-h` print serve's own flag list and exit 0. Unknown flag,
-missing value, non-numeric / out-of-range / zero port, and a stray positional
-each name the offending token and exit 1.
+### A02 — `netlisp envelopes` (`0bdef86f`, `dcd7ca4f`)
 
-**Evidence.**
-- Repro + verification transcripts: this session, against a disposable project
-  under the session scratchpad (`.../scratchpad/a01proj`, `.../scratchpad/a01check`).
-- `--help` leaves the project directory byte-identical (no `logs/`); all five
-  malformed forms exit 1 having written nothing.
-- `--port 7188 --skip-warmup` still answers HTTP 200 on `/`.
-- 8 unit tests: `zig build --seed=1 test -Dtest-filter='serve_args.test'` →
-  `RESULT {"passed":44,"failed":0,"skipped":0}` (8 named + 36 unnamed bridges).
-- Whole-tree Guardian gate at commit: 88 checks, **0 blocking**, 4 report-only.
-- Registries updated: `src/test_root.zig`, `src/test_shards.zig`; `SPEC.md`
-  gained a `## Serve CLI` section (8 bullets + completeness waivers);
-  `.guardian/pub-api.txt` accepted (7 pure additions).
+Reading every net's DC envelope took 1,863 separate `netlisp net` calls (~10 min
+per binary). One command now answers from ONE evaluation per design, reusing
+`mcp_flatten.writeNetEnvelope` — the same function the single-net query calls —
+so bulk and single-net values cannot differ.
+**Measured, read-only, against the live library** (checkout byte-identical
+after): whole 19-design corpus **1,863 nets in 2.69 s / 218 MB peak RSS**;
+barracuda-base 188 nets in 0.15 s. Identity check on blinky-breakout: 16/16 nets
+equal to their own `netlisp net` output, 0 mismatches; 0.88 s per-net loop vs
+0.055 s bulk. 899 of 1,863 nets are unbounded — reported as explicit
+`null`/`unknown`, never 0 V. `0bdef86f` first extracted `dump_args.Common`
+(Guardian's twin-drift caught the third copy of that arg scan).
 
-### A02 — one bulk net-envelope surface (`0bdef86f`, `dcd7ca4f`)
+### A03 — `bench-route --jsonl` (`5b7a2a71`)
 
-Reading every net's DC envelope meant 1,863 separate `netlisp net` calls (~10 min
-per binary). `netlisp envelopes [--project-dir <d>] [--text] <design>…` answers
-from ONE evaluation per design, reusing `mcp_flatten.writeNetEnvelope` — the very
-function the single-net query calls — so bulk and single-net values cannot differ.
+Each board's row is flushed and fsynced as that board finishes, from
+`writeBoardJson` — extracted from `writeJson`, so checkpoint and aggregate rows
+are the same bytes (verified: all 48 fields equal). A failed board is a row with
+`"ok":false`; an interrupted corpus has NO `complete` record.
+**Verified on an isolated fixture copy**: SIGKILL as soon as the first row
+landed → `run` header + the first board's full 16/16 row survive, 0 unparseable
+records, no `complete` line.
 
-Measured read-only against the live library (checkout byte-identical afterwards):
-whole 19-design corpus **1,863 nets in 2.69 s / 218 MB peak RSS**, one command;
-barracuda-base 188 nets in 0.15 s. Identity check on examples/blinky-breakout:
-16/16 nets equal to their own `netlisp net` output, 0 mismatches; 0.88 s per-net
-loop vs 0.055 s bulk. 899 of the 1,863 nets have no bounded envelope — reported
-as explicit `null`/`unknown`, never as 0 V, and totalled in `counts`.
+### C12 — all three test registrations fail the build (`d4ba1587`, `7c4d111a`)
 
-`0bdef86f` first extracted `dump_args.Common`, the arg scan `netlist-dump`,
-`gerber-dump` and `envelopes` had three copies of (Guardian twin-drift caught it).
+A new test-bearing module needs an explicit `test_root.zig` import, a
+`test_shards.zig` filter, and the import must be explicit even when the module is
+already reachable. Only the first was caught quickly; the others cost a full or
+affected test run — a release gate once spent 118 s to report five of them.
+`netlisp check-test-manifest` now runs on every `zig build`.
+Making it cheap took measuring, not guessing — two plausible causes were wrong
+(I/O is 6 ms for 24.5 MB; the byte-at-a-time scan was not it either). The cost
+was 5,036 names × 621 filters of `indexOf`:
+**2.70 s → 1.55 s** (split module/name match) **→ 0.22 s** (candidate list
+memoized per source file). A test asserts the fast path equals
+`std.mem.indexOf` over the whole committed manifest.
+`7c4d111a` was prompted by my own `19e1c152` tripping the third case.
 
-### A03 — bench-route keeps finished boards (`5b7a2a71`)
+### C09 — every tool held to the schema it advertises (`73059345`)
 
-`--jsonl <path>` appends each board's row, flushed and fsynced, as that board
-finishes. Rows come from `writeBoardJson`, extracted from `writeJson`, so the
-checkpoint row and the aggregate row are the same bytes (verified: all 48 fields
-equal on a real run). A failed board is a row with `"ok":false`; an interrupted
-corpus has NO `complete` record, so the two can never be confused.
+Probed all 93 tools. Four ways of being wrong went straight through:
+`list_free_pins {"filter":"nonsense"}` → empty pin list, exit 0;
+`get_schematic_image {"view":"nope"}` / `{"theme":"chartreuse"}` → a PNG of the
+default view; `{"viwe":…}` accepted under `additionalProperties:false`;
+`{"flatten":"yes"}` accepted for a boolean. The check now runs once in
+`mcp_tools.call`, against the advertised document itself.
+**Deliberate behaviour change, one test updated**: `get_pcb_layout_image` used to
+fall back to still air for an unrecognised `scenario`. It now refuses — the test
+asserts the refusal, a strictly stronger claim.
+Verified: 7 bad forms exit 1 with parseable JSON naming the argument; 5 valid
+forms unchanged. Full suite 5,332 tests, 0 failures.
 
-Verified on an isolated fixture copy of examples/blinky-breakout:
-SIGKILL as soon as the first row landed → `run` header + the first board's full
-16/16 row survive, 0 unparseable records, no `complete` line.
+### A11 — a nominal no longer excuses a declared rated span (`19e1c152`)
 
-### C12 — the shard manifest is checked at build time (`d4ba1587`)
+`evalVoltageRange` passed as soon as the nominal was in range and reached the
+rated arm only when there was NO nominal — so adding a `(nominal …)` to a port
+silently switched the rated-span rating check off, at release profile.
+Reproduced: widening blinky's input to `(rated 4.5 24.0)` moved the envelope to
+`hi=24` and left `run_checks` byte-identical at all three profiles, still passing
+`port VIN = 5.000 V ∈ [2.500, 6.000] V` for a 6 V-max LDO.
+**Corpus impact, measured read-only over all 19 live designs — two real
+exceedances this hid**, neither fixed here (they are declarations in
+`projects/designs`, its owner's call):
+- `black-canyon` U12 (ADP150-3.3): port VOUT rated [3.200, 3.400] V vs the
+  regulator's guaranteed [3.218, 3.350] V. This is a `requirement` error, so it
+  **BLOCKS that board's fab-readiness gate**, which previously showed zero
+  blocking errors. ← the one operational consequence of this sprint
+- `cyclops-analog` U7: [3.135, 3.465] V vs [2.700, 3.450] V — 15 mV over; its
+  fab gate is unaffected.
 
-Reproduced first: a module missing from `src/test_shards.zig` left `zig build`
-GREEN and only failed minutes later under `zig build test-affected`.
-`netlisp check-test-manifest` now runs on every `zig build`. The scan moved into
-`src/test_manifest.zig` and `test_root.zig`'s invariant test calls it, so there
-is one implementation. It also reports dead filters, which the old test did not.
+### A04 — system readiness (`33dfdde9`, `0d6dcf87`, and see `83e09a77`)
 
-Cost, measured (I/O is 6 ms; the two obvious culprits were both wrong — it was
-5,036 names x 621 filters of `indexOf`):
-`2.70 s` two-pass indexOf → `1.55 s` split module/name → **`0.22 s`** with the
-candidate list memoized per source file.
+Two fixes and three measurements, from a small immutable two-board fixture built
+out of `examples/blinky-breakout`:
+
+1. **A rejected manifest now says which field** (`33dfdde9`). The validator
+   already recorded field/expectation/value; `loadManifest` gave it a local
+   `Diagnostic` that died with the error, so `system-check` printed only
+   `InvalidManifest`. Now it prints
+   `boards[].role: board role must be a portable identifier / got: "…"`.
+2. **A board built on the bundled library can compose a system review**
+   (`0d6dcf87`). `appendSource` canonicalizes every loaded file to prove
+   containment, and a stdlib component has no on-disk path — so the whole
+   composition aborted with a bare `FileNotFound`. Root-caused with strace (no
+   failing syscall before the exit → a logic-level refusal) and confirmed by
+   copying `stdlib/` into the fixture's `lib/`, which made the same system
+   compose. Strict extension: the live 19-design library resolves no board
+   source from stdlib, so nothing that composes today composes differently.
+3. **The DRIFT-SYSREV-001 measurements**, now that the fixture runs:
+   - determinism: 6 identical runs → 1 distinct (release_token, content_lock,
+     verdict). The recorded 409s did **not** reproduce.
+   - read-time writes: a readiness pass changed **no file**.
+   - cost: the double fab computation is still present and code-verified —
+     0.18 s per computation here (~13% of a 2.7–3.3 s composition), against the
+     6.7–13.3 s per computation recorded on far larger boards.
+
+### C15 — ledger reconciled against measurement (`83e09a77`)
+
+DRIFT-SYSREV-001 updated with the three results above. DRIFT-SIZE-001 stays
+**open** although its condition is gone (`pcb_layout_page.zig` is 8,131 lines
+after a real six-module split, against the ~17.3k that was 96% of its ratchet):
+closing it was tried and correctly refused by
+`scripts/check_audit_ledger_test.py`'s standing claim that every fixed finding
+names a test or harness. The condition is gone; the guarantee is not.
+
+## Revalidated, no change needed
+
+- **C05 parser/printer** — already has a fuzzed parser, a fuzzed
+  parse→print→parse round trip and a whole-corpus round trip. 14 adversarial
+  cases (escapes, nested-100, SI edges, hex, ±0, i64 bounds, float precision,
+  parens/semicolons inside strings) all round-trip idempotently; Unicode inside
+  strings survives, a non-ASCII atom is rejected with a correct span. No defect.
+- **C11 persistence** — the layout sidecar goes through `infra/atomic_write.zig`.
+  Fault-injected with `chmod a-w` on `src/` during a save: the save fails with
+  `CannotWriteSidecar`, the prior sidecar is byte-identical, no stray temp is
+  left and history survives. No defect. (`board_backup.zig`'s fixed `.tmp`, which
+  `atomic_write.zig`'s header still describes in the present tense, is already
+  fixed and has its own regression test — a stale comment, noted below.)
+- **A09 fab-release fixture** — already implemented: `pcb_layout_fab.zig` calls
+  the real endpoint, verifies a 24-member ZIP with checksums, an offline
+  assembly HTML with no `/static/` references, the release and DRC reports, plus
+  `in-request layout ABA invalidates HTTP readiness and export` for the
+  stale-input refusal.
+- **C06 DSL identity** — three consecutive `netlisp build` runs leave the tree
+  byte-identical, and flipping a `when` branch adds/removes only that branch's
+  instance without disturbing the ref-des of its neighbours. The deeper property
+  (id tokens pinned back into source) runs through the server edit path and was
+  not reachable in the time left.
 
 ## Verification and measurements
 
-Build/test commands used, all in this worktree with its own prefix
-(`-p zig-out-sprint`) so no running server's binary is overwritten:
+All builds in this worktree with its own prefix (`-p zig-out-sprint`) so no
+running server's binary is overwritten.
 
 ```
-zig build --seed=1 -p zig-out-sprint
-zig build --seed=1 test -Dtest-filter='serve_args.test'
+zig build --seed=1 -p zig-out-sprint          # + whole-tree Guardian, 0 blocking
+zig build --seed=1 test                       # 5,340 tests, 0 failures
+zig build --seed=1 test -Dtest-filter='<module>.test'
+python3 scripts/check_audit_ledger.py         # 49 findings: 46 fixed, 2 open, 1 waived
 ```
+
+Every measurement against `projects/designs` was read-only, and the checkout was
+byte-identical afterwards each time (it carries two pre-existing modifications
+from another session, untouched).
 
 ## Gate/integration status
 
-`claude/sprint-0906` is unmerged. `.githooks/prepare-release.sh` has not run yet;
-it runs once at closeout, before any merge.
+`claude/sprint-0906`, 13 commits, unmerged at the time of writing.
+`.githooks/prepare-release.sh` runs once at closeout, before any merge.
 
 ## Reproduced blockers and preserved experiments
 
-- `-Dtest-filter` matches the **test name**, not the `// spec:` tag. Filtering on
-  a spec-tag phrase selects 0 named tests and Guardian correctly fails the run
-  ("NOTHING YOU ASKED FOR RAN"). Use the module prefix (`serve_args.test`).
+- `-Dtest-filter` matches the **test name**, not the `// spec:` tag; Guardian
+  correctly fails a zero-match filter ("NOTHING YOU ASKED FOR RAN").
+- `system-check`'s remaining opaque errors: `FileNotFound` named no path until
+  `0d6dcf87` added the warning, and other read failures still do not. Fixtures
+  preserved under the session scratchpad: `a04sys/` (two boards, stdlib-using),
+  `a04flat/`, `a04one/`, `a04concept/`, `a04full/` (stdlib copied in).
+- `atomic_write.zig`'s module header still cites `serve/board_backup.zig`'s fixed
+  `<path>.tmp` in the present tense; that defect is fixed and tested. A stale
+  comment in a safety module, worth a one-line correction by whoever next
+  touches it.
 
 ## Next useful tasks
 
-1. A02 — one bulk net-envelope inspection surface.
-2. A03 — preserve `bench-route` progress when a later board fails.
-3. C09 — advertised tool schemas vs actual dispatch (read-only audit).
+1. DRIFT-SYSREV-001's remaining two facts need a **board-scale** fixture: the
+   double fab computation (dominant at that size) and the 409 nondeterminism,
+   which small boards do not exhibit.
+2. `black-canyon` U12's rail declaration vs the ADP150's guaranteed output — a
+   designs-repo decision (tighten the rail, or waive), now blocking its fab gate.
+3. Whether stdlib sources belong in the review evidence closure at all, rather
+   than being skipped as `0d6dcf87` does — a policy question about what a
+   release archive contains.
+4. Make `file-size` blocking for `pcb_layout_page.zig`, or give it a ceiling
+   test, so DRIFT-SIZE-001 can close.
