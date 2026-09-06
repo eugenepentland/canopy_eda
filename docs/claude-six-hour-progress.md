@@ -30,9 +30,11 @@ sibling worktree touches.
 
 | Item | State | Current evidence / commit | Next action |
 | --- | --- | --- | --- |
-| A01 | **merged-pending** (verified, committed) | `cac63843` — see "Completed changes" | integrate at closeout |
-| A02 | selected | bulk net-envelope dump | implement |
-| A03 | selected | bench-route per-board checkpoint | implement after A02 |
+| A01 | **verified, committed** | `cac63843` | integrate at closeout |
+| A02 | **verified, committed** | `0bdef86f` (extraction) + `dcd7ca4f` (`netlisp envelopes`) | integrate at closeout |
+| A03 | **verified, committed** | `5b7a2a71` (`bench-route --jsonl`) | integrate at closeout |
+| C12 | **verified, committed** | `d4ba1587` (`netlisp check-test-manifest` on every build) | integrate at closeout |
+| C09 | selected | structured tools: advertised schema vs actual dispatch | audit |
 | A05 A06 A07 A12 | owned-elsewhere | files held by net-rename-copper / black-canyon-rf-straight / rough-intent | skip |
 | B01 B02 B03 B06 | owned-elsewhere | `src/placement/*` held by 5 worktrees; heavy board runs also contend for the gate lock | skip |
 
@@ -65,6 +67,48 @@ each name the offending token and exit 1.
 - Registries updated: `src/test_root.zig`, `src/test_shards.zig`; `SPEC.md`
   gained a `## Serve CLI` section (8 bullets + completeness waivers);
   `.guardian/pub-api.txt` accepted (7 pure additions).
+
+### A02 — one bulk net-envelope surface (`0bdef86f`, `dcd7ca4f`)
+
+Reading every net's DC envelope meant 1,863 separate `netlisp net` calls (~10 min
+per binary). `netlisp envelopes [--project-dir <d>] [--text] <design>…` answers
+from ONE evaluation per design, reusing `mcp_flatten.writeNetEnvelope` — the very
+function the single-net query calls — so bulk and single-net values cannot differ.
+
+Measured read-only against the live library (checkout byte-identical afterwards):
+whole 19-design corpus **1,863 nets in 2.69 s / 218 MB peak RSS**, one command;
+barracuda-base 188 nets in 0.15 s. Identity check on examples/blinky-breakout:
+16/16 nets equal to their own `netlisp net` output, 0 mismatches; 0.88 s per-net
+loop vs 0.055 s bulk. 899 of the 1,863 nets have no bounded envelope — reported
+as explicit `null`/`unknown`, never as 0 V, and totalled in `counts`.
+
+`0bdef86f` first extracted `dump_args.Common`, the arg scan `netlist-dump`,
+`gerber-dump` and `envelopes` had three copies of (Guardian twin-drift caught it).
+
+### A03 — bench-route keeps finished boards (`5b7a2a71`)
+
+`--jsonl <path>` appends each board's row, flushed and fsynced, as that board
+finishes. Rows come from `writeBoardJson`, extracted from `writeJson`, so the
+checkpoint row and the aggregate row are the same bytes (verified: all 48 fields
+equal on a real run). A failed board is a row with `"ok":false`; an interrupted
+corpus has NO `complete` record, so the two can never be confused.
+
+Verified on an isolated fixture copy of examples/blinky-breakout:
+SIGKILL as soon as the first row landed → `run` header + the first board's full
+16/16 row survive, 0 unparseable records, no `complete` line.
+
+### C12 — the shard manifest is checked at build time (`d4ba1587`)
+
+Reproduced first: a module missing from `src/test_shards.zig` left `zig build`
+GREEN and only failed minutes later under `zig build test-affected`.
+`netlisp check-test-manifest` now runs on every `zig build`. The scan moved into
+`src/test_manifest.zig` and `test_root.zig`'s invariant test calls it, so there
+is one implementation. It also reports dead filters, which the old test did not.
+
+Cost, measured (I/O is 6 ms; the two obvious culprits were both wrong — it was
+5,036 names x 621 filters of `indexOf`):
+`2.70 s` two-pass indexOf → `1.55 s` split module/name → **`0.22 s`** with the
+candidate list memoized per source file.
 
 ## Verification and measurements
 
