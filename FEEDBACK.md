@@ -814,3 +814,42 @@ real time and none is specific to that board.
   preflight free-space check in `build.zig` that names the real cause, or a
   documented `zig build clean-worktree-caches` so an agent has a sanctioned way
   to reclaim space without touching another agent's tree.
+
+## 2026-09-06 — P2 wave closures and what it surfaced
+
+Closed from the 2026-09-05 example-authoring entry: the `1A` pin-token miswire
+(now an error when a pinout/pad carries that name, a warning otherwise), `fmt`
+errors without spans, `assert-range` bound rounding, the assertion-per-layer
+rule, the `set_part_poses` origin wording, the fixture-inflated hub cap in
+`export-schematic-png`, runtime state in the project dir (`--state-dir`), and
+`repair_land_transit` making DRC worse — the last one was a redundant
+centre-detour, not a stranded spur, and the acceptance gate now refuses a
+repair whose net grows `dangling_copper`.
+
+New from the wave:
+
+- **`repair_land_transit` has no `dry_run`** while `clean_route_topology` and
+  `normalize_junctions` do; reproducing a regression means copying a project.
+- **Error-only acceptance gates are a pattern**: any gate comparing
+  `drc.errorCount` alone is blind to warn-severity trades;
+  `route_cleanup_gate.gateSafe` counts specific warn kinds and is the standard
+  to audit the others against.
+- **`review_audit` double-counts old-spelling `(test-point …)`** (block list plus
+  instance walk), so a board still on that spelling reports twice the count.
+- **`--state-dir` gap**: the VFS sandbox resolves its read-only `history/`
+  prefix against the project dir, so raw `read_file`/`list_dir` see nothing
+  when the state root is relocated; the history tools follow the root.
+- **`guardian-check accept <check>` sweeps unrelated stale rows** — every accept
+  during the two file splits wanted to re-record rows for untouched files; a
+  `--scope <paths>` would remove the hand-editing.
+- **`error-path-test` is diff-aligned**, so pure code motion re-opens error
+  paths it did not change; a moved-text heuristic would save real work.
+- **`std.debug.print` in build.zig prints once** (the configure phase is
+  cached); anything a build must say every time has to be a step.
+- **`git init` without `-b main` inherits host config**: a hermetic fixture
+  passed here and failed on a stock runner (`master`).
+- **`scripts/test_shard_balance.py` is a generator**, not a test; the `test_`
+  prefix invites the "why isn't this wired?" question.
+- **A `pgrep -f` waiter matches its own command line** and never exits.
+- **The session scratchpad is shared between concurrent agents**; a task's
+  helper scripts belong under a task-specific path.
