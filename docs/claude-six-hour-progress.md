@@ -227,10 +227,34 @@ Every measurement against `projects/designs` was read-only, and the checkout was
 byte-identical afterwards each time (it carries two pre-existing modifications
 from another session, untouched).
 
-## Gate/integration status
+## Gate/integration status — MERGED AND DEPLOYED
 
-`claude/sprint-0906`, 13 commits, unmerged at the time of writing.
-`.githooks/prepare-release.sh` runs once at closeout, before any merge.
+Main advanced from `517cc58b` to `52df45e0` during the sprint (several other
+sessions landed). Merged main into `claude/sprint-0906` rather than rebasing 16
+commits through the same append-file conflicts; the only real conflict was
+`FEEDBACK.md`, resolved by keeping both sides in log order.
+`SPEC.md`, `.guardian/pub-api.txt`, `test_root.zig` and `test_shards.zig`
+auto-merged, and all six of my SPEC sections plus every test registration
+survived (verified by grep before committing).
+
+- Merge commit: `d947830a`; full suite on the merged tree: **5,346 tests, 0 failures**.
+- `.githooks/prepare-release.sh`: queued **271 s** behind another session's
+  `perf_gate.sh --record`, then **candidate ready for d947830a4** —
+  tests 127 s, ReleaseSafe build 131 s, editor perf 616 s, wall 790 s.
+  The editor-perf stage missed once by 0.4 ms (`canvas.zoom_out.worst_p95_ms:
+  45.4 ms > 45 ms`) under that contention; the script classified it as a
+  timing-only miss and its own attempt 3 passed on a confirmed quiet host.
+  **No baseline was re-recorded and no threshold relaxed** — my changes touch no
+  editor canvas code.
+- Fast-forwarded `main` to `d947830a`; the post-merge hook reused the verified
+  candidate, restarted the service, and reported **health OK (all probes), service active**.
+- Verified against the DEPLOYED binary (`.deploy/bin/netlisp`, not the stale
+  `zig-out/` artifact): `serve --help` exits 0, `serve --port abc` refuses,
+  `envelopes` answers, `check-test-manifest` reports 5,058 tests each claimed
+  once, and `get_schematic {"viwe":…}` is rejected by argument name. Live server
+  answers on :7050.
+- `projects/designs` carries only the two modifications it already had from
+  another session; nothing in it was written by this sprint.
 
 ## Reproduced blockers and preserved experiments
 
