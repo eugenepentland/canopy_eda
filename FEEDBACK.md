@@ -981,3 +981,9 @@ New from the wave:
 - **friction:** The new `placement.router.test.via budget rolls back an over-budget partial tree` ran in the focused `via` filter but matched no full-suite shard prefix. The release gate caught this after 124 seconds and cancelled the concurrent ReleaseSafe build; 5,355 other tests had passed.
 - **idea:** Include `shard manifest runs every named test exactly once` automatically in focused test runs. Its source inventory can catch an unclaimed test before the final release gate without running the rest of the suite.
 - **status:** mitigated by assigning the new prefix in `src/test_shards.zig`
+
+
+## 2026-09-06 · codex · via-budget release timing blocker
+- **blocker:** `prepare-release.sh` passed the full tests and ReleaseSafe build at `cd5e0663`, then rejected all three Canvas zoom attempts: zoom-in p95 57.2, 45.6 and 65.2 ms against 45 ms. The branch changes no renderer assets or browser harness, but remains unmerged under the release gate. The timing phase took about eleven minutes.
+- **idea:** On a timing retry, check the completed Canvas repetitions before running the WebGPU repetitions; when Canvas already fails an absolute limit, stop that attempt and retain its metrics. This would avoid repeating a second renderer's expensive work on attempts that cannot pass.
+- **status:** open; source and solver tests pass, browser performance verification does not

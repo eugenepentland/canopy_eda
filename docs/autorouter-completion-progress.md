@@ -1100,3 +1100,18 @@ rejects the candidate because frozen copper changed. The budget changes do
 not resolve that preservation/cleanup disagreement. Next work must improve
 constrained RF repair and close Base's remaining 84 nets and geometry error,
 then verify all three boards against the authored constraints and warnings.
+
+
+### Via-budget release status
+
+Feature commits `64aaf72a` and `cd5e0663` are isolated on
+`codex/route-via-budget`. The full test suite and ReleaseSafe build passed at
+`cd5e0663` (137 s and 136 s). Release preparation then failed all three Canvas
+zoom timing attempts: zoom-in p95 was 57.2, 45.6 and 65.2 ms against 45 ms;
+the first attempt also missed the zoom-out limit. Renderer assets and the
+browser harness are unchanged by this feature, but deployment remains blocked
+until the required gate passes. No merge or production restart was performed.
+The isolated build and full logs remain in
+`.git/release-failures/cd5e0663cbec8e43f654d4c2c8c084b965faffb1-20260906-073303-3685575`.
+The saved RF candidate remains reviewable in the running server; its new
+routing-progress check is available in the isolated feature build.
