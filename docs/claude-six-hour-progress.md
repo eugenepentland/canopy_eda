@@ -31,7 +31,7 @@ correctness**, which no sibling worktree touches.
 | A02 bulk net-envelope surface | **verified, committed** | `0bdef86f` + `dcd7ca4f` |
 | A03 bench-route checkpoint | **verified, committed** | `5b7a2a71` |
 | C12 test-registration gate | **verified, committed** | `d4ba1587` + `7c4d111a` |
-| C09 tool schema vs dispatch | **verified, committed** | `73059345` |
+| C09 tool schema vs dispatch | **verified, committed** | `73059345` + `357e417b` |
 | A11 review-surface reconciliation | **verified, committed** (rating fix) | `19e1c152` |
 | A04 system readiness | **partly fixed, partly reproduced, partly disproved** | `33dfdde9` + `0d6dcf87` + `83e09a77` |
 | C15 ledger reconciliation | **verified, committed** | `83e09a77` |
@@ -112,6 +112,17 @@ fall back to still air for an unrecognised `scenario`. It now refuses — the te
 asserts the refusal, a strictly stronger claim.
 Verified: 7 bad forms exit 1 with parseable JSON naming the argument; 5 valid
 forms unchanged. Full suite 5,332 tests, 0 failures.
+
+### C09 follow-up — the seven schemas that still ignored typos (`357e417b`)
+
+`73059345` enforces the advertised schema, but only where the schema says the
+object is closed. Seven `package_*` tools omitted `"additionalProperties": false`,
+so the defect survived in the DOCUMENT: `package_show {"famly":"qfn"}` was
+accepted and the typo ignored. Closing them is checked, not assumed — the
+handlers read exactly the declared properties, and the GUI reaches them through
+`/api/packages/<action>` rather than `tools/call`. The durable half is a test
+requiring every advertised schema to close its object, so a tool added later
+cannot reopen it.
 
 ### A11 — a nominal no longer excuses a declared rated span (`19e1c152`)
 
