@@ -40,6 +40,7 @@ test {
     _ = @import("serve/package_component.zig");
     _ = @import("dump_args.zig");
     _ = @import("test_manifest.zig");
+    _ = @import("req_checks.zig");
     _ = @import("serve/tool_schema.zig");
     _ = @import("envelope_dump.zig");
     _ = @import("bench_checkpoint.zig");

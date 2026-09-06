@@ -67,10 +67,15 @@ pub const Report = struct {
     /// Filters in the manifest that name no test at all — a renamed or deleted
     /// test leaves one behind, and it silently claims nothing.
     dead_filters: []const []const u8 = &.{},
+    /// Modules whose tests exist but which `src/test_root.zig` does not import
+    /// EXPLICITLY. A module reachable only through another module's test body
+    /// stops being analyzed the moment that body is filtered into a different
+    /// shard, and its own tests then compile into no binary at all.
+    missing_imports: []const []const u8 = &.{},
 
     pub fn ok(self: Report) bool {
         return self.problems.len == 0 and self.dead_filters.len == 0 and
-            self.scanned >= min_expected_tests;
+            self.missing_imports.len == 0 and self.scanned >= min_expected_tests;
     }
 };
 
@@ -287,6 +292,7 @@ pub fn auditIn(arena: std.mem.Allocator, root: infra_fs.Dir) ScanError!Report {
         .scanned = names.items.len,
         .problems = problems.items,
         .dead_filters = dead.items,
+        .missing_imports = try missingImports(arena, root, names.items),
     };
 }
 
@@ -296,6 +302,40 @@ fn moduleOf(name: QualifiedName) []const u8 {
     const at = std.mem.indexOf(u8, name, test_infix) orelse return name;
     return name[0..at];
 }
+
+/// Modules with named tests that `src/test_root.zig` does not import outright.
+///
+/// The THIRD registration a new test-bearing module needs, after the test-root
+/// import and the shard filter — and the one that is invisible until a full run:
+/// a module reachable only through some other module's test body is analyzed
+/// today and silently dropped the moment that body moves to a different shard.
+/// This was found the hard way, by a commit in this same session that added
+/// tests to a module already reachable transitively; `zig build` was green and
+/// only the whole suite caught it.
+fn missingImports(
+    arena: std.mem.Allocator,
+    root: infra_fs.Dir,
+    names: []const QualifiedName,
+) ScanError![]const []const u8 {
+    const source = root.readFileAlloc(arena, test_root_path, max_zig_source_bytes) catch return &.{};
+    var missing: std.ArrayList([]const u8) = .empty;
+    var checked: std.StringHashMapUnmanaged(void) = .empty;
+    for (names) |name| {
+        const module = moduleOf(name);
+        // The root IS the compilation's root file, never an import of itself.
+        if (std.mem.eql(u8, module, test_root_module)) continue;
+        if (checked.contains(module)) continue;
+        try checked.put(arena, module, {});
+        const rel = try arena.dupe(u8, module);
+        std.mem.replaceScalar(u8, rel, '.', '/');
+        const import = try std.mem.concat(arena, u8, &.{ "_ = @import(\"", rel, ".zig\");" });
+        if (std.mem.indexOf(u8, source, import) == null) try missing.append(arena, import);
+    }
+    return missing.items;
+}
+
+const test_root_path = "src/test_root.zig";
+const test_root_module = "test_root";
 
 /// Render a report for a human, and say what to do about it. Returns true when
 /// the manifest is intact.
@@ -313,12 +353,17 @@ pub fn writeReport(w: *std.Io.Writer, report: Report) std.Io.Writer.Error!bool {
     for (report.dead_filters) |filter| {
         try w.print("test-manifest: filter \"{s}\" names no test\n", .{filter});
     }
+    for (report.missing_imports) |import| {
+        try w.print("test-manifest: src/test_root.zig is missing {s}\n", .{import});
+    }
     if (!report.ok()) {
         try w.print(
-            "test-manifest: FAIL — {d} unclaimed/duplicated, {d} dead filter(s) of {d} named test(s).\n" ++
-                "  A new test-bearing module needs BOTH an import in src/test_root.zig and a\n" ++
-                "  filter in src/test_shards.zig; without the second its tests compile and never run.\n",
-            .{ report.problems.len, report.dead_filters.len, report.scanned },
+            "test-manifest: FAIL — {d} unclaimed/duplicated, {d} dead filter(s), {d} missing import(s) of {d} named test(s).\n" ++
+                "  A new test-bearing module needs BOTH an explicit import in src/test_root.zig\n" ++
+                "  and a filter in src/test_shards.zig. Without the import its tests are dropped\n" ++
+                "  as soon as whatever reached it moves shards; without the filter they compile\n" ++
+                "  and never run.\n",
+            .{ report.problems.len, report.dead_filters.len, report.missing_imports.len, report.scanned },
         );
         return false;
     }
@@ -480,4 +525,31 @@ test "the split match agrees with a literal substring search" {
     const literal_only: Filter = .init("router", 0);
     try testing.expect(literal_only.matches("placement.router.test.x"));
     try testing.expect(!literal_only.matches("placement.drc.test.x"));
+}
+
+// spec: test manifest - a module whose tests exist but which the test root does not import outright is reported
+test "a module the test root does not import outright is reported" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The real tree is intact, and every module it declares tests for is bridged.
+    const report = try audit(arena);
+    try testing.expectEqual(@as(usize, 0), report.missing_imports.len);
+
+    // A module nothing imports is reported by its exact import line — the third
+    // registration a new test-bearing module needs, and the one that stays
+    // invisible until a whole-suite run.
+    const invented = try missingImports(arena, infra_fs.cwd(), &.{"zz_not_a_module.test.some test"});
+    try testing.expectEqual(@as(usize, 1), invented.len);
+    try testing.expectEqualStrings("_ = @import(\"zz_not_a_module.zig\");", invented[0]);
+
+    const failing: Report = .{
+        .scanned = min_expected_tests + 1,
+        .missing_imports = &.{"_ = @import(\"zz_not_a_module.zig\");"},
+    };
+    try testing.expect(!failing.ok());
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(!try writeReport(&out.writer, failing));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "zz_not_a_module.zig") != null);
 }

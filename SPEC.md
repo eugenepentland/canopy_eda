@@ -1088,6 +1088,7 @@ test calls the same functions rather than carrying a second copy of the rule.
 - a scan pointed at a tree with no src directory reports the read failure as a usage error rather than an empty pass
 - the shard count fits the per-name claim set
 - the split module/name match agrees with a literal substring search over the real manifest
+- a module whose tests exist but which the test root does not import outright is reported
 
 - completeness-waiver: empty inputs (a scan that finds fewer tests than the tree is known to hold fails as a wrong working directory, which is the behaviour under test)
 - completeness-waiver: large inputs (each source file is read under an explicit byte cap into a caller-owned arena released in bulk)
@@ -6567,6 +6568,7 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 
 - readiness reports the waiver register drift and a board whose release layout is not frozen fails board review
 - evaluated source paths retain the buildable src/lib shape in a review package
+- a source the bundled standard library supplied is not required to canonicalize inside the project
 - interface evidence resolves stable sub-block connector handles through the canonical flattened netlist
 - per-board block diagram evidence is one standalone SVG document rendered from the same evaluated design, omitted when there is nothing to draw
 - per-board block diagram evidence is archived as boards/<role>/diagram.svg in draft and release, reproducibly, and omitted when the design has no diagram
