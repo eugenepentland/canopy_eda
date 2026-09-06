@@ -5553,6 +5553,7 @@ Public functions: parseSchematicView, renderToHtml, setupRenderCtx, renderHubSvg
 - A passive bridging two single-hub-pin nets has no anchor and keeps default placement
 - Schematic pages expose a URL-backed Sequential and Functional slider with Functional as the default a bare URL renders
 - Functional pin ordering terminates when several pins share one earlier partner
+- A pull-up onto a rail the hub itself produces is ordered directly in front of the producing group, which keeps its own place
 - The schematic page renders no thermal panel, linking out to /thermal/:name instead, so the page reads nothing but the design's own .sexp
 - Each sub circuit card links out to its PCB layout in a new tab rather than embedding one, so no sub circuit opens a layout from the schematic page
 - A sub circuit backed by a reusable module links to that module's own layout editor, and a path- or inline-sourced one to the design-scoped view of its slice
@@ -5735,6 +5736,7 @@ Public functions: renderSchematic
 - A turned return lands on its rail's stub tie and the rail's own labelled row, whether absorbed into the column or left above the stubs, names the net exactly once
 - A pin named OUT / OUTS / VOUT marks its hub as the producer of the rail on it
 - A pin group produces its rail when any of its pins is an output pin
+- A pull-up onto a rail the hub produces is functionally linked to the producing group, so the column split cannot separate the two
 - A vertical passive labels away from its hub: left of left-side parts and right of right-side parts
 - Functional pin rows put the pin's own net before a ground shunt so the shunt draws below the pin; Original remains alphabetical
 - Identical decoupling capacitors each render as their own labeled schematic symbol
