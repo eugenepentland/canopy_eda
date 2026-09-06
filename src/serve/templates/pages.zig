@@ -59,6 +59,8 @@ pub const SystemHomeEntry = struct {
     documents: usize,
     /// The manifest carries a current attestation over these exact inputs.
     attested: bool = false,
+    /// Contract lifecycle word — concept, design, review or released.
+    status: []const u8 = "design",
 };
 
 /// A system entry paired with its search haystack (the "system" tag word +
@@ -530,6 +532,9 @@ pub const SystemCard = struct {
         try writer.writeAll("<span class=\"type-tag system\">");
         try writer.writeAll("System");
         try writer.writeAll("</span>");
+        try writer.writeAll("<span class=\"tag-chip\" title=\"Contract lifecycle declared by (status …)\">");
+        try html.writeEscaped(writer, sys.status);
+        try writer.writeAll("</span>");
         if (sys.attested) {
             try writer.writeAll("<span class=\"tag-chip starred\" title=\"Review inputs have been approved and the attestation is current\">");
             try writer.writeAll("attested");
@@ -547,13 +552,17 @@ pub const SystemCard = struct {
         try writer.writeAll("</div>");
         try writer.writeAll("</div>");
         try writer.writeAll("<div class=\"design-card-stats\">");
-        try writer.writeAll("<span>");
-        try html.writeEscaped(writer, sys.boards);
-        try writer.writeAll(" boards");
-        try writer.writeAll("</span>");
-        try writer.writeAll("<span class=\"sep\">");
-        try writer.writeAll("·");
-        try writer.writeAll("</span>");
+        // A concept system may carry no boards at all; it says what it is
+        // instead of claiming zero of them.
+        if (sys.boards > 0) {
+            try writer.writeAll("<span>");
+            try html.writeEscaped(writer, sys.boards);
+            try writer.writeAll(" boards");
+            try writer.writeAll("</span>");
+            try writer.writeAll("<span class=\"sep\">");
+            try writer.writeAll("·");
+            try writer.writeAll("</span>");
+        }
         try writer.writeAll("<span>");
         try html.writeEscaped(writer, sys.documents);
         try writer.writeAll(" documents");

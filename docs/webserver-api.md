@@ -592,6 +592,26 @@ assembly than the caller asked for.
   precisely so `V_12V` and `V_12V_RF` are one conductor. The per-finding
   meanings are tabulated in
   [docs/sexp-language.md § `interface_mismatch` findings](sexp-language.md).
+- **System status, brief and goals**: `GET /api/systems/:name/readiness` (and
+  the identical document `netlisp system-check` prints) also carries
+  `status` — `concept`, `design`, `review` or `released`, as declared by
+  `(status …)`; `brief` — the `(brief …)` record echoed in the manifest's own
+  JSON field spelling, or `null`; and `goals[]`, one row per declared
+  `(goal …)` as `{id, title, unit, min, max, verify_by, value, verdict,
+  evidence}`. `verdict` is `pass`, `fail`, `unproven`, `not_declared` or
+  `manual`, and **only `fail` contributes to `blocked`** — an `unproven` or
+  `not_declared` row names an input the design never gave its engine and a
+  `manual` row is waiting on a bench, so neither fails the gate (nor the CLI's
+  exit code). The grammar, the unit-to-figure table behind each row, and the
+  zero-board `concept` rule are in
+  [docs/sexp-language.md § System contracts](sexp-language.md). The two
+  generated regions that render the same rows into a review document are
+  `brief-summary` and `goals-status`. `GET /api/systems` and the home page's
+  cards carry the `status` word too, and a `concept` system with no boards
+  lists without a board count rather than claiming zero. `GET /systems/:name`
+  renders the brief as a read-only panel and the goals as a verdict-pilled
+  table above its document list; a concept system has no board evidence, so
+  the page shows the targets and the documents and nothing else.
 - **System dossier**: `GET /systems/:name/dossier` — the draft package's
   self-contained HTML dossier as a readable page, byte-identical to the
   `review/<base>.html` member of the same system's `draft.zip` (one composer,
