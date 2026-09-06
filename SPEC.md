@@ -449,12 +449,14 @@ Public functions: solve
 
 - gap closing honors authored layer restrictions and new-via limits before accepting or absorbing copper
 - gap closing refuses an opposite-face bridge when the net has no new-via allowance
-- reconciliation counts generated vias against the original allowance while retaining existing vias
+- reconciliation counts all retained and generated vias against the authored total limit
 - a gap batch spends via allowance only on accepted hops and does not reset it for later requests
 
 Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJunctions, glossFinishedTracks, foldNetBranches, cleanupBoard
 
 - maze-routes a two-pad net into connected track segments
+- retained same-net vias spend a whole-board route budget while foreign vias do not
+- an incomplete subtree exceeding the remaining via allowance is rolled back rather than retained
 - an equal-length octilinear tie is settled toward the straight path rather than an arbitrary staircase of the same length
 - the maze queue orders on A* priority alone, with corner count priced into the cost rather than ranked beside it
 - a maze leg is charged for the escape stub each pad gateway implies, so it buys the entry that points where the route goes instead of the outermost free one
@@ -500,6 +502,8 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - every leg of a shared guided trunk enters its waypoint chain from the same end, so the trunk is one corridor rather than two opposed ones
 - a net spanning the two board sides routes through a via, each leg on its part's layer unless the barrel stands in that pad's own land
 - a board outline detours routed copper around a concave notch; no-outline routes unchanged
+- coupled pair vias respect both members' total budgets before committing either leg
+- plane and finishing vias share the authored total with retained copper
 - a plane-less stackup routes ground as real copper instead of dropping plane vias
 - signal nets in an explicit authored route wave claim their copper before plane stitching, while the rest wave still follows the plane pass
 - exposed-pad thermal fields use practical centred 3x3 and 4x4 arrays instead of the DRC-densest possible drill packing
@@ -734,6 +738,8 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - a cleanup pass never rewrites copper outside the route's own scope, and never one leg of a differential pair alone
 
 ## serve/subcircuit-route
+
+- hierarchical seed via budgets include retained same-net copper without double-counting duplicate seed records
 
 - join-weighted module budgets are opt-in and equal module shares remain the default
 
@@ -8840,6 +8846,8 @@ design that authors none resolves — and routes — unchanged.
 - A wave-level (seed-first) is a known route selector and records a deferred bounded repair request against frozen completed copper
 
 ## placement/progress
+
+- connected nets with exceeded or unverified authored via budgets keep their routing wave incomplete
 
 Public functions: compute, writeJson
 

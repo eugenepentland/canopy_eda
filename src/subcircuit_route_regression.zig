@@ -139,8 +139,11 @@ test "local plane drops preserve an exposed thermal via array" {
     const policies = [_]route_policy.NetPolicy{.{ .max_vias = 1 }};
     var bounded = route_policy.Options{ .net = &policies };
     const stats = try pcb_layout_page.addSubcircuitRouteSeeds(alloc, "/no/saved/layout", &board, placement, .{}, &bounded);
-    try std.testing.expectEqual(@as(usize, 1), stats.copper.rejected_nets);
-    try std.testing.expectEqual(@as(usize, 0), bounded.existing_vias.len);
+    // The plane pass now stops at the cap rather than generating an oversized
+    // array that the parent has to reject wholesale. Keep its useful partial
+    // drop and leave the incomplete supply selected for later routing.
+    try std.testing.expectEqual(@as(usize, 0), stats.copper.rejected_nets);
+    try std.testing.expectEqual(@as(usize, 1), bounded.existing_vias.len);
     try std.testing.expect(bounded.selected_nets[0]);
     try std.testing.expectEqual(@as(usize, 1), stats.phase.deferred_supply_nets);
 }

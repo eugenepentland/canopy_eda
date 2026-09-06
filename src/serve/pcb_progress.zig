@@ -106,7 +106,7 @@ pub fn assemble(
         .sub_circuits = try subCircuitStatuses(arena, project_dir, block, placement),
         .has_outline = placement.board_rect != null,
         .placement = placement,
-        .net_conn = try mapNetConn(arena, conn),
+        .net_conn = try mapNetConn(arena, conn, copper),
         .fab_errors = try mapFabErrors(arena, fab.errors),
         .from_saved_layout = shown.from_saved,
         .plan = plan,
@@ -116,9 +116,16 @@ pub fn assemble(
 /// Map `fab_readiness.netConnectivity`'s per-net verdicts (in `placement.nets`
 /// order, 1:1 with the plan's route-member net indices) onto the ladder's
 /// leaner `NetConn`.
-fn mapNetConn(arena: Allocator, conn: []const fab_readiness.NetStatus) Allocator.Error![]const progress.NetConn {
+fn mapNetConn(arena: Allocator, conn: []const fab_readiness.NetStatus, copper: export_gerber.Copper) Allocator.Error![]const progress.NetConn {
     const out = try arena.alloc(progress.NetConn, conn.len);
-    for (conn, 0..) |ns, i| out[i] = .{ .name = ns.name, .routable = ns.routable, .connected = ns.connected };
+    for (conn, 0..) |ns, i| {
+        var count: usize = 0;
+        for (copper.vias) |via| {
+            const net_i = std.math.cast(usize, via.net) orelse continue;
+            if (net_i == i) count += 1;
+        }
+        out[i] = .{ .name = ns.name, .routable = ns.routable, .connected = ns.connected, .vias = count };
+    }
     return out;
 }
 
@@ -288,7 +295,13 @@ test "mapNetConn copies the connectivity verdicts in order" {
         .{ .name = "SIG", .routable = true, .connected = false, .islands = 2 },
         .{ .name = "TP", .routable = false, .connected = false, .islands = 1 },
     };
-    const out = try mapNetConn(arena, &conn);
+    const out = try mapNetConn(arena, &conn, .{ .vias = &.{
+        .{ .x = 0, .y = 0, .dia = 0.4, .drill = 0.2, .net = 1 },
+        .{ .x = 1, .y = 0, .dia = 0.4, .drill = 0.2, .net = 1 },
+        .{ .x = 2, .y = 0, .dia = 0.4, .drill = 0.2, .net = -1 },
+    } });
+    try testing.expectEqual(@as(?usize, 2), out[1].vias);
+    try testing.expectEqual(@as(?usize, 0), out[0].vias);
     try testing.expectEqual(@as(usize, 3), out.len);
     try testing.expectEqualStrings("SIG", out[1].name);
     try testing.expect(out[0].routable and out[0].connected);

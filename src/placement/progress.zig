@@ -138,6 +138,8 @@ pub const NetConn = struct {
     name: []const u8,
     routable: bool,
     connected: bool,
+    /// Actual retained via count; null means the caller did not inspect copper.
+    vias: ?usize = null,
 };
 
 /// Everything the ladder needs, assembled by the caller so this module stays a
@@ -347,6 +349,11 @@ fn routingStageWaves(arena: Allocator, in: Inputs) Allocator.Error!Stage {
         for (w.members) |ni| {
             if (ni >= in.net_conn.len) continue;
             const nc = in.net_conn[ni];
+            if (try viaBudgetItem(arena, nc, w)) |item| {
+                wt += 1;
+                try items.append(arena, item);
+                continue;
+            }
             if (!nc.routable) continue;
             wt += 1;
             if (nc.connected) {
@@ -360,6 +367,18 @@ fn routingStageWaves(arena: Allocator, in: Inputs) Allocator.Error!Stage {
         stage_done += wd;
     }
     return try finishWaveStage(arena, .routing, stage_done, tallies, &items);
+}
+
+/// Connectivity alone cannot satisfy an authored total via cap.
+fn viaBudgetItem(arena: Allocator, nc: NetConn, wave: plan_resolve.ResolvedWave) Allocator.Error!?Item {
+    const limit = wave.max_vias orelse return null;
+    const count = nc.vias orelse {
+        const msg = try std.fmt.allocPrint(arena, "net {s} via count is unverified against its limit of {d}", .{ nc.name, limit });
+        return try mkItem(arena, "via-budget-unverified", msg, .{ .net = nc.name, .wave = wave.name });
+    };
+    if (count <= limit) return null;
+    const msg = try std.fmt.allocPrint(arena, "net {s} has {d} vias; its authored total limit is {d}", .{ nc.name, count, limit });
+    return try mkItem(arena, "via-budget-exceeded", msg, .{ .net = nc.name, .wave = wave.name, .count = count });
 }
 
 /// Assign wave statuses, add the out-of-order advisory, and freeze a wave-split
@@ -1061,4 +1080,29 @@ test "plan warnings surface in the report" {
     const out = aw.written();
     try testing.expect(std.mem.indexOf(u8, out, "\"warnings\":[") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"kind\":\"plan-unknown-name\"") != null);
+}
+
+// spec: placement/progress - connected nets with exceeded or unverified authored via budgets keep their routing wave incomplete
+test "routing via budget blocks connected copper until the total is verified" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+    var parts = [_]optimizer.Part{partLocked("U1", true)};
+    var in = baseInputs(fixturePlacement(&parts));
+    var nets = [_]NetConn{.{ .name = "SIG", .routable = true, .connected = true, .vias = 3 }};
+    const waves = [_]plan_resolve.ResolvedWave{.{ .name = "control", .members = &.{0}, .max_vias = 2 }};
+    in.net_conn = &nets;
+    in.plan.route = &waves;
+    const over = try routingStageWaves(arena, in);
+    try testing.expectEqual(@as(usize, 0), over.done);
+    try testing.expectEqualStrings("via-budget-exceeded", over.items[0].kind);
+    try testing.expectEqualStrings("SIG", over.items[0].net.?);
+    try testing.expectEqual(@as(usize, 3), over.items[0].meta.count);
+    nets[0].vias = null;
+    const unknown = try routingStageWaves(arena, in);
+    try testing.expectEqualStrings("via-budget-unverified", unknown.items[0].kind);
+    nets[0].vias = 2;
+    const met = try routingStageWaves(arena, in);
+    try testing.expectEqual(@as(usize, 1), met.done);
+    try testing.expectEqual(@as(usize, 0), met.items.len);
 }

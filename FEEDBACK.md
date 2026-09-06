@@ -970,3 +970,8 @@ New from the wave:
 - **friction:** `netlisp build` writes nothing without `--output-dir`, so "build twice and diff the tree" does not exercise the ID-pinning path at all. Verifying that a repeat build does not reassign identities means driving the server edit path; there is no CLI seam for it.
 - **workaround:** `examples/blinky-breakout` is the only public board small enough to use as a fixture, and it needs a `git init` before system-level composition will get past project-state capture. Worth saying in the example's README, since the hermetic-example story is the reason it exists.
 - **correction (same session):** the `git init` above is wrong — it was a red herring from bisecting around the containment failure. A non-git project composes a system review fine; `project_status` reports `unavailable` and the composition proceeds. The whole recipe is two copies of the example board, a `(system …)` contract naming both, and one required active checklist document.
+
+## 2026-09-06 · codex · total via-budget routing
+- **friction:** A positive `retryLatticeGuided` regression repeatedly failed at the frozen-copper gate after the route had connected its two pads. Its retained isolated via was removed by topology cleanup; test output did not name that rejection because the route's info logs are suppressed in focused tests. Temporary raw-result and gate diagnostics exposed the reason.
+- **idea:** Return a typed guided-candidate rejection reason (changed frozen copper, no connectivity gain, geometry failure or timeout) to tests and route diagnostics, so a policy regression can verify the reason rather than infer it from the final failed-net count.
+- **status:** open

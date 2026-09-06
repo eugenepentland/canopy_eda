@@ -12,7 +12,7 @@ The best generated-copper candidates currently stand at:
 | Board | Connected nets | Geometry errors | Remaining acceptance work |
 | --- | --- | --- | --- |
 | Black Canyon RF | 59/59 | 0 | No missing authored surface bonds after local capacitor moves and automatic repair; DRC warnings and release review |
-| Barracuda RF | 130/130 | 0 | Local fanout trial connects LOCK_DET; total via-budget mismatch and warning review remain; no missing authored bypass bonds |
+| Barracuda RF | 130/130 | 0 | SPI_SCK reduced from 15 to 6 vias; three other via-cap violations and warning review remain; no missing authored bypass bonds |
 | Barracuda Base | 99/183 | 1 | Open nets, 26 missing authored bypass bonds, and a hairline gap |
 
 Allocation-safe finishing (`e5981dfe`) preserves Black Canyon's connected result
@@ -1060,3 +1060,43 @@ All 225 component poses, outlines, texts, pours and saved RF paths are unchanged
 The repair is still an agent-selected local window and ordered native finishing
 sequence; a single DSL-driven automatic replay remains unfinished. Barracuda Base
 remains at 99/183 with one hairline gap and 26 missing bypass bonds.
+
+
+## Total via-budget accounting — 2026-09-06
+
+The connected RF candidate hid four violations of authored `(max-vias …)`
+limits. Incremental finishing treated retained vias as free on each invocation;
+whole-net retries and module handoff also disagreed about whether the policy
+was a total or a remaining allowance. The current feature makes whole-net and
+seed policies totals, and lowers gap-repair policies to the remaining allowance
+once per transaction. Over-budget partial trees roll back. Plane, thermal,
+escape, return-stitch, ground-pad and reference-replay passes check their total;
+coupled differential legs check both members before either is committed.
+
+`get_layout_progress` now reports `via-budget-exceeded` or
+`via-budget-unverified` in the routing stage. Geometry DRC and connectivity
+remain separate measurements. Standalone fence/stitch tools without a lowered
+route plan still require this final saved-copper audit; these changes do not
+prove every geometry-producing API enforces the plan before writing.
+
+A native whole-net clear and automatic finish reduced RF `SPI_SCK` from 15 to
+6 vias, keeping 130/130 connected and no missing bypass bonds. The published
+candidate is `autorouter-review-20260906-via-budget`: 1017 physical tracks,
+439 vias, zero geometry errors and 461 warnings. It has 988 persisted tracks;
+the physical report includes derived copper. This experiment used verified
+`b21f82ad`, starting SCK with zero vias, so its ten-new-via allowance was also
+the total allowance. It is not a fresh full-board run of this feature engine.
+
+The new progress audit reports 127/130 routing requirements satisfied:
+`V_24V_CLEAN` has 4 vias against 2, `SPI_LMX_CSN` 5 against 3, and `V_1V8A`
+8 against 4. A separate chip-select clear/finish trial kept zero of one hop
+and reported a policy refusal; it remains an isolated 129/130 candidate.
+No authored limits were relaxed. Frozen experiment files and reports are in
+`/tmp/autorouter-via-budget-20260906`.
+
+A guided-repair fixture also exposed a separate limitation: the ordinary
+router can prune a retained isolated via, and the guided acceptance gate then
+rejects the candidate because frozen copper changed. The budget changes do
+not resolve that preservation/cleanup disagreement. Next work must improve
+constrained RF repair and close Base's remaining 84 nets and geometry error,
+then verify all three boards against the authored constraints and warnings.

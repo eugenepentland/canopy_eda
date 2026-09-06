@@ -65,7 +65,8 @@ pub const NetPolicy = struct {
     /// Emit recovered reference copper verbatim for plane-net replay. This is
     /// an upper-bound experiment mode, never a normal synthesized route.
     replay_reference_copper: bool = false,
-    /// Hard maximum number of newly emitted vias (`null` = unrestricted).
+    /// Hard per-net total via limit (`null` = unrestricted). Whole-board routes
+    /// count retained copper too. Gap callers lower this to a remaining allowance.
     max_vias: ?u16 = null,
 };
 

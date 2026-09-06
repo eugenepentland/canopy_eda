@@ -394,7 +394,7 @@ pub fn mcpCloseOpenNets(
         .only = only,
         .error_budget = argUsize(args_val, "drc_error_budget"),
     };
-    work.plan = try finishingPlan(alloc, solved.block, solved.placement, work.zones, routes.vias);
+    work.plan = try finishingPlan(alloc, solved.block, solved.placement, work.zones);
     work.base_drc = try work.errorViolations();
     work.error_ceiling = try work.geometryErrors();
     work.diff_ceiling = try work.diffWarnings();
@@ -851,9 +851,6 @@ const FinishingPlan = struct {
     rank: []const usize = &.{},
     net: []const route_policy.NetPolicy = &.{},
     reserved: []const route_policy.ReservedLane = &.{},
-    /// Preserved vias do not spend a plan's limit on newly generated vias.
-    /// Keep this fixed across every round, fine retry and victim transaction.
-    base_vias: []const usize = &.{},
 };
 
 /// The mutable board a `close_open_nets` call is finishing, plus everything the
@@ -1473,7 +1470,7 @@ const Work = struct {
     }
 
     /// Remaining new-via allowance for each net, shared by every finishing
-    /// rung. A fresh call into the gap router must not reset the pass's budget.
+    /// rung. All retained vias spend the authored total, including earlier calls.
     fn remainingPolicies(self: *Work) std.mem.Allocator.Error![]const route_policy.NetPolicy {
         const policies = try self.alloc.dupe(route_policy.NetPolicy, self.plan.net);
         for (policies, 0..) |*policy, ni| {
@@ -1483,8 +1480,7 @@ const Work = struct {
             for (self.vias.items) |v| if (std.mem.eql(u8, v.net, self.placement.nets[ni].name)) {
                 present += 1;
             };
-            const baseline = if (ni < self.plan.base_vias.len) self.plan.base_vias[ni] else 0;
-            policy.max_vias = limit - @as(u16, @intCast(@min(present -| baseline, limit)));
+            policy.max_vias = limit - @as(u16, @intCast(@min(present, limit)));
         }
         return policies;
     }
@@ -3180,7 +3176,6 @@ fn finishingPlan(
     block: *env_mod.DesignBlock,
     placement: optimizer.Placement,
     zones: []const pour.UserZone,
-    vias: []const SavedVia,
 ) std.mem.Allocator.Error!FinishingPlan {
     const ranks = try alloc.alloc(usize, placement.nets.len);
     @memset(ranks, std.math.maxInt(usize));
@@ -3200,17 +3195,10 @@ fn finishingPlan(
             if (net_i < ranks.len and ranks[net_i] == std.math.maxInt(usize)) ranks[net_i] = wi;
         }
     }
-    const base_vias = try alloc.alloc(usize, placement.nets.len);
-    @memset(base_vias, 0);
-    for (vias) |via| {
-        const ni = netIndex(placement, via.net) orelse continue;
-        base_vias[ni] += 1;
-    }
     return .{
         .rank = ranks,
         .net = if (block.pcb_plan != null) try plan_resolve.routePolicies(alloc, resolved, placement, true) else &.{},
         .reserved = resolved.escape_reserved,
-        .base_vias = base_vias,
     };
 }
 
@@ -4064,10 +4052,10 @@ test "close_open_nets gap policy shares its remaining via allowance across retri
             .name = "signal",
             .nets = &.{"SIG"},
             .allowed_layers = &.{ "F.Cu", "B.Cu" },
-            .max_vias = 1,
+            .max_vias = 2,
         }} },
     };
-    work.plan = try finishingPlan(arena, &block, work.placement, &.{}, &.{old_via});
+    work.plan = try finishingPlan(arena, &block, work.placement, &.{});
     try work.vias.append(arena, old_via);
     const initial = try work.remainingPolicies();
     try testing.expectEqual(@as(?u16, 1), initial[0].max_vias);
@@ -4082,6 +4070,11 @@ test "close_open_nets gap policy shares its remaining via allowance across retri
         .to = .{ .x = 8, .y = 5, .layer = 1 },
     }}, .{ .ripup = false });
     try testing.expect(paths[0] == null);
+    // Reopening the saved board in another invocation must not reset the cap.
+    work.plan = try finishingPlan(arena, &block, work.placement, &.{});
+    try testing.expectEqual(@as(?u16, 0), (try work.remainingPolicies())[0].max_vias);
+    try work.vias.append(arena, .{ .x = 5, .y = 2, .d = 0.6, .drill = 0.3, .net = "SIG" });
+    try testing.expectEqual(@as(?u16, 0), (try work.remainingPolicies())[0].max_vias);
     work.vias.shrinkRetainingCapacity(1);
     try testing.expectEqual(@as(?u16, 1), (try work.remainingPolicies())[0].max_vias);
 }

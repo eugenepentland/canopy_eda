@@ -777,8 +777,6 @@ fn mergeAcceptedSeeds(
     try guide_tracks.appendSlice(alloc, options.guides.tracks);
     var guide_vias: std.ArrayList(route_policy.GuideVia) = .empty;
     try guide_vias.appendSlice(alloc, options.guides.vias);
-    const accepted_vias = try alloc.alloc(u16, acc.rejected.len);
-    @memset(accepted_vias, 0);
     for (acc.tracks.items) |item| {
         if (acc.rejected[item.net]) continue;
         if (containsSeedTrack(tracks.items, item.copper)) continue;
@@ -801,17 +799,11 @@ fn mergeAcceptedSeeds(
             continue;
         }
         try vias.append(alloc, item.copper);
-        accepted_vias[item.net] +|= 1;
         acc.stats.copper.accepted_vias += 1;
         if (item.carrier_drop) acc.stats.phase.accepted_carrier_drops += 1;
     }
-    const policies = try alloc.dupe(route_policy.NetPolicy, options.net);
-    for (accepted_vias, 0..) |count, ni| if (count > 0 and ni < policies.len) {
-        if (policies[ni].max_vias) |limit| policies[ni].max_vias = limit -| count;
-    };
     options.guides.tracks = guide_tracks.items;
     options.guides.vias = guide_vias.items;
-    options.net = policies;
     options.existing_tracks = tracks.items;
     options.existing_vias = vias.items;
 }
@@ -1041,6 +1033,6 @@ test "guided module copper preserves protected and caller copper and via budgets
     try std.testing.expectEqual(@as(usize, 1), options.guides.tracks.len);
     try std.testing.expectEqual(@as(usize, 1), options.guides.vias.len);
     try std.testing.expectEqual(@as(u16, 1), options.net[0].max_vias.?);
-    try std.testing.expectEqual(@as(u16, 0), options.net[1].max_vias.?);
+    try std.testing.expectEqual(@as(u16, 1), options.net[1].max_vias.?);
     try std.testing.expectEqual(@as(usize, 1), acc.stats.copper.guided_tracks);
 }
