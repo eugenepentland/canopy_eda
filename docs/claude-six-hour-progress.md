@@ -269,9 +269,11 @@ from another session, untouched).
 
 ## Gate/integration status — ALL MERGED AND DEPLOYED
 
-Three integration rounds, because `main` advanced under the sprint four times
+Four integration rounds, because `main` advanced under the sprint repeatedly
 (other sessions landed the rail column, via budgets, power-island joins and a
-re-recorded PCB-page baseline). Each round: merge `main` into the branch, whole
+re-recorded PCB-page baseline). One round was also refused outright for a dirty
+worktree — a documented side-build prefix that `.gitignore` did not cover, fixed
+in `c9a5329f` rather than worked around. Each round: merge `main` into the branch, whole
 suite, `.githooks/prepare-release.sh`, fast-forward `main`, deploy hook.
 
 | Round | Branch head gated | Gate result | main after | Deploy |
@@ -279,6 +281,7 @@ suite, `.githooks/prepare-release.sh`, fast-forward `main`, deploy hook.
 | 1 | `d947830a` | candidate ready — tests 127 s, build 131 s, editor perf 616 s, wall 790 s (queued 271 s behind another session's `perf_gate.sh --record`) | `d947830a` | health OK, service active |
 | 2 | `a5d0aef5` | candidate ready — tests 119 s, build 121 s, editor perf 197 s, wall 362 s | `a5d0aef5` | health OK, service active |
 | 3 | `ea35645c` | candidate ready — tests 121 s, build 119 s, editor perf 207 s, wall 370 s | `ea35645c` | health OK, service active |
+| 4 | `b2b1fe7c` | candidate ready — tests 128 s, build 130 s, editor perf 455 s, wall 630 s | `b2b1fe7c` | health OK, service active |
 
 `git log main..claude/sprint-0906` is **empty** — nothing is left unmerged.
 
