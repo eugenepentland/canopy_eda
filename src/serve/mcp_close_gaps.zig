@@ -394,7 +394,7 @@ pub fn mcpCloseOpenNets(
         .only = only,
         .error_budget = argUsize(args_val, "drc_error_budget"),
     };
-    work.plan = try finishingPlan(alloc, solved.block, solved.placement, work.zones, routes.vias);
+    work.plan = try finishingPlan(alloc, solved.block, solved.placement, work.zones);
     work.base_drc = try work.errorViolations();
     work.error_ceiling = try work.geometryErrors();
     work.diff_ceiling = try work.diffWarnings();
@@ -405,11 +405,12 @@ pub fn mcpCloseOpenNets(
     if (argBool(args_val, "repair_bypasses") orelse true) tally.bypasses = try work.repairBypasses();
     for (0..rounds) |round| {
         if (work.budget.stopped()) break;
-        const gaps = try work.planRound(round);
+        const planned = try work.planRound(round);
+        const gaps = planned.gaps;
         progress("round {d}: {d} hops planned", .{ round, gaps.len });
         if (gaps.len == 0) break;
-        const open_before = try work.openNetCount();
-        const kept = try work.runRound(gaps);
+        const open_before = planned.open.len;
+        const kept = try work.runRound(gaps, planned.open);
         tally.tried += kept.tried;
         tally.kept += kept.hops;
         tally.ripped += kept.ripped;
@@ -795,10 +796,11 @@ const HopKey = struct {
     fy: f64,
     tx: f64,
     ty: f64,
+    surface_only: bool = false,
 
     fn eql(self: HopKey, other: HopKey) bool {
         return self.net_i == other.net_i and self.fx == other.fx and self.fy == other.fy and
-            self.tx == other.tx and self.ty == other.ty;
+            self.tx == other.tx and self.ty == other.ty and self.surface_only == other.surface_only;
     }
 };
 
@@ -806,7 +808,7 @@ const HopKey = struct {
 /// free sentinels of its own start point).
 fn hopKey(gap: router.Gap) HopKey {
     const to = gap.to orelse gap.from;
-    return .{ .net_i = gap.net_i, .fx = gap.from.x, .fy = gap.from.y, .tx = to.x, .ty = to.y };
+    return .{ .net_i = gap.net_i, .fx = gap.from.x, .fy = gap.from.y, .tx = to.x, .ty = to.y, .surface_only = gap.surface_only };
 }
 
 /// A round's outcome.
@@ -851,9 +853,6 @@ const FinishingPlan = struct {
     rank: []const usize = &.{},
     net: []const route_policy.NetPolicy = &.{},
     reserved: []const route_policy.ReservedLane = &.{},
-    /// Preserved vias do not spend a plan's limit on newly generated vias.
-    /// Keep this fixed across every round, fine retry and victim transaction.
-    base_vias: []const usize = &.{},
 };
 
 /// The mutable board a `close_open_nets` call is finishing, plus everything the
@@ -1069,17 +1068,15 @@ const Work = struct {
 
     /// Open a round: freeze the current track array so rip-up indices are
     /// stable across the round's hops.
-    fn beginRound(self: *Work) std.mem.Allocator.Error!void {
+    fn beginRound(self: *Work, open: ?[]const fab_readiness.OpenNet) std.mem.Allocator.Error!void {
         self.dead = try self.alloc.alloc(bool, self.tracks.items.len);
         @memset(self.dead, false);
-        try self.refreshWhole();
+        if (open) |connectivity| try self.setWhole(connectivity) else try self.refreshWhole();
     }
 
     /// Recompute which nets are in one piece, so the rip filter can answer from
     /// a table instead of a per-call oracle pass.
     fn refreshWhole(self: *Work) std.mem.Allocator.Error!void {
-        self.whole = try self.alloc.alloc(bool, self.placement.nets.len);
-        @memset(self.whole, true);
         const r = try self.copper();
         const open = try fab_readiness.openNets(self.alloc, self.placement, .{
             .tracks = r.tracks,
@@ -1088,6 +1085,14 @@ const Work = struct {
             .vias = r.vias,
             .zones = self.zones,
         });
+        try self.setWhole(open);
+    }
+
+    /// Use only a snapshot taken before this round, with no intervening copper
+    /// changes. Nested vacate rounds rebuild it after removing their victims.
+    fn setWhole(self: *Work, open: []const fab_readiness.OpenNet) std.mem.Allocator.Error!void {
+        self.whole = try self.alloc.alloc(bool, self.placement.nets.len);
+        @memset(self.whole, true);
         for (open) |o| {
             if (netIndex(self.placement, o.net)) |i| self.whole[i] = false;
         }
@@ -1309,8 +1314,15 @@ const Work = struct {
         return kept;
     }
 
-    /// Build this round's hop requests from the oracle's open-net report.
-    fn planRound(self: *Work, round: usize) std.mem.Allocator.Error![]const router.Gap {
+    const RoundPlan = struct {
+        gaps: []const router.Gap,
+        // Full-board connectivity, including nets outside the caller's scope.
+        // Shared by planning, the before-count and the initial rip filter.
+        open: []const fab_readiness.OpenNet,
+    };
+
+    /// Build this round's hop requests and retain their connectivity snapshot.
+    fn planRound(self: *Work, round: usize) std.mem.Allocator.Error!RoundPlan {
         const r = try self.copper();
         const open = try fab_readiness.openNets(self.alloc, self.placement, .{
             .tracks = r.tracks,
@@ -1324,15 +1336,49 @@ const Work = struct {
         for (self.placement.parts, 0..) |p, i| try index.put(self.alloc, p.ref_des, i);
         for (open) |o| {
             if (!self.wanted(o.net)) continue;
-            const net_i = netIndex(self.placement, o.net) orelse continue;
-            const plane = self.planeCarried(o.net);
-            const before = gaps.items.len;
-            if (plane) try self.addStitches(&gaps, &index, o, net_i);
-            if (bridgesNow(round, plane, gaps.items.len - before)) try self.addBridges(&gaps, &index, o, net_i);
+            try self.planNetHops(&gaps, &index, o, round);
             if (gaps.items.len >= max_hops_per_round) break;
         }
         std.mem.sort(router.Gap, gaps.items, self, hardestFirst);
-        return gaps.items;
+        return .{ .gaps = gaps.items, .open = open };
+    }
+
+    /// A fixed via allowance may be smaller than the number of plane islands.
+    /// Try joining those islands on their existing face before spending barrels.
+    /// Later rounds retain ordinary stitching and multilayer bridge fallbacks.
+    fn planNetHops(
+        self: *Work,
+        gaps: *std.ArrayList(router.Gap),
+        index: *std.StringHashMapUnmanaged(usize),
+        o: fab_readiness.OpenNet,
+        round: usize,
+    ) std.mem.Allocator.Error!void {
+        const net_i = netIndex(self.placement, o.net) orelse return;
+        const plane = self.planeCarried(o.net);
+        const before = gaps.items.len;
+        if (plane) try self.addStitches(gaps, index, o, net_i);
+        const stitches = gaps.items.len - before;
+        if (round == 0 and plane) {
+            if (self.remainingViaLimit(net_i)) |limit| if (stitches > limit) {
+                var joins: std.ArrayList(router.Gap) = .empty;
+                for (o.gaps) |g| {
+                    const from = padPoint(self.placement, index, g.from) orelse continue;
+                    const to = padPoint(self.placement, index, g.to) orelse continue;
+                    var gap = router.Gap{ .net_i = net_i, .from = from, .to = to, .surface_only = true };
+                    if (from.layer != to.layer) {
+                        gap = self.alternateBridge(index, o, g, net_i) orelse continue;
+                        gap.surface_only = true;
+                    }
+                    if (!self.deadEnd(gap)) try joins.append(self.alloc, gap);
+                }
+                if (joins.items.len > 0) {
+                    gaps.shrinkRetainingCapacity(before);
+                    try gaps.appendSlice(self.alloc, joins.items);
+                    return;
+                }
+            };
+        }
+        if (bridgesNow(round, plane, stitches)) try self.addBridges(gaps, index, o, net_i);
     }
 
     /// Order one round's hops hardest-first. Every hop in a round contends for
@@ -1473,20 +1519,22 @@ const Work = struct {
     }
 
     /// Remaining new-via allowance for each net, shared by every finishing
-    /// rung. A fresh call into the gap router must not reset the pass's budget.
+    /// rung. All retained vias spend the authored total, including earlier calls.
     fn remainingPolicies(self: *Work) std.mem.Allocator.Error![]const route_policy.NetPolicy {
         const policies = try self.alloc.dupe(route_policy.NetPolicy, self.plan.net);
-        for (policies, 0..) |*policy, ni| {
-            const limit = policy.max_vias orelse continue;
-            if (ni >= self.placement.nets.len) continue;
-            var present: usize = 0;
-            for (self.vias.items) |v| if (std.mem.eql(u8, v.net, self.placement.nets[ni].name)) {
-                present += 1;
-            };
-            const baseline = if (ni < self.plan.base_vias.len) self.plan.base_vias[ni] else 0;
-            policy.max_vias = limit - @as(u16, @intCast(@min(present -| baseline, limit)));
-        }
+        for (policies, 0..) |*policy, ni| policy.max_vias = self.remainingViaLimit(ni);
         return policies;
+    }
+
+    fn remainingViaLimit(self: *Work, net_i: usize) ?u16 {
+        if (net_i >= self.plan.net.len) return null;
+        const limit = self.plan.net[net_i].max_vias orelse return null;
+        if (net_i >= self.placement.nets.len) return limit;
+        var present: u16 = 0;
+        for (self.vias.items) |via| if (std.mem.eql(u8, via.net, self.placement.nets[net_i].name)) {
+            present +|= 1;
+        };
+        return limit -| present;
     }
 
     /// Every round, retry and collateral repair uses the same authored hard
@@ -1530,9 +1578,9 @@ const Work = struct {
     }
 
     /// Route one round's hops and keep the ones that earn their copper.
-    fn runRound(self: *Work, gaps: []const router.Gap) std.mem.Allocator.Error!RoundResult {
+    fn runRound(self: *Work, gaps: []const router.Gap, open: ?[]const fab_readiness.OpenNet) std.mem.Allocator.Error!RoundResult {
         if (self.budget.stopped()) return .{};
-        try self.beginRound();
+        try self.beginRound(open);
         const live = try self.liveCopper();
         const base = live.routes;
         const reasons = try self.alloc.alloc(router.GapReason, gaps.len);
@@ -1764,9 +1812,9 @@ const Work = struct {
             if (self.budget.stopped()) break;
             const live = try self.liveCopper();
             const legs = [_]router.Gap{
-                .{ .net_i = gap.net_i, .from = gap.from, .to = candidate.first },
-                .{ .net_i = gap.net_i, .from = candidate.first, .to = candidate.second },
-                .{ .net_i = gap.net_i, .from = candidate.second, .to = to },
+                .{ .net_i = gap.net_i, .from = gap.from, .to = candidate.first, .surface_only = gap.surface_only },
+                .{ .net_i = gap.net_i, .from = candidate.first, .to = candidate.second, .surface_only = gap.surface_only },
+                .{ .net_i = gap.net_i, .from = candidate.second, .to = to, .surface_only = gap.surface_only },
             };
             const paths = try self.closeGaps(
                 .{ .tracks = live.routes.tracks, .vias = live.routes.vias, .zones = self.router_zones },
@@ -2437,7 +2485,7 @@ const Work = struct {
             if (self.budget.stopped()) break;
             const hops = try self.planFor(subset, 1, round);
             if (hops.len == 0) break;
-            self.vacate_hops += (try self.runRound(hops)).tried;
+            self.vacate_hops += (try self.runRound(hops, null)).tried;
         }
         self.phase = .round;
         self.grid_divisor = router.gap_grid_divisor;
@@ -2739,7 +2787,7 @@ const Work = struct {
             if (self.budget.stopped()) break;
             const hops = try self.planFor(seq.nets, seq.lead, round);
             if (hops.len == 0) break;
-            self.vacate_hops += (try self.runRound(hops)).tried;
+            self.vacate_hops += (try self.runRound(hops, null)).tried;
         }
         self.phase = .round;
         self.grid_divisor = router.gap_grid_divisor;
@@ -3097,22 +3145,7 @@ const Work = struct {
         for (nets, 0..) |net_i, n| {
             for (open) |o| {
                 if (netIndex(self.placement, o.net) != net_i) continue;
-                const plane = self.planeCarried(o.net);
-                const before = gaps.items.len;
-                if (plane) try self.addStitches(&gaps, &index, o, net_i);
-                // The SAME rule the ordinary rounds plan a plane-carried net by
-                // (`bridgesNow`), and for the same reason — one this phase was
-                // quietly breaking. A pour-carried net rejoins by dropping a via
-                // into its own pour; asking for a surface trace across the
-                // pocket in the same breath spends a channel the stitch never
-                // needed. Measured on board-a: restoring `V_6VA` by bridge
-                // lays copper straight back across the `B.Cu` GND pour it had
-                // just been lifted off, re-severing the very pour whose
-                // continuity closes the `GND` seed — the transaction put its own
-                // blocker back and then rolled itself back for failing to close.
-                if (bridgesNow(round, plane, gaps.items.len - before)) {
-                    try self.addBridges(&gaps, &index, o, net_i);
-                }
+                try self.planNetHops(&gaps, &index, o, round);
             }
             if (n + 1 == lead) lead_end = gaps.items.len;
         }
@@ -3180,7 +3213,6 @@ fn finishingPlan(
     block: *env_mod.DesignBlock,
     placement: optimizer.Placement,
     zones: []const pour.UserZone,
-    vias: []const SavedVia,
 ) std.mem.Allocator.Error!FinishingPlan {
     const ranks = try alloc.alloc(usize, placement.nets.len);
     @memset(ranks, std.math.maxInt(usize));
@@ -3200,17 +3232,10 @@ fn finishingPlan(
             if (net_i < ranks.len and ranks[net_i] == std.math.maxInt(usize)) ranks[net_i] = wi;
         }
     }
-    const base_vias = try alloc.alloc(usize, placement.nets.len);
-    @memset(base_vias, 0);
-    for (vias) |via| {
-        const ni = netIndex(placement, via.net) orelse continue;
-        base_vias[ni] += 1;
-    }
     return .{
         .rank = ranks,
         .net = if (block.pcb_plan != null) try plan_resolve.routePolicies(alloc, resolved, placement, true) else &.{},
         .reserved = resolved.escape_reserved,
-        .base_vias = base_vias,
     };
 }
 
@@ -3922,7 +3947,7 @@ test "close_open_nets expired budget keeps accepted copper and skips search" {
     const paths = try work.closeGaps(.{}, &.{gap}, .{ .ripup = false });
     try testing.expect(paths[0] == null);
     try testing.expect(work.budget.timed_out);
-    try testing.expectEqual(@as(usize, 0), (try work.runRound(&.{gap})).hops);
+    try testing.expectEqual(@as(usize, 0), (try work.runRound(&.{gap}, null)).hops);
     try testing.expectEqual(@as(usize, 0), try work.vacatePhase());
     try testing.expectEqual(@as(usize, 0), try work.jointPhase());
     try testing.expectEqual(@as(usize, 0), work.failures.items.len);
@@ -4064,10 +4089,10 @@ test "close_open_nets gap policy shares its remaining via allowance across retri
             .name = "signal",
             .nets = &.{"SIG"},
             .allowed_layers = &.{ "F.Cu", "B.Cu" },
-            .max_vias = 1,
+            .max_vias = 2,
         }} },
     };
-    work.plan = try finishingPlan(arena, &block, work.placement, &.{}, &.{old_via});
+    work.plan = try finishingPlan(arena, &block, work.placement, &.{});
     try work.vias.append(arena, old_via);
     const initial = try work.remainingPolicies();
     try testing.expectEqual(@as(?u16, 1), initial[0].max_vias);
@@ -4082,6 +4107,11 @@ test "close_open_nets gap policy shares its remaining via allowance across retri
         .to = .{ .x = 8, .y = 5, .layer = 1 },
     }}, .{ .ripup = false });
     try testing.expect(paths[0] == null);
+    // Reopening the saved board in another invocation must not reset the cap.
+    work.plan = try finishingPlan(arena, &block, work.placement, &.{});
+    try testing.expectEqual(@as(?u16, 0), (try work.remainingPolicies())[0].max_vias);
+    try work.vias.append(arena, .{ .x = 5, .y = 2, .d = 0.6, .drill = 0.3, .net = "SIG" });
+    try testing.expectEqual(@as(?u16, 0), (try work.remainingPolicies())[0].max_vias);
     work.vias.shrinkRetainingCapacity(1);
     try testing.expectEqual(@as(?u16, 1), (try work.remainingPolicies())[0].max_vias);
 }
@@ -4522,11 +4552,11 @@ test "close_open_nets plans hops only for the nets the caller named" {
         .tracks = .empty,
         .vias = .empty,
     };
-    try testing.expectEqual(@as(usize, 2), (try work.planRound(0)).len);
+    try testing.expectEqual(@as(usize, 2), (try work.planRound(0)).gaps.len);
 
     const only = [_][]const u8{"OTHER"};
     work.only = &only;
-    const restricted = try work.planRound(0);
+    const restricted = (try work.planRound(0)).gaps;
     try testing.expectEqual(@as(usize, 1), restricted.len);
     try testing.expectEqualStrings("OTHER", work.placement.nets[restricted[0].net_i].name);
 }
@@ -4560,7 +4590,8 @@ test "close_open_nets orders a round's hops longest-span first" {
         .tracks = .empty,
         .vias = .empty,
     };
-    const gaps = try work.planRound(0);
+    const planned = try work.planRound(0);
+    const gaps = planned.gaps;
     try testing.expectEqual(@as(usize, 2), gaps.len);
     try testing.expectEqualStrings("LONG", work.placement.nets[gaps[0].net_i].name);
     try testing.expectEqualStrings("SHORT", work.placement.nets[gaps[1].net_i].name);
@@ -4975,7 +5006,7 @@ test "close_open_nets maps a rip reported against live copper back onto its own 
     // SIG; the other copy keeps the victim connected throughout the gate.
     work.tracks.shrinkRetainingCapacity(3);
     try work.tracks.append(arena, work.tracks.items[2]);
-    try work.beginRound();
+    try work.beginRound(null);
     const batch_live = (try work.liveCopper());
     const victim_chord = std.mem.indexOfScalar(usize, batch_live.map, 2).?;
     const batch_gaps = [_]router.Gap{.{
@@ -6112,4 +6143,110 @@ test "close_open_nets repairs a surface bypass despite a closed remote via path"
     parts[1].side = .top;
     try testing.expectEqual(@as(usize, 0), try work.repairBypasses());
     try testing.expectEqual(@as(usize, 1), (try work.missingBypasses()).len);
+}
+
+// spec: Web Server - A via-limited poured rail joins surface islands before spending an insufficient stitch allowance
+test "close_open_nets joins power islands before spending scarce vias" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const a = arena_i.allocator();
+    var parts = [_]optimizer.Part{ vacatePart("R1", 2, 5), vacatePart("R2", 8, 5) };
+    const nets = [_]export_kicad.FlatNet{vacateNet("PWR", "R1", "R2")};
+    const zones = [_]pour.UserZone{.{
+        .net = "PWR",
+        .layer = 1,
+        .poly = &.{ .{ 1, 1 }, .{ 9, 1 }, .{ 9, 9 }, .{ 1, 9 } },
+    }};
+    var work = Work{
+        .alloc = a,
+        .placement = gapFixture(&parts, &nets),
+        .params = .{},
+        .zones = &zones,
+        .router_zones = try zoneSources(a, gapFixture(&parts, &nets), &zones),
+        .rules = .{},
+        .tracks = .empty,
+        .vias = .empty,
+        .plan = .{ .net = &.{.{ .max_vias = 1 }} },
+    };
+    work.error_ceiling = try work.geometryErrors();
+    work.plan.net = &.{.{ .max_vias = 2 }};
+    const ample = (try work.planRound(0)).gaps;
+    try testing.expectEqual(@as(usize, 2), ample.len);
+    try testing.expect(ample[0].to == null);
+    work.plan.net = &.{.{ .max_vias = 1 }};
+    const planned = try work.planRound(0);
+    const gaps = planned.gaps;
+    try testing.expectEqual(@as(usize, 1), gaps.len);
+    try testing.expect(gaps[0].to != null and gaps[0].surface_only);
+    const kept = try work.runRound(gaps, planned.open);
+    try testing.expectEqual(@as(usize, 1), kept.hops);
+    try testing.expectEqual(@as(usize, 0), work.vias.items.len);
+    try testing.expectEqual(@as(usize, 0), try work.openNetCount());
+    try testing.expectEqual(@as(usize, 0), try work.geometryErrors());
+}
+
+// spec: Web Server - A refused surface-only join does not memoize failure of an ordinary multilayer bridge
+test "close_open_nets surface refusal leaves ordinary fallback eligible" {
+    var work = Work{
+        .alloc = testing.allocator,
+        .placement = undefined,
+        .params = .{},
+        .zones = &.{},
+        .router_zones = &.{},
+        .rules = .{},
+        .tracks = .empty,
+        .vias = .empty,
+    };
+    defer work.dead_ends.deinit(testing.allocator);
+    const ordinary = router.Gap{ .net_i = 0, .from = .{ .x = 2, .y = 5, .layer = 0 }, .to = .{ .x = 8, .y = 5, .layer = 0 } };
+    var surface = ordinary;
+    surface.surface_only = true;
+    try work.dead_ends.append(testing.allocator, hopKey(surface));
+    try testing.expect(work.deadEnd(surface));
+    try testing.expect(!work.deadEnd(ordinary));
+}
+
+// spec: Web Server - A finishing round shares one full-board connectivity snapshot across planning and rip protection, then refreshes after copper changes
+test "close_open_nets round snapshot preserves scoped protection and refreshes after edits" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const a = arena_i.allocator();
+    var parts = [_]optimizer.Part{
+        vacatePart("R1", 2, 5), vacatePart("R2", 8, 5),
+        vacatePart("R3", 2, 9), vacatePart("R4", 8, 9),
+    };
+    const nets = [_]export_kicad.FlatNet{
+        vacateNet("SIG", "R1", "R2"), vacateNet("OTHER", "R3", "R4"),
+    };
+    var work = Work{
+        .alloc = a,
+        .placement = gapFixture(&parts, &nets),
+        .params = .{},
+        .zones = &.{},
+        .router_zones = &.{},
+        .rules = .{},
+        .tracks = .empty,
+        .vias = .empty,
+        .only = &.{"SIG"},
+    };
+    const before = try work.planRound(0);
+    try testing.expectEqual(@as(usize, 1), before.gaps.len);
+    try testing.expectEqual(@as(usize, 2), before.open.len);
+    const kept = try work.runRound(before.gaps, before.open);
+    try testing.expectEqual(@as(usize, 1), kept.hops);
+    // An unselected open net is still protected by the full-board snapshot.
+    try testing.expect(!work.whole[0] and !work.whole[1]);
+    try testing.expectEqual(@as(usize, 0), try work.geometryErrors());
+    const after = try work.planRound(1);
+    try testing.expectEqual(@as(usize, 0), after.gaps.len);
+    try testing.expectEqual(@as(usize, 1), after.open.len);
+    try work.beginRound(after.open);
+    try testing.expect(work.whole[0] and !work.whole[1]);
+    // Vacate changes copper before starting its round, so it must derive a
+    // fresh snapshot rather than reusing the prior whole-net designation.
+    work.tracks.clearRetainingCapacity();
+    work.vias.clearRetainingCapacity();
+    try work.beginRound(null);
+    try testing.expect(!work.whole[0] and !work.whole[1]);
+    try testing.expectEqual(@as(usize, 2), work.residual_open);
 }

@@ -109,7 +109,7 @@ const guardLog = std.log.debug;
 /// that face is priced at `preferred_layer_cost_mult` — the knob an author
 /// reaches for by hand as `(wave … (preferred-layers …))` — and a via is priced
 /// at what one costs a board rather than at how many lattice steps it is worth
-/// on this net's pitch (`router.Ctx.via_cost_cap_mm`). Whichever route then
+/// on this net's pitch (`router.Ctx.via_cost.cap_mm`). Whichever route then
 /// scores lower on `detourScore`, by `detour_guard_margin`, is the one that
 /// stays.
 ///
@@ -151,17 +151,17 @@ pub fn detourGuard(
 
     router.rollbackDirectRun(run, track_mark, via_mark);
     const saved_preferred = ctx.preferred_layers;
-    const saved_via_cap = ctx.via_cost_cap_mm;
+    const saved_via_cap = ctx.via_cost.cap_mm;
     // Two changes, both pointed at the same thing — the reasons this connection
     // would not leave the face it detoured on. The preference prices that face
     // at `preferred_layer_cost_mult`, which is the knob an author reaches for by
     // hand; the cap prices a via by what one costs a BOARD rather than by how
     // many lattice steps it happens to be worth on this net's pitch.
     ctx.preferred_layers = retry_preferred;
-    ctx.via_cost_cap_mm = detour_guard_via_mm;
+    ctx.via_cost.cap_mm = detour_guard_via_mm;
     const retried = try router.routeNetAttempt(ctx, run.net, pts, run.tracks, run.vias);
     ctx.preferred_layers = saved_preferred;
-    ctx.via_cost_cap_mm = saved_via_cap;
+    ctx.via_cost.cap_mm = saved_via_cap;
 
     if (retried) {
         const retry_vias = run.vias.items.len - via_mark;

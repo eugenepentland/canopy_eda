@@ -47,6 +47,9 @@ pub const Gap = struct {
     /// endpoint matters for a surface pad beside a clipped or crowded pour:
     /// throwing it away turns a short, legal trace into a permanent open.
     stitch_fallback: ?NetPt = null,
+    /// Additive join confined to the source face, without new vias. Used to
+    /// merge power islands before spending a scarce plane-stitch allowance.
+    surface_only: bool = false,
 };
 
 /// The persisted copper a gap pass routes against: everything already on the

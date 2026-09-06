@@ -191,7 +191,7 @@ pub fn closeGaps(
             // `finishRoute` straighten pass, so gloss it here — otherwise the
             // metal a nearly-done board GAINS is the only metal on it that
             // keeps its staircases (see `straighten.glossHop`).
-            if (try closeOneGap(&physical.state, gap)) |raw| {
+            if (try closeGapWithinPolicy(&physical.state, gap)) |raw| {
                 const path = try straighten.glossHop(.{
                     .ctx = &ctx,
                     .placement = placement,
@@ -342,6 +342,32 @@ fn shapeHop(
     return .{ .tracks = drawn_t, .vias = drawn_v };
 }
 
+/// A cheapest path may use too many vias while a longer legal path exists.
+/// Reprice only that refusal, using two bounded searches against the unchanged
+/// live board. Every candidate still passes the ordinary policy/gloss/judge.
+fn closeGapWithinPolicy(state: *GapState, gap: Gap) std.mem.Allocator.Error!?GapPath {
+    const ctx = state.ctx;
+    const first = (try closeOneGap(state, gap)) orelse return null;
+    if (gap_policy.allows(first, ctx.allowed_layers, ctx.max_vias)) return first;
+    state.reason = .policy;
+    const limit = ctx.max_vias orelse return null;
+    if (limit == 0 or first.vias.len <= limit) return null;
+    const saved_bias = ctx.via_cost.bias_mm;
+    defer ctx.via_cost.bias_mm = saved_bias;
+    const span = ctx.grid.g * @as(f64, @floatFromInt(ctx.grid.nx + ctx.grid.ny));
+    for ([_]f64{ 1, 4 }) |scale| {
+        if (routeCancelled(ctx)) return null;
+        ctx.via_cost.bias_mm = @max(saved_bias, span * scale);
+        // No candidate has been absorbed. Restore even a rejected rip attempt's
+        // grid before asking the next search to see the standing copper.
+        stampGapBoard(ctx, try liveCopper(state, &.{}), state.routing_net);
+        const candidate = (try closeOneGap(state, gap)) orelse continue;
+        if (gap_policy.allows(candidate, ctx.allowed_layers, ctx.max_vias)) return candidate;
+    }
+    state.reason = .policy;
+    return null;
+}
+
 fn closeOneGap(state: *GapState, gap: Gap) std.mem.Allocator.Error!?GapPath {
     if (routeCancelled(state.ctx)) return null;
     state.routing_net = @intCast(gap.net_i);
@@ -404,7 +430,7 @@ fn closeOneGap(state: *GapState, gap: Gap) std.mem.Allocator.Error!?GapPath {
         if (try shapeHop(state, live, from, to, net)) |path| return path;
     }
 
-    if (!state.opts.ripup) return null;
+    if (!state.opts.ripup or gap.surface_only) return null;
     // The DIRECT attempt's diagnosis is the honest one — a rip-up retry that
     // also fails says nothing new — so restore it over whatever the retries set.
     const direct = state.reason;
@@ -1828,7 +1854,9 @@ fn applyGapPolicy(state: *GapState, gap: Gap) std.mem.Allocator.Error!bool {
     const available = gapLayers(ctx, state.routing_net);
     if (state.opts.constraints.net.len == 0) {
         ctx.allowed_layers = available;
-        return true;
+        ctx.max_vias = null;
+        ctx.allow_vias = true;
+        return applySurfacePolicy(state, gap);
     }
     ctx.net_policy = state.opts.constraints.net;
     const pts = try ctx.arena.alloc(NetPt, 2);
@@ -1848,5 +1876,24 @@ fn applyGapPolicy(state: *GapState, gap: Gap) std.mem.Allocator.Error!bool {
         ctx.max_vias = limit - @as(u16, @intCast(@min(spent, limit)));
     }
     ctx.allow_vias = ctx.max_vias != 0;
+    return applySurfacePolicy(state, gap);
+}
+
+fn applySurfacePolicy(state: *GapState, gap: Gap) bool {
+    if (!gap.surface_only) return true;
+    const mask = @as(u64, 1) << @intCast(gap.from.layer);
+    // Ordinary routing adds terminal escape faces to the effective mask. That
+    // exception does not authorize an entire surface join on a forbidden face.
+    const policies = state.opts.constraints.net;
+    const authored = if (gap.net_i < policies.len) policies[gap.net_i].allowed_layers else 0;
+    const forbidden = authored != 0 and authored & mask == 0;
+    const same_face = if (gap.to) |to| to.layer == gap.from.layer else false;
+    if (forbidden or state.ctx.allowed_layers & mask == 0 or !same_face) {
+        state.reason = .policy;
+        return false;
+    }
+    state.ctx.allowed_layers = mask;
+    state.ctx.max_vias = 0;
+    state.ctx.allow_vias = false;
     return true;
 }

@@ -15,6 +15,7 @@ const footprint_conv = @import("convert/footprint.zig");
 const symbol_conv = @import("convert/symbol.zig");
 const alt_functions = @import("convert/alt_functions.zig");
 const serve_mod = @import("serve.zig");
+const serve_args = @import("serve_args.zig");
 const warm_sched = @import("serve/warm_sched.zig");
 const commands = @import("commands.zig");
 const elmer_thermal_command = @import("elmer_thermal_command.zig");
@@ -26,6 +27,8 @@ const drc_dump = @import("drc_dump.zig");
 const power_flow_cli = @import("power_flow_cli.zig");
 const gerber_dump = @import("gerber_dump.zig");
 const netlist_dump = @import("netlist_dump.zig");
+const envelope_dump = @import("envelope_dump.zig");
+const test_manifest = @import("test_manifest.zig");
 const export_pinmap = @import("export_pinmap.zig");
 const export_spice = @import("export_spice.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
@@ -42,8 +45,6 @@ pub var process_environ_map: ?*const std.process.Environ.Map = null;
 pub var process_build_id: []const u8 = "unknown";
 
 // ── Constants ─────────────────────────────────────────────────────
-const default_serve_port: u16 = 7050;
-const parse_port_radix: u8 = 10;
 const filter_flag = "--filter";
 const convert_error_fmt = "Convert error: {}\n";
 const error_reading_fmt = "Error reading {s}: {}\n";
@@ -426,7 +427,30 @@ fn dispatchDumpCommand(
         try netlist_dump.cmdNetlistDump(allocator, args);
         return true;
     }
+    if (std.mem.eql(u8, command, "envelopes")) {
+        try envelope_dump.cmdEnvelopes(allocator, args);
+        return true;
+    }
+    if (std.mem.eql(u8, command, "check-test-manifest")) {
+        try cmdCheckTestManifest(allocator);
+        return true;
+    }
     return false;
+}
+
+/// Check `src/test_shards.zig` still claims every named test in `src/`.
+///
+/// A source scan, not a compile: it answers in the time a directory walk takes,
+/// which is why `zig build` can run it beside the generated-docs check. A module
+/// missing from the manifest otherwise compiles green and its tests silently
+/// never run — the failure a release gate used to spend two minutes to find.
+fn cmdCheckTestManifest(allocator: std.mem.Allocator) !void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    var out: std.Io.Writer.Allocating = .init(arena_state.allocator());
+    const intact = try test_manifest.checkAndReport(arena_state.allocator(), &out.writer);
+    try writeStdout(out.written());
+    if (!intact) exit.failure();
 }
 
 /// Regenerate (or, with `--check`, verify) the auto-generated language
@@ -461,21 +485,22 @@ fn cmdGenLanguageDocs(allocator: std.mem.Allocator, out_path: []const u8, check_
 /// Resolve and start the web server (`serve` command). Extracted from
 /// `main`'s dispatch chain to keep that chain's cognitive complexity under the
 /// Guardian cap.
+/// Decide the whole `serve` command line before anything is opened, then hand
+/// the accepted options to the server.
+///
+/// The decision lives in `serve_args.zig` as a pure function so that `--help`
+/// and every rejection are answered without creating the interaction log or
+/// binding the port — `serve` is the only subcommand where a typo used to
+/// start a long-running service instead of printing a diagnostic.
 fn dispatchServe(io: std.Io, allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, args: []const []const u8, arena: std.mem.Allocator, environ: *const std.process.Environ.Map) !void {
-    const project_dir = optionalArg(args, "--project-dir") orelse ".";
-    const port: u16 = if (optionalArg(args, "--port")) |p|
-        std.fmt.parseInt(u16, p, parse_port_radix) catch default_serve_port
-    else
-        default_serve_port;
-    const auth_dir_override = optionalArg(args, "--auth-dir") orelse readAuthDirEnv(arena, environ);
-    try serve_mod.serve(io, allocator, scratch_allocator, .{
-        .port = port,
-        .bind = optionalArg(args, "--bind") orelse serve_mod.default_bind_address,
-        .project_dir = project_dir,
-        .auth_dir = auth_dir_override,
-        .skip_warmup = hasFlag(args, "--skip-warmup"),
-        .allow_remote = hasFlag(args, "--allow-remote"),
-    });
+    switch (serve_args.parse(args, readAuthDirEnv(arena, environ))) {
+        .help => try writeStdout(serve_args.usage_text),
+        .invalid => |invalid| {
+            var buf: [512]u8 = undefined;
+            exit.fatal("{s}\n", .{invalid.describe(&buf)});
+        },
+        .run => |options| try serve_mod.serve(io, allocator, scratch_allocator, options),
+    }
 }
 
 /// Print the runtime build id (the deployment-provided netlisp commit from
@@ -653,6 +678,7 @@ fn printUsage() !void {
         \\  netlisp gerber-dump [--project-dir <d>] [--layout <name>] [--digest] <name>…  Dump the unstamped fabrication artwork of a saved layout — every Gerber layer, the job file and both drills (read-only; `#` lines carry the timings, so `diff -I '^#'` compares artwork alone)
         \\  netlisp power-flow [--project-dir <d>] [--layout <name>] [--net <name>] [--text] <name>  Explain every power rail's current solve — the two axis statuses, source terminals with contact counts, each load's resolution (contacts / complete / placed) and unplaced amperes, then per-track and per-via required vs actual with the reason (read-only; JSON unless --text)
         \\  netlisp netlist-dump [--project-dir <d>] <name>…  Dump the flattened netlist — one sorted line per net carrying its sorted refdes.pad members (read-only; `#` lines carry the timings)
+        \\  netlisp envelopes [--project-dir <d>] [--text] <name>…  Dump every flattened net's worst-case DC voltage envelope from ONE evaluation — bounds, source, provenance, and an explicit unknown for a net nothing bounds (read-only; JSON unless --text)
         \\  netlisp export-schematic-png [--project-dir <d>] <name> [--sub <slug>|--ref <hub>] [--view sequential|functional] [--theme light|dark] [--width <px>] [--output <file>]  Export a schematic block PNG without a browser
         \\  netlisp package <command>             Create, preview, check, save and export IC packages
         \\  netlisp convert-footprint <file>        Convert KiCad .kicad_mod to .sexp
@@ -660,6 +686,7 @@ fn printUsage() !void {
         \\  netlisp convert-pinout <file> [--filter <name>]  Generate pinout from KiCad .kicad_sym
         \\  netlisp merge-alt-functions <pinout.sexp> <alts.csv|alts.xml> [--write]  Merge alt functions (CSV or ST open-pin-data XML)
         \\  netlisp gen-language-docs [--output <path>] [--check]  Regenerate (or verify with --check) docs/language-forms.md from the dispatch tables
+        \\  netlisp check-test-manifest             Check src/test_shards.zig still claims every named test in src/ exactly once (a source scan; `zig build` runs it)
         \\  netlisp version                          Print the runtime build id (the netlisp commit, or the current checkout's HEAD)
         \\  netlisp help                            Show this help
         \\

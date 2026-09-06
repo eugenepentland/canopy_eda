@@ -961,3 +961,37 @@ New from the wave:
 ## 2026-09-06 · codex · RF fanout review counts and release evidence
 - **friction:** The review prose manually summed `describe_pcb_layout.routed.drc_list` categories as 461 warnings; the native result contains 462. Independent live/frozen equality exposed the typo after a 595-second release verification (including one automatic browser timing retry), requiring a corrected commit and its release gate.
 - **idea:** Add a native review-table export with explicit error/warning counts, saved versus physical copper counts, and the source-layout identity. Generate review tables directly from that witness so manually maintained totals cannot trigger extra verification cycles or disagree with the viewer.
+
+## 2026-09-06 · claude · six-hour tooling and review-correctness sprint
+- **friction:** `-Dtest-filter` matches the TEST NAME, not the `// spec:` tag. Filtering on a spec-tag phrase selects zero named tests and Guardian correctly fails the run; the fix is the module prefix (`serve_args.test`), but nothing in the failure says the filter was being matched against a different string than the one you copied.
+- **friction:** a new test-bearing module needs THREE registrations, not the two documented: an explicit `_ = @import(...)` in `src/test_root.zig`, a filter in `src/test_shards.zig`, AND the import must be explicit even when the module is already reachable transitively. The third bit me inside this sprint — a commit that added tests to `req_checks.zig` was green under `zig build` and under the shard-claim check, and only the whole suite caught it. `netlisp check-test-manifest` now covers all three at build time (0.26 s), so the inner loop no longer defers this to a full run.
+- **friction:** `netlisp system-check` reported a bare `FileNotFound` with no path, which made a minimal two-board system fixture unbuildable for about forty minutes. Root cause needed strace to establish (no failing syscall before the exit → a logic-level refusal). It was the source-closure containment walk rejecting components served from the standard library compiled into the binary. Fixed for that case, but other read failures on the system path still surface as bare errno names.
+- **idea:** the same system path throws away a populated `system_review.Diagnostic` on manifest rejection. Threading it out (`readinessDiagnosed`) turned `InvalidManifest` into `boards[].role: board role must be a portable identifier / got: "…"`. Anywhere else a validated document is refused with only an error name is likely to be the same cheap win.
+- **friction:** `netlisp build` writes nothing without `--output-dir`, so "build twice and diff the tree" does not exercise the ID-pinning path at all. Verifying that a repeat build does not reassign identities means driving the server edit path; there is no CLI seam for it.
+- **workaround:** `examples/blinky-breakout` is the only public board small enough to use as a fixture, and it needs a `git init` before system-level composition will get past project-state capture. Worth saying in the example's README, since the hermetic-example story is the reason it exists.
+- **correction (same session):** the `git init` above is wrong — it was a red herring from bisecting around the containment failure. A non-git project composes a system review fine; `project_status` reports `unavailable` and the composition proceeds. The whole recipe is two copies of the example board, a `(system …)` contract naming both, and one required active checklist document.
+
+## 2026-09-06 · codex · total via-budget routing
+- **friction:** A positive `retryLatticeGuided` regression repeatedly failed at the frozen-copper gate after the route had connected its two pads. Its retained isolated via was removed by topology cleanup; test output did not name that rejection because the route's info logs are suppressed in focused tests. Temporary raw-result and gate diagnostics exposed the reason.
+- **idea:** Return a typed guided-candidate rejection reason (changed frozen copper, no connectivity gain, geometry failure or timeout) to tests and route diagnostics, so a policy regression can verify the reason rather than infer it from the final failed-net count.
+- **status:** open
+
+
+## 2026-09-06 · codex · via-budget shard registration
+- **friction:** The new `placement.router.test.via budget rolls back an over-budget partial tree` ran in the focused `via` filter but matched no full-suite shard prefix. The release gate caught this after 124 seconds and cancelled the concurrent ReleaseSafe build; 5,355 other tests had passed.
+- **idea:** Include `shard manifest runs every named test exactly once` automatically in focused test runs. Its source inventory can catch an unclaimed test before the final release gate without running the rest of the suite.
+- **status:** mitigated by assigning the new prefix in `src/test_shards.zig`
+
+
+## 2026-09-06 · codex · via-budget release timing blocker
+- **blocker:** `prepare-release.sh` passed the full tests and ReleaseSafe build at `cd5e0663`, then rejected all three Canvas zoom attempts: zoom-in p95 57.2, 45.6 and 65.2 ms against 45 ms. The branch changes no renderer assets or browser harness, but remains unmerged under the release gate. The timing phase took about eleven minutes.
+- **idea:** On a timing retry, check the completed Canvas repetitions before running the WebGPU repetitions; when Canvas already fails an absolute limit, stop that attempt and retain its metrics. This would avoid repeating a second renderer's expensive work on attempts that cannot pass.
+- **status:** open; source and solver tests pass, browser performance verification does not
+
+
+## 2026-09-06 · codex · power-island release queue and integration base
+- **friction:** `prepare-release.sh` waited 281 seconds behind another live release. That release advanced main from 2428ef3ad to a5d0aef5 as this branch's gate began, so I stopped my superseded test process group after 78 seconds, let fail-fast cancel its paired build, and rebased before restarting verification. The resulting exit-143 artifact says tests failed even though this was an intentional integration-base cancellation.
+- **idea:** Revalidate the integration base after acquiring the shared gate and offer a typed cancellation path that stops both child groups. This would avoid compiling a branch already known to need a rebase and distinguish cancellation from a regression in release evidence.
+
+## 2026-09-06 · codex · finishing-round integration with runtime logs
+- **friction:** A verified feature merged with a concurrently advanced main, producing a different tree. The post-merge deploy then refused to prepare that combined commit because main contained the pre-existing untracked `logs/` directory. Preparing the combined tip in the clean feature worktree preserves those logs and produces the exact candidate deployment needs. An integration preflight should identify this combination before starting the main-checkout preparation; this would avoid a failed deploy and extra verification orchestration without weakening the clean-tree gate.

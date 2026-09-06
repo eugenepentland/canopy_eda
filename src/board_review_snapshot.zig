@@ -8,6 +8,8 @@
 
 const std = @import("std");
 const build_id = @import("build_id.zig");
+const log = @import("infra/log.zig");
+const stdlib = @import("stdlib.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 const ids = @import("eval/ids.zig");
 const env_mod = @import("eval/env.zig");
@@ -1409,9 +1411,49 @@ fn appendSource(
     out: *std.ArrayList(zipfile.Entry),
     total_bytes: *usize,
 ) !void {
-    const resolved = try infra_fs.canonicalPathAlloc(allocator, path);
+    // A loaded file that cannot be canonicalized has no path inside the
+    // project — and the closure walk then aborts the WHOLE composition with a
+    // bare `FileNotFound` that names nothing. The commonest cause is a
+    // component resolved from the standard library COMPILED INTO the binary:
+    // it has no on-disk path to canonicalize, so a board that uses any bundled
+    // part cannot compose a system review at all. Reproduced from this tree's
+    // own example: a two-board system over examples/blinky-breakout is refused
+    // in 1.2 s, and composes as soon as `stdlib/` is copied into the project's
+    // own `lib/`.
+    //
+    // Naming the file is not the fix — whether stdlib sources belong in the
+    // evidence closure is a policy question about what a release archive is
+    // allowed to contain, and it is recorded rather than decided here. It does
+    // turn an opaque abort into something a reader can act on.
+    // A source the BINARY supplied, not the project. It has no on-disk path to
+    // canonicalize, so the closure walk used to abort the whole composition
+    // with a bare `FileNotFound` — meaning a board that used any bundled part
+    // could not produce a system review at all. Reproduced from this tree's own
+    // example: a two-board system over examples/blinky-breakout was refused in
+    // 1.2 s, and composed as soon as `stdlib/` was copied into the project's
+    // own `lib/`.
+    //
+    // Skipping it is not a hole in the evidence. The closure exists to capture
+    // what the PROJECT contributed; what the tool contributed is pinned by the
+    // `build_id` this same snapshot records, and the standard library is
+    // compiled into that binary. A project-local file is still required to
+    // canonicalize inside the project, so nothing else is admitted.
+    if (std.mem.startsWith(u8, path, stdlib.bundled_prefix)) return;
+    const resolved = infra_fs.canonicalPathAlloc(allocator, path) catch |err| {
+        log.warn(
+            "board review source closure: cannot resolve {s} ({s}) — a component the binary's own standard library supplied has no path inside {s}",
+            .{ path, @errorName(err), project_dir },
+        );
+        return err;
+    };
     defer allocator.free(resolved);
-    const name = try projectRelativeSource(allocator, project_dir, resolved);
+    const name = projectRelativeSource(allocator, project_dir, resolved) catch |err| {
+        log.warn(
+            "board review source closure: {s} resolves to {s}, outside {s} ({s})",
+            .{ path, resolved, project_dir, @errorName(err) },
+        );
+        return err;
+    };
     errdefer allocator.free(name);
     if (seen.contains(name)) {
         allocator.free(name);
@@ -2050,4 +2092,31 @@ test "BOM rollup matches the archived CSV grouping" {
     try std.testing.expectEqual(@as(usize, 3), rollup.lines);
     try std.testing.expectEqual(@as(usize, 1), rollup.dnp_placements);
     try std.testing.expectEqual(@as(usize, 1), rollup.dnp_lines);
+}
+
+// spec: system-review - a source the bundled standard library supplied is not required to canonicalize inside the project
+test "the source closure skips a binary-supplied standard-library source" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    var out: std.ArrayList(zipfile.Entry) = .empty;
+    var total: usize = 0;
+
+    // A stdlib source has no on-disk path. Canonicalizing it fails, and the
+    // whole composition used to abort with a bare `FileNotFound` — so a board
+    // using any bundled part could not produce a system review at all. What the
+    // tool contributed is pinned by this snapshot's own `build_id`.
+    const bundled = stdlib.bundled_prefix ++ "lib/components/res-0402.sexp";
+    try appendSource(allocator, ".", bundled, &seen, &out, &total);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    try std.testing.expectEqual(@as(usize, 0), total);
+
+    // Containment is unchanged for everything else: a path outside the project
+    // is still refused rather than quietly skipped.
+    try std.testing.expectError(
+        error.FileNotFound,
+        appendSource(allocator, ".", "/nonexistent-netlisp-source.sexp", &seen, &out, &total),
+    );
 }

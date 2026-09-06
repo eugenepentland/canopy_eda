@@ -13,6 +13,17 @@ src/authored_heatsink.zig::resolveFan | fn resolveFan(placement: optimizer.Place
 src/authored_heatsink.zig::thermalInput | fn thermalInput( placement: optimizer.Placement, bt: thermal.BoardThermal, saved: sidecar.SavedHeatsink, ) ?scenarios.Heatsink
 src/bench_args.zig::Common struct_
 src/bench_args.zig::parse | fn parse( self: *Common, arena: std.mem.Allocator, args: []const []const u8, extra: anytype, comptime takeExtra: anytype, ) std.mem.Allocator.Error!void
+src/bench_checkpoint.zig::Checkpoint struct_
+src/bench_checkpoint.zig::CheckpointError value
+src/bench_checkpoint.zig::Reading struct_
+src/bench_checkpoint.zig::RunHeader struct_
+src/bench_checkpoint.zig::create | fn create(allocator: std.mem.Allocator, path: []const u8, header: RunHeader) CheckpointError!Checkpoint
+src/bench_checkpoint.zig::createIn | fn createIn( allocator: std.mem.Allocator, dir: infra_fs.Dir, sub_path: []const u8, header: RunHeader, ) CheckpointError!Checkpoint
+src/bench_checkpoint.zig::deinit | fn deinit(self: *Checkpoint) void
+src/bench_checkpoint.zig::finish | fn finish(self: *Checkpoint, boards: usize, geomean_completion: f64) CheckpointError!void
+src/bench_checkpoint.zig::parseCountingRows | fn parseCountingRows(allocator: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error!Reading
+src/bench_checkpoint.zig::renderHeader | fn renderHeader(w: *std.Io.Writer, header: RunHeader) json_writer.WriteError!void
+src/bench_checkpoint.zig::writeBoard | fn writeBoard(self: *Checkpoint, context: anytype, comptime render: anytype) CheckpointError!void
 src/bench_layout.zig::main | fn main(init: std.process.Init) !void
 src/bench_layout.zig::process_io value
 src/bench_page.zig::BenchError value
@@ -36,6 +47,7 @@ src/bench_route.zig::completion | fn completion(self: BoardResult) f64
 src/bench_route.zig::corpus | fn corpus(arena: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error![]const []const u8
 src/bench_route.zig::geomeanCompletion | fn geomeanCompletion(results: []const BoardResult) f64
 src/bench_route.zig::scorable | fn scorable(self: BoardResult) bool
+src/bench_route.zig::writeBoardJson | fn writeBoardJson(w: *std.Io.Writer, r: BoardResult) json_writer.WriteError!void
 src/bench_route.zig::writeBreakdown | fn writeBreakdown(w: *std.Io.Writer, results: []const BoardResult) std.Io.Writer.Error!void
 src/bench_route.zig::writeJson | fn writeJson(w: *std.Io.Writer, results: []const BoardResult) json_writer.WriteError!void
 src/bench_route.zig::writeTable | fn writeTable(w: *std.Io.Writer, results: []const BoardResult) std.Io.Writer.Error!void
@@ -505,10 +517,15 @@ src/drc_sweep.zig::Verdict struct_
 src/drc_sweep.zig::compare | fn compare( alloc: std.mem.Allocator, ledger: []const drc.Violation, swept: []const drc.Violation, ) Verdict
 src/drc_sweep.zig::install | fn install(store: *drc_reconcile.Store) void
 src/drc_sweep.zig::sweepOnce | fn sweepOnce( store: *drc_reconcile.Store, project_dir: []const u8, name: []const u8, sub: ?[]const u8, ) Outcome
+src/dump_args.zig::Common struct_
+src/dump_args.zig::noExtra | fn noExtra(_: void, _: []const []const u8, _: *usize) bool
+src/dump_args.zig::parse | fn parse( self: *Common, arena: std.mem.Allocator, args: []const []const u8, extra: anytype, comptime takeExtra: anytype, ) std.mem.Allocator.Error!bool
 src/elmer_thermal_command.zig::benchCommand | fn benchCommand(alloc: std.mem.Allocator, argv: []const []const u8) void
 src/elmer_thermal_command.zig::compareCommand | fn compareCommand(alloc: std.mem.Allocator, argv: []const []const u8) void
 src/elmer_thermal_command.zig::exportCommand | fn exportCommand(alloc: std.mem.Allocator, argv: []const []const u8) void
 src/emit.zig::emitResolved | fn emitResolved(allocator: std.mem.Allocator, block: *const DesignBlock) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
+src/envelope_dump.zig::DumpError value
+src/envelope_dump.zig::cmdEnvelopes | fn cmdEnvelopes(allocator: std.mem.Allocator, args: []const []const u8) DumpError!void
 src/erc.zig::PinoutEntry struct_
 src/erc.zig::Severity value
 src/erc.zig::Violation struct_
@@ -3444,7 +3461,7 @@ src/placement/route_close.zig::reconcile | fn reconcile( arena: std.mem.Allocato
 src/placement/route_close.zig::refusals | fn refusals(self: *const HopMemo, net_i: usize) usize
 src/placement/route_close.zig::refuse | fn refuse(self: *HopMemo, gap: router.Gap, wide: bool) std.mem.Allocator.Error!void
 src/placement/route_close.zig::refuseShape | fn refuseShape(self: *HopMemo, gap: router.Gap) std.mem.Allocator.Error!void
-src/placement/route_close.zig::remainingPolicies | fn remainingPolicies( alloc: std.mem.Allocator, policies: []const route_policy.NetPolicy, retained: []const route_policy.ExistingVia, present: []const router.Via, ) std.mem.Allocator.Error![]const route_policy.NetPolicy
+src/placement/route_close.zig::remainingPolicies | fn remainingPolicies( alloc: std.mem.Allocator, policies: []const route_policy.NetPolicy, present: []const router.Via, ) std.mem.Allocator.Error![]const route_policy.NetPolicy
 src/placement/route_close.zig::sealed | fn sealed(self: *const HopMemo, net_i: usize) bool
 src/placement/route_close.zig::seen | fn seen(self: *const HopMemo, gap: router.Gap, wide: bool) bool
 src/placement/route_close.zig::shapeRefusals | fn shapeRefusals(self: *const HopMemo, net_i: usize) usize
@@ -5934,6 +5951,8 @@ src/serve/thermal_cache.zig::put | fn put( self: *Store, scratch: std.mem.Alloca
 src/serve/thermal_page.zig::HandlerError value
 src/serve/thermal_page.zig::benchColdPage | fn benchColdPage(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?usize
 src/serve/thermal_page.zig::thermalPage | fn thermalPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/tool_schema.zig::Violation struct_
+src/serve/tool_schema.zig::validate | fn validate( allocator: std.mem.Allocator, schema_doc: []const u8, tool_name: []const u8, args: ?std.json.Value, ) ?Violation
 src/serve/trace_em_json.zig::write | fn write( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, routed: ?router.RouteResult, ) std.Io.Writer.Error!void
 src/serve/upload.zig::ComponentWrite enum_
 src/serve/upload.zig::HandlerError value
@@ -6002,6 +6021,13 @@ src/serve/warm_sched.zig::sinceStartUs | fn sinceStartUs() i64
 src/serve/warm_sched.zig::workerCount | fn workerCount(cap: usize) usize
 src/serve/warm_sched.zig::yieldToInteractive | fn yieldToInteractive() void
 src/serve/warmup.zig::spawn | fn spawn(ctx: *Server) void
+src/serve_args.zig::Invalid struct_
+src/serve_args.zig::Kind enum_
+src/serve_args.zig::Parsed union_
+src/serve_args.zig::default_port value
+src/serve_args.zig::describe | fn describe(self: Invalid, buf: []u8) []const u8
+src/serve_args.zig::parse | fn parse(args: []const []const u8, auth_dir_env: ?[]const u8) Parsed
+src/serve_args.zig::usage_text value
 src/sexp_form_bounds.zig::closeIndex | fn closeIndex(text: []const u8, open: usize) ?usize
 src/sexp_form_bounds.zig::endIndex | fn endIndex(text: []const u8, open: usize) ?usize
 src/sexpr/ast.zig::Node struct_
@@ -6229,6 +6255,7 @@ src/system_review.zig::attestInput | fn attestInput( allocator: std.mem.Allocato
 src/system_review.zig::canonicalAttestation | fn canonicalAttestation( allocator: std.mem.Allocator, attestation: Attestation, ) std.mem.Allocator.Error!Attestation
 src/system_review.zig::canonicalSpecDigest | fn canonicalSpecDigest( allocator: std.mem.Allocator, spec: SystemSpec, ) std.mem.Allocator.Error![64]u8
 src/system_review.zig::clear | fn clear(self: *Diagnostic) void
+src/system_review.zig::detail | fn detail(self: Diagnostic, buf: []u8) []const u8
 src/system_review.zig::freeCanonicalAttestation | fn freeCanonicalAttestation(allocator: std.mem.Allocator, attestation: Attestation) void
 src/system_review.zig::generatedSection | fn generatedSection(id: []const u8) ?GeneratedSection
 src/system_review.zig::generated_region_close value
@@ -6321,6 +6348,7 @@ src/system_review_package.zig::draft | fn draft( allocator: std.mem.Allocator, p
 src/system_review_package.zig::draftDossierHtml | fn draftDossierHtml( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) DossierHtmlError![]const u8
 src/system_review_package.zig::parseSexpContract | fn parseSexpContract( allocator: std.mem.Allocator, project_dir: []const u8, source: []const u8, depth: ContractDepth, diagnostic: *system_review.Diagnostic, ) ParseContractError!ParsedContract
 src/system_review_package.zig::readiness | fn readiness( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) ReadinessError!Readiness
+src/system_review_package.zig::readinessDiagnosed | fn readinessDiagnosed( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, diagnostic: *system_review.Diagnostic, ) ReadinessError!Readiness
 src/system_review_package.zig::release | fn release( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: ReleaseOptions, renderer: fab_service.AssemblyRenderer, ) ReleaseError!PackageResult
 src/system_review_pdf.zig::Error value
 src/system_review_pdf.zig::Options struct_
@@ -6389,6 +6417,22 @@ src/target_unblock.zig::restoreSlice | fn restoreSlice(lim: Limits, elements: us
 src/target_unblock.zig::sliceDeadline | fn sliceDeadline(now: i128, board_deadline: i128, targets_left: usize, lim: Limits) ?i128
 src/target_unblock.zig::targetOf | fn targetOf(net_i: usize, shape: OpenShape) ?Target
 src/target_unblock.zig::transactionClosed | fn transactionClosed(open: []const []const u8, named: []const []const u8) bool
+src/test_manifest.zig::QualifiedName value
+src/test_manifest.zig::Report struct_
+src/test_manifest.zig::ScanError value
+src/test_manifest.zig::Unclaimed struct_
+src/test_manifest.zig::appendNamedTests | fn appendNamedTests( arena: std.mem.Allocator, out: *std.ArrayList(QualifiedName), prefix: []const u8, source: []const u8, ) std.mem.Allocator.Error!void
+src/test_manifest.zig::audit | fn audit(arena: std.mem.Allocator) ScanError!Report
+src/test_manifest.zig::auditIn | fn auditIn(arena: std.mem.Allocator, root: infra_fs.Dir) ScanError!Report
+src/test_manifest.zig::checkAndReport | fn checkAndReport(arena: std.mem.Allocator, w: *std.Io.Writer) std.Io.Writer.Error!bool
+src/test_manifest.zig::checkAndReportIn | fn checkAndReportIn( arena: std.mem.Allocator, root: infra_fs.Dir, w: *std.Io.Writer, ) std.Io.Writer.Error!bool
+src/test_manifest.zig::claimingShards | fn claimingShards(name: QualifiedName) usize
+src/test_manifest.zig::collectQualifiedNames | fn collectQualifiedNames( arena: std.mem.Allocator, out: *std.ArrayList(QualifiedName), ) ScanError!void
+src/test_manifest.zig::collectQualifiedNamesIn | fn collectQualifiedNamesIn( arena: std.mem.Allocator, root: infra_fs.Dir, out: *std.ArrayList(QualifiedName), ) ScanError!void
+src/test_manifest.zig::min_expected_tests value
+src/test_manifest.zig::ok | fn ok(self: Report) bool
+src/test_manifest.zig::qualifiedPrefix | fn qualifiedPrefix(arena: std.mem.Allocator, rel_path: []const u8) std.mem.Allocator.Error![]const u8
+src/test_manifest.zig::writeReport | fn writeReport(w: *std.Io.Writer, report: Report) std.Io.Writer.Error!bool
 src/test_shards.zig::shards value
 src/testpoint_silkscreen.zig::Label struct_
 src/testpoint_silkscreen.zig::collectWithKeepouts | fn collectWithKeepouts( alloc: std.mem.Allocator, placement: optimizer.Placement, excluded_refs: []const []const u8, keepouts: []const subcircuit_silkscreen.Keepout, annotations: []const subcircuit_silkscreen.Annotation, user_texts: []const font.BoardText, ) std.mem.Allocator.Error![]Label

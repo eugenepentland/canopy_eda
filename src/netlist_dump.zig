@@ -39,6 +39,7 @@
 const std = @import("std");
 const clock = @import("infra/clock.zig");
 const infra_fs = @import("infra/fs.zig");
+const dump_args = @import("dump_args.zig");
 const flat_netlist = @import("flat_netlist.zig");
 const modules_mod = @import("serve/modules.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
@@ -54,21 +55,9 @@ const Args = struct {
 };
 
 fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) DumpError!Args {
-    var out: Args = .{};
-    var names: std.ArrayList([]const u8) = .empty;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const a = args[i];
-        if (std.mem.eql(u8, a, "--project-dir") and i + 1 < args.len) {
-            i += 1;
-            out.project_dir = args[i];
-        } else if (std.mem.startsWith(u8, a, "--")) {
-            return error.NetlistDumpUsage;
-        } else try names.append(arena, a);
-    }
-    if (names.items.len == 0) return error.NetlistDumpUsage;
-    out.names = names.items;
-    return out;
+    var common: dump_args.Common = .{};
+    if (!try common.parse(arena, args, {}, dump_args.noExtra)) return error.NetlistDumpUsage;
+    return .{ .project_dir = common.project_dir, .names = common.named.items };
 }
 
 fn lessThan(_: void, a: []const u8, b: []const u8) bool {

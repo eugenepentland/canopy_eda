@@ -190,17 +190,35 @@ pub fn readiness(
     project_dir: []const u8,
     name: []const u8,
 ) ReadinessError!Readiness {
-    return readinessImpl(allocator, project_dir, name);
+    return readinessImpl(allocator, project_dir, name, null);
+}
+
+/// `readiness`, keeping the validator's account of WHY a manifest was rejected.
+///
+/// A refused manifest used to reach every caller as a bare `InvalidManifest`,
+/// while the validator had already recorded the field, what it expected and
+/// what it found. `netlisp system-check` printed the error name alone, so the
+/// only way to find a mistyped field in a system contract was to read the
+/// validator's source. `diagnostic` is written only on a rejection, and only
+/// when the failure is the manifest's — it stays `.none` for every other error.
+pub fn readinessDiagnosed(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    diagnostic: *system_review.Diagnostic,
+) ReadinessError!Readiness {
+    return readinessImpl(allocator, project_dir, name, diagnostic);
 }
 
 fn readinessImpl(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
+    out_diagnostic: ?*system_review.Diagnostic,
 ) !Readiness {
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    var analysis = try analyze(scratch.allocator(), allocator, project_dir, name, .release);
+    var analysis = try analyze(scratch.allocator(), allocator, project_dir, name, .release, out_diagnostic);
     defer analysis.parsed.deinit();
     return copyReadiness(allocator, analysis, try renderReadiness(scratch.allocator(), analysis));
 }
@@ -223,7 +241,7 @@ fn draftImpl(
 ) !PackageResult {
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    var analysis = try analyze(scratch.allocator(), allocator, project_dir, name, .draft);
+    var analysis = try analyze(scratch.allocator(), allocator, project_dir, name, .draft, null);
     defer analysis.parsed.deinit();
     const ready_json = try renderReadiness(scratch.allocator(), analysis);
     const built = try composeArchive(scratch.allocator(), allocator, analysis, null);
@@ -257,7 +275,7 @@ fn draftDossierHtmlImpl(
 ) ![]const u8 {
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    var analysis = try analyze(scratch.allocator(), allocator, project_dir, name, .draft);
+    var analysis = try analyze(scratch.allocator(), allocator, project_dir, name, .draft, null);
     defer analysis.parsed.deinit();
     return allocator.dupe(u8, try composeDossierHtml(scratch.allocator(), analysis, true));
 }
@@ -312,7 +330,7 @@ fn attestImpl(
 ) !AttestationResult {
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    var analysis = try analyze(scratch.allocator(), allocator, project_dir, name, .release);
+    var analysis = try analyze(scratch.allocator(), allocator, project_dir, name, .release, null);
     defer analysis.parsed.deinit();
     if (!std.mem.eql(u8, expected_content_lock, &analysis.content_lock))
         return error.ConfirmationRequired;
@@ -385,7 +403,7 @@ fn releaseImpl(
     {
         var before_arena = std.heap.ArenaAllocator.init(allocator);
         defer before_arena.deinit();
-        var before = try analyze(before_arena.allocator(), allocator, project_dir, name, .release);
+        var before = try analyze(before_arena.allocator(), allocator, project_dir, name, .release, null);
         defer before.parsed.deinit();
         if (before.blocked()) return error.SystemReleaseBlocked;
         if (!std.mem.eql(u8, options.confirm, &before.release_token)) return error.ConfirmationRequired;
@@ -429,7 +447,7 @@ fn releaseImpl(
 
     var after_arena = std.heap.ArenaAllocator.init(allocator);
     defer after_arena.deinit();
-    var after = try analyze(after_arena.allocator(), allocator, project_dir, name, .release);
+    var after = try analyze(after_arena.allocator(), allocator, project_dir, name, .release, null);
     defer after.parsed.deinit();
     if (after.blocked() or !std.mem.eql(u8, &expected_release_token, &after.release_token))
         return error.InputsChanged;
@@ -582,15 +600,21 @@ fn loadManifest(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
+    out_diagnostic: ?*system_review.Diagnostic,
 ) !LoadedManifest {
     if (!simpleName(name)) return error.InvalidSystemName;
     // The DSL contract wins when it exists; the JSON stays loadable unchanged
     // for every workspace that has not migrated. Which file that is, is
     // `system_sexp.locate`'s decision alone — every other surface asks it too.
     const manifest = try system_sexp.locate(allocator, project_dir, name);
-    var diagnostic: system_review.Diagnostic = .{};
+    // The validator already says WHICH field is wrong and what it expected;
+    // this used to be a local that died with the error, so every rejection
+    // reached the caller as a bare `InvalidManifest`. It is the caller's
+    // diagnostic when one is offered.
+    var local_diagnostic: system_review.Diagnostic = .{};
+    const diagnostic = out_diagnostic orelse &local_diagnostic;
     var parsed = switch (manifest.kind) {
-        .sexp => (try parseSexpContract(allocator, project_dir, manifest.source, .full, &diagnostic)).parsed,
+        .sexp => (try parseSexpContract(allocator, project_dir, manifest.source, .full, diagnostic)).parsed,
         .json => try parseManifestForRefresh(allocator, manifest.source),
     };
     errdefer parsed.deinit();
@@ -701,7 +725,7 @@ fn dossierPreflightImpl(
 ) !void {
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    var loaded = try loadManifest(scratch.allocator(), project_dir, name);
+    var loaded = try loadManifest(scratch.allocator(), project_dir, name, null);
     loaded.parsed.deinit();
 }
 
@@ -711,8 +735,9 @@ fn analyze(
     project_dir: []const u8,
     name: []const u8,
     preflight_mode: PreflightMode,
+    out_diagnostic: ?*system_review.Diagnostic,
 ) !Analysis {
-    const loaded = try loadManifest(allocator, project_dir, name);
+    const loaded = try loadManifest(allocator, project_dir, name, out_diagnostic);
     const manifest_source = loaded.source;
     var parsed = loaded.parsed;
     errdefer parsed.deinit();
@@ -5138,6 +5163,49 @@ test "the system diagram is an archived SVG document the generated section point
     try std.testing.expect(!allowedSvgMember("review/SYSTEM-DIAGRAM.SVG"));
 }
 
+// spec: system-review - a rejected manifest reports which field was wrong, what was expected and what was found
+test "a rejected manifest names the field that was wrong" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/demo");
+    // A board whose role is not a portable identifier. The validator has always
+    // recorded exactly that; the diagnostic used to die inside `loadManifest`,
+    // so every caller — `netlisp system-check` included — saw the bare error
+    // name and had to read the validator's source to find the field.
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/demo/system.sexp",
+        .data =
+        \\(system "demo"
+        \\  (title "Diagnostic demo")
+        \\  (part-number "D-1")
+        \\  (revision "A")
+        \\  (status design)
+        \\  (board "board"
+        \\    (role "not a portable id")
+        \\    (source "src/board.sexp")
+        \\    (part-number "PCB-1")
+        \\    (revision "A")
+        \\    (layout "one")))
+        ,
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", allocator);
+
+    var diagnostic: system_review.Diagnostic = .{};
+    try std.testing.expectError(error.InvalidManifest, loadManifest(allocator, project, "demo", &diagnostic));
+    try std.testing.expect(diagnostic.code != .none);
+    try std.testing.expectEqualStrings("boards[].role", diagnostic.field);
+    try std.testing.expect(diagnostic.message.len > 0);
+    try std.testing.expectEqualStrings("not a portable id", diagnostic.value);
+
+    // The diagnostic is the CALLER's to keep: asking for none must still reject
+    // the manifest, and must not reach for a diagnostic that is not there.
+    try std.testing.expectError(error.InvalidManifest, loadManifest(allocator, project, "demo", null));
+}
+
 // spec: system-review - a system.sexp beside a system.json is the contract the readiness gate reads, and the shadowed JSON is reported rather than silently ignored
 test "a system contract source shadows the JSON manifest it sits beside" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -5159,7 +5227,7 @@ test "a system contract source shadows the JSON manifest it sits beside" {
 
     // With only the JSON present, that manifest is the contract.
     {
-        var loaded = try loadManifest(allocator, project, "demo");
+        var loaded = try loadManifest(allocator, project, "demo", null);
         defer loaded.parsed.deinit();
         try std.testing.expectEqualStrings("src/systems/demo/system.json", loaded.relative);
         try std.testing.expectEqualStrings("Stale JSON", loaded.parsed.value.title);
@@ -5178,7 +5246,7 @@ test "a system contract source shadows the JSON manifest it sits beside" {
         \\    (path "src/systems/demo/release.md") (classification checklist)))
         ,
     });
-    var loaded = try loadManifest(allocator, project, "demo");
+    var loaded = try loadManifest(allocator, project, "demo", null);
     defer loaded.parsed.deinit();
     try std.testing.expectEqualStrings("src/systems/demo/system.sexp", loaded.relative);
     try std.testing.expectEqualStrings("Live contract", loaded.parsed.value.title);
@@ -5195,7 +5263,7 @@ test "a system contract source shadows the JSON manifest it sits beside" {
         \\  (document "release-checklist" (title "C") (path "src/systems/demo/release.md") (classification checklist)))
         ,
     });
-    try std.testing.expectError(error.SystemNameMismatch, loadManifest(allocator, project, "demo"));
+    try std.testing.expectError(error.SystemNameMismatch, loadManifest(allocator, project, "demo", null));
 }
 
 // spec: system-review - an (auto) interface resolves its contact table by evaluating both boards for real, and a connector that cannot supply a declared contact is refused rather than truncated
@@ -5258,7 +5326,7 @@ test "an auto interface derives its contacts from two evaluated boards" {
     });
     const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", allocator);
 
-    var loaded = try loadManifest(allocator, project, "twin");
+    var loaded = try loadManifest(allocator, project, "twin", null);
     defer loaded.parsed.deinit();
     const interface = loaded.parsed.value.interfaces[0];
     try std.testing.expectEqual(@as(usize, 4), interface.contact_count);
@@ -5286,7 +5354,7 @@ test "an auto interface derives its contacts from two evaluated boards" {
         \\      (pin 2 "GND"))))
         ,
     });
-    try std.testing.expectError(error.InvalidSystemSexp, loadManifest(allocator, project, "twin"));
+    try std.testing.expectError(error.InvalidSystemSexp, loadManifest(allocator, project, "twin", null));
 }
 
 // spec: system-review - approving a workspace whose contract is a (system …) source and approving the JSON manifest it converts from leave the identical spec, so an attestation does not depend on which manifest spelling a workspace keeps

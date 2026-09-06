@@ -89,8 +89,8 @@ fn hasTrack(items: []const route_policy.ExistingTrack, want: route_policy.Existi
     return false;
 }
 
-fn hasVia(items: []const route_policy.ExistingVia, want: route_policy.ExistingVia) bool {
-    for (items) |item| if (sameVia(item, want)) return true;
+fn hasVia(comptime SeedVia: type, items: []const SeedVia, want: route_policy.ExistingVia) bool {
+    for (items) |item| if (sameVia(item.copper, want)) return true;
     return false;
 }
 
@@ -286,23 +286,25 @@ pub fn reject(alloc: std.mem.Allocator, input: anytype) std.mem.Allocator.Error!
 
     for (order.items) |ni| {
         if (rejected[ni]) continue;
-        if (ni < options.net.len) if (options.net[ni].max_vias) |limit| {
-            var count: usize = 0;
-            for (vias) |item| if (item.net == ni) {
-                count += 1;
-            };
-            if (count > limit) {
-                rejected[ni] = true;
-                continue;
-            }
-        };
         const track_mark = accepted_tracks.items.len;
         const via_mark = accepted_vias.items.len;
         for (tracks) |item| if (item.net == ni and !hasTrack(options.existing_tracks, item.copper)) {
             try accepted_tracks.append(alloc, item);
         };
-        for (vias) |item| if (item.net == ni and !hasVia(options.existing_vias, item.copper)) {
+        for (vias) |item| if (item.net == ni and !hasVia(SeedVia, accepted_vias.items, item.copper)) {
             try accepted_vias.append(alloc, item);
+        };
+        if (ni < options.net.len) if (options.net[ni].max_vias) |limit| {
+            var count: usize = 0;
+            for (accepted_vias.items) |item| if (item.net == ni) {
+                count += 1;
+            };
+            if (count > limit) {
+                rejected[ni] = true;
+                accepted_tracks.shrinkRetainingCapacity(track_mark);
+                accepted_vias.shrinkRetainingCapacity(via_mark);
+                continue;
+            }
         };
         const routed = try routedResult(SeedTrack, SeedVia, alloc, accepted_tracks.items, accepted_vias.items);
         const violations = try drc.checkForNet(alloc, placement, routed, params.clearance, ni);
@@ -501,4 +503,45 @@ test "ordered seed DRC keeps the earlier crossing candidate" {
     });
     try std.testing.expect(!rejected[0]);
     try std.testing.expect(rejected[1]);
+}
+
+// spec: serve/subcircuit-route - hierarchical seed via budgets include retained same-net copper without double-counting duplicate seed records
+test "hierarchical seed via budget includes caller copper" {
+    var arena_i = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_i.deinit();
+    const a = arena_i.allocator();
+    const placement = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{.{ .name = "SIG", .pins = &.{} }},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 5,
+        .maxy = 5,
+        .generated = false,
+        .rules = .{ .plane_nets = &.{}, .copper_layers = 2 },
+    };
+    const TestTrack = struct { copper: route_policy.ExistingTrack, net: usize };
+    const TestVia = struct { copper: route_policy.ExistingVia, net: usize };
+    const retained = route_policy.ExistingVia{ .x = 1, .y = 1, .net = 0, .dia = 0.4, .drill = 0.2 };
+    var candidate = [_]TestVia{.{ .net = 0, .copper = .{ .x = 3, .y = 1, .net = 0, .dia = 0.4, .drill = 0.2 } }};
+    var rejected = [_]bool{false};
+    const input = .{
+        .placement = placement,
+        .params = router.RouteParams{},
+        .options = route_policy.Options{ .existing_vias = &.{retained}, .net = &.{.{ .max_vias = 1 }} },
+        .rejected = &rejected,
+        .tracks = @as([]const TestTrack, &.{}),
+        .vias = @as([]const TestVia, &candidate),
+    };
+    try reject(a, input);
+    try std.testing.expect(rejected[0]);
+    candidate[0].copper = retained;
+    rejected[0] = false;
+    try reject(a, input);
+    try std.testing.expect(!rejected[0]);
 }

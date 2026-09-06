@@ -510,6 +510,39 @@ fn findVoltageForNet(
     return null;
 }
 
+/// Which of a port's voltage statements, if any, puts a pin outside the part's
+/// declared limits.
+///
+/// BOTH statements are checked when the port makes both, and the nominal never
+/// excuses the rated span. A port declaring `(nominal 5.0) (rated 4.5 24.0)`
+/// says the input may legitimately sit anywhere up to 24 V; a part whose
+/// datasheet stops at 6 V is out of spec there. This check used to return a
+/// pass as soon as the nominal fell inside the window, and reached the rated
+/// arm only when there was NO nominal — so adding a nominal to a port silently
+/// switched the rated-span rating check off, on the worst-case number, at
+/// release profile, which is exactly where a rating is meant to bite.
+const VoltageBreach = enum {
+    /// Every declaration the port makes lies inside the part's limits.
+    none,
+    /// The declared nominal is outside them.
+    nominal,
+    /// The declared `(rated lo hi)` span is not contained by them.
+    rated,
+    /// The port declares neither a nominal nor a complete rated span.
+    undeclared,
+};
+
+fn voltageBreach(vi: VoltageInfo, min_v: f64, max_v: f64) VoltageBreach {
+    if (vi.nominal) |v| {
+        if (v + current_tolerance_f < min_v or v > max_v + current_tolerance_f) return .nominal;
+    }
+    if (vi.rated_min) |lo| if (vi.rated_max) |hi| {
+        if (lo + current_tolerance_f < min_v or hi > max_v + current_tolerance_f) return .rated;
+        return .none;
+    };
+    return if (vi.nominal == null) .undeclared else .none;
+}
+
 fn evalVoltageRange(
     allocator: std.mem.Allocator,
     eval: *Evaluator,
@@ -526,19 +559,19 @@ fn evalVoltageRange(
     const vi = findVoltageForNet(allocator, block, net, &visited, 0) orelse
         return fail(allocator, "no `(port …)` declared on net {s} — can't verify voltage", .{net});
 
-    if (vi.nominal) |v| {
-        if (v + current_tolerance_f < min_v or v > max_v + current_tolerance_f) {
-            return fail(allocator, "{s} nominal = {d:.3} V, outside [{d:.3}, {d:.3}] V", .{ vi.label, v, min_v, max_v });
-        }
-        return passMsg(allocator, "{s} = {d:.3} V ∈ [{d:.3}, {d:.3}] V", .{ vi.label, v, min_v, max_v });
+    switch (voltageBreach(vi, min_v, max_v)) {
+        .nominal => return fail(allocator, "{s} nominal = {d:.3} V, outside [{d:.3}, {d:.3}] V", .{ vi.label, vi.nominal.?, min_v, max_v }),
+        .rated => return fail(allocator, "{s} rated [{d:.3}, {d:.3}] V, outside [{d:.3}, {d:.3}] V", .{ vi.label, vi.rated_min.?, vi.rated_max.?, min_v, max_v }),
+        .undeclared => return fail(allocator, "{s} has no declared voltage — add (rated …) or a nominal", .{vi.label}),
+        .none => {},
     }
+    // The pass text reports the strongest statement the port made: a declared
+    // rated span is a wider claim than its nominal, and a reader of a passing
+    // rating row should see which interval was actually cleared.
     if (vi.rated_min) |lo| if (vi.rated_max) |hi| {
-        if (lo + current_tolerance_f < min_v or hi > max_v + current_tolerance_f) {
-            return fail(allocator, "{s} rated [{d:.3}, {d:.3}] V, outside [{d:.3}, {d:.3}] V", .{ vi.label, lo, hi, min_v, max_v });
-        }
         return passMsg(allocator, "{s} rated [{d:.3}, {d:.3}] V ⊆ [{d:.3}, {d:.3}] V", .{ vi.label, lo, hi, min_v, max_v });
     };
-    return fail(allocator, "{s} has no declared voltage — add (rated …) or a nominal", .{vi.label});
+    return passMsg(allocator, "{s} = {d:.3} V ∈ [{d:.3}, {d:.3}] V", .{ vi.label, vi.nominal.?, min_v, max_v });
 }
 
 const VoltageNotAboveCheck = struct {
@@ -1134,4 +1167,51 @@ fn suffixToVolts(s: []const u8) ?f64 {
     if (ieql(s, "mV")) return 1e-3;
     if (ieql(s, "kV")) return 1e3;
     return null;
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+fn breach(nominal: ?f64, lo: ?f64, hi: ?f64, min_v: f64, max_v: f64) VoltageBreach {
+    return voltageBreach(.{ .label = "port VIN", .nominal = nominal, .rated_min = lo, .rated_max = hi }, min_v, max_v);
+}
+
+// spec: req_checks - a declared rated span outside the part's limits fails even when the nominal is inside them
+test "a nominal inside the limits does not excuse a rated span outside them" {
+    // The regression: 5 V nominal on a port the design rates to 24 V, against a
+    // part that stops at 6 V. Passing this shipped a rating check that agreed
+    // with the design's own worst case only when the design declined to state it.
+    try testing.expectEqual(VoltageBreach.rated, breach(5.0, 4.5, 24.0, 2.5, 6.0));
+    // Both statements inside: still a pass.
+    try testing.expectEqual(VoltageBreach.none, breach(5.0, 4.5, 5.5, 2.5, 6.0));
+    // The nominal is still checked in its own right, and reported as its own
+    // breach so the message names the statement that failed.
+    try testing.expectEqual(VoltageBreach.nominal, breach(7.0, 4.5, 5.5, 2.5, 6.0));
+    // A rated span below the part's minimum fails too, not only one above.
+    try testing.expectEqual(VoltageBreach.rated, breach(3.0, 1.0, 3.2, 2.5, 6.0));
+}
+
+// spec: req_checks - a port stating only one of the two voltage declarations is judged on the one it makes
+test "a port with only one voltage declaration is judged on that one" {
+    try testing.expectEqual(VoltageBreach.none, breach(5.0, null, null, 2.5, 6.0));
+    try testing.expectEqual(VoltageBreach.nominal, breach(9.0, null, null, 2.5, 6.0));
+    try testing.expectEqual(VoltageBreach.none, breach(null, 4.5, 5.5, 2.5, 6.0));
+    try testing.expectEqual(VoltageBreach.rated, breach(null, 4.5, 24.0, 2.5, 6.0));
+    // A half-declared span is not a span: it constrains nothing on its own, and
+    // with no nominal beside it the port has said nothing to check.
+    try testing.expectEqual(VoltageBreach.undeclared, breach(null, 4.5, null, 2.5, 6.0));
+    try testing.expectEqual(VoltageBreach.undeclared, breach(null, null, null, 2.5, 6.0));
+    // …but a nominal beside a half-declared span is still judged.
+    try testing.expectEqual(VoltageBreach.none, breach(5.0, null, 24.0, 2.5, 6.0));
+}
+
+// spec: req_checks - a boundary value exactly on a part's limit is inside it
+test "a value exactly on a limit is inside it" {
+    try testing.expectEqual(VoltageBreach.none, breach(6.0, null, null, 2.5, 6.0));
+    try testing.expectEqual(VoltageBreach.none, breach(2.5, null, null, 2.5, 6.0));
+    try testing.expectEqual(VoltageBreach.none, breach(null, 2.5, 6.0, 2.5, 6.0));
+    // The 15 mV overshoot that a live board turned out to have: a span wider
+    // than the part's window by a hair is still outside it.
+    try testing.expectEqual(VoltageBreach.rated, breach(3.3, 3.135, 3.465, 2.7, 3.45));
 }

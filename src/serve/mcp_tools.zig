@@ -21,6 +21,7 @@ const env_mod = @import("../eval/env.zig");
 const eval_modules = @import("../eval/modules.zig");
 const erc_mod = @import("../erc.zig");
 const log = @import("../infra/log.zig");
+const tool_schema = @import("tool_schema.zig");
 const process_alloc = @import("../infra/process_alloc.zig");
 const bom = @import("../bom.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
@@ -353,6 +354,25 @@ pub const CallResult = struct {
     image_mime: ?[]const u8 = null,
 };
 
+/// Render a schema rejection as the same `{"ok":false,"error":…}` envelope every
+/// other refusal uses, escaping the message rather than interpolating it.
+fn writeSchemaViolation(
+    allocator: std.mem.Allocator,
+    tool_name: []const u8,
+    violation: tool_schema.Violation,
+    out: *std.ArrayList(u8),
+) !void {
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
+    try w.writeAll("{\"ok\":false,\"error\":");
+    const text = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ tool_name, violation.message });
+    try json_writer.writeString(w, text);
+    try w.writeAll(",\"argument\":");
+    try json_writer.writeString(w, violation.property);
+    try w.writeAll("}");
+    try out.appendSlice(allocator, buf.written());
+}
+
 /// Dispatch a tool call. Writes the result into `out` and returns how the
 /// caller should frame it in the CLI envelope.
 pub fn call(
@@ -362,6 +382,21 @@ pub fn call(
     args_val: ?std.json.Value,
     out: *std.ArrayList(u8),
 ) CallResult {
+    // Hold the call to the schema this tool ADVERTISES, before any handler sees
+    // it. Every surface passes through here, so an unknown argument name, a
+    // value outside a declared enum or a wrongly typed one is a rejection
+    // rather than whatever the individual handler happened to do with it —
+    // which used to include rendering a PNG with a silent default view, and
+    // returning an empty pin list for a misspelled filter.
+    if (tool_schema.validate(allocator, tools_list_result, tool_name, args_val)) |violation| {
+        // Through `json_writer`, not `allocPrint`: the message quotes the
+        // caller's own argument names and values, so composing it by
+        // interpolation produced a body that was not JSON at all.
+        writeSchemaViolation(allocator, tool_name, violation, out) catch |e| {
+            log.warn("failed to write schema violation: {s}", .{@errorName(e)});
+        };
+        return .{ .ok = false };
+    }
     // The image tool returns binary content, so it's handled here (not in
     // `callInner`, which only ever produces text) and tagged with its MIME type
     // so the CLI layer frames it as an image content block.
@@ -2809,6 +2844,34 @@ fn jsonMatchesToolTable(alloc: std.mem.Allocator) !bool {
 // spec: serve/mcp_tools - The tools registration table and the embedded tools_list_result.json declare exactly the same tool names
 test "tools table matches tools_list_result.json" {
     try std.testing.expect(try jsonMatchesToolTable(std.testing.allocator));
+}
+
+// spec: serve/mcp_tools - Every advertised tool schema closes its object, so a misspelled argument name is refused rather than ignored
+test "every advertised schema closes its object" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // `serve/tool_schema` refuses an undeclared argument only where the schema
+    // SAYS the object is closed. Seven package tools left theirs open, so a
+    // misspelled argument to them was still silently ignored — the same defect
+    // the validator was added to close, surviving in the document rather than
+    // in the code. This keeps the property for every tool added later.
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, tools_list_result, .{});
+    var open: usize = 0;
+    var checked: usize = 0;
+    for (parsed.object.get("tools").?.array.items) |t| {
+        const schema = t.object.get("inputSchema").?.object;
+        checked += 1;
+        const closed = switch (schema.get("additionalProperties") orelse std.json.Value{ .null = {} }) {
+            .bool => |b| !b,
+            else => false,
+        };
+        if (!closed) open += 1;
+    }
+    // A scan that found no tools would make the assertion below vacuous.
+    try std.testing.expect(checked > 50);
+    try std.testing.expectEqual(@as(usize, 0), open);
 }
 
 /// The declared description of `name` in the embedded tool list, or null when

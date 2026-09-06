@@ -436,6 +436,19 @@ pub fn build(b: *std.Build) void {
         docs_check_run.has_side_effects = true;
         test_step.dependOn(&docs_check_run.step);
         b.getInstallStep().dependOn(&docs_check_run.step);
+
+        // The shard manifest, checked the same way and for the same reason. A
+        // module missing from `src/test_root.zig` already fails `zig build`
+        // (Guardian's test-reachability); a module missing from
+        // `src/test_shards.zig` compiled green while its tests silently never
+        // ran, and only a full or affected test run reached the invariant test
+        // that catches it. This is a source scan, so it costs a directory walk.
+        const manifest_check_run = b.addRunArtifact(exe);
+        manifest_check_run.addArgs(&.{"check-test-manifest"});
+        manifest_check_run.setCwd(b.path("."));
+        manifest_check_run.has_side_effects = true;
+        test_step.dependOn(&manifest_check_run.step);
+        b.getInstallStep().dependOn(&manifest_check_run.step);
     }
 
     // spec-init: generate starter SPEC.md

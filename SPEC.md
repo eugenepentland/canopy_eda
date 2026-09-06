@@ -36,6 +36,25 @@ full contract are in [CONTRIBUTING.md](CONTRIBUTING.md) § 4.
 - completeness-waiver: integer overflow (a single forward pass over argv with no arithmetic on its length)
 - completeness-waiver: panic-free (an allocation failure returns the unfiltered argv rather than failing the run)
 
+## Serve CLI
+
+- help is answered without opening logs or a socket
+- a malformed port is rejected instead of silently serving the default
+- a value-taking flag with no value is an error, not a default
+- an unrecognised flag or stray positional is rejected
+- a valid command line still produces the same options as before
+- the no-argument defaults are unchanged
+- NETLISP_AUTH_DIR is the fallback and --auth-dir overrides it
+- every rejection renders a diagnostic naming the argument
+- completeness-waiver: empty inputs (an empty argv is the documented default command line and is accepted as `.run`)
+- completeness-waiver: large inputs (argv is bounded by the operating system's own limit and every entry is borrowed, never copied)
+- completeness-waiver: unauthorized access (the parser grants nothing; `--allow-remote` is passed through to the server, which owns the auth decision)
+- completeness-waiver: i/o failure (the parser touches no filesystem — that is the point of deciding the command line before anything is opened)
+- completeness-waiver: concurrent access (the command line is parsed once, in `main`, before any thread or socket exists)
+- completeness-waiver: malformed encoding (arguments are compared as bytes; only `--port` is decoded, and a non-numeric value is a reported rejection)
+- completeness-waiver: integer overflow (the sole conversion is a checked `parseInt(u16, ...)` whose overflow is the `bad_port` rejection)
+- completeness-waiver: panic-free (the parser allocates nothing and returns a value on every path; `describe` truncates rather than failing)
+
 ## CLI allocation lifetime
 
 - one-shot CLI commands keep process-lifetime evaluation storage on the automatically cleaned process arena
@@ -430,12 +449,16 @@ Public functions: solve
 
 - gap closing honors authored layer restrictions and new-via limits before accepting or absorbing copper
 - gap closing refuses an opposite-face bridge when the net has no new-via allowance
-- reconciliation counts generated vias against the original allowance while retaining existing vias
+- reconciliation counts all retained and generated vias against the authored total limit
+- A surface-only gap preserves authored layers and cannot restrict a later ordinary gap in the same batch
+- a via-limited gap retries a longer legal path with a nonzero via allowance instead of rejecting the cheaper excessive-via path
 - a gap batch spends via allowance only on accepted hops and does not reset it for later requests
 
 Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJunctions, glossFinishedTracks, foldNetBranches, cleanupBoard
 
 - maze-routes a two-pad net into connected track segments
+- retained same-net vias spend a whole-board route budget while foreign vias do not
+- an incomplete subtree exceeding the remaining via allowance is rolled back rather than retained
 - an equal-length octilinear tie is settled toward the straight path rather than an arbitrary staircase of the same length
 - the maze queue orders on A* priority alone, with corner count priced into the cost rather than ranked beside it
 - a maze leg is charged for the escape stub each pad gateway implies, so it buys the entry that points where the route goes instead of the outermost free one
@@ -481,6 +504,8 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - every leg of a shared guided trunk enters its waypoint chain from the same end, so the trunk is one corridor rather than two opposed ones
 - a net spanning the two board sides routes through a via, each leg on its part's layer unless the barrel stands in that pad's own land
 - a board outline detours routed copper around a concave notch; no-outline routes unchanged
+- coupled pair vias respect both members' total budgets before committing either leg
+- plane and finishing vias share the authored total with retained copper
 - a plane-less stackup routes ground as real copper instead of dropping plane vias
 - signal nets in an explicit authored route wave claim their copper before plane stitching, while the rest wave still follows the plane pass
 - exposed-pad thermal fields use practical centred 3x3 and 4x4 arrays instead of the DRC-densest possible drill packing
@@ -716,6 +741,8 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 
 ## serve/subcircuit-route
 
+- hierarchical seed via budgets include retained same-net copper without double-counting duplicate seed records
+
 - join-weighted module budgets are opt-in and equal module shares remain the default
 
 
@@ -785,6 +812,7 @@ Public functions: edgeInset, pointInset, clearsOutline, buildOutlineMask, netOff
 
 ## bench-route
 
+- --jsonl names a checkpoint path, and an empty or flag-shaped one fails the run rather than measuring without a record
 - --save-candidate writes the measured copper and solved poses to a new layout, preserving the source layout and its star and refusing a name collision
 - benchmark candidates include generated perimeter copper and use the physical connectivity oracle before measurement and capture
 
@@ -935,6 +963,151 @@ layer worth reading first is the one that is not silk.
 - completeness-waiver: malformed encoding (the design and its saved layout are parsed by the same seam the PCB page uses, which rejects malformed input long before any artwork exists to write)
 - completeness-waiver: integer overflow (no arithmetic on the dump path beyond the writers' own already-audited coordinate quantization)
 - completeness-waiver: panic-free (every failing stage degrades to a comment line and the next board rather than aborting the dump)
+
+## dump command line
+
+Public functions: parse, noExtra
+
+The scan `netlist-dump`, `gerber-dump` and `envelopes` share. One place for the
+strictness these read-only inspection commands need and the `bench-*` harnesses
+deliberately do not: an unrecognised flag and a run naming no design are both
+refused, because a dump exists to be diffed and a dump that silently inspected
+nothing reads exactly like a dump that found no difference.
+
+- the shared scan reads the project dir, collects positional design names, and lets a command take its own flags first
+- an unrecognised flag or a run naming no design is refused rather than inspecting nothing
+
+- completeness-waiver: empty inputs (an empty argv names no design and is refused, which is the behaviour under test)
+- completeness-waiver: large inputs (argv is bounded by the operating system's own limit; only the positional names are appended to a caller-owned list)
+- completeness-waiver: unauthorized access (the scan grants nothing; it records a directory path its caller already has authority over)
+- completeness-waiver: concurrent access (each CLI process scans its own argv once, before any design is opened)
+- completeness-waiver: i/o failure (the scan touches no filesystem; the project directory is opened by the command that received it)
+- completeness-waiver: malformed encoding (arguments are compared as bytes and never decoded)
+- completeness-waiver: integer overflow (a single forward pass over argv with no arithmetic on its length)
+- completeness-waiver: panic-free (the only failure is the caller's allocator, returned as an error; every other path returns a bool)
+
+## bench checkpoint
+
+Public functions: renderHeader, create, writeBoard, finish, deinit, parseCountingRows
+
+`bench-route --json` buffers the whole corpus and writes one document at the end.
+A three-board run killed with exit 137 under memory pressure lost the two boards
+that had finished along with the one that had not. `--jsonl` writes each board's
+row the moment that board finishes — the same row the aggregate document carries,
+from the same renderer — so an interrupted corpus keeps everything it measured.
+A board that FAILED is a recorded row with `ok:false`; a corpus that never
+finished simply has no completion record, so the two can never be confused.
+
+- a finished board is on disk and parseable before the next board is measured
+- an interrupted corpus has no completion record so a partial file can never read as a finished run
+- a board that failed to route is a recorded failure, distinct from a corpus that never finished
+- a line truncated by a kill is dropped and every earlier board survives
+- the run header records the tool revision, project and seed policy so an interrupted file identifies its own inputs
+- a checkpoint path that cannot be created fails the run instead of measuring without a record
+
+- completeness-waiver: empty inputs (a run naming no board writes a header and an immediate completion record, which is a truthful empty result)
+- completeness-waiver: large inputs (each line is composed into one reused buffer that is cleared after every record, so the stream holds one board's row at a time)
+- completeness-waiver: unauthorized access (the checkpoint is a local file at a path the invoking user named and already has authority over)
+- completeness-waiver: concurrent access (one benchmark process owns its stream and appends from its single board loop)
+- completeness-waiver: i/o failure (an unopenable path fails the run before a board is measured, and a failed write or sync is returned rather than swallowed — durability is the feature)
+- completeness-waiver: malformed encoding (every free string goes through json_writer, and the read rule drops a line that does not parse)
+- completeness-waiver: integer overflow (the only arithmetic is a recovered-row count bounded by the corpus size)
+- completeness-waiver: panic-free (an unopenable path and a failed write or sync are returned as errors; nothing here asserts)
+
+## envelope dump
+
+Public functions: cmdEnvelopes
+
+Every flattened net's worst-case DC voltage envelope from ONE evaluation. The
+single-net answer already existed (`netlisp net`'s `"envelope"` object); reading
+them all meant 1,863 separate invocations, each re-evaluating the whole design.
+The per-net object here is written by the very function the single-net query
+calls, so a bulk value and a single-net value cannot disagree, and a net nothing
+bounds is reported as an explicit unknown rather than as zero volts.
+
+- the CLI parses the project dir and text flag with positionals as design names and refuses a run that names no design
+- a bulk row carries the same envelope object the single-net query writes for that net
+- a net nothing bounds reports an explicit unknown rather than a zero-volt envelope
+- a ground-class name is bounded at zero volts and counted as known
+- hierarchical and non-ASCII net names survive the JSON encoding
+- nets sort by name so two runs of one design compare byte for byte
+- a design that fails to resolve fails the run instead of emitting an empty comparison
+
+- completeness-waiver: empty inputs (a run naming no design is a usage error; a design with no nets emits an empty net array with its zero counts rather than passing as a trivial match)
+- completeness-waiver: large inputs (one arena per design, freed before the next, so a corpus sweep peaks at one design's flattened netlist)
+- completeness-waiver: unauthorized access (a local read-only CLI over the caller's own project directory; no network, no auth surface, and no file is written)
+- completeness-waiver: concurrent access (single-threaded, sharing no state between designs)
+- completeness-waiver: i/o failure (a design that cannot be resolved emits an explicit unresolved row and the command fails after every design has had its chance)
+- completeness-waiver: malformed encoding (net names are escaped through json_writer, which is what carries a hierarchical or non-ASCII name intact)
+- completeness-waiver: integer overflow (no arithmetic beyond formatting already-computed bounds and counts)
+- completeness-waiver: panic-free (an absent envelope is the documented unknown state, not a failure; a design that fails to resolve degrades to a row and the next design)
+
+## tool schema
+
+Public functions: validate
+
+`assets/tools_list_result.json` is the structured tools' contract — `tools/list`
+returns it, an agent's client validates against it — and nothing enforced it. A
+test keeps the tool NAMES in lockstep with the registration table; the
+parameters were on their honour, so whether a bad argument was refused depended
+on whether the individual handler happened to check. `list_free_pins` with an
+invalid `filter` returned an empty pin list and exit 0; `get_pcb_layout_image`
+and `get_schematic_image` rendered a PNG of a DIFFERENT view for an invalid
+`scenario`/`view`/`theme`; a misspelled argument name passed straight through an
+`"additionalProperties": false` schema; a string reached a declared boolean. The
+check now runs once, in the dispatch every surface shares, against the advertised
+document itself — so the rule and the contract cannot drift.
+
+- a call that conforms to the advertised schema is accepted unchanged
+- a value outside a declared enum is rejected and the accepted values are named
+- an argument the schema does not declare is rejected when the schema closes the object
+- a required argument that is absent is rejected by name
+- an argument whose JSON type contradicts the declared type is rejected
+- a tool the document does not describe is left for the caller to reject
+
+- completeness-waiver: empty inputs (a call with no arguments is validated as an empty object, which is how a missing required argument is caught)
+- completeness-waiver: large inputs (the schema document is a compiled-in constant of known size; caller arguments are already-parsed values it only reads)
+- completeness-waiver: unauthorized access (validation grants nothing and reads no file; it runs before any handler opens a project)
+- completeness-waiver: concurrent access (the document is parsed per call into the caller's own allocator, so no state is shared between threads)
+- completeness-waiver: i/o failure (nothing here performs I/O)
+- completeness-waiver: malformed encoding (argument names and values are compared as bytes and escaped through json_writer on the way into the rejection)
+- completeness-waiver: integer overflow (no arithmetic; numeric arguments are only classified, never converted)
+- completeness-waiver: panic-free (an allocation failure or an unexpected document shape yields "no violation" rather than turning an internal failure into a caller error)
+
+## test manifest
+
+Public functions: collectQualifiedNames, collectQualifiedNamesIn, qualifiedPrefix, appendNamedTests, claimingShards, audit, auditIn, writeReport, checkAndReport, checkAndReportIn
+
+A new test-bearing module needs BOTH an import in `src/test_root.zig` and a
+filter in `src/test_shards.zig`, and the two failures used to cost very
+different amounts to find. Missing from the test root, Guardian's
+`test-reachability` fails `zig build` in seconds. Missing from the shard
+manifest, the module compiled, its tests existed, no shard's filter selected
+them, and every shard reported PASS — only a full or affected test run reached
+the invariant test that catches it, which is how a release gate once spent 118
+seconds to report five missing registrations. The scan here is pure source text
+plus the manifest's own literals, so `netlisp check-test-manifest` runs on every
+`zig build` beside the generated-docs check, and `src/test_root.zig`'s invariant
+test calls the same functions rather than carrying a second copy of the rule.
+
+- only a test declaration at the start of a line is collected, and an unnamed test block is not
+- a source path becomes the dotted prefix the compiler names its tests with
+- this tree's shard manifest claims every named test exactly once and carries no dead filter
+- a test no shard claims is reported as unclaimed rather than passing silently
+- a scan that found almost no tests fails rather than reporting a vacuous pass
+- a scan pointed at a tree with no src directory reports the read failure as a usage error rather than an empty pass
+- the shard count fits the per-name claim set
+- the split module/name match agrees with a literal substring search over the real manifest
+- a module whose tests exist but which the test root does not import outright is reported
+
+- completeness-waiver: empty inputs (a scan that finds fewer tests than the tree is known to hold fails as a wrong working directory, which is the behaviour under test)
+- completeness-waiver: large inputs (each source file is read under an explicit byte cap into a caller-owned arena released in bulk)
+- completeness-waiver: unauthorized access (a read-only walk of the repository's own src/ directory, which the invoking user already has authority over)
+- completeness-waiver: concurrent access (one process scans a source tree it does not write)
+- completeness-waiver: i/o failure (an unreadable src/ is reported as a usage error and a failing verdict, never as zero problems)
+- completeness-waiver: malformed encoding (the scan compares bytes; a test name is copied verbatim between its quotes and never decoded)
+- completeness-waiver: integer overflow (the only arithmetic is a claim count bounded by the shard count)
+- completeness-waiver: panic-free (every path returns a value or a returned error; the failing verdict is a bool, not an assertion)
 
 ## netlist-dump
 
@@ -5248,6 +5421,7 @@ against its own file rather than the design's.
 - Declares the flattened-netlist currency types in a neutral module beneath both the export and placement layers
 - Re-exports the flattened-netlist currency types from the export layer as the same types
 - Escapes the netlist's design name, the one field that is not a tokenizer slice, and copies already-escaped design strings through untouched
+- The exported netlist carries exactly the flattened netlist's membership, with hierarchical names and SI-shaped pad numbers intact
 - Escapes a 3D-model filename in the emitted .kicad_mod so a quote or backslash in the file name cannot break the (model …) path
 - Replaces a source .kicad_mod's (model …) block by scanning parens outside quoted strings, so a parenthesis in the model path cannot mis-splice the file
 
@@ -6411,6 +6585,7 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 
 - readiness reports the waiver register drift and a board whose release layout is not frozen fails board review
 - evaluated source paths retain the buildable src/lib shape in a review package
+- a source the bundled standard library supplied is not required to canonicalize inside the project
 - interface evidence resolves stable sub-block connector handles through the canonical flattened netlist
 - per-board block diagram evidence is one standalone SVG document rendered from the same evaluated design, omitted when there is nothing to draw
 - per-board block diagram evidence is archived as boards/<role>/diagram.svg in draft and release, reproducibly, and omitted when the design has no diagram
@@ -6455,6 +6630,9 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - independently allocated fabrication snapshots compare their identity strings by value
 - draft archives are visibly non-fabrication packages and contain no nested board release ZIPs
 - archive members are safe, unique project-relative paths, and draft validation rejects CAM and nested ZIP payloads
+- a rejected manifest reports which field was wrong, what was expected and what was found
+- a diagnostic renders the offending field and value, and renders nothing when it recorded nothing
+- the system-check CLI reports the rejected field rather than the error name alone
 - optional active documents may be absent without blocking release, while every required active document and required checklist must pass
 - duplicate attestation or source paths are accepted only when their bytes agree
 - the release manifest states which self-referential inventory and checksum members it excludes
@@ -6543,6 +6721,9 @@ Public functions: runChecks, deinit, parseMicroFarads, parseOhms, parseMicroHenr
 - pin connectivity checks accept physical pin ids as well as pinout function names
 - runChecks frees a partial result on map allocation failure
 - decoupling-per-pin requires distinct physical capacitors
+- a declared rated span outside the part's limits fails even when the nominal is inside them
+- a port stating only one of the two voltage declarations is judged on the one it makes
+- a boundary value exactly on a part's limit is inside it
 - voltage-not-above compares the control worst-case maximum against the supply worst-case minimum plus margin
 
 ## net_analysis
@@ -7513,6 +7694,7 @@ Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesig
 - build tool severity arg filters the erc[] array to the named severity
 - build response carries eval warnings in a warnings[] array separate from erc[]
 - The tools registration table and the embedded tools_list_result.json declare exactly the same tool names
+- Every advertised tool schema closes its object, so a misspelled argument name is refused rather than ignored
 - get_schematic defaults to a compact summary far smaller than the full scene graph
 - build, list_instances, and get_net resolve allocator-owned refdes from the same stable-ID BOM ledger
 - flatten makes list_instances include sub-block children with prefixed refs and origins
@@ -7967,6 +8149,8 @@ is what makes the predicate exact rather than approximately right.
 - The close_open_nets tool plans hops only for the open nets the caller named
 - A close_open_nets stitch is never planned for the island its plane or pour already carries
 - A close_open_nets stitch island whose first pad is memoised dead is retried from its next pad
+- A refused surface-only join does not memoize failure of an ordinary multilayer bridge
+- A via-limited poured rail joins surface islands before spending an insufficient stitch allowance
 - A close_open_nets round bridges a plane-carried net straight away when that round could plan it no stitch at all, so a call scoped to such a net is never a no-op
 - A no-path bridge takes the fine corridor rescue only in the last few open nets, while a stitch always remains eligible
 - the routability_preflight tool emits each finding's measurements and a per-rule tally
@@ -7978,6 +8162,7 @@ is what makes the predicate exact rather than approximately right.
 - Hand-added copper that raises the error-severity DRC count is rolled back rather than persisted, unless the caller opts out
 - A violation's reported nets name only copper that could be party to that rule — a drill finding never blames a surface pad
 - A close_open_nets round routes its longest-span hops before its short ones so a cheap bridge cannot spend a long hop's only corridor
+- A finishing round shares one full-board connectivity snapshot across planning and rip protection, then refreshes after copper changes
 - A close_open_nets pass runs on past a round that kept nothing while a later round still has hops that one could not ask for
 - The close_open_nets accept gate ratchets its DRC error ceiling down as the board cleans up, so errors it removes can never come back
 - The close_open_nets accept gate rejects an independently-finished differential leg when it would increase coupling or skew warnings
@@ -8674,6 +8859,8 @@ design that authors none resolves — and routes — unchanged.
 - A wave-level (seed-first) is a known route selector and records a deferred bounded repair request against frozen completed copper
 
 ## placement/progress
+
+- connected nets with exceeded or unverified authored via budgets keep their routing wave incomplete
 
 Public functions: compute, writeJson
 

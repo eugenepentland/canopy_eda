@@ -1123,9 +1123,23 @@ test "get_pcb_layout_image renders the heat field on request" {
     // two pictures, and neither is the copper view.
     try testing.expect(!std.mem.eql(u8, still, blown));
     try testing.expect(!std.mem.eql(u8, still, copper));
-    // An unrecognised scenario falls back to still air rather than refusing.
-    const typo = try mcpImage(alloc, project, "{\"name\":\"heater\",\"thermal\":true,\"scenario\":\"breeze\",\"width\":420}");
-    try testing.expectEqualStrings(still, typo);
+    // An unrecognised scenario is REFUSED. It used to fall back to still air,
+    // so a caller who asked for a cooling case that does not exist was handed a
+    // picture of a different one — an expensive render of the wrong answer,
+    // indistinguishable from the right one. `serve/tool_schema` now holds the
+    // call to the enum this tool advertises, before the renderer runs.
+    var out: std.ArrayList(u8) = .empty;
+    const refused = mcp_tools.call(
+        alloc,
+        project,
+        "get_pcb_layout_image",
+        try parse(alloc, "{\"name\":\"heater\",\"thermal\":true,\"scenario\":\"breeze\",\"width\":420}"),
+        &out,
+    );
+    try testing.expect(!refused.ok);
+    try testing.expect(refused.image_mime == null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "scenario") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "breeze") != null);
 }
 
 /// Call `get_pcb_layout_image` with `args_json` and return the decoded PNG.

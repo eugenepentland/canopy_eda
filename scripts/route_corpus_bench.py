@@ -32,6 +32,7 @@ it measures.
 
 import argparse
 import json
+import os
 import math
 import subprocess
 import sys
@@ -151,6 +152,60 @@ def record(rows, gm, project_dir, binary):
         "min", "error-severity DRC across the corpus")
 
 
+class Checkpoint:
+    """Each board's row on disk the moment that board finishes.
+
+    `--json` is written once, at the end. A corpus killed partway — the recorded
+    case is exit 137 under memory pressure, several minutes in — loses every
+    board that HAD finished along with the one that had not. This is the same
+    record `netlisp bench-route --jsonl` writes, deliberately: one reader, one
+    shape, whichever harness produced the file.
+
+        {"kind":"run",      ...}   inputs and policy, always first
+        {"kind":"board",    ...}   one per FINISHED board, in corpus order
+        {"kind":"complete", ...}   only when every board finished
+
+    A board that FAILED is a row carrying its own `error`; a corpus that never
+    finished simply has no `complete` line. The two are distinguished
+    structurally, so a partial file cannot be read as a finished run.
+
+    Disabled (`path=None`) it is inert, so the caller needs no conditional.
+    """
+
+    def __init__(self, path, binary, project_dir, names, route):
+        self.path = path
+        if not path:
+            return
+        self.handle = open(path, "w")
+        self._write({
+            "kind": "run",
+            "tool": binary,
+            "project_dir": project_dir,
+            "route": route,
+            "boards": list(names),
+        })
+
+    def _write(self, record):
+        json.dump(record, self.handle)
+        self.handle.write("\n")
+        # Durability is the whole point: a row that reached the page cache and
+        # no further is exactly the row an OOM kill loses.
+        self.handle.flush()
+        os.fsync(self.handle.fileno())
+
+    def board(self, row):
+        if not self.path:
+            return
+        self._write({"kind": "board", "result": row})
+
+    def complete(self, boards, geomean_routed):
+        if not self.path:
+            return
+        self._write({"kind": "complete", "boards": boards,
+                     "geomean_routed": geomean_routed})
+        self.handle.close()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -162,6 +217,12 @@ def main():
     ap.add_argument("--no-route", action="store_true",
                     help="measure the saved copper without re-routing (fast baseline)")
     ap.add_argument("--json", help="write the full result set here")
+    ap.add_argument("--jsonl", metavar="PATH",
+                    help="append each board's row as it finishes, flushed and fsynced. "
+                         "A corpus killed partway keeps every board it already measured; "
+                         "a run that never finished has no {\"kind\":\"complete\"} line. "
+                         "Same record shape as `netlisp bench-route --jsonl`, so one "
+                         "reader handles both.")
     ap.add_argument("--record", metavar="PROJECT_DIR",
                     help="write metrics into that project's [benchmark] ledger")
     ap.add_argument("--guardian", default="../guardian-zig/zig-out/bin/guardian-check",
@@ -174,10 +235,13 @@ def main():
         print("no designs found — check --project-dir and --netlisp", file=sys.stderr)
         return 1
 
+    checkpoint = Checkpoint(args.jsonl, args.netlisp, args.project_dir, names,
+                            route=not args.no_route)
     rows = []
     for n in names:
         row = measure(args.netlisp, args.project_dir, n, route=not args.no_route)
         rows.append(row)
+        checkpoint.board(row)
         print(
             f"{row['board']:<22} {row['routed']:>3}/{row['total']:<3} "
             f"drc {row['drc']:>3}/{row['drc_errors']:<3}err "
@@ -199,6 +263,7 @@ def main():
           f"{opens} net(s) open | {errs} DRC error(s) | "
           f"{sum(r['secs'] for r in rows):.1f}s total")
 
+    checkpoint.complete(len(rows), gm)
     if args.json:
         with open(args.json, "w") as f:
             json.dump({"rows": rows, "geomean": gm, "open": opens, "drc_errors": errs},
