@@ -846,9 +846,20 @@ pub fn functionalLayoutNet(self: *const RenderCtx, net: []const u8) bool {
     return isFunctionalSignalTerminal(base) or !directNetNeedsLabel(self, base);
 }
 
-/// Whether a series part may turn toward `terminal`'s pin row at all.
-fn functionalReturnTurns(self: *const RenderCtx, terminal: []const u8) bool {
-    return functionalLayoutNet(self, terminal);
+/// Whether a series part may turn toward `terminal`'s pin row at all: a
+/// signal or a hub-private supply (`functionalLayoutNet`), or a shared rail
+/// whose destination group on this side is where THIS HUB MAKES it — a
+/// regulator's OUT / VOUT row (`FunctionalPinRow.produces_rail`). A pull-up
+/// from PG or a feedback divider's upper leg then draws into the output node
+/// it senses, which is what the reader is looking for on the regulator's own
+/// sheet; a pull-up to a rail the hub merely CONSUMES still keeps the label
+/// that lets the reader find the rail elsewhere. Ground never turns.
+fn functionalReturnTurns(self: *const RenderCtx, side: Side, terminal: []const u8) bool {
+    if (functionalLayoutNet(self, terminal)) return true;
+    const base = baseNetName(terminal);
+    if (base.len == 0 or isGroundNet(draw.shortNetName(base))) return false;
+    const row = functionalPinRow(self, side, terminal) orelse return false;
+    return row.produces_rail;
 }
 
 /// No other pin row of this side may lie between the turning row and its
@@ -879,7 +890,7 @@ const ReturnHeading = struct {
 };
 
 fn functionalReturnHeading(self: *const RenderCtx, side: Side, terminal: []const u8, py: f64) ReturnHeading {
-    if (!functionalReturnTurns(self, terminal)) return .{};
+    if (!functionalReturnTurns(self, side, terminal)) return .{};
     const row = functionalPinRow(self, side, terminal) orelse return .{};
     if (row.cy > py) return .{ .dir = .below, .y = row.cy };
     if (row.cy < py) return .{ .dir = .above, .y = row.cy };
@@ -898,7 +909,7 @@ fn functionalSeriesTargetY(
     connection_count: usize,
     cy: f64,
 ) ?f64 {
-    if (!functionalReturnTurns(self, terminal)) return null;
+    if (!functionalReturnTurns(self, side, terminal)) return null;
     const row = functionalPinRow(self, side, terminal) orelse return null;
     const target_y = row.cy;
     // The part is one body long and must end before the destination's
@@ -945,6 +956,25 @@ fn inlineAnchorY(self: *const RenderCtx, group: DeferredGroup, body: BranchBody)
     return if (body.cy < row.cy) row.first_stub_y else row.last_stub_y;
 }
 
+/// One name per net per hub side. Every turn toward a net lands on the SAME
+/// row (the row index holds one row per net per side), so a second copy of the
+/// name would only repeat what the first already says: a regulator whose
+/// feedback divider AND power-good pull-up both turn onto its output node
+/// labels that node once.
+const InlineLabels = struct {
+    claimed: std.StringHashMapUnmanaged(void) = .empty,
+
+    /// True the first time this side asks for `net`; false afterwards. A rail
+    /// row that kept its own label claims the name too, so a later turned
+    /// return does not print a second copy beside itself.
+    fn claim(self: *InlineLabels, allocator: std.mem.Allocator, side: Side, net: []const u8) RenderError!bool {
+        const key = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ @tagName(side), baseNetName(net) });
+        if (self.claimed.contains(key)) return false;
+        try self.claimed.put(allocator, key, {});
+        return true;
+    }
+};
+
 /// Close every turned series return in `group` on its pin-stub column before
 /// the outside lanes are chosen: a straight lane from the part's far end to
 /// the destination group's nearest stub, labelled beside the part when the
@@ -952,6 +982,7 @@ fn inlineAnchorY(self: *const RenderCtx, group: DeferredGroup, body: BranchBody)
 /// returns from other rows still gets its outside lane for those — merging
 /// them onto the column ran a lane along the stub ends of every row between.
 fn closeInlineReturns(self: *RenderCtx, w: anytype, groups: []DeferredGroup) RenderError!void {
+    var labels: InlineLabels = .{};
     for (groups, 0..) |*group, gi| {
         var kept: std.ArrayList(BranchBody) = .empty;
         var closed = false;
@@ -963,7 +994,12 @@ fn closeInlineReturns(self: *RenderCtx, w: anytype, groups: []DeferredGroup) Ren
             };
             closed = true;
             if (target_y != body.cy) try drawNetWire(w, body.end_x, body.cy, body.end_x, target_y, group.terminal);
-            if (directNetNeedsLabel(self, group.terminal)) {
+            // The net's label goes beside the turned part — unless the rail
+            // it lands on keeps its own labelled row, which then says it once,
+            // or another turn onto the same row already carried the name.
+            const rail_row_labelled = try absorbAnchorRows(self, w, groups, gi, group.*, body.end_x);
+            const unnamed_here = try labels.claim(self.allocator, group.side, group.terminal);
+            if (unnamed_here and !rail_row_labelled and directNetNeedsLabel(self, group.terminal)) {
                 try branch_mod.drawTerminal(self, w, body.end_x, body.cy, group.terminal, switch (group.side) {
                     .left => "end",
                     .right => "start",
@@ -971,7 +1007,6 @@ fn closeInlineReturns(self: *RenderCtx, w: anytype, groups: []DeferredGroup) Ren
             } else {
                 try writeDebugPin(w, body.end_x, body.cy);
             }
-            try absorbAnchorRows(self, w, groups, gi, group.*, body.end_x);
         }
         if (closed) group.results = try kept.toOwnedSlice(self.allocator);
     }
@@ -981,7 +1016,9 @@ fn closeInlineReturns(self: *RenderCtx, w: anytype, groups: []DeferredGroup) Ren
 /// return turned toward it — the net reaches another hub, so the row earned
 /// a label the moment that group rendered. A row inside the group's stub span
 /// now belongs to the column lane: wire it across and drop it, or it closes a
-/// second time as a lone label beside the one the turned part already has.
+/// second time as a lone label. A row OUTSIDE the span (the rail's label row
+/// fanned above its first stub) stays and keeps its label; returns true so the
+/// turned part does not add a second copy of the same name beside itself.
 fn absorbAnchorRows(
     self: *RenderCtx,
     w: anytype,
@@ -989,8 +1026,9 @@ fn absorbAnchorRows(
     closed_idx: usize,
     closed: DeferredGroup,
     column_x: f64,
-) RenderError!void {
-    const row = functionalPinRow(self, closed.side, closed.terminal) orelse return;
+) RenderError!bool {
+    const row = functionalPinRow(self, closed.side, closed.terminal) orelse return false;
+    var rail_row_remains = false;
     for (groups, 0..) |*other, oi| {
         if (oi == closed_idx or !sameDeferredNet(closed, other.*)) continue;
         if (!std.mem.eql(u8, baseNetName(other.source_net), baseNetName(other.terminal))) continue;
@@ -1005,7 +1043,9 @@ fn absorbAnchorRows(
             absorbed = true;
         }
         if (absorbed) other.results = try kept.toOwnedSlice(self.allocator);
+        rail_row_remains = rail_row_remains or other.results.len > 0;
     }
+    return rail_row_remains;
 }
 
 const label_char_width: f64 = 7.0;
@@ -1271,6 +1311,15 @@ pub fn renderDeferredTerminals(
     }
 
     try closeInlineReturns(self, w, groups.items);
+    // A group the pre-pass emptied must not linger as a phantom "return":
+    // `isDirectCandidate` would still count it toward the rail row it closed on.
+    var live: usize = 0;
+    for (groups.items) |group| {
+        if (group.results.len == 0) continue;
+        groups.items[live] = group;
+        live += 1;
+    }
+    groups.shrinkRetainingCapacity(live);
 
     const handled = try self.allocator.alloc(bool, groups.items.len);
     @memset(handled, false);
@@ -1676,6 +1725,117 @@ test "direct return lane clears a net label between its rows" {
     try testing.expect(std.mem.indexOf(u8, got.written(), "156.0,100.0") == null);
     try testing.expect(std.mem.indexOf(u8, got.written(), "points=\"100.0,100.0 100.0,100.0 100.0,180.0 100.0,180.0\"") != null);
     try testing.expect(std.mem.indexOf(u8, got.written(), "x1=\"210.0\" y1=\"100.0\" x2=\"100.0\" y2=\"100.0\"") != null);
+}
+
+// spec: render_svg - A turned return lands on its rail's stub tie and the rail's own labelled row, whether absorbed into the column or left above the stubs, names the net exactly once
+test "turned return and its rail's own row share one label" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // VREG reaches a second hub, so it earns a label somewhere.
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "U2", .component = "ldo", .value = "", .footprint = "", .symbol = "" },
+    };
+    const vreg = [_]PinRef{ .{ .ref_des = "U1", .pin = "6" }, .{ .ref_des = "U2", .pin = "1" } };
+    const nets = [_]env_mod.Net{.{ .name = "VREG", .pins = &vreg }};
+    const block: env_mod.DesignBlock = .{
+        .name = "rail-row-label",
+        .instances = &instances,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var ctx = RenderCtx.init(a);
+    try ctx.setup(&block);
+    ctx.render_scratch.functional_layout = true;
+    // The VREG group's stubs run 136..176 on the left column.
+    try ctx.render_scratch.functional_left_pin_y.put(a, "VREG", .{ .cy = 156, .first_stub_y = 136, .last_stub_y = 176, .stub_x = 312 });
+
+    const turned = [_]BranchBody{.{ .end_x = 312.0, .cy = 192.0, .terminal = "VREG", .inline_direct_lane = true }};
+
+    // 1. The rail's own row fanned ABOVE its first stub: it keeps its label
+    //    at the terminal column; the turned part adds none.
+    const above = [_]BranchBody{.{ .end_x = 282.0, .cy = 116.0, .terminal = "VREG" }};
+    var deferred: DeferredTerminals = .{};
+    try deferred.runs.append(a, .{ .results = &above, .term_x = 212.0, .side = .left, .source_net = "VREG", .source_is_feedback = false });
+    try deferred.runs.append(a, .{ .results = &turned, .term_x = 212.0, .side = .left, .source_net = "CS", .source_is_feedback = false });
+    var got: std.Io.Writer.Allocating = .init(a);
+    try renderDeferredTerminals(&ctx, &got.writer, &deferred, true);
+    try testing.expect(std.mem.indexOf(u8, got.written(), "points=\"312.0,192.0 312.0,192.0 312.0,176.0 312.0,176.0\"") != null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, got.written(), ">VREG</text>"));
+    try testing.expect(std.mem.indexOf(u8, got.written(), "x=\"194.0\" y=\"120.0\" text-anchor=\"end\"") != null);
+    try testing.expect(std.mem.indexOf(u8, got.written(), "x1=\"282.0\" y1=\"116.0\" x2=\"212.0\"") != null);
+
+    // 2. The rail's own row ON its first stub: it joins the column and the
+    //    turned part carries the one label.
+    const on_stub = [_]BranchBody{.{ .end_x = 282.0, .cy = 136.0, .terminal = "VREG" }};
+    var absorbed: DeferredTerminals = .{};
+    try absorbed.runs.append(a, .{ .results = &on_stub, .term_x = 212.0, .side = .left, .source_net = "VREG", .source_is_feedback = false });
+    try absorbed.runs.append(a, .{ .results = &turned, .term_x = 212.0, .side = .left, .source_net = "CS", .source_is_feedback = false });
+    var got2: std.Io.Writer.Allocating = .init(a);
+    try renderDeferredTerminals(&ctx, &got2.writer, &absorbed, true);
+    try testing.expect(std.mem.indexOf(u8, got2.written(), "x1=\"282.0\" y1=\"136.0\" x2=\"312.0\" y2=\"136.0\"") != null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, got2.written(), ">VREG</text>"));
+    try testing.expect(std.mem.indexOf(u8, got2.written(), "x=\"294.0\" y=\"196.0\" text-anchor=\"end\"") != null);
+    try testing.expect(std.mem.indexOf(u8, got2.written(), "x2=\"212.0\"") == null);
+}
+
+// spec: render_svg - Two returns turning onto one output row name the shared rail once
+test "two turned returns onto one rail row name it once" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // A regulator whose feedback divider comes from the row above its output
+    // group and whose power-good pull-up comes from the row below: both turn
+    // onto the SAME stub tie, so the rail is named once, not once per part.
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "buck", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "U2", .component = "mcu", .value = "", .footprint = "", .symbol = "" },
+    };
+    const vreg = [_]PinRef{ .{ .ref_des = "U1", .pin = "6" }, .{ .ref_des = "U2", .pin = "1" } };
+    const nets = [_]env_mod.Net{.{ .name = "VREG", .pins = &vreg }};
+    const block: env_mod.DesignBlock = .{
+        .name = "two-turned-returns",
+        .instances = &instances,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var ctx = RenderCtx.init(a);
+    try ctx.setup(&block);
+    ctx.render_scratch.functional_layout = true;
+    try ctx.render_scratch.functional_left_pin_y.put(a, "VREG", .{
+        .cy = 156,
+        .first_stub_y = 136,
+        .last_stub_y = 176,
+        .stub_x = 312,
+        .produces_rail = true,
+    });
+
+    const from_above = [_]BranchBody{.{ .end_x = 312.0, .cy = 116.0, .terminal = "VREG", .inline_direct_lane = true }};
+    const from_below = [_]BranchBody{.{ .end_x = 312.0, .cy = 192.0, .terminal = "VREG", .inline_direct_lane = true }};
+    var deferred: DeferredTerminals = .{};
+    try deferred.runs.append(a, .{ .results = &from_above, .term_x = 212.0, .side = .left, .source_net = "FB", .source_is_feedback = true });
+    try deferred.runs.append(a, .{ .results = &from_below, .term_x = 212.0, .side = .left, .source_net = "PG", .source_is_feedback = false });
+
+    var got: std.Io.Writer.Allocating = .init(a);
+    try renderDeferredTerminals(&ctx, &got.writer, &deferred, true);
+
+    // Each lands on the stub nearest it — the first stub from above, the last
+    // from below — and only the first one carries the name.
+    try testing.expect(std.mem.indexOf(u8, got.written(), "points=\"312.0,116.0 312.0,116.0 312.0,136.0 312.0,136.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, got.written(), "points=\"312.0,192.0 312.0,192.0 312.0,176.0 312.0,176.0\"") != null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, got.written(), ">VREG</text>"));
+    try testing.expect(std.mem.indexOf(u8, got.written(), "x=\"294.0\" y=\"120.0\" text-anchor=\"end\"") != null);
 }
 
 // spec: render_svg - The Original schematic view keeps feedback endpoints label-connected without an outside cross-pin rail

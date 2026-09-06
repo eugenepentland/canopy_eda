@@ -5555,6 +5555,7 @@ Public functions: parseSchematicView, renderToHtml, setupRenderCtx, renderHubSvg
 - A passive bridging two single-hub-pin nets has no anchor and keeps default placement
 - Schematic pages expose a URL-backed Sequential and Functional slider with Functional as the default a bare URL renders
 - Functional pin ordering terminates when several pins share one earlier partner
+- A pull-up onto a rail the hub itself produces is ordered directly in front of the producing group, which keeps its own place
 - The schematic page renders no thermal panel, linking out to /thermal/:name instead, so the page reads nothing but the design's own .sexp
 - Each sub circuit card links out to its PCB layout in a new tab rather than embedding one, so no sub circuit opens a layout from the schematic page
 - A sub circuit backed by a reusable module links to that module's own layout editor, and a path- or inline-sourced one to the design-scoped view of its slice
@@ -5729,8 +5730,15 @@ Public functions: renderSchematic
 - A Functional turned series return shares the destination rail's x-coordinate so VTUNE closes straight down without an outside detour
 - A sub-block's path-qualified supply rail is still a supply, not a signal return
 - Pull-ups between neighbouring pin groups turn vertical on the pin-stub column and land on the destination group's nearest stub
+- A return to a shared rail turns onto the pin group where this hub produces that rail
+- A feedback divider's upper leg turns onto the regulator's own output stub instead of an outside lane
+- Two returns turning onto one output row name the shared rail once
 - An outside direct-return lane is pushed past any net label drawn on a row it spans
 - Group heights follow render order: a spoke shared with an earlier group is counted there, and the own net's row is reserved once an earlier group draws a spoke on it
+- A turned return lands on its rail's stub tie and the rail's own labelled row, whether absorbed into the column or left above the stubs, names the net exactly once
+- A pin named OUT / OUTS / VOUT marks its hub as the producer of the rail on it
+- A pin group produces its rail when any of its pins is an output pin
+- A pull-up onto a rail the hub produces is functionally linked to the producing group, so the column split cannot separate the two
 - A vertical passive labels away from its hub: left of left-side parts and right of right-side parts
 - Functional pin rows put the pin's own net before a ground shunt so the shunt draws below the pin; Original remains alphabetical
 - Identical decoupling capacitors each render as their own labeled schematic symbol

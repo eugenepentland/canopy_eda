@@ -328,6 +328,15 @@ pub const SplitGroups = struct {
     right_heights: []f64,
 };
 
+/// Whether this pin group's function names say the hub produces the rail on
+/// it (`draw.isRailOutputPinLabel`): a regulator's OUT / VOUT pins.
+pub fn groupProducesRail(group: PinGroup) bool {
+    for (group.stub_labels) |label| {
+        if (draw.isRailOutputPinLabel(label)) return true;
+    }
+    return false;
+}
+
 /// Whether a net joins two pin groups for layout purposes — a signal, or a
 /// supply private to this hub. The one rule, shared with `connection`. Only
 /// a DIRECT reach (`groupReachesNet`) uses it: the island walk below still
@@ -439,7 +448,22 @@ fn groupCanonicalNet(self: *RenderCtx, hub_ref: []const u8, group: PinGroup) Ren
     return "";
 }
 
-fn groupReachesNet(self: *RenderCtx, hub_ref: []const u8, group: PinGroup, target_net: []const u8) RenderError!bool {
+/// Whether `group`'s spokes reach `target`'s canonical net `target_net`. The
+/// net has to be one that joins two rows for layout (`functionalLayoutNet`) —
+/// or a rail this hub PRODUCES on `target`: an LDO's PG pull-up lands on the
+/// output node, so the two rows are one unit even though the output rail is
+/// shared with the rest of the board and keeps its label. Mirrors the
+/// produced-rail relation `render_html.relatedTargetIndex` orders by, so the
+/// column split cannot re-separate what the ordering pass just paired.
+fn groupReachesGroupNet(
+    self: *RenderCtx,
+    hub_ref: []const u8,
+    group: PinGroup,
+    target: PinGroup,
+    target_net: []const u8,
+) RenderError!bool {
+    if (target_net.len == 0) return false;
+    const produces_rail = groupProducesRail(target);
     for (group.conns) |conn| {
         const spoke = switch (conn.endpoint) {
             .pin => |pin| pin,
@@ -447,7 +471,8 @@ fn groupReachesNet(self: *RenderCtx, hub_ref: []const u8, group: PinGroup, targe
         };
         if (!self.spoke_set.contains(spoke.ref_des)) continue;
         const terminal = baseNetName(try connection.getConnTerminal(self, conn.endpoint, hub_ref, conn.pin));
-        if (functionalLayoutNet(self, terminal) and std.mem.eql(u8, terminal, target_net)) return true;
+        if (!std.mem.eql(u8, terminal, target_net)) continue;
+        if (produces_rail or functionalLayoutNet(self, terminal)) return true;
     }
     return false;
 }
@@ -458,7 +483,8 @@ fn groupsFunctionallyLinked(self: *RenderCtx, hub_ref: []const u8, a: PinGroup, 
     if (groupsSharePassiveAnchor(self, a, b)) return true;
     const a_net = try groupCanonicalNet(self, hub_ref, a);
     const b_net = try groupCanonicalNet(self, hub_ref, b);
-    return try groupReachesNet(self, hub_ref, a, b_net) or try groupReachesNet(self, hub_ref, b, a_net);
+    return try groupReachesGroupNet(self, hub_ref, a, b, b_net) or
+        try groupReachesGroupNet(self, hub_ref, b, a, a_net);
 }
 
 /// Split an ordered run of pin groups at the prefix whose visual height is
@@ -712,6 +738,77 @@ pub fn estimateBranchCount(self: *RenderCtx, spoke_rd: []const u8, hub_ref: []co
         }
     }
     return 1;
+}
+
+// spec: render_svg - A pin group produces its rail when any of its pins is an output pin
+test "a pin group produces its rail when any of its pins is an output pin" {
+    const out_group: PinGroup = .{ .display_name = "OUT", .pin_numbers = "9,10", .stub_labels = &.{ "OUTS", "OUT" }, .conns = &.{} };
+    const in_group: PinGroup = .{ .display_name = "IN", .pin_numbers = "1,2", .stub_labels = &.{ "IN_1", "IN_2" }, .conns = &.{} };
+    try testing.expect(groupProducesRail(out_group));
+    try testing.expect(!groupProducesRail(in_group));
+}
+
+// spec: render_svg - A pull-up onto a rail the hub produces is functionally linked to the producing group, so the column split cannot separate the two
+test "a pull-up onto a produced rail links its group to the output group" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    // U1 produces V_5V on OUT and consumes V_3V3 on VDD; U2 and U3 sit on both,
+    // so NEITHER rail is private to this hub and `functionalLayoutNet` rejects
+    // both. Only the produced one links its pull-up: PG's resistor lands on the
+    // output node, while CTRL's is just one more consumer of a board rail.
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ldo", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "U2", .component = "mcu", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "U3", .component = "adc", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "R_PG", .component = "res-0402", .value = "100k", .footprint = "", .symbol = "generic-res" },
+        .{ .ref_des = "R_CTRL", .component = "res-0402", .value = "10k", .footprint = "", .symbol = "generic-res" },
+    };
+    const pg = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "R_PG", .pin = "1" } };
+    const ctrl = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "R_CTRL", .pin = "1" } };
+    const v_5v = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "2" },
+        .{ .ref_des = "R_PG", .pin = "2" },
+        .{ .ref_des = "U2", .pin = "1" },
+        .{ .ref_des = "U3", .pin = "1" },
+    };
+    const v_3v3 = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "4" },
+        .{ .ref_des = "R_CTRL", .pin = "2" },
+        .{ .ref_des = "U2", .pin = "2" },
+        .{ .ref_des = "U3", .pin = "2" },
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "ldo/PG", .pins = &pg },
+        .{ .name = "ldo/CTRL", .pins = &ctrl },
+        .{ .name = "V_5V", .pins = &v_5v },
+        .{ .name = "V_3V3", .pins = &v_3v3 },
+    };
+    const block: env_mod.DesignBlock = .{
+        .name = "produced-rail-link",
+        .instances = &instances,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    var ctx = RenderCtx.init(allocator);
+    try ctx.setup(&block);
+    var pin_names: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try pin_names.put(allocator, "1", "PG");
+    try pin_names.put(allocator, "2", "OUT");
+    try pin_names.put(allocator, "3", "CTRL");
+    try pin_names.put(allocator, "4", "VDD");
+    const pins = [_][]const u8{ "1", "2", "3", "4" };
+    const groups = try groupHubPinsFunctional(&ctx, &pins, ctx.adjacency.get("U1").?.items, &pin_names);
+    try testing.expectEqual(@as(usize, 4), groups.len);
+
+    try testing.expect(try groupsFunctionallyLinked(&ctx, "U1", groups[0], groups[1]));
+    try testing.expect(try groupsFunctionallyLinked(&ctx, "U1", groups[1], groups[0]));
+    try testing.expect(!try groupsFunctionallyLinked(&ctx, "U1", groups[2], groups[3]));
 }
 
 // spec: render_svg - Group heights follow render order: a spoke shared with an earlier group is counted there, and the own net's row is reserved once an earlier group draws a spoke on it
