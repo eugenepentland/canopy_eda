@@ -77,7 +77,24 @@ pub const FunctionalPinRow = struct {
     first_stub_y: f64,
     last_stub_y: f64,
     stub_x: f64,
+    /// The row fan this group was given room for (`hub.groupHeights`), which
+    /// is where its connection bus will run: a turned return needs one body of
+    /// room before the nearest of these rows.
+    first_row_y: f64,
+    last_row_y: f64,
     produces_rail: bool = false,
+};
+
+/// The rows one pin group actually drew, recorded when it rendered: the span
+/// of its connection bus (one row: the row's own wire), on the bus column. A
+/// turned return lands on the nearest end of this, so the net runs straight
+/// down into the group. `rows == 0` when every connection was drawn from
+/// another group's side and nothing is on the bus column at all.
+pub const RenderedRowSpan = struct {
+    first_y: f64,
+    last_y: f64,
+    rows: usize,
+    bus_x: f64,
 };
 
 const RenderScratch = struct {
@@ -100,6 +117,10 @@ const RenderScratch = struct {
     /// its lane runs straight into the neighbouring group's stub tie.
     functional_series_column_x: ?f64 = null,
     rendered_connection_end_y: ?f64 = null,
+    /// `RenderedRowSpan` per `<side>:<net>` for the current hub, filled as each
+    /// pin group renders and read by the deferred pass that closes turned
+    /// returns onto their destination.
+    rendered_row_spans: std.StringHashMapUnmanaged(RenderedRowSpan) = .empty,
 };
 
 // ── Flat types ────────────────────────────────────────────────────────
