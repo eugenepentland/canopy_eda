@@ -6611,6 +6611,9 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - independently allocated fabrication snapshots compare their identity strings by value
 - draft archives are visibly non-fabrication packages and contain no nested board release ZIPs
 - archive members are safe, unique project-relative paths, and draft validation rejects CAM and nested ZIP payloads
+- a rejected manifest reports which field was wrong, what was expected and what was found
+- a diagnostic renders the offending field and value, and renders nothing when it recorded nothing
+- the system-check CLI reports the rejected field rather than the error name alone
 - optional active documents may be absent without blocking release, while every required active document and required checklist must pass
 - duplicate attestation or source paths are accepted only when their bytes agree
 - the release manifest states which self-referential inventory and checksum members it excludes

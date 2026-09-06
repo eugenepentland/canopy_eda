@@ -6251,6 +6251,7 @@ src/system_review.zig::attestInput | fn attestInput( allocator: std.mem.Allocato
 src/system_review.zig::canonicalAttestation | fn canonicalAttestation( allocator: std.mem.Allocator, attestation: Attestation, ) std.mem.Allocator.Error!Attestation
 src/system_review.zig::canonicalSpecDigest | fn canonicalSpecDigest( allocator: std.mem.Allocator, spec: SystemSpec, ) std.mem.Allocator.Error![64]u8
 src/system_review.zig::clear | fn clear(self: *Diagnostic) void
+src/system_review.zig::detail | fn detail(self: Diagnostic, buf: []u8) []const u8
 src/system_review.zig::freeCanonicalAttestation | fn freeCanonicalAttestation(allocator: std.mem.Allocator, attestation: Attestation) void
 src/system_review.zig::generatedSection | fn generatedSection(id: []const u8) ?GeneratedSection
 src/system_review.zig::generated_region_close value
@@ -6343,6 +6344,7 @@ src/system_review_package.zig::draft | fn draft( allocator: std.mem.Allocator, p
 src/system_review_package.zig::draftDossierHtml | fn draftDossierHtml( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) DossierHtmlError![]const u8
 src/system_review_package.zig::parseSexpContract | fn parseSexpContract( allocator: std.mem.Allocator, project_dir: []const u8, source: []const u8, depth: ContractDepth, diagnostic: *system_review.Diagnostic, ) ParseContractError!ParsedContract
 src/system_review_package.zig::readiness | fn readiness( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) ReadinessError!Readiness
+src/system_review_package.zig::readinessDiagnosed | fn readinessDiagnosed( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, diagnostic: *system_review.Diagnostic, ) ReadinessError!Readiness
 src/system_review_package.zig::release | fn release( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: ReleaseOptions, renderer: fab_service.AssemblyRenderer, ) ReleaseError!PackageResult
 src/system_review_pdf.zig::Error value
 src/system_review_pdf.zig::Options struct_

@@ -425,6 +425,20 @@ pub const Diagnostic = struct {
         self.* = .{};
     }
 
+    /// The two lines a rejection is worth showing a person, or "" when this
+    /// diagnostic records nothing.
+    ///
+    /// A refused manifest reaches its caller as a bare error name, and the only
+    /// way to find the offending field used to be reading this file. Rendered
+    /// into a caller-owned buffer, and truncated rather than failed: a clipped
+    /// explanation beats an error name on its own.
+    pub fn detail(self: Diagnostic, buf: []u8) []const u8 {
+        if (self.code == .none) return "";
+        return std.fmt.bufPrint(buf, "\n  {s}: {s}\n  got: \"{s}\"", .{
+            self.field, self.message, self.value,
+        }) catch buf[0..0];
+    }
+
     fn set(
         self: *Diagnostic,
         code: DiagnosticCode,
@@ -2131,4 +2145,23 @@ test "the brief layer enters the canonical digest only where a contract declares
     for ([_]SystemSpec{ concept, briefed, goal_bearing }) |changed| {
         try std.testing.expect(!std.mem.eql(u8, &base, &try canonicalSpecDigest(allocator, changed)));
     }
+}
+
+// spec: system-review - a diagnostic renders the offending field and value, and renders nothing when it recorded nothing
+test "a diagnostic renders its field and value, or nothing at all" {
+    var buf: [256]u8 = undefined;
+    const empty: Diagnostic = .{};
+    try std.testing.expectEqualStrings("", empty.detail(&buf));
+
+    var recorded: Diagnostic = .{};
+    recorded.set(.invalid_identifier, "boards[].role", "board role must be a portable identifier", "not an id");
+    const text = recorded.detail(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, text, "boards[].role") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "portable identifier") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "not an id") != null);
+
+    // A buffer too small truncates rather than failing: the caller is on its
+    // way to a fatal exit and a clipped sentence beats an error name alone.
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), recorded.detail(&tiny).len);
 }

@@ -39,6 +39,7 @@ const req_design_rules = @import("req_design_rules.zig");
 const notes = @import("serve/notes.zig");
 const thermal_api = @import("serve/thermal_api.zig");
 const system_review_package = @import("system_review_package.zig");
+const system_review = @import("system_review.zig");
 
 const InspectCommandError = std.mem.Allocator.Error || std.Io.Writer.Error;
 
@@ -431,8 +432,13 @@ pub fn checkReport(allocator: std.mem.Allocator, args: []const []const u8) Comma
 pub fn cmdSystemCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void {
     const parsed = parseSystemReviewArgs(args, false) catch exit.fatal(system_check_usage, .{});
     if (parsed.name.len == 0) exit.fatal(system_check_usage, .{});
-    const result = system_review_package.readiness(allocator, parsed.project_dir, parsed.name) catch |err| {
-        exit.fatal("System review failed: {s}\n", .{@errorName(err)});
+    // The validator records the field, what it expected and what it found; the
+    // error name alone used to be all a caller saw, so a mistyped field in a
+    // system contract could only be found by reading the validator's source.
+    var diagnostic: system_review.Diagnostic = .{};
+    var detail_buf: [512]u8 = undefined;
+    const result = system_review_package.readinessDiagnosed(allocator, parsed.project_dir, parsed.name, &diagnostic) catch |err| {
+        exit.fatal("System review failed: {s}{s}\n", .{ @errorName(err), diagnostic.detail(&detail_buf) });
     };
     try std.Io.File.stdout().writeStreamingAll(infra_fs.currentIo(), result.json);
     try std.Io.File.stdout().writeStreamingAll(infra_fs.currentIo(), "\n");
@@ -1698,4 +1704,45 @@ test "evalForExport pins minted ids into the design source" {
     const after2 = try infra_fs.cwd().readFileAlloc(alloc, design_path, 1 << 20);
     defer alloc.free(after2);
     try std.testing.expectEqualStrings(after1, after2);
+}
+
+// spec: system-review - the system-check CLI reports the rejected field rather than the error name alone
+test "cmdSystemCheck reports the rejected field rather than the error name alone" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/demo");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/demo/system.sexp",
+        .data =
+        \\(system "demo"
+        \\  (title "Diagnostic demo")
+        \\  (part-number "D-1")
+        \\  (revision "A")
+        \\  (status design)
+        \\  (board "board"
+        \\    (role "not a portable id")
+        \\    (source "src/board.sexp")
+        \\    (part-number "PCB-1")
+        \\    (revision "A")
+        \\    (layout "one")))
+        ,
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", allocator);
+
+    // The exact call `cmdSystemCheck` makes, and the exact text it prints on the
+    // failure path: the error name alone said nothing about WHICH field was
+    // wrong, which is the whole point of threading the diagnostic out.
+    var diagnostic: system_review.Diagnostic = .{};
+    try std.testing.expectError(
+        error.InvalidManifest,
+        system_review_package.readinessDiagnosed(allocator, project, "demo", &diagnostic),
+    );
+    var buf: [512]u8 = undefined;
+    const detail = diagnostic.detail(&buf);
+    try std.testing.expect(std.mem.indexOf(u8, detail, "boards[].role") != null);
+    try std.testing.expect(std.mem.indexOf(u8, detail, "not a portable id") != null);
 }
