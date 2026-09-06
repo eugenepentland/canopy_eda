@@ -328,6 +328,15 @@ pub const SplitGroups = struct {
     right_heights: []f64,
 };
 
+/// Whether this pin group's function names say the hub produces the rail on
+/// it (`draw.isRailOutputPinLabel`): a regulator's OUT / VOUT pins.
+pub fn groupProducesRail(group: PinGroup) bool {
+    for (group.stub_labels) |label| {
+        if (draw.isRailOutputPinLabel(label)) return true;
+    }
+    return false;
+}
+
 /// Whether a net joins two pin groups for layout purposes — a signal, or a
 /// supply private to this hub. The one rule, shared with `connection`. Only
 /// a DIRECT reach (`groupReachesNet`) uses it: the island walk below still
@@ -712,6 +721,14 @@ pub fn estimateBranchCount(self: *RenderCtx, spoke_rd: []const u8, hub_ref: []co
         }
     }
     return 1;
+}
+
+// spec: render_svg - A pin group produces its rail when any of its pins is an output pin
+test "a pin group produces its rail when any of its pins is an output pin" {
+    const out_group: PinGroup = .{ .display_name = "OUT", .pin_numbers = "9,10", .stub_labels = &.{ "OUTS", "OUT" }, .conns = &.{} };
+    const in_group: PinGroup = .{ .display_name = "IN", .pin_numbers = "1,2", .stub_labels = &.{ "IN_1", "IN_2" }, .conns = &.{} };
+    try testing.expect(groupProducesRail(out_group));
+    try testing.expect(!groupProducesRail(in_group));
 }
 
 // spec: render_svg - Group heights follow render order: a spoke shared with an earlier group is counted there, and the own net's row is reserved once an earlier group draws a spoke on it

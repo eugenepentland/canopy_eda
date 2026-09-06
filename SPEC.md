@@ -5729,6 +5729,9 @@ Public functions: renderSchematic
 - Pull-ups between neighbouring pin groups turn vertical on the pin-stub column and land on the destination group's nearest stub
 - An outside direct-return lane is pushed past any net label drawn on a row it spans
 - Group heights follow render order: a spoke shared with an earlier group is counted there, and the own net's row is reserved once an earlier group draws a spoke on it
+- A turned return lands on its rail's stub tie and the rail's own labelled row, whether absorbed into the column or left above the stubs, names the net exactly once
+- A pin named OUT / OUTS / VOUT marks its hub as the producer of the rail on it
+- A pin group produces its rail when any of its pins is an output pin
 - A vertical passive labels away from its hub: left of left-side parts and right of right-side parts
 - Functional pin rows put the pin's own net before a ground shunt so the shunt draws below the pin; Original remains alphabetical
 - Identical decoupling capacitors each render as their own labeled schematic symbol

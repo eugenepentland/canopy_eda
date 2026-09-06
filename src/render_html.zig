@@ -9,7 +9,6 @@ const std = @import("std");
 const source_transaction = @import("infra/source_transaction.zig");
 const json_writer = @import("json_writer.zig");
 const env_mod = @import("eval/env.zig");
-const rails_mod = @import("eval/rails.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const infra_fs = @import("infra/fs.zig");
 const ast = @import("sexpr/ast.zig");
@@ -684,13 +683,7 @@ pub fn setupRenderCtx(allocator: Allocator, block: *const DesignBlock) std.mem.A
     return ctx;
 }
 
-fn isSupplyLikeSchematicNet(net: []const u8) bool {
-    if (draw.isGroundNet(net)) return true;
-    for (rails_mod.schematic_supply_prefixes) |prefix| {
-        if (std.ascii.startsWithIgnoreCase(net, prefix)) return true;
-    }
-    return false;
-}
+const isSupplyLikeSchematicNet = draw.isSupplyLikeNet;
 
 fn appendSvgAdjacency(ctx: *RenderCtx, ref_des: []const u8, entry: AdjEntry) !void {
     const gop = try ctx.adjacency.getOrPut(ctx.allocator, ref_des);
