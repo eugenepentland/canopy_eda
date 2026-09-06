@@ -14,7 +14,7 @@
 13 src/eval/env.zig|DesignRulesSpec
 9 src/eval/env.zig|ElectricalDecl
 28 src/eval/env.zig|Instance
-13 src/eval/env.zig|NetClassSpec
+14 src/eval/env.zig|NetClassSpec
 8 src/eval/env.zig|PdnIntent
 10 src/eval/env.zig|PlaceholderPart
 13 src/eval/env.zig|PlanWave
@@ -60,8 +60,8 @@
 8 src/placement/drc.zig|Violation
 8 src/placement/gap_policy.zig|GapOptions
 14 src/placement/geometry.zig|Pad
-12 src/placement/net_rules.zig|NetRule
-9 src/placement/net_rules.zig|Rf
+13 src/placement/net_rules.zig|NetRule
+10 src/placement/net_rules.zig|Rf
 9 src/placement/optimizer.zig|BoardRules
 9 src/placement/optimizer.zig|Breakdown
 13 src/placement/optimizer.zig|DesignRules
@@ -129,5 +129,5 @@
 8 src/system_review.zig|Brief
 9 src/system_review.zig|DocumentSpec
 8 src/system_review.zig|GoalSpec
-9 src/system_review.zig|SystemSpec
+12 src/system_review.zig|SystemSpec
 8 src/thermal_scenarios.zig|Row
