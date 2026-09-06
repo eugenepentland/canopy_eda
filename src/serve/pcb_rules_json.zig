@@ -124,6 +124,10 @@ pub fn writeNetClasses(w: *std.Io.Writer, p: optimizer.Placement) std.Io.Writer.
             if (rule.return_path.declared) "true" else "false",
         });
         try json_writer.writeScriptString(w, rule.return_path.reference_net);
+        try w.print(",\"voltage_drop_limit_v\":{d},\"copper_temperature_c\":{d},\"voltage_return_net\":", .{
+            rule.voltage_drop.limit_v, rule.voltage_drop.copper_temperature_c,
+        });
+        try json_writer.writeScriptString(w, rule.voltage_drop.return_net);
         try w.print(",\"return_path_stitch_radius_mm\":{d},\"return_path_max_loop_area_mm2\":{d},\"conflict\":{s}}}", .{
             rule.return_path.stitch_radius_mm,
             rule.return_path.max_loop_area_mm2,

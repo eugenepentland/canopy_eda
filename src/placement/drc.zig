@@ -15,6 +15,7 @@ const router = @import("router.zig");
 const drc_diffpair = @import("drc_diffpair.zig");
 const drc_keepout = @import("drc_keepout.zig");
 const drc_perimeter_keepout = @import("drc_perimeter_keepout.zig");
+const drc_power_voltage = @import("drc_power_voltage.zig");
 const drc_power_width = @import("drc_power_width.zig");
 const drc_board_keepout = @import("drc_board_keepout.zig");
 const drc_match = @import("drc_match.zig");
@@ -75,6 +76,8 @@ pub const Kind = enum {
     /// this very track was measured to carry. Fabrication geometry remains
     /// legal, but the copper cannot carry its proven load: an error.
     power_width,
+    power_voltage_drop,
+    power_voltage_unverified,
     /// Routed power copper is below the whole-rail current ENVELOPE, used
     /// because the per-branch solve failed (no source terminal, a disconnected
     /// load, a singular graph — the finding carries the status name as its
@@ -242,7 +245,7 @@ pub fn defaultSeverity(k: Kind) Severity {
         // add_tracks / close_open_nets / the fence ratchet and the fab gate, and
         // an unproven width must not lock any of them: the solved twin
         // (`power_width`) stays an error, this one reports and explains itself.
-        .power_width_envelope => .warn,
+        .power_width_envelope, .power_voltage_unverified => .warn,
         // An RF keepout intrusion is likewise a preference: the board still
         // builds. Error severity is what `drc.errorCount` gates — add_tracks,
         // close_open_nets and the fence ratchet all refuse to write above zero —
@@ -875,6 +878,7 @@ fn checkImpl(
         .zones = topology_zones,
     });
     try drc_power_via.report(arena, &out, current_routed, solved_power.vias);
+    try drc_power_voltage.report(arena, &out, placement, solved_power.voltage);
     // Topology still needs the private chords as physical support (a curved or
     // flared path may touch something its compact handle does not), but finding
     // identity must remain in the persisted track domain.  The topology checker
@@ -5278,7 +5282,7 @@ fn firstUncoveredWarningKind(seen: KindSet) ?Kind {
         // `via_current_envelope` joins them for the same reason from the other
         // end: it needs a board with DECLARED rail current, which no fixture
         // here has, and `drc_power_via.zig` proves its severity on one.
-        if (k == .via_current_envelope) continue;
+        if (k == .via_current_envelope or k == .power_voltage_unverified) continue;
         if (k == .bypass_open or k == .reference_plane_gap or
             k == .reference_transition or k == .loop_area) continue;
         if (defaultSeverity(k) == .warn and !seen[i]) return k;

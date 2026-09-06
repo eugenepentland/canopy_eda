@@ -1034,7 +1034,7 @@ fn adaptPowerTracks(board: router.CleanupBoard) std.mem.Allocator.Error!bool {
             const target = if (targets.items.len > index)
                 targets.items[index]
             else if (track.width > floor + router.clearance_eps) 0 else net_limits.limits.net_target;
-            if (target <= floor + eps) {
+            if (target <= track.width + eps) {
                 try fixed.append(arena, track);
                 continue;
             }
@@ -1047,7 +1047,7 @@ fn adaptPowerTracks(board: router.CleanupBoard) std.mem.Allocator.Error!bool {
             const run = try shapeRun(arena, .{
                 .probe = probe,
                 .track = track,
-                .floor = floor,
+                .floor = @max(floor, track.width),
                 .target = target,
                 .start = start,
                 .end = end,

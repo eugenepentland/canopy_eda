@@ -36,6 +36,7 @@ pub const NetRule = struct {
         conflict: bool = false,
     } = .{},
     width: f64 = 0,
+    voltage_drop: env.NetClassSpec.VoltageDrop = .{},
     /// Resolved SMD pad-local neck profile. The router keeps `width` as the
     /// nominal trunk geometry and uses this narrower profile only at lands.
     pad_neck: env.NetClassSpec.PadNeck = .{},
@@ -261,6 +262,12 @@ const ProfileRank = struct {
     }
 };
 
+fn mergeVoltageDrop(out: *NetRule, p: ClassProfileDecl, rank: *ProfileRank) void {
+    if (p.spec.voltage_drop.limit_v == 0 or !rank.better(p)) return;
+    out.voltage_drop = p.spec.voltage_drop;
+    rank.take(p);
+}
+
 fn mergePowerBranchWidth(out: *NetRule, p: ClassProfileDecl, rank: *ProfileRank) void {
     if (p.spec.pad_neck.power_branch_width <= 0 or !rank.better(p)) return;
     out.pad_neck.power_branch_width = p.spec.pad_neck.power_branch_width;
@@ -320,6 +327,7 @@ fn profileRule(profiles: []const ClassProfileDecl, win: WinningClass, conflict: 
     var out = NetRule{ .class = .{ .name = win.class_name, .source = win.source, .conflict = conflict } };
     var width_rank = ProfileRank{};
     var power_branch_width_rank = ProfileRank{};
+    var voltage_rank = ProfileRank{};
     var neck_width_rank = ProfileRank{};
     var neck_length_rank = ProfileRank{};
     var taper_length_rank = ProfileRank{};
@@ -384,6 +392,7 @@ fn profileRule(profiles: []const ClassProfileDecl, win: WinningClass, conflict: 
             width_rank.take(p);
         }
         mergePowerBranchWidth(&out, p, &power_branch_width_rank);
+        mergeVoltageDrop(&out, p, &voltage_rank);
         if (p.spec.pad_neck.width > 0 and neck_width_rank.better(p)) {
             out.pad_neck.width = p.spec.pad_neck.width;
             neck_width_rank.take(p);
@@ -921,4 +930,15 @@ test "keepout escape collapses to the resolved rf escape unless authored" {
             try std.testing.expectEqual(@as(f64, 0), rule.rf.keepout_escape_mm);
         }
     }
+}
+
+// spec: placement/power-routing - the destination class voltage budget overrides the child budget as one policy including its return reference
+test "voltage budget resolves destination override without mixing return nets" {
+    const profiles = [_]ClassProfileDecl{
+        .{ .spec = .{ .name = "power", .voltage_drop = .{ .limit_v = 0.1, .return_net = "child/GND" } }, .source = "child", .depth = 1, .order = 0 },
+        .{ .spec = .{ .name = "power", .voltage_drop = .{ .limit_v = 0.05, .return_net = "GND" } }, .source = "", .depth = 0, .order = 1 },
+    };
+    const rule = profileRule(&profiles, .{ .class_name = "power", .source = "", .depth = 0, .order = 0 }, false);
+    try std.testing.expectEqual(@as(f64, 0.05), rule.voltage_drop.limit_v);
+    try std.testing.expectEqualStrings("GND", rule.voltage_drop.return_net);
 }

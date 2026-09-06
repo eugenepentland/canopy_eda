@@ -30,6 +30,8 @@ pub fn kindStr(k: drc.Kind) []const u8 {
         .min_drill => "min drill",
         .track_width => "track width",
         .power_width => "power width",
+        .power_voltage_drop => "power voltage drop",
+        .power_voltage_unverified => "power voltage unverified",
         .power_width_envelope => "power width (envelope)",
         .via_current => "via current",
         .via_current_envelope => "via current envelope",
@@ -94,7 +96,7 @@ pub const drawer_groups = [_]DrawerGroup{
     .{
         .title = "Electrical quality",
         .blurb = "Power capacity, controlled-impedance, and RF routing discipline.",
-        .kinds = &.{ .power_width, .power_width_envelope, .via_current, .via_current_envelope, .diff_uncoupled, .diff_skew, .length_mismatch, .sharp_bend, .ground_via_distance, .reference_plane_gap, .reference_transition, .loop_area, .bypass_open },
+        .kinds = &.{ .power_voltage_drop, .power_voltage_unverified, .power_width, .power_width_envelope, .via_current, .via_current_envelope, .diff_uncoupled, .diff_skew, .length_mismatch, .sharp_bend, .ground_via_distance, .reference_plane_gap, .reference_transition, .loop_area, .bypass_open },
     },
     .{
         .title = "Keepouts",

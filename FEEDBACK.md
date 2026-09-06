@@ -940,3 +940,8 @@ New from the wave:
 - **friction:** The final release had passed its tests and build, then waited several minutes for a globally quiet host while unrelated worktrees compiled. The owner expanded the routing task during that wait, requiring the pending gate to stop. A resumable exact-commit browser stage would avoid repeating completed tests when only the performance window was unavailable.
 - **idea:** Keep the existing browser budgets unchanged, but expose the already supported `NETLISP_PERF_HOST_WAIT=0` option in the release workflow documentation so an agent can attempt real measurements under contention instead of repeatedly reporting a quiet-host wait.
 - **status:** observed; no release thresholds changed
+
+## 2026-09-06 · codex · power voltage-drop budgets
+- **friction:** Focused `zig build test -Dtest-filter='voltage budget'` iterations still ran the deployment-script simulations, Ward-auth smoke test and example export when compilation or a single assertion failed. Those independent gates repeatedly dominated the sub-second electrical tests.
+- **idea:** Add a documented compile-first, focused-test target for the inner loop; retain the complete external checks in `prepare-release.sh`.
+- **status:** observed; no verification gates bypassed or relaxed.

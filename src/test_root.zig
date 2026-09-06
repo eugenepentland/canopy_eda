@@ -329,6 +329,7 @@ test {
     _ = @import("placement/power_branch_width.zig");
     _ = @import("placement/power_capacity.zig");
     _ = @import("placement/power_current.zig");
+    _ = @import("placement/power_voltage_regression.zig");
     _ = @import("placement/port_escape.zig");
     _ = @import("placement/pose_math.zig");
     _ = @import("placement/pose_snapshot.zig");

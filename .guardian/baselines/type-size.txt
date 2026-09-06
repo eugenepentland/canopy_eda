@@ -76,6 +76,8 @@
 15 src/placement/pdn_impedance.zig|Rail
 8 src/placement/plan_resolve.zig|ResolvedWave
 8 src/placement/pour.zig|Grid
+8 src/placement/power_current.zig|Axis
+8 src/placement/power_integrity.zig|LoadFlow
 8 src/placement/progress.zig|Inputs
 9 src/placement/route_policy.zig|Guides
 11 src/placement/route_policy.zig|Options

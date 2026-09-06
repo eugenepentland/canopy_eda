@@ -30,6 +30,7 @@ const power_budget = @import("../eval/power_budget.zig");
 const net_names = @import("../net_name.zig");
 const numeric = @import("../numeric.zig");
 const power_current = @import("power_current.zig");
+const power_voltage = @import("power_voltage.zig");
 const net_graph = @import("net_graph.zig");
 const pad_shape = @import("pad_shape.zig");
 const pour = @import("pour.zig");
@@ -252,6 +253,7 @@ pub const LoadFlow = struct {
     complete: bool,
     /// Per-axis placement outcome.
     placed: Placed,
+    drop_v: struct { typical: ?f64 = null, maximum: ?f64 = null } = .{},
 };
 
 /// One current axis's outcome for a whole rail.
@@ -921,6 +923,20 @@ fn solveCurrent(
     demand: Demand,
     poured: Poured,
 ) std.mem.Allocator.Error!Solved {
+    return solveTerminals(alloc, placement, routed, family, .{ .demand = demand }, poured);
+}
+
+const Terminals = struct { source: []const power_current.Contact, loads: []const power_current.Load };
+
+fn solveTerminals(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    family: Family,
+    terminals: struct { demand: Demand = .{}, override: ?Terminals = null },
+    poured: Poured,
+) std.mem.Allocator.Error!Solved {
+    const demand = terminals.demand;
     const plating_mm = placement.rules.physical.via_plating_mm;
     var segments: std.ArrayList(power_current.Segment) = .empty;
     for (routed.tracks, 0..) |track, route_index| {
@@ -977,16 +993,26 @@ fn solveCurrent(
         .source = .{ .contacts = sources.contacts, .complete = sources.contacts.len > 0 },
         .loads = loads,
     };
+    if (terminals.override) |replacement| {
+        flow.source = .{ .contacts = replacement.source, .complete = replacement.source.len > 0 };
+        flow.loads = replacement.loads;
+    }
     // The solver's own centreline snapping is tighter than the fabrication
     // contact policy DRC topology uses, so hand it the canonical junctions —
     // but only for a net that will actually be solved, since that sweep is
     // quadratic in the net's copper and ground would pay it for nothing.
     if (power_current.needsGraph(flow)) flow.joins = try net_graph.joinsFor(alloc, flow, poured.lands);
     const result = try power_current.solve(alloc, flow);
-    for (resolutions, 0..) |*resolution, i| resolution.placed = .{
-        .typical = i < result.typical.placed.len and result.typical.placed[i],
-        .maximum = i < result.maximum.placed.len and result.maximum.placed[i],
-    };
+    for (resolutions, 0..) |*resolution, i| {
+        resolution.placed = .{
+            .typical = i < result.typical.placed.len and result.typical.placed[i],
+            .maximum = i < result.maximum.placed.len and result.maximum.placed[i],
+        };
+        resolution.drop_v = .{
+            .typical = if (i < result.typical.load_drop_v.len) result.typical.load_drop_v[i] else null,
+            .maximum = if (i < result.maximum.load_drop_v.len) result.maximum.load_drop_v[i] else null,
+        };
+    }
     const disconnected = result.typical.status == .disconnected or result.maximum.status == .disconnected;
     return .{
         .flow = result,
@@ -1263,11 +1289,18 @@ fn demandedSurfaces(
 ) std.mem.Allocator.Error![]const Surface {
     for (placement.nets) |net| {
         const demand = demandFor(placement.rules.physical.rails, net.name);
-        if (demand.typical_a == null and demand.maximum_a == null) continue;
+        if (demand.typical_a == null and demand.maximum_a == null and !voltageReturnNamed(placement, net.name)) continue;
         if (!router.netHasPlane(placement, net.name) and !zoneCarriesNet(zones, net.name)) continue;
         return buildSurfaces(alloc, placement, routed, zones, null, memo);
     }
     return &.{};
+}
+
+fn voltageReturnNamed(placement: optimizer.Placement, name: []const u8) bool {
+    for (placement.rules.net) |rule| {
+        if (rule.voltage_drop.limit_v != 0 and std.ascii.eqlIgnoreCase(rule.voltage_drop.return_net, name)) return true;
+    }
+    return false;
 }
 
 fn zoneCarriesNet(zones: []const pour.UserZone, net_name: []const u8) bool {
@@ -1389,6 +1422,7 @@ pub const PowerRequirements = struct {
     tracks: []const ?LocalWidth,
     /// Index-aligned with `routed.vias`; see `routedViaRequirements`.
     vias: []const ?ViaCurrent,
+    voltage: []const power_voltage.Assessment = &.{},
 };
 
 /// One rail's screening current on one conductor: its solved branch share, or
@@ -1458,6 +1492,153 @@ fn fillViaCurrents(
     }
 }
 
+/// Inputs already prepared by the shared current/width solve.
+const VoltageContext = struct {
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    copper: struct { identity: net_identity.Identity, family: Family, poured: Poured, surfaces: []const Surface },
+    demand: Demand,
+    solved: Solved,
+    budget: env.NetClassSpec.VoltageDrop,
+};
+
+fn voltageModelReason(c: VoltageContext) []const u8 {
+    if (!c.budget.valid()) return "invalid-voltage-drop-budget";
+    if (c.demand.maximum_a == null or c.demand.consumers.len == 0) return "missing-maximum-load-current";
+    var total: f64 = 0;
+    for (c.demand.consumers) |load| {
+        const amps = load.i_max orelse return "missing-maximum-load-current";
+        if (!std.math.isFinite(amps) or amps < 0) return "invalid-maximum-load-current";
+        total += amps;
+    }
+    if (@abs(total - c.demand.maximum_a.?) > 1e-9) return "incomplete-maximum-load-current";
+    for (c.solved.sources) |source| if (source.contacts == 0) return "incomplete-source-terminals";
+    if (c.copper.poured.sheets.sheets.len > 0) return "supply-sheet-resistance-unmodeled";
+    if (c.solved.flow.maximum.status != .solved) return c.solved.flow.maximum.status.name();
+    return "";
+}
+
+const ReturnFlow = struct {
+    axis: ?power_current.Axis = null,
+    net: ?usize = null,
+    reason: []const u8 = "",
+};
+
+fn voltageReturn(alloc: std.mem.Allocator, c: VoltageContext) std.mem.Allocator.Error!ReturnFlow {
+    var root: ?usize = null;
+    for (c.placement.nets, 0..) |net, i| {
+        if (std.ascii.eqlIgnoreCase(net.name, c.budget.return_net)) root = @intCast(c.copper.identity.canonical(@intCast(i)));
+    }
+    const return_i = root orelse return .{ .reason = "missing-return-net" };
+    var out = ReturnFlow{ .net = return_i };
+    if (return_i == c.copper.family.root) {
+        out.reason = "return-net-is-supply";
+        return out;
+    }
+    const family = try familyFor(alloc, c.placement, c.copper.identity, return_i);
+    // Any surviving return sheet needs a resistive mesh. Refuse before
+    // mapping hundreds of ground contacts repeatedly for every supply rail.
+    for (c.copper.surfaces) |surface| {
+        if (!sameNet(surface.net, family.name) or surface.fill.n_comp == 0) continue;
+        out.reason = "return-sheet-resistance-unmodeled";
+        return out;
+    }
+    // Independent per-rail solves cannot prove a shared return. Other rails'
+    // return injections and converter ground currents need a coupled model.
+    // Refuse that case instead of silently charging ground with just this rail.
+    for (c.placement.rules.physical.rails) |rail| {
+        if (sameNet(rail.net, c.copper.family.name)) continue;
+        if (rail.any_typ_load or rail.any_max_load) {
+            out.reason = "shared-return-current-unmodeled";
+            return out;
+        }
+    }
+    const terminals = try returnTerminals(alloc, c, family) orelse {
+        out.reason = "ambiguous-or-missing-return-terminals";
+        return out;
+    };
+    const poured = try pourFor(alloc, c.placement, c.routed, family, c.copper.surfaces);
+    const solved = try solveTerminals(alloc, c.placement, c.routed, family, .{ .override = terminals }, poured);
+    if (solved.flow.maximum.status != .solved) {
+        out.reason = solved.flow.maximum.status.name();
+        return out;
+    }
+    out.axis = solved.flow.maximum;
+    return out;
+}
+
+/// Return pads must belong to the exact device that owns the supply terminal.
+/// A module port landing on a bead is not enough evidence to guess the IC's
+/// ground; it remains unverified until the actual load terminals are modeled.
+fn oppositeContacts(
+    alloc: std.mem.Allocator,
+    c: VoltageContext,
+    family: Family,
+    supply: []const power_current.Contact,
+) std.mem.Allocator.Error!?[]const power_current.Contact {
+    var owner: ?[]const u8 = null;
+    for (supply) |contact| {
+        var found = false;
+        for (c.copper.family.pins) |pin| {
+            const pad = contactForPin(c.placement, pin) orelse continue;
+            if (pad.layer != contact.layer or std.math.hypot(pad.at[0] - contact.at[0], pad.at[1] - contact.at[1]) > geometry_eps_mm) continue;
+            if (owner) |ref| {
+                if (!std.mem.eql(u8, ref, pin.ref_des)) return null;
+            } else owner = pin.ref_des;
+            found = true;
+        }
+        if (!found) return null;
+    }
+    const ref = owner orelse return null;
+    var contacts: std.ArrayList(power_current.Contact) = .empty;
+    for (family.pins) |pin| {
+        if (!std.mem.eql(u8, ref, pin.ref_des)) continue;
+        const contact = contactForPin(c.placement, pin) orelse return null;
+        try appendContact(alloc, &contacts, contact);
+    }
+    if (contacts.items.len == 0) return null;
+    return contacts.items;
+}
+
+fn returnTerminals(alloc: std.mem.Allocator, c: VoltageContext, family: Family) std.mem.Allocator.Error!?Terminals {
+    const supply_source = try sourceContacts(alloc, c.placement, c.copper.family, c.demand.source_terminals);
+    const source = try oppositeContacts(alloc, c, family, supply_source.contacts) orelse return null;
+    const loads = try alloc.alloc(power_current.Load, c.demand.consumers.len);
+    for (c.demand.consumers, loads) |consumer, *load| {
+        const supply = try loadContacts(alloc, c.placement, c.copper.family, consumer);
+        const contacts = try oppositeContacts(alloc, c, family, supply.contacts) orelse return null;
+        load.* = .{ .contacts = contacts, .typical_a = consumer.i_typ, .maximum_a = consumer.i_max };
+    }
+    return .{ .source = source, .loads = loads };
+}
+
+fn assessVoltage(alloc: std.mem.Allocator, c: VoltageContext, out: *std.ArrayList(power_voltage.Assessment)) std.mem.Allocator.Error!void {
+    const reason = voltageModelReason(c);
+    if (reason.len > 0) {
+        try out.append(alloc, .{ .net = c.copper.family.root, .budget = c.budget, .reason = reason });
+        return;
+    }
+    const ret = try voltageReturn(alloc, c);
+    // Uniform copper temperature scales every R equally, leaving the KCL
+    // current division unchanged. TI Precision Labs, Temperature Error:
+    // R(T) = R(20 C) * [1 + 0.00393 * (T - 20 C)]. Clamp below 20 C to
+    // retain the room-temperature bound instead of taking credit for cold.
+    const resistance_scale = 1 + 0.00393 * @max(0, c.budget.copper_temperature_c - 20);
+    for (c.demand.consumers, 0..) |consumer, i| {
+        const supply = if (i < c.solved.flow.maximum.load_drop_v.len) c.solved.flow.maximum.load_drop_v[i] else null;
+        const back = if (ret.axis) |axis| (if (i < axis.load_drop_v.len) axis.load_drop_v[i] else null) else null;
+        try out.append(alloc, .{
+            .net = c.copper.family.root,
+            .load = consumer.ref_des,
+            .budget = c.budget,
+            .supply_drop_v = if (supply) |v| v * resistance_scale else null,
+            .return_drop_v = if (back) |v| v * resistance_scale else null,
+            .return_net = ret.net,
+            .reason = if (ret.reason.len > 0) ret.reason else if (supply == null or back == null) "unplaced-load" else "",
+        });
+    }
+}
+
 fn routedPowerRequirementsFromSurfaces(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -1469,6 +1650,7 @@ fn routedPowerRequirementsFromSurfaces(
     const barrels = try alloc.alloc(?ViaCurrent, routed.vias.len);
     @memset(barrels, null);
     const identity = try net_identity.Identity.init(alloc, placement);
+    var voltage: std.ArrayList(power_voltage.Assessment) = .empty;
     for (placement.nets, 0..) |net, net_index| {
         // A per-pin bypass stub is judged as its rail's own copper.
         if (!identity.isRoot(net_index)) continue;
@@ -1476,7 +1658,10 @@ fn routedPowerRequirementsFromSurfaces(
         // The declared whole-rail envelope, on the axis the verdict is taken
         // on: never substitute the smaller typical axis for a declared maximum
         // (for example, because a max-only consumer is disconnected).
-        const envelope_a = (if (demand.maximum_a != null) demand.maximum_a else demand.typical_a) orelse continue;
+        const budget = if (net_index < placement.rules.net.len) placement.rules.net[net_index].voltage_drop else env.NetClassSpec.VoltageDrop{};
+        const envelope = if (demand.maximum_a != null) demand.maximum_a else demand.typical_a;
+        if (envelope == null and budget.limit_v == 0) continue;
+        const envelope_a = envelope orelse 0;
         const family = try familyFor(alloc, placement, identity, net_index);
         const poured = try pourFor(alloc, placement, routed, family, surfaces);
         const solved = try solveCurrent(alloc, placement, routed, family, demand, poured);
@@ -1487,8 +1672,16 @@ fn routedPowerRequirementsFromSurfaces(
         const charged: Charged = .{ .axis = axis, .envelope_a = envelope_a, .resolved = axis.status == .solved };
         fillTrackWidths(placement, routed, family, charged, widths);
         fillViaCurrents(placement, routed, family, charged, barrels);
+        if (budget.limit_v != 0) try assessVoltage(alloc, .{
+            .placement = placement,
+            .routed = routed,
+            .copper = .{ .identity = identity, .family = family, .poured = poured, .surfaces = surfaces },
+            .demand = demand,
+            .solved = solved,
+            .budget = budget,
+        }, &voltage);
     }
-    return .{ .tracks = widths, .vias = barrels };
+    return .{ .tracks = widths, .vias = barrels, .voltage = voltage.items };
 }
 
 fn routedTrackRequiredWidthsFromSurfaces(
