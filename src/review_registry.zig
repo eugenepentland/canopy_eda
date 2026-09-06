@@ -679,6 +679,18 @@ pub const rows: []const Row = &.{
         .closes_with = "(requirement \"…\" (check (pins-on-same-net (pins \"A\" \"B\" …))))",
     },
 
+    .{
+        .id = "interface-esd-protection",
+        .layer = .unit,
+        .category = .connectivity,
+        .scope = .net,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "Every externally exposed interface the system brief names carries a protection-class part when the brief declares an ESD class.",
+        .engine = "brief_checks.zig - Observation interface-esd-protection, via preflight FindingKind.brief",
+        .closes_with = "place a TVS/ESD part on the interface net, or a part with (class protection)",
+    },
+
     // ── Supply voltages ───────────────────────────────────────────
     .{
         .id = "rail-voltage-consistent",
@@ -767,6 +779,18 @@ pub const rows: []const Row = &.{
         .asserts = "The highest voltage on one pin's net stays within a margin of another's lowest.",
         .engine = "eval/check_grammar.zig - voltage_range alias; req_checks.zig",
         .closes_with = "(requirement \"…\" (check (voltage-not-above (pin \"A\") (pin \"B\") (margin M))))",
+    },
+
+    .{
+        .id = "brief-input-power-envelope",
+        .layer = .unit,
+        .category = .supply_voltages,
+        .scope = .net,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "The board net the system brief's input power feeds proves an envelope covering the brief's (voltage LO HI) window and any (transient V) it must survive.",
+        .engine = "brief_checks.zig - Observation brief-input-power-envelope, via preflight FindingKind.brief",
+        .closes_with = "(port … (rated LO HI)) or (net-envelope \"NET\" (rated LO HI)) on the input net, and (input-power … (feeds \"NET\")) in the brief",
     },
 
     // ── Power budget and copper ───────────────────────────────────
@@ -1085,6 +1109,29 @@ pub const rows: []const Row = &.{
         .closes_with = "(requirement \"…\" (check (cap-rating (pin \"A\") (pin \"B\") (min-ratio X))))",
     },
 
+    .{
+        .id = "part-temperature-grade",
+        .layer = .unit,
+        .category = .component_ratings,
+        .scope = .part,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "Every placed part's declared temperature grade meets or exceeds the grade the system brief requires.",
+        .engine = "brief_checks.zig - Observation part-temperature-grade, via preflight FindingKind.brief",
+        .closes_with = "(temperature-grade industrial) on the component, the call site, or the parts-table row",
+    },
+    .{
+        .id = "component-derating-standard",
+        .layer = .unit,
+        .category = .component_ratings,
+        .scope = .part,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "Applied stress stays inside the fraction of each part's rating that the derating standard named by the system brief allows.",
+        .engine = "fab_readiness.zig - component-derating (ceramic voltage, resistor power, inductor current)",
+        .closes_with = "select a higher-rated part, or state the programme's own standard in (derating \"…\")",
+    },
+
     // ── Thermal ───────────────────────────────────────────────────
     .{
         .id = "thermal-dissipation-known",
@@ -1129,6 +1176,29 @@ pub const rows: []const Row = &.{
         .asserts = "The board's screened cooling scenario is the one the release is built for.",
         .engine = "review_thermal.zig, thermal_scenarios.zig - scenario ladder",
         .closes_with = "(board (heatsink …)) or the airflow the release assumes",
+    },
+
+    .{
+        .id = "thermal-brief-ambient",
+        .layer = .unit,
+        .category = .thermal,
+        .scope = .board,
+        .policy = .advisory,
+        .verdicts = declared,
+        .asserts = "The thermal screen runs at the ambient the governing system brief states, in the scenario its declared cooling case maps to.",
+        .engine = "brief_checks.zig - Plan/AmbientSource, rendered by review_thermal.zig on all six thermal surfaces",
+        .closes_with = "(brief (environment (ambient MIN MAX) (cooling …))) on the system that owns the board",
+    },
+    .{
+        .id = "part-operating-range",
+        .layer = .unit,
+        .category = .thermal,
+        .scope = .part,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "Every placed part's rated ambient range covers the whole ambient window the system brief states.",
+        .engine = "brief_checks.zig - Observation part-operating-range, via preflight FindingKind.brief",
+        .closes_with = "(thermal (operating MIN MAX)) in the component body, or a part rated over the brief window",
     },
 
     // ── Datasheet compliance ──────────────────────────────────────
@@ -2082,6 +2152,7 @@ pub const fab_finding_ids: []const []const u8 = &.{
     "bom-spec-unmatched",
     "cache-layout",
     "centroid-parity",
+    "component-derating-standard",
     "component-rating-invalid",
     "component-rating-margin",
     "component-rating-missing",
@@ -2152,15 +2223,32 @@ pub fn profileItemId(code: []const u8) ?[]const u8 {
     return keyedId(profile_item_table, code);
 }
 
+/// The four brief-driven check ids `brief_checks.observe` can produce. A
+/// `.brief` finding carries its id in `requirement.id`, so the join is a
+/// membership test rather than a second spelling of the vocabulary.
+const brief_check_table: []const KeyedId = &.{
+    .{ .key = "part-operating-range", .id = "part-operating-range" },
+    .{ .key = "part-temperature-grade", .id = "part-temperature-grade" },
+    .{ .key = "brief-input-power-envelope", .id = "brief-input-power-envelope" },
+    .{ .key = "interface-esd-protection", .id = "interface-esd-protection" },
+};
+
+/// The registry id a brief-driven check code belongs to, or null when the code
+/// is not one `brief_checks` can emit.
+pub fn briefCheckId(code: []const u8) ?[]const u8 {
+    return keyedId(brief_check_table, code);
+}
+
 /// The registry id a strict-preflight finding belongs to. `code` is the
-/// `profile_incomplete` item code and is ignored for the other kinds; an
-/// unregistered item code yields null.
+/// `profile_incomplete` item code or the `brief` check id and is ignored for
+/// the other kinds; an unregistered code yields null.
 pub fn preflightId(kind: preflight.FindingKind, code: []const u8) ?[]const u8 {
     return switch (kind) {
         .requirement => "requirement-check",
         .datasheet_review => "datasheet-review-complete",
         .eval_warning => "build-warning-free",
         .profile_incomplete => profileItemId(code),
+        .brief => briefCheckId(code),
     };
 }
 
@@ -2395,11 +2483,30 @@ fn categoryHasRow(category: Category) bool {
     return false;
 }
 
-/// Every preflight finding kind resolves, using the profile item codes for
-/// the one kind that carries them.
+/// The code a finding of this kind carries, for the resolution walk below.
+/// The two kinds that carry one are checked against their whole table by the
+/// helpers beneath; this only has to hand each kind something it accepts.
+fn sampleCode(kind: preflight.FindingKind) []const u8 {
+    return switch (kind) {
+        .profile_incomplete => "requirements",
+        .brief => "part-operating-range",
+        .requirement, .datasheet_review, .eval_warning => "",
+    };
+}
+
+/// Every preflight finding kind resolves, using each kind's own code space.
 fn preflightKindsResolve() bool {
     for (std.enums.values(preflight.FindingKind)) |kind| {
-        const id = preflightId(kind, "requirements") orelse return false;
+        const id = preflightId(kind, sampleCode(kind)) orelse return false;
+        if (lookup(id) == null) return false;
+    }
+    return true;
+}
+
+/// Every brief-driven check code resolves to a registered row.
+fn briefCodesResolve() bool {
+    for (brief_check_table) |entry| {
+        const id = briefCheckId(entry.key) orelse return false;
         if (lookup(id) == null) return false;
     }
     return true;
@@ -2475,6 +2582,8 @@ test "every check primitive and net-rule predicate maps to a registered row" {
 test "every preflight kind and profile item code maps to a registered row" {
     try std.testing.expect(preflightKindsResolve());
     try std.testing.expect(profileCodesResolve());
+    try std.testing.expect(briefCodesResolve());
+    try std.testing.expectEqual(@as(?[]const u8, null), briefCheckId("no-such-brief-check"));
 }
 
 // spec: review-audit - every rail, thermal, loop and interface-contract verdict maps to a registered review check

@@ -415,7 +415,7 @@ pub fn checkReport(allocator: std.mem.Allocator, args: []const []const u8) Comma
     const w = &w_buf.writer;
     var counts = try writeCheckErc(w, violations, parsed.severity);
     counts.include(try writeCheckAssertions(w, &eval, parsed.severity));
-    const report = try preflight.run(allocator, &eval, block, parsed.project_dir, parsed.profile);
+    const report = try preflight.runFor(allocator, &eval, block, parsed.project_dir, parsed.profile, parsed.design);
     defer report.deinit(allocator);
     counts.include(try writeCheckFindings(w, report.findings, parsed.severity));
     try w.print("\n{d} violation(s)\n", .{counts.shown});

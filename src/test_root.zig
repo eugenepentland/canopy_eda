@@ -44,6 +44,7 @@ test {
     _ = @import("board_theme.zig");
     _ = @import("bom.zig");
     _ = @import("bom_resolve.zig");
+    _ = @import("brief_checks.zig");
     _ = @import("build_id.zig");
     _ = @import("canonical_module_check.zig");
     _ = @import("commands.zig");

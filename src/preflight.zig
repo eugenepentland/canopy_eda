@@ -4,6 +4,7 @@
 //! all consume this module so they cannot disagree about requirement status.
 
 const std = @import("std");
+const brief_checks = @import("brief_checks.zig");
 const checks = @import("checks.zig");
 const component_classification = @import("component_classification.zig");
 const env_mod = @import("eval/env.zig");
@@ -57,7 +58,13 @@ pub fn parseProfile(word: ?[]const u8) ?Profile {
 }
 
 /// Validation subsystem that emitted a structured preflight finding.
-pub const FindingKind = enum { requirement, datasheet_review, profile_incomplete, eval_warning };
+///
+/// `brief` is the brief-driven family: the checks a board owes only because
+/// the SYSTEM it belongs to declared a `(brief …)`. A `brief` finding carries
+/// its `review_registry` row id in `requirement.id` and the row's assertion in
+/// `requirement.text`, which is how a review surface tells a missed ambient
+/// window from a missed temperature grade without a second vocabulary.
+pub const FindingKind = enum { requirement, datasheet_review, profile_incomplete, eval_warning, brief };
 /// Normalized outcome shared by machine checks and datasheet-review checks.
 /// `unproven` and `deferred` mirror the two `req_checks.Status` outcomes that
 /// are neither a verdict nor the reviewer-judgement hole `pending` names: a
@@ -161,6 +168,24 @@ pub fn run(
     project_dir: []const u8,
     profile: Profile,
 ) std.mem.Allocator.Error!Report {
+    return runFor(allocator, eval, block, project_dir, profile, "");
+}
+
+/// `run`, told which design this block IS.
+///
+/// The lookup name is what `system_brief.governingBrief` needs to find the
+/// system whose `(brief …)` governs the board — `block.name` cannot serve,
+/// being a formatted title. A caller that passes `""` gets exactly the old
+/// behaviour: no brief is resolved and no brief finding can be produced, so
+/// this is additive for every surface that has not adopted it yet.
+pub fn runFor(
+    allocator: std.mem.Allocator,
+    eval: *Evaluator,
+    block: *const DesignBlock,
+    project_dir: []const u8,
+    profile: Profile,
+    design_name: []const u8,
+) std.mem.Allocator.Error!Report {
     var results = try req_checks.runChecks(allocator, eval, block);
     defer req_checks.deinit(allocator, &results);
     req_checks.applyVerifications(&results, block, block.instances);
@@ -189,6 +214,11 @@ pub fn run(
     };
     try walkBlock(walk, block);
     try appendDesignRuleFindings(allocator, rules, profile, &findings);
+    try appendBriefFindings(allocator, block, .{
+        .project_dir = project_dir,
+        .design_name = design_name,
+        .profile = profile,
+    }, &findings);
     if (profile == .release) try appendEvalWarnings(allocator, eval, &findings);
 
     var errors: usize = 0;
@@ -283,6 +313,50 @@ fn appendProfileFindings(walk: Walk, inst: Instance, block: *const DesignBlock) 
             .message = item.message,
         });
         moved += 1;
+    }
+}
+
+/// What the brief walk needs beyond the block and the findings sink.
+const BriefScope = struct {
+    project_dir: []const u8,
+    /// Design lookup name; empty ⇒ no brief is resolved.
+    design_name: []const u8,
+    profile: Profile,
+};
+
+/// One finding per brief-driven check the board does not meet.
+///
+/// The severity ladder is the class-profile one — informational while
+/// authoring, a warning in preflight, an error at release — because these are
+/// obligations of the same shape: a target somebody stated that the design has
+/// not yet answered. A board whose system declares no brief produces nothing
+/// here, so this is inert until a brief is written.
+fn appendBriefFindings(
+    allocator: std.mem.Allocator,
+    block: *const DesignBlock,
+    scope: BriefScope,
+    findings: *std.ArrayList(Finding),
+) std.mem.Allocator.Error!void {
+    if (scope.design_name.len == 0) return;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const plan = brief_checks.planFor(scratch, scope.project_dir, scope.design_name);
+    const observations = try brief_checks.observe(scratch, block, scope.project_dir, plan);
+    for (observations) |observation| {
+        const message = try allocator.dupe(u8, observation.message);
+        try appendOwnedFinding(allocator, findings, .{
+            .kind = .brief,
+            .status = switch (observation.result) {
+                .fail => .fail,
+                .not_declared => .missing,
+            },
+            .severity = profileSeverity(scope.profile),
+            .ref_des = observation.ref_des,
+            .component = observation.component,
+            .message = message,
+            .requirement = .{ .id = observation.id, .source = .design },
+        });
     }
 }
 

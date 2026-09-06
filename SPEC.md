@@ -261,6 +261,7 @@ candidate for deployment.
 - The review-check registry tests remain claimed by the shard manifest
 - Panelization export tests remain claimed by the shard manifest
 - The system brief and goal evaluations remain claimed by the shard manifest
+- The brief-driven unit-check tests remain claimed by the shard manifest
 - The anonymous-wiring tests remain claimed by exactly one shard
 - Bridges every test-bearing module into the shard import graph so filters alone decide a shard's contents
 - Rejects a shard filter that no longer names a test in the tree
@@ -6229,6 +6230,8 @@ own column headers are free to use the Greek letter.
 - with a cooling ladder the ambient window's hot end is the governing scenario's ceiling and names the cooling it assumes, adding the still-air ceiling whenever passive operation is not viable
 - the shared JSON body carries the board-coupled verdict as its own additive key, null when there is no ladder, while the package-level verdict key keeps its meaning untouched
 - the shared JSON body carries the scenario ladder as absolute degrees per rung, including its physical heatsink interface, shared-plate temperature and directional package path, or a null ladder beside the sentence saying why there is none
+- the provenance line names the governing system brief, its ambient window and the scenario its cooling case is read at, says outright when nothing declared one, and marks a caller-dialled ambient as a what-if
+- the shared JSON body carries the ambient provenance as its own object, null-valued in every field when nothing declared one
 - completeness-waiver: empty inputs (a board with no rows renders prose and no table, and an unknown figure is a dash or a JSON null, both covered by the bullets above)
 - completeness-waiver: large inputs (one linear pass over the already-computed rows; a bigger board only lengthens the slice it formats)
 - completeness-waiver: unauthorized access (pure formatting over a value the caller already holds; it opens nothing and exposes no surface of its own)
@@ -6445,6 +6448,14 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - the generated brief and goals sections render the declared envelope and every goal's verdict, and say so plainly when the system declares neither
 - the system workspace page renders the brief panel and the goals table above its document list
 - the brief governing a board is the first system by name that declares it, and a board no system declares has none
+- a board with no governing brief keeps the bench ambient and produces no brief-driven observation
+- the screening plan takes the brief's ambient maximum and maps its declared cooling case to a solver scenario
+- a sealed-conduction brief is screened in still air and every surface is told the scenario is a conservative stand-in
+- a named derating standard selects its published factors while the house default and an unknown standard change nothing
+- temperature grades are ordered so a stricter grade satisfies a looser demand
+- an active part whose rated ambient range does not cover the brief window fails, and one declaring none is not-declared rather than passing
+- the brief's input-power window is bound to a board net by (feeds "NET") or by an interface named after a board port, and an envelope narrower than the window fails
+- a declared ESD class demands a protection-class part on every interface net the brief names
 - a contract declaring no status, brief or goal hashes exactly as it did before those forms existed, so adopting them re-attests only the systems that use them
 - an identity-only parse drops an (auto) interface it has no evaluator for instead of refusing the contract, so a listing surface never pays a board evaluation per workspace
 - approving a workspace whose contract is a (system …) source and approving the JSON manifest it converts from leave the identical spec, so an attestation does not depend on which manifest spelling a workspace keeps
@@ -8500,6 +8511,7 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 - a series element is charged the branch its own rail data declares, and the whole rail's worst case only when the design declared no branch
 - a rail with no per-branch declaration still charges every series element its whole worst-case load
 - a zero-ohm configuration strap to ground carries no rail current, while a jumper any rail reaches or a ground-to-ground link stays unproven
+- a derating standard named by the system brief screens applied stress against a fraction of each rating, and the house default screens exactly as before
 - a series magnetic sealed inside a module inherits that module's declared input current, and keeps none of it on a leg the declaration never covered
 - a net a ferrite bead ties to a rail is that rail's node for current as well as voltage, so a module-internal series element behind the bead is charged the rail
 - saved rounded outlines must exactly match authored dimensions, radius, polygon, and native arcs

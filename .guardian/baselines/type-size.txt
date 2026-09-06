@@ -28,6 +28,7 @@
 28 src/eval/evaluator.zig|Evaluator
 13 src/eval/instance.zig|ResolvedComponent
 12 src/eval/power_budget.zig|Rail
+8 src/eval/thermal.zig|BoardThermal
 8 src/export_gerber.zig|Layer
 9 src/fab_readiness.zig|Stats
 13 src/flat_netlist.zig|FlatInstance

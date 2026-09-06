@@ -305,6 +305,7 @@ fn writeThermal(
     // Kept, demoted and labelled — see review_thermal.summaryLines.
     if (lines.package.len > 0) try w.print("{s}\n\n", .{lines.package});
     if (lines.ambient.len > 0) try w.print("Board ambient range: {s}\n\n", .{lines.ambient});
+    try w.print("{s}\n\n", .{lines.provenance});
     if (bt.parts.len > 0) {
         try w.writeAll("| Ref | Component | P (W) | θJA (°C/W) | Tj (°C) | Margin (°C) | Max ambient (°C) |\n");
         try w.writeAll("|-----|-----------|-------|------------|---------|-------------|------------------|\n");

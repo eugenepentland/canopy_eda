@@ -1481,7 +1481,8 @@ and where in its lifecycle it is:
   (brief
     (purpose "Swept X-band signal source with a 50–1500 MHz IF output")
     (environment (ambient -10 60) (cooling sealed-conduction) (altitude 2000) (ingress 40))
-    (input-power (source "12 V barrel") (voltage 11.4 12.6) (transient 15) (current-max 1.2))
+    (input-power (source "12 V barrel") (voltage 11.4 12.6) (transient 15) (current-max 1.2)
+                 (feeds "V_12V_RAW"))
     (temperature-grade industrial)
     (derating "NASA EEE-INST-002")
     (ipc-class 2)
@@ -1545,6 +1546,90 @@ Only `fail` contributes to `blocked`, so `system-check` exits non-zero for a
 missed target and not for one nobody has measured. `(measured VALUE
 "evidence")` on a `measurement` goal closes it: the row leaves `manual` and is
 judged against its own bounds like any engine figure.
+
+#### What the brief feeds downward
+
+A brief is not a document: each field is the parameter a unit-level check runs
+at. Every board the system declares picks its brief up automatically — the
+governing brief is the first system, by directory name, that declares the board
+— and a board whose system declares no brief is screened exactly as it was
+before any brief existed. That asymmetry is deliberate: each row below reads
+`not-declared` rather than passing when nothing stated the target.
+
+| brief field | what it parametrizes | registry check |
+| --- | --- | --- |
+| `(environment (ambient MIN MAX))` | the thermal screen runs at **MAX** instead of the 25 °C bench default, on all six thermal surfaces | `thermal-brief-ambient` |
+| `(environment (cooling …))` | which screened scenario the ladder is read at | `thermal-brief-ambient` |
+| `(environment (ambient MIN MAX))` | every active part's `(thermal (operating MIN MAX))` must cover the whole window | `part-operating-range` |
+| `(temperature-grade …)` | every active part's `temperature-grade` must meet or exceed it | `part-temperature-grade` |
+| `(input-power (voltage LO HI) (transient T))` | the bound input net's proven envelope must cover `[LO, HI]`, and reach `T` | `brief-input-power-envelope` |
+| `(derating "…")` | the fabrication gate's ceramic-voltage, resistor-power and inductor-current screens | `component-derating-standard` |
+| `(compliance (esd "…"))` | every `(interface …)` net must carry a protection-class part | `interface-esd-protection` |
+
+Each check is registered in [`language-forms.md` § *Review checks*](language-forms.md)
+and surfaces as an ordinary finding: the four part- and net-scoped ones through
+strict preflight (informational while authoring, a warning in preflight, an
+error at release, like a class-profile obligation), the derating one as a
+fabrication-gate finding, and the ambient one as the provenance line every
+thermal surface prints.
+
+**Cooling cases map to screened scenarios** one for one, except the last:
+
+| `(cooling …)` | screened scenario |
+| --- | --- |
+| `natural` | `natural` |
+| `fan` | `fan` |
+| `airflow_1ms` | `airflow_1ms` |
+| `airflow_2ms` | `airflow_2ms` |
+| `heatsink` | `heatsink` |
+| `sealed-conduction` | `natural`, **an approximation** |
+
+The field solver models convection off the board faces plus a bolted heatsink
+network; it has no sealed-conduction model. A sealed enclosure's conduction
+path to the case is an *additional* route to ambient the solver does not carry,
+so reading the board at the still-air rung understates the cooling and never
+the heat — the only direction a screen may err. Every surface that prints the
+scenario also prints that it is a stand-in, so an approximation can never be
+mistaken for a solve.
+
+**Which net the input power feeds** is decided by two rules, in order, and the
+finding always says which one applied:
+
+1. `(input-power … (feeds "NET"))` names the board net outright. Use this
+   whenever the board's input net is not spelled like a brief interface.
+2. Otherwise the **first** `(interface "NAME" …)` whose NAME matches a
+   design-block port name, case-insensitively; that port's net is the input net.
+
+Neither resolving is `not-declared`: the tool will not guess which net carries
+the product's input. The check is *coverage* — the net's proven envelope must
+reach at least as low as `LO` and at least as high as `HI` (and as high as
+`(transient T)` when one is stated, which widens the abs-max end only, since a
+surge to survive is not an operating point). Closing a failure means widening
+the board's own `(port … (rated LO HI))` or `(net-envelope "NET" (rated LO HI))`;
+once it is widened, `eval/net_envelopes` propagates it and the
+`component-rating-*`, `(check (voltage-range …))` and `(check (cap-rating …))`
+screens judge every part against the brief's numbers without knowing a brief
+exists.
+
+**Derating standards.** `(derating "…")` selects a factor table. `house` (and
+any standard the tool does not carry) changes nothing: the ceramic
+`(cap-rating …)` default stays 1.5×, and the gate keeps comparing applied
+stress against the rating itself. A named standard adds a second, stricter
+comparison whose finding states the standard and the factor it applied:
+
+| `(derating "…")` | ceramic voltage | resistor power | inductor current |
+| --- | --- | --- | --- |
+| `house` (default) | — | — | — |
+| `NASA EEE-INST-002` | 0.60 × rated | 0.60 × rated | 0.70 × rated |
+| `MIL-HDBK-1547` | 0.60 × rated | 0.50 × rated | 0.60 × rated |
+| `ECSS-Q-ST-30-11` | 0.50 × rated | 0.50 × rated | 0.50 × rated |
+
+These are each standard's **general** rows for the three passive families the
+gate screens, not a transcription of its whole table. A programme at a
+different quality level, or one derating against temperature as well as stress,
+states its own factors in its own process document; what the tool guarantees is
+that a named standard is applied consistently and that every finding says which
+factor produced it.
 
 Two generated regions render this: `brief-summary` (the envelope as a field
 table, always led by the status line) and `goals-status` (one row per goal with
