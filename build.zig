@@ -597,11 +597,17 @@ fn addTreePolicyChecks(b: *std.Build, test_step: *std.Build.Step, exe: *std.Buil
         // against COPIES of the tracked scripts, with `zig`/`node`/the deploy
         // tail stubbed, so none of them can reach this repository, the real
         // systemd units, the owner's design library, or production. Runtimes
-        // on the reference box: 35 s, 3.5 s, 0.15 s, 0.2 s — they run
+        // on the reference box: 35 s, 3.5 s, 0.15 s, 0.2 s, 1.5 s — they run
         // concurrently with the eight test shards, whose wall is longer.
         &.{"scripts/test_deploy_debounce.sh"},
         &.{"scripts/test_prepare_release_fail_fast.sh"},
         &.{"scripts/test_worktree_cache_prune.sh"},
+        // The pre-push latency gate's pinned workload: a recording saves the
+        // snapshot it measured, and a run whose live designs library has moved
+        // measures THAT recording (restored, or rebuilt from its commit) rather
+        // than refusing the push. Its fixture is a pair of throwaway git repos
+        // with `zig`, `bench-page` and the browser runners stubbed.
+        &.{"scripts/test_perf_gate_workload_store.sh"},
         &.{ "python3", "scripts/test_affected_test.py" },
         // NOT wired, deliberately: `scripts/test_shard_balance.py` is not a
         // test despite the name — it is the generator that REWRITES

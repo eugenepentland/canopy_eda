@@ -63,6 +63,9 @@ A gated run fails (non-zero exit, refusing the push) when any of:
    minutes later as rules 1–4 violations. An unstamped baseline fails the same
    way; re-record to stamp it. (Running `bench-page --baseline` by hand skips
    this shell-level check; its own missing/unlined notes still apply.)
+   **This is the last resort, not the first response to drift**: the gate
+   first tries to go back to the recorded workload and measure that — see
+   *How the workload is pinned* below.
 
 A board **without a blessed (starred/named-restorable) layout** has its PCB,
 thermal, solve, and DRC phases reported but not gated: those paths re-solve the
@@ -76,6 +79,84 @@ vanished boards are noted (`missing`), never failed — a designs-repo rename
 is not a code regression. A missing or corrupt baseline **fails**: a gate that silently
 stops gating is how the regressions this exists to stop got here.
 
+## How the workload is pinned
+
+The boards being timed live in a separate, working library that is edited and
+auto-committed all day. Judging a baseline against whatever that library holds
+right now made the gate unusable: a baseline recorded at 06:03 was already
+unmatchable at 07:20, and rule 6 refused every push in between. A gate that
+needs a quiet-host re-record after every board edit is a gate nobody runs.
+
+So the recording owns its workload:
+
+- **`--record` saves the snapshot it measured.** The assembled snapshot (the
+  designs commit's tracked sources plus the ignored `lib/models`,
+  `*.layouts.json`/`*.autolayout.json` and `*.bom` bundles) is tarred **before**
+  it is measured — a render of an unblessed board persists its solve back into
+  the sidecars, so the tree afterwards is no longer the tree that was
+  measured — and installed under a machine-local store once the recording is
+  accepted:
+
+  ```
+  ~/.cache/netlisp/perf-workload/<designs-short>-<fingerprint digest>.tar
+  ~/.cache/netlisp/perf-workload/<designs-short>-<fingerprint digest>.fingerprint
+  ```
+
+  `NETLISP_PERF_WORKLOAD_STORE` moves the store, `NETLISP_PERF_WORKLOAD_KEEP`
+  (default 3) says how many to keep — each is as large as the workload, ~220 MB
+  here — and the oldest are pruned on every write. The store is machine-local
+  derived data: it is outside the repository, never committed, and safe to
+  delete (the next drifted run rebuilds or, failing that, asks for a
+  re-record). A contended, refused recording installs nothing.
+- **An enforce run whose live workload has drifted measures the RECORDED one.**
+  The live fingerprint is computed as always; when it differs from the
+  baseline's, the gate looks for that baseline's stored snapshot, extracts it
+  over the disposable snapshot directory, re-hashes it to prove it is what its
+  name claims, and says so:
+
+  ```
+  perf_gate: live designs drifted to ecb62c218bf0; measuring the recorded
+  workload snapshot f2ab02928e1d-6b1c… instead (from ~/.cache/netlisp/perf-workload)
+  ```
+
+  The comparison is then apples to apples: same boards, same sidecars, new
+  code. The identity check still has the last word — it is told which workload
+  was actually measured, and verifies that against the stamp.
+- **With no stored snapshot, it tries to rebuild one.** `git archive` of the
+  recorded designs commit plus the bundles present now, hashed and accepted
+  **only** on an exact fingerprint match; a rebuild that is merely close is a
+  different workload. A successful rebuild is stored, so it costs nothing the
+  next time. This is what makes a fresh machine, or a cleared cache, recover on
+  its own — as long as the ignored bundles have not moved.
+- **Only when neither works does it refuse**, naming both attempts (no stored
+  snapshot, and what the rebuild hashed to instead) before the identity check
+  states the drift and the re-record recipe.
+
+`scripts/perf_gate.sh --resolve-workload` answers "what would an enforce run
+measure?" without building or timing anything — it resolves the workload,
+prints the identity and where it came from, runs the identity check, and exits
+with its verdict. It still queues on the machine gate lock, because assembling
+a snapshot is a couple of hundred megabytes of disk traffic.
+
+### When a re-record is still required
+
+- **You changed the corpus or the budgets on purpose** — new boards, a board
+  deleted, a placement re-solved, an edited `budgets` object. The recorded
+  numbers describe a workload that no longer exists, and no snapshot should
+  paper over that.
+- **A machine with no stored snapshot that cannot rebuild one.** The recorded
+  designs commit is gone from the checkout, or the ignored bundles (which are
+  local editor/vendor state and are never in git) have moved since. Nothing on
+  disk can reproduce the recording, so the recording has to be replaced.
+- **A different machine or build mode.** Unchanged by any of this: the
+  timings are only comparable on the box and build that recorded them.
+
+The three browser baselines pin their own workload under `reference.designs`
+and are recorded by the same `--record` run. If one of them names a different
+workload than the page baseline, that recording did not complete; the enforce
+run says so as a WARNING, and only a full `--record` puts all four back in
+agreement.
+
 ## Workflow
 
 ```bash
@@ -84,9 +165,13 @@ scripts/perf_gate.sh
 
 # Re-record after an intentional change (a real speedup, a designs-repo
 # update) — then review and COMMIT the diff deliberately. The wrapper preserves
-# the existing hand-set "budgets" object while replacing measurements, and
-# stamps the measured designs identity into the top-level "designs" object:
+# the existing hand-set "budgets" object while replacing measurements, stamps
+# the measured designs identity into the top-level "designs" object, and saves
+# that workload under the store above:
 scripts/perf_gate.sh --record
+
+# What would an enforce run measure here, and can it? (no build, no timings)
+scripts/perf_gate.sh --resolve-workload
 
 # One board, more reps, by hand:
 zig-out/bin/netlisp bench-page --project-dir projects/designs --reps 5 barracuda

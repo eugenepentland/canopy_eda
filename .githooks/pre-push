@@ -67,7 +67,16 @@ fi
 echo "pre-push: server-page and browser interaction performance gates for main — queueing behind the machine gate lock…"
 NETLISP_PERF_PROJECT_DIR="$PROJECT_DIR" bash scripts/perf_gate.sh
 status=$?
-if [ "$status" -ne 0 ]; then
+# 3 is the workload-identity refusal, not a measurement: the gate could not
+# reproduce the workload $BASELINE was recorded against (its store has no
+# snapshot for it and the designs checkout can no longer rebuild one), so it
+# never compared any timings. Saying "latency regressed" there would send the
+# reader hunting a regression that was never measured.
+if [ "$status" -eq 3 ]; then
+  echo "pre-push: REFUSED — the workload $BASELINE was recorded against cannot be reproduced on this machine (see the reason above); nothing was timed." >&2
+  echo "pre-push: re-record it on a quiet host and commit the diff: scripts/perf_gate.sh --record" >&2
+  echo "pre-push: (scripts/perf_gate.sh --resolve-workload reports this without building anything)" >&2
+elif [ "$status" -ne 0 ]; then
   echo "pre-push: REFUSED — page latency regressed vs $BASELINE (see the gate report above)." >&2
   echo "pre-push: fix it, or if the change is intentional re-record: scripts/perf_gate.sh --record (commit the diff)" >&2
 fi
