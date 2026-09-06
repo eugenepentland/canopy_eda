@@ -36,6 +36,8 @@ copper permit. Adjacent corners share their connecting segment without overlap.
 The same rule applies to 45° and 90° corners. The configured minimum bend radius
 still controls under-radius findings; a large desired radius does not prove
 clearance, so the smoother checks the emitted geometry and shrinks when needed.
+Final pad-stub cleanup preserves these arc tangent points, including points
+inside a pad, so saved curves retain the same launch direction.
 
 An explicitly authored `(escape MM)` remains the ray construction's minimum
 straight launch. The implicit 1 mm default remains a maze preference, but analytic
