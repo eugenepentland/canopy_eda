@@ -269,7 +269,7 @@ from another session, untouched).
 
 ## Gate/integration status — ALL MERGED AND DEPLOYED
 
-Four integration rounds, because `main` advanced under the sprint repeatedly
+Six integration rounds, because `main` advanced under the sprint repeatedly
 (other sessions landed the rail column, via budgets, power-island joins and a
 re-recorded PCB-page baseline). One round was also refused outright for a dirty
 worktree — a documented side-build prefix that `.gitignore` did not cover, fixed
@@ -282,6 +282,20 @@ suite, `.githooks/prepare-release.sh`, fast-forward `main`, deploy hook.
 | 2 | `a5d0aef5` | candidate ready — tests 119 s, build 121 s, editor perf 197 s, wall 362 s | `a5d0aef5` | health OK, service active |
 | 3 | `ea35645c` | candidate ready — tests 121 s, build 119 s, editor perf 207 s, wall 370 s | `ea35645c` | health OK, service active |
 | 4 | `b2b1fe7c` | candidate ready — tests 128 s, build 130 s, editor perf 455 s, wall 630 s | `b2b1fe7c` | health OK, service active |
+| 5 | `c7247e46` | candidate ready — tests 122 s, build 121 s, editor perf 211 s, wall 376 s | superseded (main moved) | — |
+| 6 | `57b3ffe8` | candidate ready — tests 117 s, build 115 s, editor perf 205 s, wall 364 s | `57b3ffe8` | health OK, service active |
+
+**A deploy blocker fixed on the way out, observed rather than reasoned about.**
+At 09:37 another session's merge to `main` failed its release preparation with
+`refusing dirty worktree … ?? logs/`, and production stayed on the previous
+binary (mine, `b2b1fe7c`) while `main` moved to `939e7542`. The cause is
+self-inflicted and recurring: the deploy hook's own health probe starts a server
+with `project_dir: "."`, which writes `logs/interactions-<date>.jsonl` into the
+repository root — dirtying the worktree that the NEXT deploy then refuses.
+`/examples/*/logs/` was already ignored for exactly this reason; the root one was
+not. `57b3ffe8` ignores it (nothing under `logs/` is tracked), and the main
+checkout is now clean with the directory still present. Production is caught up:
+`main` == prod == `57b3ffe8`.
 
 `git log main..claude/sprint-0906` is **empty** — nothing is left unmerged.
 
