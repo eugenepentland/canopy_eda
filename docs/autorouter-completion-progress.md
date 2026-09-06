@@ -1195,3 +1195,22 @@ patch and Debug executable hash are in `/tmp/autorouter-power-vias-20260906`.
 Release verification and promotion follow the implementation; the broader goal
 still includes Base's open nets, the RF 24 V constraint, power-model gaps and
 warning review on all boards.
+
+## Finishing-round connectivity reuse — 2026-09-06
+
+Barracuda Base's scoped clock-control trial exhausted a 45-second search budget
+before attempting a hop (113 seconds including preparation and final reporting).
+The round planner, starting open-net count and initial rip-protection table each
+ran the same full-board physical-connectivity calculation on unchanged copper.
+Ordinary rounds now pass the planner's full-board result directly to the other
+two consumers. Scope limits the requested hops, never the connectivity snapshot
+used to protect unselected open nets. Nested vacate rounds still recompute after
+removing copper, and post-hop connectivity/DRC acceptance is unchanged.
+
+A physical two-net regression routes the selected net, checks that both initially
+open nets were protected, replans against the newly connected copper, and then
+removes copper to verify that a vacate-style round refreshes its protection table.
+The existing poured-power surface-join regression exercises the shared snapshot
+with real pour connectivity. Real-board evidence is retained under
+`/tmp/autorouter-base-finishing-20260906`; measurements below distinguish route
+attempts and connected-net changes from reduced preparation overhead.

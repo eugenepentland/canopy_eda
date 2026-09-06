@@ -8156,6 +8156,7 @@ is what makes the predicate exact rather than approximately right.
 - Hand-added copper that raises the error-severity DRC count is rolled back rather than persisted, unless the caller opts out
 - A violation's reported nets name only copper that could be party to that rule — a drill finding never blames a surface pad
 - A close_open_nets round routes its longest-span hops before its short ones so a cheap bridge cannot spend a long hop's only corridor
+- A finishing round shares one full-board connectivity snapshot across planning and rip protection, then refreshes after copper changes
 - A close_open_nets pass runs on past a round that kept nothing while a later round still has hops that one could not ask for
 - The close_open_nets accept gate ratchets its DRC error ceiling down as the board cleans up, so errors it removes can never come back
 - The close_open_nets accept gate rejects an independently-finished differential leg when it would increase coupling or skew warnings
