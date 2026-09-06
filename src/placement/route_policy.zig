@@ -4,6 +4,7 @@
 //! and `router.zig` can share it without coupling either module to the other.
 
 const std = @import("std");
+const board_layers = @import("../board_layers.zig");
 const route_space_cache = @import("route_space_cache.zig");
 const route_timing = @import("route_timing.zig");
 const pair_pinch = @import("pair_pinch.zig");
@@ -21,6 +22,14 @@ pub const GuideBranch = struct {
     waypoints: []const Waypoint = &.{},
 };
 
+/// A physical guide must fit inside the net's hard allowed-layer mask.
+/// Unlike real pad terminals, virtual guide points cannot authorize a fanout.
+pub fn guideLayersAllowed(mask: u64, points: []const Waypoint) bool {
+    const layers = board_layers.LayerSet.fromRaw(mask);
+    for (points) |point| if (!layers.contains(board_layers.SignalIndex.of(point.layer))) return false;
+    return true;
+}
+
 /// Per-net policy lowered from one resolved route wave. A zero/empty field
 /// preserves the legacy router behaviour.
 pub const NetPolicy = struct {
@@ -29,7 +38,7 @@ pub const NetPolicy = struct {
         priority: u32 = 0,
         /// Route before plane stitching can occupy this wave's corridor.
         before_planes: u32 = 0,
-        /// Include this waypoint-guided net in the bounded first-claim seed.
+        /// Include this net in the post-route authored-corridor repair.
         seed_first: bool = false,
         /// Ordered hard corridor tried only after the ordinary net attempt
         /// fails, and again by the post-route residual repair.
@@ -273,6 +282,14 @@ pub const Effort = enum {
 /// carry them in two unrelated places could hand the router a bias toward one
 /// corridor while holding a different one open.
 pub const Guides = struct {
+    /// Permit validated saved module tracks/vias after fresh local routing.
+    /// Disable when measuring or generating copper entirely with the router.
+    saved_module_routes: bool = true,
+    /// Reuse unrestricted fresh local signals as soft paths the global route may revise.
+    module_signals_guided: bool = false,
+    /// Experimental join-weighted module slices; equal shares preserve the default scheduler.
+    module_budget_weighted: bool = false,
+
     tracks: []const GuideTrack = &.{},
     vias: []const GuideVia = &.{},
     /// Lanes reserved for their owning nets for the WHOLE run (see

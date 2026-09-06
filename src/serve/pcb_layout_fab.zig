@@ -748,9 +748,9 @@ pub const FabViewError = error{
     /// The design/module name resolves to no block.
     BlockNotFound,
     /// A layout was asked for by name and no saved row answers to it.
-    UnknownLayout,
+    UnknownLayout, // UNTESTED-ERROR: Existing fab selection failure, unchanged by the CLI module extraction.
     /// Nothing is saved (or cached) to build the view from.
-    NoSavedLayout,
+    NoSavedLayout, // UNTESTED-ERROR: Existing fab selection failure, unchanged by the CLI module extraction.
     /// The placement itself failed to build.
     // UNTESTED-ERROR: allocation-only. `refPosesFromParts` and
     // `optimizer.placeFromPoses` return no error but `Allocator.Error`, so this
@@ -875,15 +875,15 @@ pub fn fabViewForResolved(
     const chosen: ?SavedLayout = switch (fab_package.select(sidecar.layouts, cache_poses != null, layout_arg)) {
         .row => |L| L.*,
         .cache => null,
-        .unknown_layout => return error.UnknownLayout,
-        .none_saved => return error.NoSavedLayout,
+        .unknown_layout => return error.UnknownLayout, // UNTESTED-ERROR: Existing fab selection failure, unchanged by the CLI module extraction.
+        .none_saved => return error.NoSavedLayout, // UNTESTED-ERROR: Existing fab selection failure, unchanged by the CLI module extraction.
     };
 
     const poses: []const optimizer.RefPose = if (chosen) |layout|
         // UNTESTED-ERROR: both re-keyers return null only on allocation failure.
         (rekeyPosesByOrigin(alloc, block, layout.parts) orelse (refPosesFromParts(alloc, layout.parts) orelse return error.PlacementFailed))
     else
-        (cache_poses orelse return error.NoSavedLayout);
+        (cache_poses orelse return error.NoSavedLayout); // UNTESTED-ERROR: Existing fab selection failure, unchanged by the CLI module extraction.
 
     // The chosen layout's own drawn outline is the fab board edge.
     const oseed: optimizer.OutlineSource = if (chosen) |L|
@@ -1626,4 +1626,107 @@ test "release layout lowering fails closed across every manufacturing adapter" {
         .fabrication_layers = &.{.{ .name = "backing.gbr", .regions = &.{&poly} }},
     };
     try std.testing.expect(!lowerSavedManufacturing(aggregate_alloc.allocator(), &placement, layout).complete);
+}
+
+// spec: Web Server - Finishing refuses malformed DRC policy before routing or persisting a saved layout
+test "close_open_nets rejects malformed policy without saving copper" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    try writeFabSelectionFixture(tmp.dir);
+    const before = try tmp.dir.readFileAlloc(std.testing.io, "src/fabsel.layouts.json", alloc, .unlimited);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/fabsel.drc-rules.json", .data = "{malformed" });
+    const args = try std.json.parseFromSliceLeaky(std.json.Value, alloc,
+        \\{"name":"fabsel","layout":"routed","rounds":1,"vacate":false}
+    , .{});
+    var output: std.ArrayList(u8) = .empty;
+    try std.testing.expect(!try @import("mcp_close_gaps.zig").mcpCloseOpenNets(alloc, project, args, &output));
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "could not read the complete DRC policy") != null);
+    const after = try tmp.dir.readFileAlloc(std.testing.io, "src/fabsel.layouts.json", alloc, .unlimited);
+    try std.testing.expectEqualStrings(before, after);
+}
+
+// spec: Web Server - Finishing a saved layout preserves its mechanical assembly, fabrication layers and driving dimensions while updating only routed copper
+test "close_open_nets preserves saved assembly and dimension metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    try writeFabSelectionFixture(tmp.dir);
+    var working = pcb_layout_page.mcpReadWorking(alloc, project, "fabsel", "routed").?;
+    working.dimensions = &.{.{ .ref = "C1", .axis = "x", .edge_id = 1, .offset = 5 }};
+    working.heatsink = .{ .x = 5, .y = 5, .w = 3, .h = 2 };
+    working.fan = .{ .model = "test-fan", .rect = .{ .x = 2, .y = 3, .w = 4, .h = 4 }, .curve = .{ .free_air_flow_m3_s = 0.001, .max_static_pressure_pa = 10 } };
+    working.fabrication_layers = &.{.{ .name = "Backer", .regions = &.{&.{ .{ 1, 1 }, .{ 2, 1 }, .{ 2, 2 }, .{ 1, 2 } }} }};
+    try pcb_layout_page.mcpPersistWorking(alloc, project, "fabsel", working, false);
+    const args = try std.json.parseFromSliceLeaky(std.json.Value, alloc,
+        \\{"name":"fabsel","layout":"routed","rounds":1,"vacate":false}
+    , .{});
+    var output: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try @import("mcp_close_gaps.zig").mcpCloseOpenNets(alloc, project, args, &output));
+    const after = pcb_layout_page.mcpReadWorking(alloc, project, "fabsel", "routed").?;
+    try std.testing.expectEqualDeep(working.dimensions, after.dimensions);
+    try std.testing.expectEqualDeep(working.heatsink, after.heatsink);
+    try std.testing.expectEqualDeep(working.fan, after.fan);
+    try std.testing.expectEqualDeep(working.fabrication_layers, after.fabrication_layers);
+    try std.testing.expect(after.default);
+}
+
+// spec: Web Server - Finishing accepts zero ordinary rounds without silently routing the open nets
+test "close_open_nets zero rounds skips ordinary routing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    try writeFabSelectionFixture(tmp.dir);
+    const args = try std.json.parseFromSliceLeaky(std.json.Value, alloc,
+        \\{"name":"fabsel","layout":"routed","rounds":0,"vacate":false}
+    , .{});
+    var output: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try @import("mcp_close_gaps.zig").mcpCloseOpenNets(alloc, project, args, &output));
+    const result = (try std.json.parseFromSliceLeaky(std.json.Value, alloc, output.items, .{})).object;
+    try std.testing.expectEqual(@as(i64, 0), result.get("hops_tried").?.integer);
+    try std.testing.expectEqual(@as(i64, 0), result.get("vacate_hops_tried").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), result.get("routed").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), result.get("total").?.integer);
+    const after = pcb_layout_page.mcpReadWorking(alloc, project, "fabsel", "routed").?.routes.?;
+    try std.testing.expectEqual(@as(usize, 3), after.tracks.len);
+    try std.testing.expectEqual(@as(usize, 0), after.vias.len);
+}
+
+// spec: Web Server - Saving from an explicit source project creates a separate review candidate, retains complete layout metadata, refuses name collisions, and preserves the destination star
+test "save_pcb_layout imports a named candidate and reports CandidateNameExists without replacing the destination" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var src = std.testing.tmpDir(.{});
+    defer src.cleanup();
+    var dst = std.testing.tmpDir(.{});
+    defer dst.cleanup();
+    try writeFabSelectionFixture(src.dir);
+    try writeFabSelectionFixture(dst.dir);
+    const source = try src.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    const target = try dst.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    var working = pcb_layout_page.mcpReadWorking(alloc, source, "fabsel", "open").?;
+    working.heatsink = .{ .x = 5, .y = 5, .w = 4, .h = 4, .base_mm = 1 };
+    try pcb_layout_page.mcpPersistWorking(alloc, source, "fabsel", working, false);
+    const args_json = try std.fmt.allocPrint(alloc, "{{\"name\":\"fabsel\",\"layout\":\"open\",\"layout_name\":\"review\",\"source_project_dir\":\"{s}\"}}", .{source});
+    const args = try std.json.parseFromSliceLeaky(std.json.Value, alloc, args_json, .{});
+    var output: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try pcb_layout_page.mcpSavePcbLayout(alloc, target, args, &output));
+    const imported = pcb_layout_page.mcpReadWorking(alloc, target, "fabsel", "review").?;
+    try std.testing.expectEqualDeep(working.routes, imported.routes);
+    try std.testing.expectEqualDeep(working.heatsink, imported.heatsink);
+    try std.testing.expect(!imported.default);
+    try std.testing.expectEqualStrings("routed", pcb_layout_page.mcpReadWorking(alloc, target, "fabsel", null).?.name);
+    try std.testing.expect(!try pcb_layout_page.mcpSavePcbLayout(alloc, target, args, &output));
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "candidate name already exists") != null);
+    try std.testing.expectEqual(@as(usize, 3), (try readDesignDoc(alloc, target, "fabsel")).layouts.len);
 }

@@ -66,6 +66,7 @@ const net_names = @import("../net_name.zig");
 const SavedTrack = pcb_layout_page.SavedTrack;
 const SavedVia = pcb_layout_page.SavedVia;
 const SavedRoutes = pcb_layout_page.SavedRoutes;
+const SavedRfPath = @import("../layout_sidecar_types.zig").SavedRfPath;
 const HandlerError = pcb_layout_page.HandlerError;
 
 fn netNameAt(nets: []const export_kicad.FlatNet, raw: i32) []const u8 {
@@ -315,6 +316,38 @@ fn progress(comptime fmt: []const u8, args: anytype) void {
     log.progress("close_open_nets: " ++ fmt, args);
 }
 
+/// One search deadline shared by all rounds and their nested repair attempts.
+/// Validation and persistence still finish after it so accepted copper is safe.
+const SearchBudget = struct {
+    stop: route_policy.Stop = .{},
+    timed_out: bool = false,
+
+    fn fromArgs(args_val: ?std.json.Value) ?SearchBudget {
+        const args = args_val orelse return .{};
+        if (args != .object or !args.object.contains("max_route_ms")) return .{};
+        const ms = argUsize(args_val, "max_route_ms") orelse return null;
+        if (ms > 3_600_000) return null;
+        return .{ .stop = .{ .max_route_ms = ms } };
+    }
+
+    fn arm(self: *SearchBudget) void {
+        if (self.stop.max_route_ms != 0 and self.stop.deadline_ns == 0)
+            self.stop.deadline_ns = clock.nanoTimestamp() + @as(i128, self.stop.max_route_ms) * clock.ns_per_ms;
+    }
+
+    fn stopped(self: *SearchBudget) bool {
+        if (self.stop.deadline_ns != 0 and clock.nanoTimestamp() >= self.stop.deadline_ns) self.timed_out = true;
+        return self.timed_out;
+    }
+
+    fn restrict(self: *const SearchBudget, original: route_policy.Stop) route_policy.Stop {
+        var out = original;
+        const deadline = self.stop.deadline_ns;
+        if (deadline != 0 and (out.deadline_ns == 0 or deadline < out.deadline_ns)) out.deadline_ns = deadline;
+        return out;
+    }
+};
+
 /// `close_open_nets` — route the copper that closes the board's remaining
 /// airwires, verified hop by hop against the connectivity oracle.
 pub fn mcpCloseOpenNets(
@@ -326,8 +359,11 @@ pub fn mcpCloseOpenNets(
     const started_ms = clock.milliTimestamp();
     const name = argStr(args_val, "name") orelse return fail(out, alloc, "missing required arg: name");
     const layout_arg = argStr(args_val, "layout");
-    const rounds = argUsize(args_val, "rounds") orelse default_rounds;
+    const rounds = roundCount(args_val) orelse
+        return fail(out, alloc, "rounds must be a non-negative integer; zero skips ordinary rounds");
     const only = try argNames(alloc, args_val, "nets");
+    const budget = SearchBudget.fromArgs(args_val) orelse
+        return fail(out, alloc, "max_route_ms must be an integer from 1 to 3600000; omit it for no search deadline");
 
     var eval = Evaluator.init(alloc, project_dir);
     defer eval.deinit();
@@ -345,29 +381,36 @@ pub fn mcpCloseOpenNets(
 
     var work = Work{
         .alloc = alloc,
+        .budget = budget,
         .placement = solved.placement,
         .params = solved.placement.rules.design.routeParams(),
         .zones = solved.shown_zones.user,
-        .router_zones = zoneSources(alloc, solved.placement, solved.shown_zones.user),
-        .rules = drc_rules.load(alloc, project_dir, name),
+        .router_zones = try zoneSources(alloc, solved.placement, solved.shown_zones.user),
+        .rules = drc_rules.loadForValidation(alloc, project_dir, name) orelse
+            return fail(out, alloc, "could not read the complete DRC policy; layout was not changed"),
         .tracks = try dupeList(SavedTrack, alloc, routes.tracks),
         .vias = try dupeList(SavedVia, alloc, routes.vias),
+        .rf_paths = routes.rf_paths,
         .only = only,
         .error_budget = argUsize(args_val, "drc_error_budget"),
     };
-    work.plan_rank = planRanks(alloc, solved.block, solved.placement);
+    work.plan = try finishingPlan(alloc, solved.block, solved.placement, work.zones, routes.vias);
     work.base_drc = try work.errorViolations();
     work.error_ceiling = try work.geometryErrors();
     work.diff_ceiling = try work.diffWarnings();
+    work.budget.arm();
 
+    const original_bypasses = try work.missingBypasses();
     var tally = Tally{};
+    if (argBool(args_val, "repair_bypasses") orelse true) tally.bypasses = try work.repairBypasses();
     for (0..rounds) |round| {
+        if (work.budget.stopped()) break;
         const gaps = try work.planRound(round);
         progress("round {d}: {d} hops planned", .{ round, gaps.len });
         if (gaps.len == 0) break;
         const open_before = try work.openNetCount();
-        tally.tried += gaps.len;
         const kept = try work.runRound(gaps);
+        tally.tried += kept.tried;
         tally.kept += kept.hops;
         tally.ripped += kept.ripped;
         tally.no_path += kept.no_path;
@@ -383,34 +426,42 @@ pub fn mcpCloseOpenNets(
     // that is what the last few nets need (see the `vacatePhase` header). The
     // joint tier follows it because it is the more expensive move and because
     // its clusters are formed from whatever the single-seed pass left open.
-    if (argBool(args_val, "vacate") orelse true) {
+    if (!work.budget.stopped() and (argBool(args_val, "vacate") orelse true)) {
         tally.vacated = try work.vacatePhase();
         tally.joint = try work.jointPhase();
     }
     // Last, because every phase above can plant one: a via the finishing search
     // dropped a few hundred microns from a barrel this net already had.
-    tally.folded = try work.foldRedundantVias();
-    const pruned = try work.pruneArtifacts();
+    const before_cleanup_tracks = try alloc.dupe(SavedTrack, work.tracks.items);
+    const before_cleanup_vias = try alloc.dupe(SavedVia, work.vias.items);
+    const before_cleanup_bypasses = try work.missingBypasses();
+    if (!work.budget.stopped()) tally.folded = try work.foldRedundantVias();
+    const pruned = if (!work.budget.stopped()) try work.pruneArtifacts() else ArtifactPrune{};
     tally.artifact_tracks_pruned = pruned.tracks;
     tally.artifact_vias_pruned = pruned.vias;
+    // Cosmetic cleanup cannot undo a surface bond that this call just earned.
+    if (newBypassMissing(before_cleanup_bypasses, try work.missingBypasses())) {
+        work.tracks = try dupeList(SavedTrack, alloc, before_cleanup_tracks);
+        work.vias = try dupeList(SavedVia, alloc, before_cleanup_vias);
+        work.dead = &.{};
+        tally.folded = 0;
+        tally.artifact_tracks_pruned = 0;
+        tally.artifact_vias_pruned = 0;
+    }
 
-    const entry = pcb_layout_page.SavedLayout{
-        .name = pcb_layout_page.mcpWorkingName(alloc, project_dir, name, layout_arg),
-        .kind = "manual",
-        .ts = 0,
-        .score = working.score,
-        .parts = working.parts,
-        .routes = .{ .tracks = work.tracks.items, .vias = work.vias.items, .zones = routes.zones, .rf_paths = routes.rf_paths },
-        .outline = working.outline,
-        .texts = working.texts,
-    };
+    const final = (try finalCheck(alloc, project_dir, name, &work)) orelse
+        return fail(out, alloc, "final DRC validation was incomplete; layout was not changed");
+    if (newBypassMissing(original_bypasses, try work.missingBypasses()))
+        return fail(out, alloc, "finishing broke an authored bypass connection; layout was not changed");
+    var entry = working;
+    entry.routes = .{ .tracks = work.tracks.items, .vias = work.vias.items, .zones = routes.zones, .rf_paths = routes.rf_paths };
     try pcb_layout_page.mcpPersistWorking(alloc, project_dir, name, entry, false);
     return writeResult(out, .{
         .alloc = alloc,
-        .project_dir = project_dir,
         .design = name,
         .layout = entry.name,
         .work = &work,
+        .final = final,
         .tally = tally,
         .wall_ms = @max(0, clock.milliTimestamp() - started_ms),
     });
@@ -466,8 +517,22 @@ fn memoStale(ripped: usize, open_before: usize, open_after: usize) bool {
     return ripped > 0 or open_after < open_before;
 }
 
+fn hasBypass(items: []const drc.Violation, target: drc.Violation) bool {
+    for (items) |item| {
+        if (item.who.part_a != target.who.part_a or item.who.part_b != target.who.part_b) continue;
+        if (std.mem.eql(u8, item.who.pad_a, target.who.pad_a) and std.mem.eql(u8, item.who.pad_b, target.who.pad_b)) return true;
+    }
+    return false;
+}
+
+fn newBypassMissing(before: []const drc.Violation, after: []const drc.Violation) bool {
+    for (after) |item| if (!hasBypass(before, item)) return true;
+    return false;
+}
+
 /// What one call accomplished.
 const Tally = struct {
+    bypasses: usize = 0,
     tried: usize = 0,
     kept: usize = 0,
     ripped: usize = 0,
@@ -505,6 +570,7 @@ const Verdict = enum {
     drc,
     /// The copper made differential-pair coupling/skew quality worse.
     diff_pair,
+    bypass,
 };
 
 /// The next thing worth TRYING for a hop that did not land, in the caller's own
@@ -526,11 +592,13 @@ const Verdict = enum {
 fn remedyFor(verdict: Verdict, why: router.GapReason, scoped: bool) []const u8 {
     return switch (verdict) {
         .kept => "",
+        .bypass => "the repair broke an authored capacitor-to-IC surface connection; preserve that exact bond",
         .no_merge => "the copper landed but joined nothing — check whether a higher-priority pour clips this net's zone here, or raise this net's (net-class … (priority …)) zone rank",
         .broke_victim => "the rip this hop needed broke its victim — route the victim net first, or free the corridor by hand with add_tracks",
         .drc => "the copper broke a clearance rule — see drc_new for the rule and shortfall; a narrower (net-class … (width …)) or a different corridor is what it wants",
         .diff_pair => "the hop would route one differential leg independently and worsen coupling/skew — route both pair members together with route_pcb, or free a shared corridor for the pair",
         .no_path => switch (why) {
+            .policy => "the candidate exceeds the authored layer or new-via limits — inspect the route wave and find a path within its constraints",
             .sealed_from, .sealed_to => "a terminal pad has no exit — its neighbours seal it; move the blocking part, or hand-draw the escape via with add_tracks",
             .no_via_site => "no legal via site near the pad — clear the drills/copper crowding it, or place the via by hand with add_tracks",
             .exhausted => if (scoped)
@@ -743,6 +811,7 @@ fn hopKey(gap: router.Gap) HopKey {
 
 /// A round's outcome.
 const RoundResult = struct {
+    tried: usize = 0,
     hops: usize = 0,
     ripped: usize = 0,
     no_path: usize = 0,
@@ -752,6 +821,16 @@ const RoundResult = struct {
 
 /// What a wider-rip retry settled on (see `Work.escalateRip`).
 const Escalation = struct { verdict: Verdict, ripped: usize };
+
+/// A saved arc expands into several physical tracks on restore. Rip indexes
+/// address those chords; every chord must map back to its one saved owner.
+fn savedTrackChordCount(alloc: std.mem.Allocator, track: SavedTrack) std.mem.Allocator.Error!usize {
+    if (track.xm == null or track.ym == null) return 1;
+    // Ask the persistence adapter itself so its tessellation and the owner
+    // map cannot drift. Only the few true arcs need this temporary projection.
+    const restored = pcb_layout_page.restoreRoutes(alloc, .{ .tracks = &.{track}, .vias = &.{} }, &.{}) orelse return error.OutOfMemory;
+    return restored.tracks.len;
+}
 
 /// The board's copper as the router must see it, plus the way back. `closeGaps`
 /// reports the tracks it ripped as indices into the array it was handed, and
@@ -768,10 +847,21 @@ const LiveCopper = struct {
 /// deep the cascade already is when its turn comes (see `max_repair_rip_depth`).
 const VictimTask = struct { net_i: usize, depth: usize };
 
+const FinishingPlan = struct {
+    rank: []const usize = &.{},
+    net: []const route_policy.NetPolicy = &.{},
+    reserved: []const route_policy.ReservedLane = &.{},
+    /// Preserved vias do not spend a plan's limit on newly generated vias.
+    /// Keep this fixed across every round, fine retry and victim transaction.
+    base_vias: []const usize = &.{},
+};
+
 /// The mutable board a `close_open_nets` call is finishing, plus everything the
 /// accept gate needs to judge a hop.
 const Work = struct {
+    surface_target: ?drc.Violation = null,
     alloc: std.mem.Allocator,
+    budget: SearchBudget = .{},
     placement: optimizer.Placement,
     params: router.RouteParams,
     zones: []const pour.UserZone,
@@ -779,6 +869,8 @@ const Work = struct {
     rules: drc_rules.Rules,
     tracks: std.ArrayList(SavedTrack),
     vias: std.ArrayList(SavedVia),
+    /// Retained swept RF copper must participate in every connectivity/DRC gate.
+    rf_paths: []const SavedRfPath = &.{},
     /// Net names in the design's `(pcb-plan (route (wave …)))` order — the
     /// author's declared routing priority, empty when there is no plan.
     ///
@@ -788,7 +880,7 @@ const Work = struct {
     /// blind to the intent. On board-a that is 11 of 87 nets — most of the
     /// margin between a fresh route and the finished board — ordered against
     /// what the design says it wants.
-    plan_rank: []const usize = &.{},
+    plan: FinishingPlan = .{},
     /// Error-severity violations present on the board as the gate last judged
     /// it, minus the ones already there when the pass opened — i.e. exactly
     /// what the rejected hop added. Set by `judge`, drained by `note`.
@@ -930,25 +1022,26 @@ const Work = struct {
 
     /// The board's copper as the oracle and the DRC see it right now — ripped
     /// tracks excluded.
-    fn copper(self: *Work) ?router.RouteResult {
-        const live = self.liveCopper() catch return null;
-        return (live orelse return null).routes;
+    fn copper(self: *Work) std.mem.Allocator.Error!router.RouteResult {
+        return (try self.liveCopper()).routes;
     }
 
     /// The same live copper, plus the index map back into `tracks` a caller
     /// needs when the router hands it rips against this array (see `LiveCopper`).
-    fn liveCopper(self: *Work) std.mem.Allocator.Error!?LiveCopper {
+    fn liveCopper(self: *Work) std.mem.Allocator.Error!LiveCopper {
         var live: std.ArrayList(SavedTrack) = .empty;
         var map: std.ArrayList(usize) = .empty;
         for (self.tracks.items, 0..) |t, i| {
             if (i < self.dead.len and self.dead[i]) continue;
             try live.append(self.alloc, t);
-            try map.append(self.alloc, i);
+            const count = try savedTrackChordCount(self.alloc, t);
+            try map.appendNTimes(self.alloc, i, count);
         }
         const routes = pcb_layout_page.restoreRoutes(self.alloc, .{
             .tracks = live.items,
             .vias = self.vias.items,
-        }, self.placement.nets) orelse return null;
+            .rf_paths = self.rf_paths,
+        }, self.placement.nets) orelse return error.OutOfMemory;
         return .{ .routes = routes, .map = map.items };
     }
 
@@ -960,7 +1053,7 @@ const Work = struct {
         try self.growDead();
         var out: std.ArrayList(usize) = .empty;
         for (ripped) |i| {
-            if (i < map.len) try out.append(self.alloc, map[i]);
+            if (i < map.len and std.mem.indexOfScalar(usize, out.items, map[i]) == null) try out.append(self.alloc, map[i]);
         }
         return out.toOwnedSlice(self.alloc);
     }
@@ -987,7 +1080,7 @@ const Work = struct {
     fn refreshWhole(self: *Work) std.mem.Allocator.Error!void {
         self.whole = try self.alloc.alloc(bool, self.placement.nets.len);
         @memset(self.whole, true);
-        const r = self.copper() orelse return;
+        const r = try self.copper();
         const open = try fab_readiness.openNets(self.alloc, self.placement, .{
             .tracks = r.tracks,
             .arcs = r.arcs,
@@ -1018,6 +1111,9 @@ const Work = struct {
         if (net < 0) return false;
         const i: usize = @intCast(net);
         if (i >= self.whole.len or !self.whole[i]) return false;
+        if (i < self.placement.nets.len) for (self.rf_paths) |path| {
+            if (std.mem.eql(u8, path.net, self.placement.nets[i].name)) return false;
+        };
         if (routing < 0) return true;
         // A net the design ranks BELOW the one now routing may lose its copper
         // to it. Without this, plan order means nothing once the board is full:
@@ -1048,20 +1144,20 @@ const Work = struct {
     /// Error-severity GEOMETRY violations (see the module header: `net open` is
     /// deliberately not in this list).
     fn geometryErrors(self: *Work) std.mem.Allocator.Error!usize {
-        const r = self.copper() orelse return 0;
-        const raw = drc.check(self.alloc, self.placement, r, self.params.clearance) catch return 0;
+        const r = try self.copper();
+        const raw = try drc.check(self.alloc, self.placement, r, self.params.clearance);
         var n: usize = 0;
-        for (drc_rules.apply(self.alloc, self.rules, raw)) |v| {
+        for (try drc_rules.applyChecked(self.alloc, self.rules, raw)) |v| {
             if (v.severity == .err) n += 1;
         }
         return n;
     }
 
     fn diffWarnings(self: *Work) std.mem.Allocator.Error!usize {
-        const r = self.copper() orelse return 0;
-        const raw = drc.check(self.alloc, self.placement, r, self.params.clearance) catch return 0;
+        const r = try self.copper();
+        const raw = try drc.check(self.alloc, self.placement, r, self.params.clearance);
         var n: usize = 0;
-        for (drc_rules.apply(self.alloc, self.rules, raw)) |v| {
+        for (try drc_rules.applyChecked(self.alloc, self.rules, raw)) |v| {
             if (v.kind == .diff_uncoupled or v.kind == .diff_skew) n += 1;
         }
         return n;
@@ -1069,10 +1165,10 @@ const Work = struct {
 
     /// Every error-severity violation on the board right now.
     fn errorViolations(self: *Work) std.mem.Allocator.Error![]const drc.Violation {
-        const r = self.copper() orelse return &.{};
-        const raw = drc.check(self.alloc, self.placement, r, self.params.clearance) catch return &.{};
+        const r = try self.copper();
+        const raw = try drc.check(self.alloc, self.placement, r, self.params.clearance);
         var out: std.ArrayList(drc.Violation) = .empty;
-        for (drc_rules.apply(self.alloc, self.rules, raw)) |v| {
+        for (try drc_rules.applyChecked(self.alloc, self.rules, raw)) |v| {
             if (v.severity == .err) try out.append(self.alloc, v);
         }
         return out.items;
@@ -1147,7 +1243,7 @@ const Work = struct {
 
     /// How many nets the connectivity oracle still finds in pieces.
     fn openNetCount(self: *Work) std.mem.Allocator.Error!usize {
-        const r = self.copper() orelse return 0;
+        const r = try self.copper();
         const open = try fab_readiness.openNets(self.alloc, self.placement, .{
             .tracks = r.tracks,
             .arcs = r.arcs,
@@ -1159,23 +1255,63 @@ const Work = struct {
     }
 
     /// How many copper islands `net_i`'s pads currently fall into.
-    fn islands(self: *Work, net_i: usize) usize {
-        const r = self.copper() orelse return 0;
-        const g = fab_readiness.buildNetGraph(self.alloc, self.placement, .{
+    fn islands(self: *Work, net_i: usize) std.mem.Allocator.Error!usize {
+        const r = try self.copper();
+        const g = try fab_readiness.buildPhysicalNetGraph(self.alloc, self.placement, .{
             .tracks = r.tracks,
             .arcs = r.arcs,
             .rf_paths = r.rf_port_outcomes,
             .vias = r.vias,
             .zones = self.zones,
-        }, self.placement.nets[net_i], @intCast(net_i)) catch return 0;
+        }, net_i);
         var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
-        for (0..g.n_pads) |i| seen.put(self.alloc, g.root(i), {}) catch return 0;
+        for (0..g.n_pads) |i| try seen.put(self.alloc, g.root(i), {});
         return seen.count();
+    }
+
+    fn missingBypasses(self: *Work) std.mem.Allocator.Error![]const drc.Violation {
+        return drc.checkBypasses(self.alloc, self.placement, (try self.copper()).tracks);
+    }
+
+    /// Repair exact surface intent even when a remote plane already closes the net.
+    fn repairBypasses(self: *Work) std.mem.Allocator.Error!usize {
+        var kept: usize = 0;
+        for (try self.missingBypasses()) |target| {
+            if (self.budget.stopped()) break;
+            const ni: usize = @intCast(target.who.net_a);
+            if (!self.wanted(self.placement.nets[ni].name)) continue;
+            if (!hasBypass(try self.missingBypasses(), target)) continue;
+            const cap = self.placement.parts[@intCast(target.who.part_a)];
+            const hub = self.placement.parts[@intCast(target.who.part_b)];
+            if (cap.side != hub.side) continue;
+            const a = padNumbered(cap, target.who.pad_a) orelse continue;
+            const b = padNumbered(hub, target.who.pad_b) orelse continue;
+            const ash = try pad_shape.worldShape(self.alloc, cap, a);
+            const bsh = try pad_shape.worldShape(self.alloc, hub, b);
+            const layer: u8 = if (cap.side == .top) 0 else 1;
+            const gap = router.Gap{
+                .net_i = ni,
+                .from = .{ .x = (ash.x0 + ash.x1) / 2, .y = (ash.y0 + ash.y1) / 2, .layer = layer },
+                .to = .{ .x = (bsh.x0 + bsh.x1) / 2, .y = (bsh.y0 + bsh.y1) / 2, .layer = layer },
+            };
+            self.surface_target = target;
+            defer self.surface_target = null;
+            const live = try self.liveCopper();
+            const paths = try self.closeGaps(.{
+                .tracks = live.routes.tracks,
+                .vias = live.routes.vias,
+                .zones = self.router_zones,
+            }, &.{gap}, .{ .ripup = false });
+            const path = paths[0] orelse continue;
+            try self.refreshWhole();
+            if (try self.tryHop(gap, path) == .kept) kept += 1;
+        }
+        return kept;
     }
 
     /// Build this round's hop requests from the oracle's open-net report.
     fn planRound(self: *Work, round: usize) std.mem.Allocator.Error![]const router.Gap {
-        const r = self.copper() orelse return &.{};
+        const r = try self.copper();
         const open = try fab_readiness.openNets(self.alloc, self.placement, .{
             .tracks = r.tracks,
             .arcs = r.arcs,
@@ -1225,8 +1361,8 @@ const Work = struct {
 
     /// Where a net sits in the plan's route order; unplanned nets sort last.
     fn planRank(self: *Work, net_i: usize) usize {
-        if (net_i >= self.plan_rank.len) return std.math.maxInt(usize);
-        return self.plan_rank[net_i];
+        if (net_i >= self.plan.rank.len) return std.math.maxInt(usize);
+        return self.plan.rank[net_i];
     }
 
     /// A hop's straight-line span in mm; 0 for a plane stitch (no far terminal).
@@ -1296,15 +1432,109 @@ const Work = struct {
             const from = padPoint(self.placement, index, g.from) orelse continue;
             const to = padPoint(self.placement, index, g.to) orelse continue;
             const gap = router.Gap{ .net_i = net_i, .from = from, .to = to };
-            if (self.deadEnd(gap)) continue;
-            try gaps.append(self.alloc, gap);
+            const chosen = if (self.deadEnd(gap))
+                self.alternateBridge(index, o, g, net_i) orelse continue
+            else
+                gap;
+            try gaps.append(self.alloc, chosen);
         }
+    }
+
+    /// A failed pad pair does not make its two copper islands unreachable.
+    /// In particular, nearest XY pads can be on opposite faces while another
+    /// pad already on the start island offers a surface-only bridge (the DSA
+    /// select connection on Barracuda). Try one nearest untried surface pair
+    /// per round, retaining the same island join and the ordinary accept gate.
+    fn alternateBridge(
+        self: *Work,
+        index: *std.StringHashMapUnmanaged(usize),
+        open: fab_readiness.OpenNet,
+        join: fab_readiness.OpenGap,
+        net_i: usize,
+    ) ?router.Gap {
+        var best: ?router.Gap = null;
+        var best_span = std.math.inf(f64);
+        for (open.pads) |a| {
+            if (a.island != join.from.island) continue;
+            const from = padPoint(self.placement, index, a) orelse continue;
+            for (open.pads) |b| {
+                if (b.island != join.to.island) continue;
+                const shares_face = a.side == b.side or a.thru or b.thru;
+                if (!shares_face) continue;
+                const to = padPoint(self.placement, index, b) orelse continue;
+                const gap = router.Gap{ .net_i = net_i, .from = from, .to = to };
+                const span = hopSpan(gap);
+                if (span >= best_span or self.deadEnd(gap)) continue;
+                best = gap;
+                best_span = span;
+            }
+        }
+        return best;
+    }
+
+    /// Remaining new-via allowance for each net, shared by every finishing
+    /// rung. A fresh call into the gap router must not reset the pass's budget.
+    fn remainingPolicies(self: *Work) std.mem.Allocator.Error![]const route_policy.NetPolicy {
+        const policies = try self.alloc.dupe(route_policy.NetPolicy, self.plan.net);
+        for (policies, 0..) |*policy, ni| {
+            const limit = policy.max_vias orelse continue;
+            if (ni >= self.placement.nets.len) continue;
+            var present: usize = 0;
+            for (self.vias.items) |v| if (std.mem.eql(u8, v.net, self.placement.nets[ni].name)) {
+                present += 1;
+            };
+            const baseline = if (ni < self.plan.base_vias.len) self.plan.base_vias[ni] else 0;
+            policy.max_vias = limit - @as(u16, @intCast(@min(present -| baseline, limit)));
+        }
+        return policies;
+    }
+
+    /// Every round, retry and collateral repair uses the same authored hard
+    /// policy. Keep this at the gap-call seam so a new rung cannot omit it.
+    fn closeGaps(
+        self: *Work,
+        board: router.GapBoard,
+        gaps: []const router.Gap,
+        opts: router.GapOptions,
+    ) std.mem.Allocator.Error![]const ?router.GapPath {
+        if (self.budget.stopped()) {
+            const skipped = try self.alloc.alloc(?router.GapPath, gaps.len);
+            @memset(skipped, null);
+            return skipped;
+        }
+        var options = opts;
+        options.raster.stop = self.budget.restrict(options.raster.stop);
+        var policies = try self.remainingPolicies();
+        if (self.surface_target) |target| {
+            const surface = try self.alloc.alloc(route_policy.NetPolicy, self.placement.nets.len);
+            for (surface, 0..) |*slot, i| slot.* = if (i < policies.len) policies[i] else .{};
+            const ni: usize = @intCast(target.who.net_a);
+            const layer: u8 = if (self.placement.parts[@intCast(target.who.part_a)].side == .top) 0 else 1;
+            const mask = @as(u64, 1) << @intCast(layer);
+            if (surface[ni].allowed_layers != 0 and surface[ni].allowed_layers & mask == 0) {
+                const refused = try self.alloc.alloc(?router.GapPath, gaps.len);
+                @memset(refused, null);
+                return refused;
+            }
+            surface[ni].allowed_layers = mask;
+            surface[ni].max_vias = 0;
+            policies = surface;
+            options.ripup = false;
+        }
+        options.constraints.net = policies;
+        var view = board;
+        view.reserved_lanes = self.plan.reserved;
+        const result = try router.closeGaps(self.alloc, self.placement, self.params, view, gaps, options);
+        _ = self.budget.stopped();
+        return result;
     }
 
     /// Route one round's hops and keep the ones that earn their copper.
     fn runRound(self: *Work, gaps: []const router.Gap) std.mem.Allocator.Error!RoundResult {
+        if (self.budget.stopped()) return .{};
         try self.beginRound();
-        const base = self.copper() orelse return .{};
+        const live = try self.liveCopper();
+        const base = live.routes;
         const reasons = try self.alloc.alloc(router.GapReason, gaps.len);
         @memset(reasons, .routed);
         // The accept gate runs INSIDE the batch (see `router.GapJudge`), so the
@@ -1316,11 +1546,12 @@ const Work = struct {
         var watch = HopWatch{
             .work = self,
             .gaps = gaps,
+            .map = live.map,
             .last_ms = clock.milliTimestamp(),
             .reasons = reasons,
             .verdicts = verdicts,
         };
-        const paths = try router.closeGaps(self.alloc, self.placement, self.params, .{
+        const paths = try self.closeGaps(.{
             .tracks = base.tracks,
             .vias = base.vias,
             .zones = self.router_zones,
@@ -1328,12 +1559,13 @@ const Work = struct {
             .sink = .{ .ctx = &watch, .emit = HopWatch.emit },
             .judge = .{ .ctx = &watch, .keep = HopWatch.keep },
             .rip_filter = self.ripFilter(),
-            .terminal_via = self.terminal_via,
+            .constraints = .{ .terminal_via = self.terminal_via },
             .raster = .{ .divisor = self.grid_divisor },
         });
-        var kept = RoundResult{};
+        var kept = RoundResult{ .tried = watch.tried };
         for (gaps, paths, reasons, verdicts) |gap, maybe, why, judged| {
             const path = maybe orelse {
+                if (self.budget.stopped()) continue;
                 const bridge_fine = endgameBridgeFine(self.residual_open, gap, why);
                 const global_detour = globalDetourEligible(
                     self.residual_open,
@@ -1349,18 +1581,19 @@ const Work = struct {
                         continue;
                     }
                 }
+                if (self.budget.stopped()) continue;
                 kept.no_path += 1;
                 try self.note(gap, .no_path, why);
                 continue;
             };
             var verdict = judged orelse .no_path;
             var ripped = path.ripped.len;
-            if (verdict == .broke_victim) {
+            if (verdict == .broke_victim and !self.budget.stopped()) {
                 const wider = try self.escalateRip(gap);
                 verdict = wider.verdict;
                 ripped = wider.ripped;
             }
-            if (verdict != .kept) {
+            if (verdict != .kept and !self.budget.stopped()) {
                 // The last rung's verdict is the reported one even when it
                 // fails: it is the attempt that had the most board to work
                 // with, so its DRC is what a caller should aim `add_tracks` at.
@@ -1373,6 +1606,7 @@ const Work = struct {
                 verdict = try self.fineDirect(gap, global_detour);
                 ripped = 0;
             }
+            if (verdict == .no_path and self.budget.stopped()) continue;
             if (verdict == .kept) {
                 kept.hops += 1;
                 kept.ripped += ripped;
@@ -1406,18 +1640,19 @@ const Work = struct {
         var judged: []const usize = &.{};
         const top = ripTierCapFor(wideArmed(self.rungs, self.wide_spent));
         while (tier < top) : (tier += 1) {
+            if (self.budget.stopped()) break;
             // Exactly one rung sits above the fixed cap, so this charges the
             // hop once for the sweep it is about to buy.
             if (tier >= max_rip_tier) self.wide_spent += 1;
-            const live = (try self.liveCopper()) orelse break;
-            const paths = try router.closeGaps(self.alloc, self.placement, self.params, .{
+            const live = try self.liveCopper();
+            const paths = try self.closeGaps(.{
                 .tracks = live.routes.tracks,
                 .vias = live.routes.vias,
                 .zones = self.router_zones,
             }, &.{gap}, .{
                 .rip_from = tier,
                 .rip_filter = self.ripFilter(),
-                .terminal_via = self.terminal_via,
+                .constraints = .{ .terminal_via = self.terminal_via },
                 .raster = .{ .divisor = self.grid_divisor },
             });
             const raw = paths[0] orelse continue;
@@ -1463,6 +1698,7 @@ const Work = struct {
         // which can see a perimeter corridor outside this rectangle. Divisor 8
         // stays corridor-bounded: board-wide it is prohibitively large.
         for (fine_divisors, 0..) |divisor, i| {
+            if (self.budget.stopped()) break;
             const verdict = try self.fineDirectAt(gap, divisor);
             if (verdict == .kept) return verdict;
             if (i == 0 and global_detour) {
@@ -1478,11 +1714,9 @@ const Work = struct {
 
     /// One corridor-bounded re-ask of `gap` at `divisor`× the base pitch.
     fn fineDirectAt(self: *Work, gap: router.Gap, divisor: f64) std.mem.Allocator.Error!Verdict {
-        const live = (try self.liveCopper()) orelse return .no_path;
-        const paths = try router.closeGaps(
-            self.alloc,
-            self.placement,
-            self.params,
+        if (self.budget.stopped()) return .no_path;
+        const live = try self.liveCopper();
+        const paths = try self.closeGaps(
             .{ .tracks = live.routes.tracks, .vias = live.routes.vias, .zones = self.router_zones },
             &.{gap},
             fineDirectOptions(gap, divisor),
@@ -1501,11 +1735,9 @@ const Work = struct {
     /// corridor rung: no rip, exact SMD terminal escapes enabled, and capped by
     /// `global_detour_spenders` before it reaches here.
     fn fineGlobalAt(self: *Work, gap: router.Gap, divisor: f64) std.mem.Allocator.Error!Verdict {
-        const live = (try self.liveCopper()) orelse return .no_path;
-        const paths = try router.closeGaps(
-            self.alloc,
-            self.placement,
-            self.params,
+        if (self.budget.stopped()) return .no_path;
+        const live = try self.liveCopper();
+        const paths = try self.closeGaps(
             .{ .tracks = live.routes.tracks, .vias = live.routes.vias, .zones = self.router_zones },
             &.{gap},
             fineGlobalOptions(divisor),
@@ -1529,16 +1761,14 @@ const Work = struct {
         const to = gap.to orelse return .no_path;
         const candidates = boundaryDetours(self.placement, gap);
         for (candidates, 0..) |candidate, edge| {
-            const live = (try self.liveCopper()) orelse return .no_path;
+            if (self.budget.stopped()) break;
+            const live = try self.liveCopper();
             const legs = [_]router.Gap{
                 .{ .net_i = gap.net_i, .from = gap.from, .to = candidate.first },
                 .{ .net_i = gap.net_i, .from = candidate.first, .to = candidate.second },
                 .{ .net_i = gap.net_i, .from = candidate.second, .to = to },
             };
-            const paths = try router.closeGaps(
-                self.alloc,
-                self.placement,
-                self.params,
+            const paths = try self.closeGaps(
                 .{ .tracks = live.routes.tracks, .vias = live.routes.vias, .zones = self.router_zones },
                 &legs,
                 fineBoundaryOptions(candidate.window, divisor),
@@ -1573,7 +1803,7 @@ const Work = struct {
     fn fineDirectOptions(gap: router.Gap, divisor: f64) router.GapOptions {
         return .{
             .ripup = false,
-            .terminal_via = .smd_ok,
+            .constraints = .{ .terminal_via = .smd_ok },
             .raster = .{
                 .divisor = divisor,
                 .window = router.GapWindow.around(gap, fine_corridor_margin_mm),
@@ -1585,7 +1815,7 @@ const Work = struct {
     fn fineGlobalOptions(divisor: f64) router.GapOptions {
         return .{
             .ripup = false,
-            .terminal_via = .smd_ok,
+            .constraints = .{ .terminal_via = .smd_ok },
             .raster = .{ .divisor = divisor, .expansion_multiplier = fine_expansion_multiplier },
         };
     }
@@ -1593,7 +1823,7 @@ const Work = struct {
     fn fineBoundaryOptions(window: router.GapWindow, divisor: f64) router.GapOptions {
         return .{
             .ripup = false,
-            .terminal_via = .smd_ok,
+            .constraints = .{ .terminal_via = .smd_ok },
             .raster = .{
                 .divisor = divisor,
                 .window = window,
@@ -1647,30 +1877,35 @@ const Work = struct {
     /// rip the cascade made.
     fn tryHop(self: *Work, gap: router.Gap, path: router.GapPath) std.mem.Allocator.Error!Verdict {
         try self.growDead();
-        const before_islands = self.islands(gap.net_i);
+        const before_islands = try self.islands(gap.net_i);
+        const before_bypasses = try self.missingBypasses();
         const mark_tracks = self.tracks.items.len;
         const mark_vias = self.vias.items.len;
         self.victims.clearRetainingCapacity();
         self.victim_queue.clearRetainingCapacity();
         self.ripped_marks.clearRetainingCapacity();
+        var kept = false;
+        defer if (!kept) {
+            self.tracks.shrinkRetainingCapacity(mark_tracks);
+            self.vias.shrinkRetainingCapacity(mark_vias);
+            for (self.ripped_marks.items) |i| {
+                if (i < self.dead.len) self.dead[i] = false;
+            }
+        };
         try self.noteVictims(path.ripped_nets, path.ripped.len, 0);
         // Nothing has been applied yet, so an unrippable victim costs only the
         // island counts already taken.
         if (self.rippedAnOpenNet()) return .broke_victim;
-        self.applyHop(gap.net_i, path);
+        try self.applyHop(gap.net_i, path);
         // Added copper can split a retained pour without ripping one byte of
         // that net's routed copper. Treat every net that was whole at the round
         // boundary and is open now as a transaction victim, so the same repair
         // and rollback guarantees cover geometric pour clipping too.
         try self.noteCollateralVictims(gap.net_i, 0);
         try self.repairVictims();
+        if (newBypassMissing(before_bypasses, try self.missingBypasses())) return .bypass;
         const verdict = try self.judge(gap.net_i, before_islands);
-        if (verdict == .kept) return verdict;
-        self.tracks.shrinkRetainingCapacity(mark_tracks);
-        self.vias.shrinkRetainingCapacity(mark_vias);
-        for (self.ripped_marks.items) |i| {
-            if (i < self.dead.len) self.dead[i] = false;
-        }
+        kept = verdict == .kept;
         return verdict;
     }
 
@@ -1690,7 +1925,7 @@ const Work = struct {
         if (v >= self.placement.nets.len) return;
         const slot = try self.victims.getOrPut(self.alloc, v);
         if (slot.found_existing) return;
-        slot.value_ptr.* = self.islands(v);
+        slot.value_ptr.* = try self.islands(v);
         try self.victim_queue.append(self.alloc, .{ .net_i = v, .depth = depth });
     }
 
@@ -1700,7 +1935,7 @@ const Work = struct {
     /// a complete victim ledger. `whole` is the pre-hop round snapshot: a net
     /// already open then is the caller's unfinished work, never collateral.
     fn noteCollateralVictims(self: *Work, routing_net: usize, depth: usize) std.mem.Allocator.Error!void {
-        const r = self.copper() orelse return;
+        const r = try self.copper();
         const open = try fab_readiness.openNets(self.alloc, self.placement, .{
             .tracks = r.tracks,
             .arcs = r.arcs,
@@ -1747,6 +1982,7 @@ const Work = struct {
     fn repairVictims(self: *Work) std.mem.Allocator.Error!void {
         var i: usize = 0;
         while (i < self.victim_queue.items.len and i < max_transaction_victims) : (i += 1) {
+            if (self.budget.stopped()) break;
             const task = self.victim_queue.items[i];
             try self.repairNet(task.net_i, task.depth);
         }
@@ -1756,14 +1992,17 @@ const Work = struct {
     /// worth reporting: it did not merge the net, it left a net whose copper it
     /// ripped worse off, or it added a geometry DRC error.
     fn judge(self: *Work, net_i: usize, before: usize) std.mem.Allocator.Error!Verdict {
-        if (self.islands(net_i) >= before) return .no_merge;
+        const after = try self.islands(net_i);
+        if (self.surface_target) |target| {
+            if (after > before or hasBypass(try self.missingBypasses(), target)) return .no_merge;
+        } else if (after >= before) return .no_merge;
         // The cascade can nominate a victim of its own after `tryHop`'s early
         // check, so the rule is re-asserted here where every victim is known.
         if (self.rippedAnOpenNet()) return .broke_victim;
         var it = self.victims.iterator();
         while (it.next()) |e| {
             if (e.key_ptr.* == net_i) continue;
-            if (self.islands(e.key_ptr.*) > e.value_ptr.*) return .broke_victim;
+            if ((try self.islands(e.key_ptr.*)) > e.value_ptr.*) return .broke_victim;
         }
         const errors = try self.geometryErrors();
         if (errors > self.errorCap()) {
@@ -1796,12 +2035,13 @@ const Work = struct {
     /// find a path through standing copper or fail. Either way its copper lands
     /// in the transaction `tryHop` accepts or discards as a whole.
     fn repairNet(self: *Work, net_i: usize, depth: usize) std.mem.Allocator.Error!void {
+        if (self.budget.stopped()) return;
         const gaps = try self.repairGaps(net_i);
         if (gaps.len == 0) return;
         const rip = depth < repairRipDepthFor(wideArmed(self.rungs, self.wide_spent));
         var watch = RepairWatch{ .net = self.placement.nets[net_i].name };
-        const live = (try self.liveCopper()) orelse return;
-        const paths = try router.closeGaps(self.alloc, self.placement, self.params, .{
+        const live = try self.liveCopper();
+        const paths = try self.closeGaps(.{
             .tracks = live.routes.tracks,
             .vias = live.routes.vias,
             .zones = self.router_zones,
@@ -1809,22 +2049,19 @@ const Work = struct {
             .ripup = rip,
             .sink = .{ .ctx = &watch, .emit = RepairWatch.emit },
             .rip_filter = self.ripFilter(),
-            .terminal_via = self.terminal_via,
+            .constraints = .{ .terminal_via = self.terminal_via },
             .raster = .{ .divisor = self.grid_divisor },
         });
         var landed: usize = 0;
         for (gaps, paths) |gap, maybe| {
             var chosen = maybe;
-            if (chosen == null) {
+            if (chosen == null and !self.budget.stopped()) {
                 // Collateral repairs get the same bounded local fine rung as a
                 // top-level endgame hop. Board A's pour island is a 1.868 mm
                 // lattice miss: standard repair exhausts, divisor 4 closes it
                 // in its own corridor without rip or board-wide search.
-                const fine_live = (try self.liveCopper()) orelse continue;
-                const fine = try router.closeGaps(
-                    self.alloc,
-                    self.placement,
-                    self.params,
+                const fine_live = try self.liveCopper();
+                const fine = try self.closeGaps(
                     .{ .tracks = fine_live.routes.tracks, .vias = fine_live.routes.vias, .zones = self.router_zones },
                     &.{gap},
                     fineDirectOptions(gap, vacate_fine_divisor),
@@ -1840,7 +2077,7 @@ const Work = struct {
             const ripped = try self.mapRipped(p.ripped, live.map);
             if (ripped.len > 0 and !rip) continue;
             try self.noteVictims(p.ripped_nets, ripped.len, depth + 1);
-            self.applyHop(net_i, .{
+            try self.applyHop(net_i, .{
                 .tracks = p.tracks,
                 .vias = p.vias,
                 .ripped = ripped,
@@ -1859,7 +2096,7 @@ const Work = struct {
 
     /// The hops that would re-close `net_i` on the board as it stands.
     fn repairGaps(self: *Work, net_i: usize) std.mem.Allocator.Error![]const router.Gap {
-        const r = self.copper() orelse return &.{};
+        const r = try self.copper();
         const open = try fab_readiness.openNets(self.alloc, self.placement, .{
             .tracks = r.tracks,
             .arcs = r.arcs,
@@ -1880,18 +2117,21 @@ const Work = struct {
 
     /// Append a hop's copper and mark the tracks it ripped, recording each mark
     /// so `tryHop` can undo the WHOLE cascade and not just its first rip.
-    /// Allocation failure is swallowed: a partially-applied hop is still judged
-    /// by `tryHop`'s island + DRC gate and rolled back if it did not land.
-    fn applyHop(self: *Work, net_i: usize, path: router.GapPath) void {
+    /// Reserve all storage before changing any copper or rip mark. Later
+    /// validation failures are rolled back by the enclosing transaction.
+    fn applyHop(self: *Work, net_i: usize, path: router.GapPath) std.mem.Allocator.Error!void {
+        try self.ripped_marks.ensureUnusedCapacity(self.alloc, path.ripped.len);
+        try self.tracks.ensureUnusedCapacity(self.alloc, path.tracks.len);
+        try self.vias.ensureUnusedCapacity(self.alloc, path.vias.len);
         const net_name = self.placement.nets[net_i].name;
         for (path.ripped) |i| {
             if (i >= self.dead.len or self.dead[i]) continue;
             // Record BEFORE marking: a mark the ledger missed is a rip the
             // rollback would leave standing.
-            self.ripped_marks.append(self.alloc, i) catch return;
+            self.ripped_marks.appendAssumeCapacity(i);
             self.dead[i] = true;
         }
-        for (path.tracks) |t| self.tracks.append(self.alloc, .{
+        for (path.tracks) |t| self.tracks.appendAssumeCapacity(.{
             .x1 = t.x1,
             .y1 = t.y1,
             .x2 = t.x2,
@@ -1900,15 +2140,15 @@ const Work = struct {
             .w = t.width,
             .net = net_name,
             .source = pcb_layout_page.route_source_autorouter,
-        }) catch return;
-        for (path.vias) |v| self.vias.append(self.alloc, .{
+        });
+        for (path.vias) |v| self.vias.appendAssumeCapacity(.{
             .x = v.x,
             .y = v.y,
             .d = v.dia,
             .drill = v.drill,
             .net = net_name,
             .source = pcb_layout_page.route_source_autorouter,
-        }) catch return;
+        });
     }
 
     // ── Wholesale re-route: vacate the corridor ─────────────────────────────
@@ -2028,6 +2268,7 @@ const Work = struct {
         var done: usize = 0;
         var refused: usize = 0;
         for (folds) |f| {
+            if (self.budget.stopped()) break;
             if (try self.applyOneFold(sites[f.keep], sites[f.drop])) done += 1 else refused += 1;
         }
         progress("via fold: reused {d} same-net via(s), {d} refused", .{ done, refused });
@@ -2041,7 +2282,7 @@ const Work = struct {
     /// carrying a layer transition survives.
     fn pruneArtifacts(self: *Work) std.mem.Allocator.Error!ArtifactPrune {
         try self.endRound();
-        const before = self.copper() orelse return .{};
+        const before = try self.copper();
         var selected: []bool = &.{};
         if (self.only.len > 0) {
             selected = try self.alloc.alloc(bool, self.placement.nets.len);
@@ -2080,6 +2321,7 @@ const Work = struct {
         var closed: usize = 0;
         var attempts: usize = 0;
         while (attempts < max_vacate_seeds) : (attempts += 1) {
+            if (self.budget.stopped()) break;
             const seed = try self.nextVacateSeed() orelse break;
             try self.vacate_tried.append(self.alloc, seed);
             const name = self.placement.nets[seed].name;
@@ -2119,11 +2361,13 @@ const Work = struct {
     /// walled-in seed can be suffering both.
     fn vacateFor(self: *Work, seed: usize) std.mem.Allocator.Error!bool {
         if (try self.vacateAt(seed, router.gap_grid_divisor, .standard)) return true;
+        if (self.budget.stopped()) return false;
         progress("vacate {s}: retrying on the divisor-{d} grid", .{
             self.placement.nets[seed].name,
             vacate_fine_divisor,
         });
         if (try self.vacateAt(seed, vacate_fine_divisor, .standard)) return true;
+        if (self.budget.stopped()) return false;
         progress("vacate {s}: retrying with cheap-to-restore neighbours", .{
             self.placement.nets[seed].name,
         });
@@ -2141,6 +2385,7 @@ const Work = struct {
     /// blocker-less seed is still a bail-out: nothing about the board would
     /// differ from the rounds that already failed it.
     fn vacateAt(self: *Work, seed: usize, divisor: f64, tier: Tier) std.mem.Allocator.Error!bool {
+        if (self.budget.stopped()) return false;
         // A bare run — no displaceable blockers, subset = the seed alone —
         // reproduces the rounds that already failed unless the raster changed,
         // and on the cheap tier it is never useful at all: the standard tier
@@ -2189,10 +2434,10 @@ const Work = struct {
         // only from whatever that left open. One round could only ever have both
         // at once, which is the ordering mistake this phase used to make.
         for (0..vacate_rounds) |round| {
+            if (self.budget.stopped()) break;
             const hops = try self.planFor(subset, 1, round);
             if (hops.len == 0) break;
-            self.vacate_hops += hops.len;
-            _ = try self.runRound(hops);
+            self.vacate_hops += (try self.runRound(hops)).tried;
         }
         self.phase = .round;
         self.grid_divisor = router.gap_grid_divisor;
@@ -2295,6 +2540,7 @@ const Work = struct {
         var closed: usize = 0;
         var spent: std.ArrayList(usize) = .empty;
         while (budget.takeCluster()) {
+            if (self.budget.stopped()) break;
             const cluster = try self.nextJointCluster(spent.items) orelse break;
             try spent.appendSlice(self.alloc, cluster);
             const before = (try self.openNetNames()).len;
@@ -2380,7 +2626,9 @@ const Work = struct {
         var best: ?Snapshot = null;
         var best_open = before_open.len;
         for (joint_rasters) |divisor| {
+            if (self.budget.stopped()) break;
             for (joint_orders) |o| {
+                if (self.budget.stopped()) break;
                 if (!budget.takeAttempt()) break;
                 const seq = try self.jointSequence(o, seeds, blockers);
                 try self.runJointTransaction(strip, seq, divisor, before_errors);
@@ -2488,10 +2736,10 @@ const Work = struct {
         // loop's answer (see `Phase`).
         self.phase = .vacate;
         for (0..vacate_rounds) |round| {
+            if (self.budget.stopped()) break;
             const hops = try self.planFor(seq.nets, seq.lead, round);
             if (hops.len == 0) break;
-            self.vacate_hops += hops.len;
-            _ = try self.runRound(hops);
+            self.vacate_hops += (try self.runRound(hops)).tried;
         }
         self.phase = .round;
         self.grid_divisor = router.gap_grid_divisor;
@@ -2891,7 +3139,7 @@ const Work = struct {
     /// asks about every open net; taking them per seed would pay for them a
     /// dozen times to learn the same thing.
     fn boardView(self: *Work) std.mem.Allocator.Error!?BoardView {
-        const r = self.copper() orelse return null;
+        const r = try self.copper();
         return .{
             .open = try fab_readiness.openNets(self.alloc, self.placement, .{
                 .tracks = r.tracks,
@@ -2906,7 +3154,7 @@ const Work = struct {
 
     /// The oracle's open-net report for the board as it stands.
     fn openList(self: *Work) std.mem.Allocator.Error![]const fab_readiness.OpenNet {
-        const r = self.copper() orelse return &.{};
+        const r = try self.copper();
         return fab_readiness.openNets(self.alloc, self.placement, .{
             .tracks = r.tracks,
             .arcs = r.arcs,
@@ -2925,33 +3173,45 @@ const Work = struct {
     }
 };
 
-/// Per-net-index position in the design's `(pcb-plan (route …))` wave order,
-/// so the finishing pass claims corridors in the author's declared priority
-/// rather than by hop length alone. Unplanned nets (and any resolution failure)
-/// rank last, which is exactly the old span-only behaviour.
-fn planRanks(
+/// Resolve order, layer/via policies and reservations together. A failed
+/// allocation cannot silently turn authored hard constraints into defaults.
+fn finishingPlan(
     alloc: std.mem.Allocator,
     block: *env_mod.DesignBlock,
     placement: optimizer.Placement,
-) []const usize {
-    const ranks = alloc.alloc(usize, placement.nets.len) catch return &.{};
+    zones: []const pour.UserZone,
+    vias: []const SavedVia,
+) std.mem.Allocator.Error!FinishingPlan {
+    const ranks = try alloc.alloc(usize, placement.nets.len);
     @memset(ranks, std.math.maxInt(usize));
-    var policy = module_policy.analyze(alloc, placement) catch return ranks;
+    var policy = try module_policy.analyze(alloc, placement);
     defer policy.deinit(alloc);
-    const resolved = plan_resolve.resolve(alloc, block.pcb_plan, .{
+    const resolved = try plan_resolve.resolve(alloc, block.pcb_plan, .{
         .placement = placement,
         .net_class = policy.net_class,
         .part_role = policy.part_role,
         .modules = policy.modules,
-        .sections = plan_resolve.sectionMembers(alloc, block) catch &.{},
+        .sections = try plan_resolve.sectionMembers(alloc, block),
         .net_class_specs = block.net_classes,
-    }) catch return ranks;
+        .zones = zones,
+    });
     for (resolved.route, 0..) |wave, wi| {
         for (wave.members) |net_i| {
             if (net_i < ranks.len and ranks[net_i] == std.math.maxInt(usize)) ranks[net_i] = wi;
         }
     }
-    return ranks;
+    const base_vias = try alloc.alloc(usize, placement.nets.len);
+    @memset(base_vias, 0);
+    for (vias) |via| {
+        const ni = netIndex(placement, via.net) orelse continue;
+        base_vias[ni] += 1;
+    }
+    return .{
+        .rank = ranks,
+        .net = if (block.pcb_plan != null) try plan_resolve.routePolicies(alloc, resolved, placement, true) else &.{},
+        .reserved = resolved.escape_reserved,
+        .base_vias = base_vias,
+    };
 }
 
 /// Net name after the last '/', so a sub-block's `pll/GND` reads as ground.
@@ -3070,7 +3330,11 @@ fn boundaryDetours(placement: optimizer.Placement, gap: router.Gap) [4]BoundaryD
 /// pass that spends minutes inside a single `closeGaps` call.
 const HopWatch = struct {
     work: *Work,
+    tried: usize = 0,
     gaps: []const router.Gap,
+    /// The batch's physical track indices can include many chords per saved
+    /// arc. Keep its original owner map for every judge call in the batch.
+    map: []const usize,
     /// Wall clock at the previous event — the router reports hop boundaries and
     /// leaves the timing to us, so consecutive reads give each hop's cost.
     last_ms: i64,
@@ -3090,7 +3354,12 @@ const HopWatch = struct {
         // An allocation failure mid-judgement cannot be reported through a veto
         // that returns bool. Refusing the copper is the fail-safe answer: the
         // hop is rolled back and reported, never silently kept unjudged.
-        const verdict = self.work.tryHop(self.gaps[index], path) catch Verdict.no_path;
+        var saved_path = path;
+        saved_path.ripped = self.work.mapRipped(path.ripped, self.map) catch {
+            self.verdicts[index] = .no_path;
+            return false;
+        };
+        const verdict = self.work.tryHop(self.gaps[index], saved_path) catch Verdict.no_path;
         self.verdicts[index] = verdict;
         return verdict == .kept;
     }
@@ -3101,6 +3370,7 @@ const HopWatch = struct {
         const took = now - self.last_ms;
         self.last_ms = now;
         if (ev.index >= self.gaps.len) return;
+        self.tried += 1;
         self.reasons[ev.index] = ev.why;
         const gap = self.gaps[ev.index];
         progress("  {s} {s} ({d:.2},{d:.2}) {s} {d} ms{s}", .{
@@ -3141,17 +3411,17 @@ fn zoneSources(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
     zones: []const pour.UserZone,
-) []const route_policy.ExistingZone {
+) std.mem.Allocator.Error![]const route_policy.ExistingZone {
     var out: std.ArrayList(route_policy.ExistingZone) = .empty;
     for (zones) |z| {
         const ni = netIndex(placement, z.net) orelse continue;
-        out.append(alloc, .{
+        try out.append(alloc, .{
             .polygon = z.poly,
             .layer = z.layer,
             .net = @intCast(ni),
             .copper = true,
             .priority = z.priority,
-        }) catch return out.items;
+        });
     }
     return out.items;
 }
@@ -3186,14 +3456,41 @@ fn padPoint(
     };
 }
 
+/// Complete physical validation, prepared before writing the candidate.
+const FinalCheck = struct {
+    violations: []const drc.Violation,
+    tally: fab_readiness.Tally,
+};
+
+fn finalCheck(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, work: *Work) std.mem.Allocator.Error!?FinalCheck {
+    const r = try work.copper();
+    const report = drc_rules.checkRelease(alloc, project_dir, name, .{
+        .placement = work.placement,
+        .routed = r,
+        .clearance = work.params.clearance,
+        .zones = work.zones,
+    });
+    if (!report.complete) return null;
+    return .{
+        .violations = report.effective,
+        .tally = try fab_readiness.routableTally(alloc, work.placement, .{
+            .tracks = r.tracks,
+            .arcs = r.arcs,
+            .rf_paths = r.rf_port_outcomes,
+            .vias = r.vias,
+            .zones = work.zones,
+        }),
+    };
+}
+
 /// Write the tool's result: what it laid down, plus the pour-aware DRC and the
 /// connectivity tally of the board it just persisted.
 const Outcome = struct {
     alloc: std.mem.Allocator,
-    project_dir: []const u8,
     design: []const u8,
     layout: []const u8,
     work: *Work,
+    final: FinalCheck,
     tally: Tally,
     wall_ms: i64,
 };
@@ -3203,13 +3500,7 @@ const Outcome = struct {
 fn writeResult(out: *std.ArrayList(u8), o: Outcome) HandlerError!bool {
     const alloc = o.alloc;
     const work = o.work;
-    const r = work.copper() orelse return fail(out, alloc, "could not rebuild the finished copper");
-    const violations = drc_rules.checkFilteredZones(alloc, o.project_dir, o.design, .{
-        .placement = work.placement,
-        .routed = r,
-        .clearance = work.params.clearance,
-        .zones = work.zones,
-    });
+    const violations = o.final.violations;
     // `drc.errorCount`, so `drc_errors` means the same fab-blocking geometry it
     // does in the `add_tracks` result and in the rollback gate this tool's own
     // hops are judged by. The open nets it drops are reported two fields along,
@@ -3223,17 +3514,15 @@ fn writeResult(out: *std.ArrayList(u8), o: Outcome) HandlerError!bool {
         if (v.kind == .diff_uncoupled or v.kind == .diff_skew) diff_warnings += 1;
         if (v.kind == .single_layer_via or v.kind == .redundant_via or v.kind == .copper_stub or v.kind == .dangling_copper) artifact_warnings += 1;
     }
-    const final = try fab_readiness.routableTally(alloc, work.placement, .{
-        .tracks = r.tracks,
-        .arcs = r.arcs,
-        .rf_paths = r.rf_port_outcomes,
-        .vias = r.vias,
-        .zones = work.zones,
-    });
+    const final = o.final.tally;
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
     try w.print("{{\"ok\":true,\"live_version\":{d},\"layout\":", .{serve_root.getLiveVersion(o.design)});
     try pcb_layout_page.writeJsonStr(w, o.layout);
+    try w.print(",\"bypasses_repaired\":{d},\"bypasses_remaining\":{d}", .{
+        o.tally.bypasses, drc.countKind(violations, .bypass_open),
+    });
+    try w.print(",\"search_timed_out\":{s}", .{if (work.budget.timed_out) "true" else "false"});
     try w.print(
         ",\"hops_tried\":{d},\"hops_kept\":{d},\"hops_no_path\":{d},\"hops_rejected\":{d}," ++
             "\"nets_vacated\":{d},\"nets_joint_vacated\":{d}," ++
@@ -3278,9 +3567,9 @@ fn writeResult(out: *std.ArrayList(u8), o: Outcome) HandlerError!bool {
     // cannot tell which it is holding, and `hops_tried: 0` beside two dozen
     // diagnoses reads as a ledger from somewhere else entirely.
     try w.writeAll(",\"failed\":");
-    try writeFailures(w, work, .round);
+    try writeFailures(w, work, .round, final.open);
     try w.writeAll(",\"vacate_failed\":");
-    try writeFailures(w, work, .vacate);
+    try writeFailures(w, work, .vacate, final.open);
     try writeVacateTrace(w, work);
     try w.writeAll("}");
     try out.appendSlice(alloc, aw.written());
@@ -3330,11 +3619,12 @@ fn writeVacateTrace(w: *std.Io.Writer, work: *Work) HandlerError!void {
 }
 
 /// One phase's failure ledger as a JSON array (see `Phase`).
-fn writeFailures(w: *std.Io.Writer, work: *Work, phase: Phase) HandlerError!void {
+fn writeFailures(w: *std.Io.Writer, work: *Work, phase: Phase, open: []const []const u8) HandlerError!void {
     try w.writeAll("[");
     var n: usize = 0;
     for (work.failures.items) |f| {
         if (f.phase != phase) continue;
+        if (phase == .round and !containsName(open, f.net)) continue;
         if (n > 0) try w.writeAll(",");
         n += 1;
         try w.writeAll("{\"net\":");
@@ -3415,6 +3705,16 @@ fn argUsize(args_val: ?std.json.Value, key: []const u8) ?usize {
     return @intCast(v.integer);
 }
 
+/// Zero starts directly at the wholesale phase. Malformed explicit values
+/// must not silently buy four ordinary rounds before that phase can run.
+fn roundCount(args_val: ?std.json.Value) ?usize {
+    const args = args_val orelse return default_rounds;
+    if (args != .object) return default_rounds;
+    const value = args.object.get("rounds") orelse return default_rounds;
+    if (value != .integer) return null;
+    return std.math.cast(usize, value.integer);
+}
+
 fn fail(out: *std.ArrayList(u8), alloc: std.mem.Allocator, msg: []const u8) HandlerError!bool {
     try out.appendSlice(alloc, "{\"ok\":false,\"error\":");
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -3453,6 +3753,392 @@ fn gapFixture(parts: []optimizer.Part, nets: []const export_kicad.FlatNet) optim
         .maxy = 10,
         .generated = true,
     };
+}
+
+// spec: Web Server - Finishing validation propagates allocation failures instead of reporting clean geometry or completed connectivity
+test "close_open_nets validation reports allocation failure" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var parts = [_]optimizer.Part{ vacatePart("R1", 2, 5), vacatePart("R2", 8, 5) };
+    const nets = [_]export_kicad.FlatNet{vacateNet("SIG", "R1", "R2")};
+    inline for (.{ Work.geometryErrors, Work.diffWarnings, Work.errorViolations, Work.openNetCount, Work.planRound }, 0..) |inspect, i| {
+        var failing = testing.FailingAllocator.init(arena, .{ .fail_index = 0 });
+        var work = Work{
+            .alloc = failing.allocator(),
+            .placement = gapFixture(&parts, &nets),
+            .params = .{},
+            .zones = &.{},
+            .router_zones = &.{},
+            .rules = .{},
+            .tracks = .empty,
+            .vias = .empty,
+        };
+        if (i == 4) {
+            try testing.expectError(error.OutOfMemory, inspect(&work, 0));
+        } else {
+            try testing.expectError(error.OutOfMemory, inspect(&work));
+        }
+    }
+}
+
+// spec: Web Server - Finishing must retain every shown pour obstacle or report allocation failure before searching
+test "close_open_nets cannot silently truncate pour obstacles" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var parts = [_]optimizer.Part{ vacatePart("R1", 2, 5), vacatePart("R2", 8, 5) };
+    const nets = [_]export_kicad.FlatNet{vacateNet("SIG", "R1", "R2")};
+    const placement = gapFixture(&parts, &nets);
+    const polygon = [_][2]f64{ .{ 1, 1 }, .{ 9, 1 }, .{ 9, 9 }, .{ 1, 9 } };
+    const zones = [_]pour.UserZone{
+        .{ .net = "SIG", .layer = 0, .poly = &polygon },
+        .{ .net = "SIG", .layer = 1, .poly = &polygon },
+    };
+    var failing = testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, zoneSources(failing.allocator(), placement, &zones));
+    try testing.expectEqual(@as(usize, 2), (try zoneSources(alloc, placement, &zones)).len);
+}
+
+// spec: Web Server - Final finishing validation cannot return a complete candidate after a checker allocation failure
+test "close_open_nets final validation refuses incomplete evidence" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(testing.io, "src", .default_dir);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/demo.sexp", .data = "(design demo)" });
+    const project = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(project);
+    for (0..4000) |fail_at| {
+        var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_inst.deinit();
+        const arena = arena_inst.allocator();
+        var failing = testing.FailingAllocator.init(arena, .{ .fail_index = fail_at });
+        var parts = [_]optimizer.Part{ vacatePart("R1", 2, 5), vacatePart("R2", 8, 5) };
+        const nets = [_]export_kicad.FlatNet{vacateNet("SIG", "R1", "R2")};
+        var work = Work{
+            .alloc = failing.allocator(),
+            .placement = gapFixture(&parts, &nets),
+            .params = .{},
+            .zones = &.{},
+            .router_zones = &.{},
+            .rules = .{},
+            .tracks = .empty,
+            .vias = .empty,
+        };
+        const result = finalCheck(work.alloc, project, "demo", &work);
+        if (!failing.has_induced_failure) {
+            try testing.expect((try result) != null);
+            progress("final validation sweep checked {d} failure sites before complete evidence", .{fail_at});
+            return;
+        }
+        const checked = result catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        try testing.expect(checked == null);
+    }
+    return error.AllocationSweepDidNotFinish;
+}
+
+// spec: Web Server - Every failed allocation in a finishing hop leaves accepted tracks, vias and earlier rip marks intact
+test "close_open_nets allocation failure rolls back the entire hop" {
+    // Each run owns its scratch arena; fail after each allocation in turn until
+    // the complete transaction succeeds, including the allocation sites after
+    // its candidate copper and rip marks have already been applied.
+    for (0..2000) |fail_at| {
+        var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_inst.deinit();
+        const arena = arena_inst.allocator();
+        var parts = [_]optimizer.Part{
+            vacatePart("R1", 2, 5), vacatePart("R2", 8, 5),
+            vacatePart("R3", 2, 8), vacatePart("R4", 8, 8),
+        };
+        const nets = [_]export_kicad.FlatNet{ vacateNet("SIG", "R1", "R2"), vacateNet("VICTIM", "R3", "R4") };
+        var failing = testing.FailingAllocator.init(arena, .{ .fail_index = fail_at });
+        var work = Work{
+            .alloc = failing.allocator(),
+            .placement = gapFixture(&parts, &nets),
+            .params = .{},
+            .zones = &.{},
+            .router_zones = &.{},
+            .rules = .{},
+            .tracks = .empty,
+            .vias = .empty,
+        };
+        const victim = SavedTrack{ .net = "VICTIM", .l = 0, .x1 = 2, .y1 = 8, .x2 = 8, .y2 = 8, .w = 0.127 };
+        const original = [_]SavedTrack{ victim, victim, victim };
+        try work.tracks.appendSlice(arena, &original);
+        const retained_via = SavedVia{ .net = "VICTIM", .x = 5, .y = 8, .d = 0.6, .drill = 0.3 };
+        try work.vias.append(arena, retained_via);
+        var dead = [_]bool{ true, false, false };
+        work.dead = &dead;
+        var whole = [_]bool{ false, true };
+        work.whole = &whole;
+        const gap = router.Gap{ .net_i = 0, .from = .{ .x = 2, .y = 5, .layer = 0 }, .to = .{ .x = 8, .y = 5, .layer = 0 } };
+        const path = router.GapPath{
+            .tracks = &.{.{ .x1 = 2, .y1 = 5, .x2 = 8, .y2 = 5, .width = 0.127, .layer = 0, .net = 0 }},
+            .vias = &.{.{ .x = 5, .y = 5, .dia = 0.6, .drill = 0.3, .net = 0 }},
+            .ripped = &.{1},
+            .ripped_nets = &.{1},
+        };
+        const outcome = work.tryHop(gap, path);
+        if (!failing.has_induced_failure) {
+            try testing.expectEqual(Verdict.kept, try outcome);
+            try testing.expect(fail_at > 0);
+            progress("allocation sweep checked {d} failure sites before a successful hop", .{fail_at});
+            return;
+        }
+        try testing.expectError(error.OutOfMemory, outcome);
+        try testing.expectEqual(original.len, work.tracks.items.len);
+        for (original, work.tracks.items) |before, after| try testing.expect(std.meta.eql(before, after));
+        try testing.expectEqual(@as(usize, 1), work.vias.items.len);
+        try testing.expect(std.meta.eql(retained_via, work.vias.items[0]));
+        try testing.expectEqualSlices(bool, &.{ true, false, false }, work.dead[0..3]);
+    }
+    return error.AllocationSweepDidNotFinish;
+}
+
+// spec: Web Server - An expired finishing search skips grid allocation and further retries while retaining already accepted copper
+test "close_open_nets expired budget keeps accepted copper and skips search" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var parts = [_]optimizer.Part{ vacatePart("R1", 2, 5), vacatePart("R2", 8, 5) };
+    const nets = [_]export_kicad.FlatNet{vacateNet("SIG", "R1", "R2")};
+    var work = Work{
+        .alloc = arena,
+        .budget = .{ .stop = .{ .deadline_ns = 1 } },
+        .placement = gapFixture(&parts, &nets),
+        .params = .{},
+        .zones = &.{},
+        .router_zones = &.{},
+        .rules = .{},
+        .tracks = .empty,
+        .vias = .empty,
+    };
+    const accepted = SavedTrack{ .net = "SIG", .l = 0, .x1 = 2, .y1 = 5, .x2 = 3, .y2 = 5, .w = 0.2 };
+    try work.tracks.append(arena, accepted);
+    const gap = router.Gap{ .net_i = 0, .from = .{ .x = 3, .y = 5, .layer = 0 }, .to = .{ .x = 8, .y = 5, .layer = 0 } };
+    const paths = try work.closeGaps(.{}, &.{gap}, .{ .ripup = false });
+    try testing.expect(paths[0] == null);
+    try testing.expect(work.budget.timed_out);
+    try testing.expectEqual(@as(usize, 0), (try work.runRound(&.{gap})).hops);
+    try testing.expectEqual(@as(usize, 0), try work.vacatePhase());
+    try testing.expectEqual(@as(usize, 0), try work.jointPhase());
+    try testing.expectEqual(@as(usize, 0), work.failures.items.len);
+    try testing.expectEqual(@as(usize, 1), work.tracks.items.len);
+    try testing.expect(std.meta.eql(accepted, work.tracks.items[0]));
+    // A previous wholesale tier can exhaust the deadline. Later tiers must
+    // not rebuild the board or allocate a rollback copy before checking it.
+    var failing = testing.FailingAllocator.init(arena, .{ .fail_index = 0 });
+    work.alloc = failing.allocator();
+    try testing.expect(!try work.vacateAt(0, vacate_fine_divisor, .standard));
+    try testing.expect(!failing.has_induced_failure);
+}
+
+// spec: Web Server - Finishing rejects invalid search budgets and never extends an already armed deadline
+test "close_open_nets validates and arms its search budget once" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const invalid = [_][]const u8{
+        "{\"name\":\"unused\",\"max_route_ms\":0}",
+        "{\"name\":\"unused\",\"max_route_ms\":-1}",
+        "{\"name\":\"unused\",\"max_route_ms\":3600001}",
+        "{\"name\":\"unused\",\"max_route_ms\":\"1000\"}",
+        "{\"name\":\"unused\",\"max_route_ms\":null}",
+    };
+    for (invalid) |text| {
+        const args = try std.json.parseFromSlice(std.json.Value, arena, text, .{});
+        var out: std.ArrayList(u8) = .empty;
+        try testing.expect(!try mcpCloseOpenNets(arena, "/unused", args.value, &out));
+        try testing.expect(std.mem.indexOf(u8, out.items, "max_route_ms must be an integer") != null);
+    }
+    var unlimited = SearchBudget.fromArgs(null).?;
+    unlimited.arm();
+    try testing.expectEqual(@as(i128, 0), unlimited.stop.deadline_ns);
+    try testing.expect(!unlimited.stopped());
+    const args = try std.json.parseFromSlice(std.json.Value, arena, "{\"max_route_ms\":1000}", .{});
+    var bounded = SearchBudget.fromArgs(args.value).?;
+    const before = clock.nanoTimestamp();
+    bounded.arm();
+    const deadline = bounded.stop.deadline_ns;
+    try testing.expect(deadline >= before + clock.ns_per_s);
+    bounded.arm();
+    try testing.expectEqual(deadline, bounded.stop.deadline_ns);
+    try testing.expectEqual(deadline, bounded.restrict(.{}).deadline_ns);
+    try testing.expectEqual(@as(i128, 1), bounded.restrict(.{ .deadline_ns = 1 }).deadline_ns);
+}
+
+// spec: Web Server - Finishing rejects malformed round counts before evaluating or changing a layout
+test "close_open_nets rejects malformed round counts" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const invalid = [_][]const u8{
+        "{\"name\":\"unused\",\"rounds\":-1}",
+        "{\"name\":\"unused\",\"rounds\":\"4\"}",
+        "{\"name\":\"unused\",\"rounds\":1.5}",
+        "{\"name\":\"unused\",\"rounds\":null}",
+        "{\"name\":\"unused\",\"rounds\":false}",
+    };
+    for (invalid) |source| {
+        const args = try std.json.parseFromSliceLeaky(std.json.Value, arena, source, .{});
+        var out: std.ArrayList(u8) = .empty;
+        try testing.expect(!try mcpCloseOpenNets(arena, "/unused", args, &out));
+        try testing.expect(std.mem.indexOf(u8, out.items, "rounds must be a non-negative integer") != null);
+    }
+    try testing.expectEqual(@as(?usize, default_rounds), roundCount(null));
+    const omitted = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{}", .{});
+    try testing.expectEqual(@as(?usize, default_rounds), roundCount(omitted));
+}
+
+// spec: Web Server - An expired finishing deadline still gates completed copper and rolls back a hop whose victim cannot be repaired
+test "close_open_nets timeout keeps a complete hop and rolls back an unrepaired victim" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var parts = [_]optimizer.Part{
+        vacatePart("R1", 2, 5), vacatePart("R2", 8, 5),
+        vacatePart("R3", 2, 8), vacatePart("R4", 8, 8),
+    };
+    const nets = [_]export_kicad.FlatNet{ vacateNet("SIG", "R1", "R2"), vacateNet("OTHER", "R3", "R4") };
+    var work = Work{
+        .alloc = arena,
+        .budget = .{ .stop = .{ .deadline_ns = 1 } },
+        .placement = gapFixture(&parts, &nets),
+        .params = .{},
+        .zones = &.{},
+        .router_zones = &.{},
+        .rules = .{},
+        .tracks = .empty,
+        .vias = .empty,
+    };
+    const signal = router.Gap{ .net_i = 0, .from = .{ .x = 2, .y = 5, .layer = 0 }, .to = .{ .x = 8, .y = 5, .layer = 0 } };
+    const completed = router.GapPath{ .tracks = &.{.{ .x1 = 2, .y1 = 5, .x2 = 8, .y2 = 5, .width = 0.127, .layer = 0, .net = 0 }} };
+    try testing.expectEqual(Verdict.kept, try work.tryHop(signal, completed));
+    const kept = work.tracks.items[0];
+    try work.refreshWhole();
+    const other = router.Gap{ .net_i = 1, .from = .{ .x = 2, .y = 8, .layer = 0 }, .to = .{ .x = 8, .y = 8, .layer = 0 } };
+    const ripping = router.GapPath{
+        .tracks = &.{.{ .x1 = 2, .y1 = 8, .x2 = 8, .y2 = 8, .width = 0.127, .layer = 0, .net = 1 }},
+        .ripped = &.{0},
+        .ripped_nets = &.{0},
+    };
+    try testing.expectEqual(Verdict.broke_victim, try work.tryHop(other, ripping));
+    try testing.expect(work.budget.timed_out);
+    try testing.expectEqual(@as(usize, 1), work.tracks.items.len);
+    try testing.expect(std.meta.eql(kept, work.tracks.items[0]));
+    try testing.expectEqual(@as(usize, 1), try work.islands(0));
+    try testing.expectEqual(@as(usize, 2), try work.islands(1));
+}
+
+// spec: Web Server - Finishing propagates the route plan's layer masks, reservations and remaining new-via allowance through every round and retry without resetting the allowance
+test "close_open_nets gap policy shares its remaining via allowance across retries" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var parts = [_]optimizer.Part{ vacatePart("R1", 2, 5), vacatePart("R2", 8, 5) };
+    parts[1].side = .bottom;
+    const nets = [_]export_kicad.FlatNet{vacateNet("SIG", "R1", "R2")};
+    var work = Work{
+        .alloc = arena,
+        .placement = gapFixture(&parts, &nets),
+        .params = .{},
+        .zones = &.{},
+        .router_zones = &.{},
+        .rules = .{},
+        .tracks = .empty,
+        .vias = .empty,
+    };
+    const old_via = SavedVia{ .x = 2, .y = 2, .d = 0.6, .drill = 0.3, .net = "SIG" };
+    var block = env_mod.DesignBlock{
+        .name = "finishing-policy",
+        .instances = &.{},
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+        .pcb_plan = .{ .route = &.{.{
+            .name = "signal",
+            .nets = &.{"SIG"},
+            .allowed_layers = &.{ "F.Cu", "B.Cu" },
+            .max_vias = 1,
+        }} },
+    };
+    work.plan = try finishingPlan(arena, &block, work.placement, &.{}, &.{old_via});
+    try work.vias.append(arena, old_via);
+    const initial = try work.remainingPolicies();
+    try testing.expectEqual(@as(?u16, 1), initial[0].max_vias);
+    try testing.expectEqual(@as(u64, 3), initial[0].allowed_layers);
+    try work.vias.append(arena, .{ .x = 8, .y = 2, .d = 0.6, .drill = 0.3, .net = "SIG" });
+    try testing.expectEqual(@as(?u16, 0), (try work.remainingPolicies())[0].max_vias);
+    // This is the seam all retry rungs use. A new cross-face bridge cannot
+    // acquire another via just by starting a fresh closeGaps call.
+    const paths = try work.closeGaps(.{}, &.{.{
+        .net_i = 0,
+        .from = .{ .x = 2, .y = 5, .layer = 0 },
+        .to = .{ .x = 8, .y = 5, .layer = 1 },
+    }}, .{ .ripup = false });
+    try testing.expect(paths[0] == null);
+    work.vias.shrinkRetainingCapacity(1);
+    try testing.expectEqual(@as(?u16, 1), (try work.remainingPolicies())[0].max_vias);
+}
+
+// spec: Web Server - When the nearest island bridge has failed, close_open_nets can try an untried same-face pad pair on those same islands without repeating the failed hop
+test "close_open_nets tries another same-face pair after a bridge failed" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var parts = [_]optimizer.Part{
+        vacatePart("R1", 2, 5), vacatePart("R2", 2.5, 5), vacatePart("R3", 8, 5),
+    };
+    parts[0].side = .bottom;
+    const nets = [_]export_kicad.FlatNet{.{
+        .name = "SIG",
+        .pins = &.{
+            .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" }, .{ .ref_des = "R3", .pin = "1" },
+        },
+    }};
+    var work = Work{
+        .alloc = arena,
+        .placement = gapFixture(&parts, &nets),
+        .params = .{},
+        .zones = &.{},
+        .router_zones = &.{},
+        .rules = .{},
+        .tracks = .empty,
+        .vias = .empty,
+    };
+    var index = std.StringHashMapUnmanaged(usize).empty;
+    try index.put(arena, "R1", 0);
+    try index.put(arena, "R2", 1);
+    try index.put(arena, "R3", 2);
+    // R1 and R3 are already connected. The nearest pair asks for an extra
+    // layer change; after that fails, R3 can join R2 entirely on the top face.
+    const pads = [_]fab_readiness.OpenPad{
+        .{ .ref = "R1", .pad = "1", .x = 2, .y = 5, .side = .bottom, .thru = false, .island = 0 },
+        .{ .ref = "R2", .pad = "1", .x = 2.5, .y = 5, .side = .top, .thru = false, .island = 1 },
+        .{ .ref = "R3", .pad = "1", .x = 8, .y = 5, .side = .top, .thru = false, .island = 0 },
+    };
+    const nearest = [_]fab_readiness.OpenGap{.{ .from = pads[0], .to = pads[1], .mm = 0.5 }};
+    const open = fab_readiness.OpenNet{ .net = "SIG", .islands = 2, .pads = &pads, .gaps = &nearest };
+    var gaps: std.ArrayList(router.Gap) = .empty;
+    try work.addBridges(&gaps, &index, open, 0);
+    try testing.expectEqual(@as(usize, 1), gaps.items.len);
+    try testing.expectEqualStrings("R1", gaps.items[0].from.ref_des);
+    try work.note(gaps.items[0], .no_path, .sealed_from);
+    gaps.clearRetainingCapacity();
+    try work.addBridges(&gaps, &index, open, 0);
+    try testing.expectEqual(@as(usize, 1), gaps.items.len);
+    try testing.expectEqualStrings("R3", gaps.items[0].from.ref_des);
+    try testing.expectEqualStrings("R2", gaps.items[0].to.?.ref_des);
+    try testing.expectEqual(gaps.items[0].from.layer, gaps.items[0].to.?.layer);
+    try work.note(gaps.items[0], .no_path, .blocked);
+    gaps.clearRetainingCapacity();
+    try work.addBridges(&gaps, &index, open, 0);
+    try testing.expectEqual(@as(usize, 0), gaps.items.len);
 }
 
 // spec: Web Server - The close_open_nets widened-rung policy arms its two capped rungs only once the board's residual is down to the last few nets, and only for a bounded number of hops
@@ -3513,7 +4199,7 @@ test "the close_open_nets global detour is long-hop endgame only" {
 
     const opts = Work.fineGlobalOptions(vacate_fine_divisor);
     try testing.expect(!opts.ripup);
-    try testing.expectEqual(router.TerminalVia.smd_ok, opts.terminal_via);
+    try testing.expectEqual(router.TerminalVia.smd_ok, opts.constraints.terminal_via);
     try testing.expectEqual(@as(?router.GapWindow, null), opts.raster.window);
     try testing.expectEqual(fine_expansion_multiplier, opts.raster.expansion_multiplier);
 }
@@ -3580,6 +4266,55 @@ test "close_open_nets rolls back a hop that does not merge the net's islands" {
     try testing.expectEqual(@as(usize, 1), work.tracks.items.len);
 }
 
+// spec: Web Server - The close_open_nets accept gate includes proven bypass-family pads when measuring progress on a parent supply rail
+test "close_open_nets accepts a feed joining a proven bypass branch to its parent rail" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var parts = [_]optimizer.Part{
+        vacatePart("R1", 2, 5), vacatePart("R2", 4, 5),
+        vacatePart("C1", 6, 5), vacatePart("U1", 8, 5),
+    };
+    const nets = [_]export_kicad.FlatNet{
+        vacateNet("VDD", "R1", "R2"), vacateNet("VDD.U1.1", "C1", "U1"),
+    };
+    var placement = gapFixture(&parts, &nets);
+    placement.loops = &.{.{
+        .cap = 2,
+        .hub = 3,
+        .cap_pwr = .{ .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .cap_gnd = .{ .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .hub_pwr = &.{},
+        .hub_gnd = &.{},
+        .hub_pwr_pin = .{ .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .pwr_net = 1,
+        .explicit_pin = "1",
+    }};
+    var work = Work{
+        .alloc = arena,
+        .placement = placement,
+        .params = .{},
+        .zones = &.{},
+        .router_zones = &.{},
+        .rules = .{},
+        .tracks = .empty,
+        .vias = .empty,
+    };
+    try work.tracks.append(arena, .{ .x1 = 2, .y1 = 5, .x2 = 4, .y2 = 5, .l = 0, .w = 0.127, .net = "VDD" });
+    try work.tracks.append(arena, .{ .x1 = 6, .y1 = 5, .x2 = 8, .y2 = 5, .l = 0, .w = 0.127, .net = "VDD.U1.1" });
+    // Both logical endpoint pairs are closed, but the bypass branch has no feed.
+    try testing.expectEqual(@as(usize, 1), try work.openNetCount());
+    try testing.expectEqual(@as(usize, 2), try work.islands(0));
+    try testing.expectEqual(@as(usize, 1), try work.islands(1));
+    const gap = router.Gap{ .net_i = 0, .from = .{ .x = 4, .y = 5, .layer = 0 }, .to = .{ .x = 6, .y = 5, .layer = 0 } };
+    const bridge = router.GapPath{ .tracks = &.{.{ .x1 = 4, .y1 = 5, .x2 = 6, .y2 = 5, .layer = 0, .width = 0.127, .net = 0 }} };
+    try testing.expectEqual(Verdict.kept, try work.tryHop(gap, bridge));
+    try testing.expectEqual(@as(usize, 3), work.tracks.items.len);
+    try testing.expectEqual(@as(usize, 0), try work.openNetCount());
+    try testing.expectEqual(@as(usize, 1), try work.islands(0));
+    try testing.expectEqual(@as(usize, 1), try work.islands(1));
+}
+
 // spec: Web Server - The close_open_nets accept gate counts geometry DRC errors and never the net-open airwire it is closing
 test "close_open_nets gate ignores the net-open marker of the net it is closing" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
@@ -3615,7 +4350,7 @@ test "close_open_nets gate ignores the net-open marker of the net it is closing"
     try work.vias.append(arena, .{ .x = 7, .y = 8, .d = 0.4, .drill = 0.2, .net = "OTHER" });
     try testing.expectEqual(@as(usize, 0), try work.geometryErrors());
 
-    const r = work.copper().?;
+    const r = (try work.copper());
     const pour_aware = try @import("../placement/net_open.zig").check(arena, work.placement, .{ .tracks = r.tracks, .vias = r.vias }, null);
     try testing.expect(pour_aware.len > 0);
 }
@@ -3640,7 +4375,7 @@ test "close_open_nets refuses to rip copper the plan ranks above the routing net
     var whole = [_]bool{ true, true };
     work.whole = &whole;
     const ranks = [_]usize{ 0, 5 }; // net 0 outranks net 1
-    work.plan_rank = &ranks;
+    work.plan.rank = &ranks;
 
     // The lower-ranked net may not take copper from the one above it…
     try testing.expect(!Work.rippable(&work, 0, 1));
@@ -3753,7 +4488,7 @@ test "close_open_nets orders hops by plan wave, then by span among peers" {
     // With PLANNED in wave 0 and LONG unplanned, declared intent wins — this is
     // the whole point: the author's order reaches the finishing pass too.
     const ranks = [_]usize{ std.math.maxInt(usize), 0 };
-    work.plan_rank = &ranks;
+    work.plan.rank = &ranks;
     gaps = [_]router.Gap{ short, long };
     std.mem.sort(router.Gap, &gaps, &work, Work.hardestFirst);
     try testing.expectEqual(@as(usize, 1), gaps[0].net_i);
@@ -3940,7 +4675,7 @@ test "close_open_nets gate spends a declared DRC error budget but not an undecla
     const mark = work.tracks.items.len;
     try work.tracks.append(arena, .{ .x1 = 2, .y1 = 5, .x2 = 8, .y2 = 5, .l = 0, .w = 0.127, .net = "SIG" });
     try testing.expectEqual(@as(usize, 2), try work.geometryErrors());
-    try testing.expectEqual(@as(usize, 1), work.islands(0));
+    try testing.expectEqual(@as(usize, 1), try work.islands(0));
 
     // Undeclared budget: the gate refuses the copper even though the net closes,
     // and leaves the ceiling where it was.
@@ -4059,8 +4794,8 @@ test "close_open_nets gate rejects a cascade that broke its SECOND victim" {
 
     // The first victim alone looks fine; the gate must still refuse, because a
     // hop may not pay for one net by quietly splitting a second.
-    try testing.expectEqual(@as(usize, 1), work.islands(1));
-    try testing.expectEqual(@as(usize, 2), work.islands(2));
+    try testing.expectEqual(@as(usize, 1), try work.islands(1));
+    try testing.expectEqual(@as(usize, 2), try work.islands(2));
     try testing.expectEqual(Verdict.broke_victim, try work.judge(0, 2));
 
     // Put VIC2 back and the identical hop is kept — the SECOND victim's state
@@ -4109,7 +4844,7 @@ test "close_open_nets detects a pour clipped by added copper as collateral" {
     try testing.expect(!work.whole[0]);
     try testing.expect(work.whole[1]);
 
-    work.applyHop(0, .{ .tracks = &.{.{
+    try work.applyHop(0, .{ .tracks = &.{.{
         .x1 = 5,
         .y1 = 0,
         .x2 = 5,
@@ -4178,6 +4913,7 @@ test "close_open_nets refuses to rip a net that is itself still open" {
 }
 
 // spec: Web Server - The close_open_nets pass reads its board back as live copper with an index map, so a rip reported against it lands on the board's own tracks
+// spec: Web Server - Finishing restores saved RF regions for every connectivity and DRC check, protects them from ordinary rip-up, and maps arc chords back to their single saved owner
 test "close_open_nets maps a rip reported against live copper back onto its own tracks" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -4207,7 +4943,7 @@ test "close_open_nets maps a rip reported against live copper back onto its own 
     // SHORTER than the board's and its indices are shifted.
     work.dead[1] = true;
 
-    const live = (try work.liveCopper()).?;
+    const live = (try work.liveCopper());
     try testing.expectEqual(@as(usize, 2), live.routes.tracks.len);
     try testing.expectEqualSlices(usize, &.{ 0, 2 }, live.map);
 
@@ -4224,6 +4960,58 @@ test "close_open_nets maps a rip reported against live copper back onto its own 
     try work.tracks.append(arena, .{ .x1 = 2, .y1 = 5, .x2 = 8, .y2 = 5, .l = 0, .w = 0.127, .net = "SIG" });
     _ = try work.mapRipped(&.{}, live.map);
     try testing.expectEqual(work.tracks.items.len, work.dead.len);
+    work.tracks.items[0].xm = 3;
+    work.tracks.items[0].ym = 3;
+    const curved = (try work.liveCopper());
+    try testing.expect(curved.routes.tracks.len > 3);
+    try testing.expectEqual(curved.routes.tracks.len, curved.map.len);
+    const last_victim = curved.map.len - 2;
+    try testing.expectEqual(@as(usize, 2), curved.map[last_victim]);
+    const remapped = try work.mapRipped(&.{ 0, 1, last_victim }, curved.map);
+    try testing.expectEqualSlices(usize, &.{ 0, 2 }, remapped);
+
+    // The batch judge must perform the same translation, not just the retry
+    // helpers above. Rip one redundant victim row after an arc while closing
+    // SIG; the other copy keeps the victim connected throughout the gate.
+    work.tracks.shrinkRetainingCapacity(3);
+    try work.tracks.append(arena, work.tracks.items[2]);
+    try work.beginRound();
+    const batch_live = (try work.liveCopper());
+    const victim_chord = std.mem.indexOfScalar(usize, batch_live.map, 2).?;
+    const batch_gaps = [_]router.Gap{.{
+        .net_i = 0,
+        .from = .{ .x = 2, .y = 5, .layer = 0 },
+        .to = .{ .x = 8, .y = 5, .layer = 0 },
+    }};
+    var reasons = [_]router.GapReason{.routed};
+    var verdicts = [_]?Verdict{null};
+    var watch = HopWatch{
+        .work = &work,
+        .gaps = &batch_gaps,
+        .map = batch_live.map,
+        .last_ms = 0,
+        .reasons = &reasons,
+        .verdicts = &verdicts,
+    };
+    try testing.expect(HopWatch.keep(&watch, 0, .{
+        .tracks = &.{.{ .x1 = 2, .y1 = 5, .x2 = 8, .y2 = 5, .layer = 0, .width = 0.127, .net = 0 }},
+        .ripped = &.{victim_chord},
+        .ripped_nets = &.{2},
+    }));
+    try testing.expect(work.dead[2]);
+    try testing.expect(!work.dead[0]);
+    try testing.expect(!work.dead[3]);
+
+    // RF regions can connect pads without an ordinary constant-width track.
+    work.tracks.clearRetainingCapacity();
+    work.dead = &.{};
+    work.rf_paths = &.{.{ .net = "SIG", .layer = 0, .samples = &.{
+        .{ .at = .{ 2, 5 }, .s_mm = 0, .curvature = 0, .width_mm = 0.2 }, .{ .at = .{ 8, 5 }, .s_mm = 6, .curvature = 0, .width_mm = 0.2 },
+    } }};
+    try work.refreshWhole();
+    try testing.expect(work.whole[0]);
+    try testing.expectEqual(@as(usize, 1), (try work.copper()).rf_port_outcomes.len);
+    try testing.expect(!Work.rippable(&work, 0, 1));
 }
 
 // ── Wholesale re-route phase ────────────────────────────────────────────────
@@ -4891,7 +5679,7 @@ test "the vacate tier's nomination is the shared corridor sweep" {
     try nomination.sweepHops(&theirs, arena, .{
         .net_i = 0,
         .hops = &.{.{ .ax = 2, .ay = 5, .bx = 8, .by = 5 }},
-        .tracks = (work.copper().?).tracks,
+        .tracks = ((try work.copper())).tracks,
         .radius_mm = vacate_corridor_mm,
     });
     const want = try theirs.ranked(arena);
@@ -4919,7 +5707,7 @@ test "the last rung asks for a finer raster and no rip at all" {
     try std.testing.expect(opts.raster.divisor > router.gap_grid_divisor);
     // The escape via has to be allowed on the terminal itself, or a sealed
     // fine-pitch pad has no exit for the finer raster to find.
-    try std.testing.expectEqual(router.TerminalVia.smd_ok, opts.terminal_via);
+    try std.testing.expectEqual(router.TerminalVia.smd_ok, opts.constraints.terminal_via);
     // …and it is BOUNDED to the hop's own corridor, which is what makes the
     // finer rung affordable at all (a board-wide divisor-8 raster was measured
     // at over 50 minutes for two nets and removed).
@@ -4931,6 +5719,7 @@ test "the last rung asks for a finer raster and no rip at all" {
 }
 
 // spec: Web Server - The close_open_nets result reports the round loop's failures apart from the wholesale phase's own, and marks the ones whose transaction was rolled back
+// spec: Web Server - Finishing reports round failures only for nets still open in the final physical tally
 test "close_open_nets splits its round failures from the wholesale phase's" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
@@ -4984,7 +5773,7 @@ test "close_open_nets splits its round failures from the wholesale phase's" {
     });
 
     var round_out: std.Io.Writer.Allocating = .init(arena);
-    try writeFailures(&round_out.writer, &work, .round);
+    try writeFailures(&round_out.writer, &work, .round, &.{"GND"});
     const round_json = round_out.written();
     // `failed[]` is the caller's answer: only the hop asked on the net they
     // named. A foreign net leaking in here is what made an agent act on a
@@ -4997,7 +5786,7 @@ test "close_open_nets splits its round failures from the wholesale phase's" {
     try testing.expect(std.mem.indexOf(u8, round_json, "rolled_back") == null);
 
     var vac_out: std.Io.Writer.Allocating = .init(arena);
-    try writeFailures(&vac_out.writer, &work, .vacate);
+    try writeFailures(&vac_out.writer, &work, .vacate, &.{"GND"});
     const vac_json = vac_out.written();
     // The phase's own churn is KEPT, not dropped — "the seed's blockers could
     // not all come back" is why the seed is still open — but it is labelled,
@@ -5009,6 +5798,9 @@ test "close_open_nets splits its round failures from the wholesale phase's" {
     // Both arrays are still well-formed JSON arrays of objects.
     try testing.expect(round_json[0] == '[' and round_json[round_json.len - 1] == ']');
     try testing.expect(vac_json[0] == '[' and vac_json[vac_json.len - 1] == ']');
+    var resolved: std.Io.Writer.Allocating = .init(arena);
+    try writeFailures(&resolved.writer, &work, .round, &.{});
+    try testing.expectEqualStrings("[]", resolved.written());
 }
 
 // spec: Web Server - Every close_open_nets failure carries the next thing worth trying, not just the verdict that rejected it
@@ -5265,4 +6057,59 @@ test "close_open_nets folds a redundant same-net via and leaves the rest alone" 
     try work.vias.append(arena, .{ .x = 5.402, .y = 5, .d = 0.4, .drill = 0.2, .net = "SIG", .f = "RF1" });
     try testing.expectEqual(@as(usize, 0), try work.foldRedundantVias());
     try testing.expectEqual(@as(usize, 2), work.vias.items.len);
+}
+
+// spec: Web Server - Finishing repairs exact same-face bypass intent on an already-connected rail without adding vias or breaking other authored bonds
+test "close_open_nets repairs a surface bypass despite a closed remote via path" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const a = arena_i.allocator();
+    var parts = [_]optimizer.Part{ vacatePart("C1", 2, 5), vacatePart("U1", 8, 5) };
+    const nets = [_]export_kicad.FlatNet{vacateNet("VDD", "C1", "U1")};
+    var placement = gapFixture(&parts, &nets);
+    placement.loops = &.{.{
+        .cap = 0,
+        .hub = 1,
+        .cap_pwr = .{ .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .cap_gnd = .{ .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .hub_pwr = &.{},
+        .hub_gnd = &.{},
+        .hub_pwr_pin = .{ .x = 0, .y = 0, .w = 0.6, .h = 0.6 },
+        .pwr_net = 0,
+        .explicit_pin = "1",
+    }};
+    var work = Work{
+        .alloc = a,
+        .placement = placement,
+        .params = .{},
+        .zones = &.{},
+        .router_zones = &.{},
+        .rules = .{},
+        .tracks = .empty,
+        .vias = .empty,
+    };
+    try work.tracks.append(a, .{ .x1 = 2, .y1 = 5, .x2 = 8, .y2 = 5, .l = 1, .w = 0.127, .net = "VDD" });
+    try work.vias.append(a, .{ .x = 2, .y = 5, .d = 0.4, .drill = 0.2, .net = "VDD" });
+    try work.vias.append(a, .{ .x = 8, .y = 5, .d = 0.4, .drill = 0.2, .net = "VDD" });
+    const missing = try work.missingBypasses();
+    try testing.expectEqual(@as(usize, 1), missing.len);
+    try testing.expectEqual(@as(usize, 1), try work.islands(0));
+    work.error_ceiling = try work.geometryErrors();
+    const before_tracks = work.tracks.items.len;
+    // The board forbids the cap's surface: the repair must not override it.
+    work.plan.net = &.{.{ .allowed_layers = 2 }};
+    try testing.expectEqual(@as(usize, 0), try work.repairBypasses());
+    try testing.expectEqual(before_tracks, work.tracks.items.len);
+    work.plan.net = &.{};
+    try testing.expectEqual(@as(usize, 1), try work.repairBypasses());
+    try testing.expectEqual(@as(usize, 0), (try work.missingBypasses()).len);
+    try testing.expectEqual(@as(usize, 2), work.vias.items.len);
+    try testing.expectEqual(@as(usize, 1), try work.islands(0));
+    try testing.expect(newBypassMissing(&.{}, missing));
+    try testing.expect(!newBypassMissing(missing, &.{}));
+    // Moving to the other face is a placement problem, never a via workaround.
+    parts[0].side = .bottom;
+    parts[1].side = .top;
+    try testing.expectEqual(@as(usize, 0), try work.repairBypasses());
+    try testing.expectEqual(@as(usize, 1), (try work.missingBypasses()).len);
 }

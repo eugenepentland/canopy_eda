@@ -643,6 +643,31 @@ test "get_pcb_layout_image decodes to the same PNG the pcb-png endpoint serves" 
     try testing.expectEqualSlices(u8, "\x89PNG", raw[0..4]);
 }
 
+// spec: Web Server - The PCB image tool and HTTP endpoint select the same named copper layer and reject unknown layers
+test "PNG copper layer selection matches between MCP and HTTP" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try fixtureProject(alloc, &tmp, .routed);
+    const http = try httpCall(alloc, project, pcb_layout_page.pcbPngApi, "twinfx", &.{.{ "layer", "B.Cu" }}, null);
+    try testing.expectEqual(@as(u16, 200), http.status);
+    const tool = try mcpCall(alloc, project, "get_pcb_layout_image", "{\"name\":\"twinfx\",\"layer\":\"B.Cu\"}");
+    try testing.expect(tool.ok);
+    const dec = std.base64.standard.Decoder;
+    const raw = try alloc.alloc(u8, try dec.calcSizeForSlice(tool.body));
+    try dec.decode(raw, tool.body);
+    try testing.expectEqualSlices(u8, http.body, raw);
+    const plain = try httpCall(alloc, project, pcb_layout_page.pcbPngApi, "twinfx", &.{}, null);
+    try testing.expect(!std.mem.eql(u8, plain.body, raw));
+    try testing.expectError(error.InvalidLayer, pcb_layout_page.renderDesignPng(alloc, project, "twinfx", .{ .layer = "In99.Cu" }, null));
+    const bad = try httpCall(alloc, project, pcb_layout_page.pcbPngApi, "twinfx", &.{.{ "layer", "In99.Cu" }}, null);
+    try testing.expectEqual(@as(u16, 400), bad.status);
+    const bad_tool = try mcpCall(alloc, project, "get_pcb_layout_image", "{\"name\":\"twinfx\",\"layer\":\"In99.Cu\"}");
+    try testing.expect(!bad_tool.ok);
+}
+
 // spec: Web Server - The diagnose_net MCP tool and the pcb-route-analyze endpoint run one diagnosis, so a named net reads identically on both surfaces
 test "diagnose_net returns the same per-net analysis as the pcb-route-analyze endpoint" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);

@@ -1105,3 +1105,43 @@ ambiguous bare aliases produce an unresolved-guide warning.
 same service as `netlisp package` and the `package_*` structured tools.
 See [package-builder.md](package-builder.md) for dimensions, recipes, revision
 checks, stencil apertures, component assignment, and CLI examples.
+
+### Measuring generated module routing
+
+`route_experiment` and `route_pcb` accept `saved_module_routes:false` to disable
+saved module track/via recovery after local routing. Placement, shown pours,
+and authored routing guides remain inputs. For `route_pcb`, omit
+`reference_layout` and use a whole-board scope when measuring generated copper;
+incremental routing intentionally retains other nets' existing copper.
+
+Responses include `subcircuit_seeds.saved_module_routes` and `attempts[]`.
+Each attempt reports the module path, `budget_ms` (null means unbounded; zero means expired),
+`wall_ms`, `supply_bond_ms`, `signal_ms`, `recovery_ms`, and `timed_out`.
+`primary_connected/primary_total` measures the primary local signal pass before
+standalone recovery and assembled-board seed acceptance. It is not final
+whole-board connectivity. The benchmark's `--no-saved-module-routes` switch
+selects the same policy and its JSON includes the same attempt report.
+
+
+`bench-route --json --no-saved-module-routes --save-candidate NAME DESIGN`
+stores the measured copper and solved poses as a new, unstarred layout. An
+existing name is refused; the source layout is preserved. `candidate_layout`
+and `candidate_error` identify capture outcomes, and a failed capture exits
+nonzero. Benchmark measurements now include generated perimeter copper
+(`perimeter_included:true`); older pre-perimeter results must be compared
+with that scope difference in mind.
+
+The named candidate can be inspected through `describe_pcb_layout`,
+`get_pcb_layout_image` and `diagnose_net`, then finished automatically with
+`close_open_nets`. The finisher preserves saved assembly/dimension/fabrication
+metadata and includes retained RF regions in its physical connectivity and
+DRC checks. Its rip-index map accounts for the multiple physical chords of a
+single saved arc. Use a separate project copy for algorithm experiments so
+measurements and unfinished candidates do not alter the live board.
+
+For an isolated wholesale repair attempt, pass `rounds:0, vacate:true` to
+`close_open_nets`, together with a bounded `max_route_ms`. This skips ordinary
+gap routing so it cannot consume the search budget before wholesale repair
+starts. `rounds:0, vacate:false` performs only cleanup and final validation.
+Omitting `rounds` retains the four-pass default; malformed explicit counts are
+rejected before layout evaluation or mutation.

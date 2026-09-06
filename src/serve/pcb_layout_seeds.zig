@@ -16,6 +16,7 @@
 //! a valid bond). `SubcircuitRouteSeedStats` is what the route response reports.
 
 const std = @import("std");
+const log = @import("../infra/log.zig");
 const env_mod = @import("../eval/env.zig");
 const optimizer = @import("../placement/optimizer.zig");
 const router = @import("../placement/router.zig");
@@ -306,7 +307,11 @@ fn mappedNet(
 /// board-level compatibility filtering; accepted counts are the same-net
 /// sources actually handed to the global router.
 pub const SubcircuitRouteSeedStats = struct {
+    saved_module_routes: bool = true,
+    attempts: []const subcircuit_route.Attempt = &.{},
     copper: struct {
+        guided_tracks: usize = 0,
+        guided_vias: usize = 0,
         candidate_tracks: usize = 0,
         candidate_vias: usize = 0,
         accepted_nets: usize = 0,
@@ -331,6 +336,7 @@ const SeedTrack = subcircuit_route.SeedTrack;
 const SeedVia = subcircuit_route.SeedVia;
 
 const SeedAccumulator = struct {
+    guide_nets: []const bool = &.{},
     tracks: std.ArrayList(SeedTrack) = .empty,
     vias: std.ArrayList(SeedVia) = .empty,
     rejected: []bool,
@@ -767,17 +773,33 @@ fn mergeAcceptedSeeds(
     try tracks.appendSlice(alloc, options.existing_tracks);
     var vias: std.ArrayList(route_policy.ExistingVia) = .empty;
     try vias.appendSlice(alloc, options.existing_vias);
+    var guide_tracks: std.ArrayList(route_policy.GuideTrack) = .empty;
+    try guide_tracks.appendSlice(alloc, options.guides.tracks);
+    var guide_vias: std.ArrayList(route_policy.GuideVia) = .empty;
+    try guide_vias.appendSlice(alloc, options.guides.vias);
     const accepted_vias = try alloc.alloc(u16, acc.rejected.len);
     @memset(accepted_vias, 0);
     for (acc.tracks.items) |item| {
         if (acc.rejected[item.net]) continue;
         if (containsSeedTrack(tracks.items, item.copper)) continue;
+        if (item.net < acc.guide_nets.len and acc.guide_nets[item.net]) {
+            const t = item.copper;
+            try guide_tracks.append(alloc, .{ .x1 = t.x1, .y1 = t.y1, .x2 = t.x2, .y2 = t.y2, .layer = t.layer, .width = t.width, .net = t.net });
+            acc.stats.copper.guided_tracks += 1;
+            continue;
+        }
         try tracks.append(alloc, item.copper);
         acc.stats.copper.accepted_tracks += 1;
     }
     for (acc.vias.items) |item| {
         if (acc.rejected[item.net]) continue;
         if (containsSeedVia(vias.items, item.copper)) continue;
+        if (item.net < acc.guide_nets.len and acc.guide_nets[item.net]) {
+            const v = item.copper;
+            try guide_vias.append(alloc, .{ .x = v.x, .y = v.y, .net = v.net });
+            acc.stats.copper.guided_vias += 1;
+            continue;
+        }
         try vias.append(alloc, item.copper);
         accepted_vias[item.net] +|= 1;
         acc.stats.copper.accepted_vias += 1;
@@ -787,6 +809,8 @@ fn mergeAcceptedSeeds(
     for (accepted_vias, 0..) |count, ni| if (count > 0 and ni < policies.len) {
         if (policies[ni].max_vias) |limit| policies[ni].max_vias = limit -| count;
     };
+    options.guides.tracks = guide_tracks.items;
+    options.guides.vias = guide_vias.items;
     options.net = policies;
     options.existing_tracks = tracks.items;
     options.existing_vias = vias.items;
@@ -805,7 +829,7 @@ pub fn addSubcircuitRouteSeeds(
     params: router.RouteParams,
     options: *route_policy.Options,
 ) std.mem.Allocator.Error!SubcircuitRouteSeedStats {
-    if (block.sub_blocks.len == 0 or placement.nets.len == 0) return .{};
+    if (block.sub_blocks.len == 0 or placement.nets.len == 0) return .{ .saved_module_routes = options.guides.saved_module_routes };
     const rejected = try alloc.alloc(bool, placement.nets.len);
     @memset(rejected, false);
     const candidate = try alloc.alloc(bool, placement.nets.len);
@@ -819,11 +843,21 @@ pub fn addSubcircuitRouteSeeds(
             else => false,
         } else false;
     }
+    const seed_started = clock.nanoTimestamp();
     const local = try subcircuit_route.routeAllClassified(alloc, block, placement, params, options.*, supply);
+    log.progress("module routing: {d} ms", .{@divTrunc(clock.nanoTimestamp() - seed_started, clock.ns_per_ms)});
     @memcpy(candidate, local.nets);
-    var acc = SeedAccumulator{ .rejected = rejected, .candidate = candidate, .isolated = local.nets, .supply = supply };
+    const guided = try alloc.alloc(bool, placement.nets.len);
+    for (guided, 0..) |*yes, ni| {
+        const fresh = ni < local.nets.len and local.nets[ni];
+        const protected = ni >= local.protected.len or local.protected[ni];
+        yes.* = options.guides.module_signals_guided and fresh and !protected;
+    }
+    var acc = SeedAccumulator{ .rejected = rejected, .candidate = candidate, .isolated = local.nets, .supply = supply, .guide_nets = guided };
     try acc.tracks.appendSlice(alloc, local.tracks);
     try acc.vias.appendSlice(alloc, local.vias);
+    acc.stats.saved_module_routes = options.guides.saved_module_routes;
+    acc.stats.attempts = local.attempts;
     acc.stats.copper.candidate_tracks = local.tracks.len;
     acc.stats.copper.candidate_vias = local.vias.len;
     acc.stats.phase.attempted_subcircuits = local.phase.attempted_subcircuits;
@@ -833,9 +867,13 @@ pub fn addSubcircuitRouteSeeds(
     var ctx = SeedContext{ .alloc = alloc, .placement = placement, .params = params, .options = options.*, .supply = supply, .acc = &acc };
     try validateSeedCandidates(ctx);
     acc.isolated = try subcircuit_seed_drc.retainAccepted(SeedAccumulator, alloc, &acc);
+    // Saved fallback remains fixed even if a rejected fresh route was guideable.
+    for (guided, 0..) |*yes, ni| yes.* = yes.* and acc.isolated[ni];
     const fresh_tracks = acc.tracks.items.len;
     const fresh_vias = acc.vias.items.len;
-    for (block.sub_blocks) |sb| try appendSubcircuitCandidate(&ctx, project_dir, sb);
+    if (options.guides.saved_module_routes) {
+        for (block.sub_blocks) |sb| try appendSubcircuitCandidate(&ctx, project_dir, sb);
+    }
     // Fresh survivors precede saved alternatives, preserving their channels
     // when a fallback collides. Avoid repeating the gate with no added copper.
     if (acc.tracks.items.len != fresh_tracks or acc.vias.items.len != fresh_vias)
@@ -853,28 +891,38 @@ pub fn addSubcircuitRouteSeeds(
         @memset(global_scope, true)
     else for (global_scope, 0..) |*yes, ni|
         yes.* = ni < options.selected_nets.len and options.selected_nets[ni];
+    log.progress("module routing plus seed validation: {d} ms", .{@divTrunc(clock.nanoTimestamp() - seed_started, clock.ns_per_ms)});
     // The whole retained bundle, pours included: the same oracle describe and
     // fabrication run, which reads a net joined through a pour as connected.
     const retained = try route_plan.retainedCopper(alloc, options.*, try route_plan.retainedZones(alloc, placement, options.*));
-    const connectivity = try fab_readiness.netConnectivity(alloc, placement, retained);
+    var carrier_names: std.ArrayList([]const u8) = .empty;
+    for (local.complete_planes, 0..) |complete, ni| {
+        if (complete and !rejected[ni]) try carrier_names.append(alloc, placement.nets[ni].name);
+    }
+    const open_carriers = try fab_readiness.openNetsAmong(alloc, placement, retained, carrier_names.items);
     for (local.complete_planes, 0..) |complete, ni| {
         // The same oracle used by describe/fabrication decides whether the
         // retained local drops really joined every terminal. Complete carrier
         // nets stay frozen; only a physically open carrier re-enters the global
         // plane pass, where retainedStubMm prevents duplicate barrels.
-        if (!complete or rejected[ni] or ni >= connectivity.len) continue;
-        if (!connectivity[ni].routable or connectivity[ni].connected) {
+        if (!complete or rejected[ni]) continue;
+        var open = false;
+        for (open_carriers) |carrier| {
+            if (std.mem.eql(u8, carrier.net, placement.nets[ni].name)) open = true;
+        }
+        if (!open) {
             global_scope[ni] = false;
         } else {
             acc.stats.phase.deferred_supply_nets += 1;
         }
     }
     options.selected_nets = global_scope;
+    log.progress("complete module handoff: {d} ms", .{@divTrunc(clock.nanoTimestamp() - seed_started, clock.ns_per_ms)});
     return acc.stats;
 }
 
 fn seedWasUsed(stats: SubcircuitRouteSeedStats) bool {
-    return !stats.fallback and (stats.copper.accepted_tracks > 0 or stats.copper.accepted_vias > 0);
+    return !stats.fallback and (stats.copper.accepted_tracks + stats.copper.guided_tracks > 0 or stats.copper.accepted_vias > 0);
 }
 
 pub fn armRouteDeadline(options: *route_policy.Options) void {
@@ -923,7 +971,7 @@ pub fn writeRouteSeedStats(w: *std.Io.Writer, stats: SubcircuitRouteSeedStats) s
         ",\"subcircuit_seeds\":{{\"candidate_tracks\":{d},\"candidate_vias\":{d}," ++
             "\"accepted_nets\":{d},\"accepted_tracks\":{d},\"accepted_vias\":{d},\"rejected_nets\":{d}," ++
             "\"attempted_subcircuits\":{d},\"completed_subcircuits\":{d},\"timed_out_subcircuits\":{d}," ++
-            "\"deferred_supply_nets\":{d},\"accepted_carrier_drops\":{d},\"used\":{},\"fallback\":{}}}",
+            "\"deferred_supply_nets\":{d},\"accepted_carrier_drops\":{d},\"used\":{},\"fallback\":{}",
         .{
             stats.copper.candidate_tracks,
             stats.copper.candidate_vias,
@@ -940,6 +988,10 @@ pub fn writeRouteSeedStats(w: *std.Io.Writer, stats: SubcircuitRouteSeedStats) s
             stats.fallback,
         },
     );
+    try w.print(",\"saved_module_routes\":{},\"attempts\":", .{stats.saved_module_routes});
+    try subcircuit_route.writeAttempts(w, stats.attempts);
+    try w.print(",\"guided_tracks\":{d},\"guided_vias\":{d}", .{ stats.copper.guided_tracks, stats.copper.guided_vias });
+    try w.writeByte('}');
 }
 
 // spec: Web Server - Route responses report attempted, completed, and timed-out local sub-circuits, deferred supply nets, and accepted carrier drops while the compatibility fallback flag remains false
@@ -958,4 +1010,37 @@ test "fresh isolated supply copper suppresses its saved snapshot" {
     try std.testing.expect(!needsSavedSeedFallback(&.{true}, 0));
     try std.testing.expect(needsSavedSeedFallback(&.{false}, 0));
     try std.testing.expect(needsSavedSeedFallback(&.{}, 0));
+}
+
+// spec: serve/subcircuit-route - module-signals guided makes unrestricted fresh local signal routes revisable hints while fixed remains the default
+test "guided module copper preserves protected and caller copper and via budgets" {
+    var arena_i = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_i.deinit();
+    const a = arena_i.allocator();
+    var rejected = [_]bool{ false, false, true };
+    var candidate = [_]bool{ true, true, true };
+    var acc = SeedAccumulator{
+        .rejected = &rejected,
+        .candidate = &candidate,
+        .isolated = &candidate,
+        .supply = &.{ false, true, false },
+        .guide_nets = &.{ true, false, true },
+    };
+    for (0..3) |ni| {
+        const net = std.math.cast(i32, ni) orelse return error.TestInvalidIndex;
+        try acc.tracks.append(a, .{ .net = ni, .copper = .{ .x1 = 1, .y1 = 1, .x2 = 2, .y2 = 1, .width = 0.127, .layer = 0, .net = net } });
+        try acc.vias.append(a, .{ .net = ni, .copper = .{ .x = 2, .y = 1, .dia = 0.4, .drill = 0.2, .net = net } });
+    }
+    const caller = route_policy.ExistingTrack{ .x1 = 5, .y1 = 1, .x2 = 6, .y2 = 1, .width = 0.127, .layer = 0, .net = 0 };
+    var options = route_policy.Options{ .existing_tracks = &.{caller}, .net = &.{ .{ .max_vias = 1 }, .{ .max_vias = 1 }, .{} } };
+    try mergeAcceptedSeeds(a, &options, &acc);
+    try std.testing.expectEqual(@as(usize, 2), options.existing_tracks.len);
+    try std.testing.expectEqualDeep(caller, options.existing_tracks[0]);
+    try std.testing.expectEqual(@as(usize, 1), options.existing_vias.len);
+    try std.testing.expectEqual(@as(i32, 1), options.existing_vias[0].net);
+    try std.testing.expectEqual(@as(usize, 1), options.guides.tracks.len);
+    try std.testing.expectEqual(@as(usize, 1), options.guides.vias.len);
+    try std.testing.expectEqual(@as(u16, 1), options.net[0].max_vias.?);
+    try std.testing.expectEqual(@as(u16, 0), options.net[1].max_vias.?);
+    try std.testing.expectEqual(@as(usize, 1), acc.stats.copper.guided_tracks);
 }

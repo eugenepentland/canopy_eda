@@ -4165,13 +4165,22 @@ fn collectPlanGuides(
 /// sub-form makes the assigned lanes hard reservations as well as soft guides.
 /// Extra members are warned and ignored, and the form still applies with its
 /// defaults.
-fn parseAssignEscapes(self: *Evaluator, selector: []const Node) env_mod.PlanEscapeSpec {
+fn parseAssignEscapes(self: *Evaluator, selector: []const Node) EvalError!env_mod.PlanEscapeSpec {
     var spec = env_mod.PlanEscapeSpec{};
+    var peers: std.ArrayList([]const u8) = .empty;
     var names: usize = 0;
     for (selector[1..]) |member| {
         if (member.asList()) |sub| {
             if (sub.len > 0 and std.mem.eql(u8, sub[0].asAtom() orelse "", "reserve")) {
                 spec.reserve = true;
+                continue;
+            }
+            if (sub.len == 1 and std.mem.eql(u8, sub[0].asAtom() orelse "", "pin-side")) {
+                spec.pin_side = true;
+                continue;
+            }
+            if (sub.len > 1 and std.mem.eql(u8, sub[0].asAtom() orelse "", "with-nets")) {
+                try collectPlanNames(self, sub[1..], &peers);
                 continue;
             }
         } else {
@@ -4180,8 +4189,9 @@ fn parseAssignEscapes(self: *Evaluator, selector: []const Node) env_mod.PlanEsca
             names += 1;
             if (names <= 2) continue;
         }
-        self.warnFmt(selector[0].span, "(assign-escapes [\"LAYER\"] [\"HUBREF\"] [(reserve)]) takes at most two names — extras ignored", .{});
+        self.warnFmt(selector[0].span, "assign-escapes takes two optional names and (reserve), (pin-side), or (with-nets NET...) — extra member ignored", .{});
     }
+    spec.with_nets = try peers.toOwnedSlice(self.allocator);
     return spec;
 }
 
@@ -4265,7 +4275,7 @@ fn applyPlanSelector(
         return;
     }
     if (is_route and std.mem.eql(u8, head, "assign-escapes")) {
-        wave.corridor.assign_escapes = parseAssignEscapes(self, sc);
+        wave.corridor.assign_escapes = try parseAssignEscapes(self, sc);
         return;
     }
     if (is_route and std.mem.eql(u8, head, "topology")) {
@@ -4368,6 +4378,19 @@ fn parsePlanRouteSeconds(self: *Evaluator, node: Node, is_route: bool) PlanRoute
     return .{ .value = @intCast(numeric.toCount(seconds.?)) };
 }
 
+fn parseModuleChoice(self: *Evaluator, node: Node, is_route: bool, comptime form: []const u8, comptime off: []const u8, comptime on: []const u8) ?bool {
+    if (!is_route) return null;
+    const c = node.asList() orelse return null;
+    if (c.len == 0 or !std.mem.eql(u8, c[0].asAtom() orelse "", form)) return null;
+    if (c.len == 2) {
+        const word = c[1].asAtom() orelse "";
+        if (std.mem.eql(u8, word, on)) return true;
+        if (std.mem.eql(u8, word, off)) return false;
+    }
+    self.warnFmt(node.span, "expected ({s} {s}|{s})", .{ form, off, on });
+    return false;
+}
+
 fn parsePcbPlan(self: *Evaluator, form_children: []const Node) EvalError!env_mod.PcbPlanSpec {
     var place: std.ArrayList(env_mod.PlanWave) = .empty;
     var route: std.ArrayList(env_mod.PlanWave) = .empty;
@@ -4376,6 +4399,8 @@ fn parsePcbPlan(self: *Evaluator, form_children: []const Node) EvalError!env_mod
     var effort: ?env_mod.PlanEffort = null;
     var max_route_seconds: ?u32 = null;
     var topology = false;
+    var module_signals_guided = false;
+    var module_budget_weighted = false;
     for (form_children[1..]) |child| {
         const c = child.asList() orelse continue;
         if (c.len == 0) continue;
@@ -4394,6 +4419,14 @@ fn parsePcbPlan(self: *Evaluator, form_children: []const Node) EvalError!env_mod
         const dest = if (is_route) &route else &place;
         const rest_seen = if (is_route) &route_rest else &place_rest;
         for (c[1..]) |wave_node| {
+            if (parseModuleChoice(self, wave_node, is_route, "module-signals", "fixed", "guided")) |guided| {
+                module_signals_guided = guided;
+                continue;
+            }
+            if (parseModuleChoice(self, wave_node, is_route, "module-budget", "equal", "weighted")) |weighted| {
+                module_budget_weighted = weighted;
+                continue;
+            }
             switch (parsePlanRouteSeconds(self, wave_node, is_route)) {
                 .not_form => {},
                 .invalid => continue,
@@ -4416,6 +4449,8 @@ fn parsePcbPlan(self: *Evaluator, form_children: []const Node) EvalError!env_mod
         .effort = effort,
         .max_route_seconds = max_route_seconds,
         .topology = topology,
+        .module_signals_guided = module_signals_guided,
+        .module_budget_weighted = module_budget_weighted,
     };
 }
 
@@ -5584,6 +5619,28 @@ test "a route wave records its (assign-escapes) opt-in" {
     try testing.expectEqualStrings("B.Cu", aimed.layer);
     try testing.expectEqualStrings("J1", aimed.hub);
     try testing.expect(plan.route[2].corridor.assign_escapes == null);
+}
+
+// spec: eval/pcb-plan - An escape assignment records pin-side mode and peer nets independently of the wave's own net selector and hard policies
+test "assign-escapes records pin-side and with-nets without changing wave ownership" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    var eval: Evaluator = undefined;
+    const block = try evalPlanFixture(arena_i.allocator(), &eval,
+        \\(design-block "test" (pcb-plan (route
+        \\  (wave "lock" (nets "LOCK") (allowed-layers "B.Cu") (max-vias 2)
+        \\    (assign-escapes "F.Cu" "U1" (pin-side) (with-nets "SCK" "MOSI") (reserve))))))
+    );
+    const wave = block.pcb_plan.?.route[0];
+    const spec = wave.corridor.assign_escapes.?;
+    try testing.expect(spec.pin_side);
+    try testing.expect(spec.reserve);
+    try testing.expectEqual(@as(usize, 2), spec.with_nets.len);
+    try testing.expectEqualStrings("MOSI", spec.with_nets[1]);
+    try testing.expectEqual(@as(usize, 1), wave.nets.len);
+    try testing.expectEqualStrings("LOCK", wave.nets[0]);
+    try testing.expectEqualStrings("B.Cu", wave.allowed_layers[0]);
+    try testing.expectEqual(@as(?u16, 2), wave.max_vias);
 }
 
 // spec: eval/pcb-plan - A pcb-plan form captures each place and route wave's selectors, reason, and rest flag
@@ -7442,4 +7499,26 @@ test "a computed port (rated …) window reaches the derived rail and net envelo
     const derived = derivedEnvelopeFor(envelopes, "V_5V1") orelse return error.TestExpectedEnvelope;
     try testing.expectApproxEqAbs(@as(f64, 4.8545), derived.min, 1e-9);
     try testing.expectApproxEqAbs(@as(f64, 5.3655), derived.max, 1e-9);
+}
+
+// spec: serve/subcircuit-route - module-signals accepts fixed or guided only in the route section
+test "module signal handoff mode parses only explicit route intent" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const a = arena_i.allocator();
+    try testing.expect((try planFor(a, "(design-block \"t\" (pcb-plan (route (module-signals guided))))")).module_signals_guided);
+    try testing.expect(!(try planFor(a, "(design-block \"t\" (pcb-plan (route (module-signals fixed))))")).module_signals_guided);
+    try testing.expect(!(try planFor(a, "(design-block \"t\" (pcb-plan (route (module-signals typo))))")).module_signals_guided);
+    try testing.expect(!(try planFor(a, "(design-block \"t\" (pcb-plan (place (module-signals guided))))")).module_signals_guided);
+}
+
+// spec: serve/subcircuit-route - join-weighted module budgets are opt-in and equal module shares remain the default
+test "module budget accepts weighted and defaults to equal" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expect((try planFor(a, "(design-block \"t\" (pcb-plan (route (module-budget weighted))))")).module_budget_weighted);
+    try testing.expect(!(try planFor(a, "(design-block \"t\" (pcb-plan (route (module-budget equal))))")).module_budget_weighted);
+    try testing.expect(!(try planFor(a, "(design-block \"t\" (pcb-plan (route (module-budget typo))))")).module_budget_weighted);
+    try testing.expect(!(try planFor(a, "(design-block \"t\" (pcb-plan (place (module-budget weighted))))")).module_budget_weighted);
 }

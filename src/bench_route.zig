@@ -17,8 +17,9 @@
 //! from that same oracle tally, so a two-net move is diffable net by net instead
 //! of leaving a reader to guess which two it was.
 //!
-//! Read-only: it never writes a layout sidecar, so it is safe to point at a
-//! project dir another process is serving.
+//! Read-only by default. `--save-candidate NAME` explicitly captures the
+//! measured copper as a new, unstarred layout for inspection and finishing.
+//! It refuses an existing name and never replaces the source layout.
 //!
 //! Usage:
 //!   netlisp bench-route --project-dir <dir> [--route-space lattice|field]
@@ -35,6 +36,9 @@ const drc = @import("placement/drc.zig");
 const drc_rules = @import("serve/drc_rules.zig");
 const pcb_layout_page = @import("serve/pcb_layout_page.zig");
 const route_plan = @import("serve/route_plan.zig");
+const route_copper_state = @import("route_copper_state.zig");
+const saved_route_copper = @import("saved_route_copper.zig");
+const sidecar_store = @import("layout_sidecar_store.zig");
 const route_timing = @import("placement/route_timing.zig");
 const route_policy = @import("placement/route_policy.zig");
 const route_space_cache = @import("placement/route_space_cache.zig");
@@ -43,6 +47,7 @@ const route_score = @import("placement/route_score.zig");
 const route_shape_score = @import("placement/route_shape_score.zig");
 const router = @import("placement/router.zig");
 const modules_mod = @import("serve/modules.zig");
+const subcircuit_route = @import("serve/subcircuit_route.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
 
 /// Completion floor inside a geometric mean: a zero-completion board would
@@ -64,7 +69,7 @@ pub const BenchError = std.mem.Allocator.Error ||
     std.Io.Writer.Error ||
     infra_fs.File.WriteError ||
     infra_fs.Iterator.Error ||
-    error{BaselineRegression}; // the --baseline gate failed
+    error{ BaselineRegression, CandidateSaveFailed, InvalidCandidateName }; // the --baseline gate failed
 
 /// A board's connectivity, as the oracle counts it.
 pub const Nets = struct {
@@ -125,6 +130,7 @@ pub const Copper = struct {
 
 /// Secondary route quality dimensions used by the path-director A/B.
 const Quality = struct {
+    candidate: struct { layout: ?[]const u8 = null, err: ?[]const u8 = null } = .{},
     shape: route_shape_score.Metrics = .{},
     score_v1: f64 = 0,
     copper_hash: u64 = 0,
@@ -211,17 +217,33 @@ pub fn benchOneBreakdown(
     name: []const u8,
     breakdown: bool,
 ) BoardResult {
-    return benchOneConfigured(alloc, project_dir, name, breakdown, .lattice);
+    return benchOneConfigured(alloc, project_dir, name, .{ .breakdown = breakdown });
 }
+
+const RunConfig = struct {
+    breakdown: bool = false,
+    route_space: route_policy.RouteSpace = .lattice,
+    saved_module_routes: bool = true,
+    save_candidate: ?[]const u8 = null,
+};
 
 fn benchOneConfigured(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     name: []const u8,
-    breakdown: bool,
-    route_space: route_policy.RouteSpace,
+    config: RunConfig,
 ) BoardResult {
+    const breakdown = config.breakdown;
+    const route_space = config.route_space;
     var out = BoardResult{ .name = name, .breakdown = breakdown, .quality = .{ .route_space = route_space.name() } };
+    if (config.save_candidate) |target| {
+        out.quality.candidate.layout = target;
+        out.quality.candidate.err = "CandidateNotProduced";
+        if (pcb_layout_page.mcpReadWorking(alloc, project_dir, name, target) != null) {
+            out.quality.candidate.err = "CandidateNameExists";
+            return out;
+        }
+    }
     var eval = Evaluator.init(alloc, project_dir);
     defer eval.deinit();
     var module_res: ?modules_mod.ResolvedBlock = null;
@@ -246,17 +268,18 @@ fn benchOneConfigured(
     const t0 = clock.nanoTimestamp();
     var route_options = route_plan.lowerOrEmpty(alloc, solved.block, solved.placement);
     route_options.existing_zones = solved.shown_zones.sources;
+    route_options.guides.saved_module_routes = config.saved_module_routes;
     // Always arm counters in the benchmark so route-space attempts are visible
     // in compact JSON too. Both A/B modes pay the same timing instrumentation.
     route_options.timing = &out.timing;
     var static_cache = route_space_cache.Cache.init(switch (route_space) {
         .lattice => alloc,
-        .field => |config| config.scratch,
+        .field => |field| field.scratch,
     });
     defer static_cache.deinit();
     route_options.guides.route_space = switch (route_space) {
         .lattice => .lattice,
-        .field => |config| .{ .field = .{ .scratch = config.scratch, .cache = &static_cache } },
+        .field => |field| .{ .field = .{ .scratch = field.scratch, .cache = &static_cache } },
     };
     const seeded = pcb_layout_page.routeWithSubcircuitSeeds(
         alloc,
@@ -267,7 +290,9 @@ fn benchOneConfigured(
         route_options,
     ) catch return out;
     out.copper.seeds = seeded.seeds;
-    const routed = seeded.result;
+    // Match the copper that commit, experiment and inspection actually show.
+    // The perimeter is generated output and belongs in the measured candidate.
+    const routed = finishCandidate(alloc, solved.placement, seeded.result, solved.shown_zones.user) catch return out;
     out.wall_ms = @as(f64, @floatFromInt(clock.nanoTimestamp() - t0)) / ns_per_ms;
     if (out.breakdown) {
         // Resolve slow-net indexes to names while the placement is alive; the
@@ -324,7 +349,44 @@ fn benchOneConfigured(
         .quality_warns = route_score.qualityWarnCount(v),
     });
     out.quality.copper_hash = copperHash(routed.tracks, routed.vias);
+    if (config.save_candidate) |target| {
+        out.quality.candidate.err = null;
+        captureCandidate(alloc, project_dir, name, solved.placement, routed, target) catch |err| {
+            out.quality.candidate.err = @errorName(err);
+        };
+    }
     return out;
+}
+
+fn finishCandidate(
+    alloc: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    zones: []const @import("placement/pour.zig").UserZone,
+) std.mem.Allocator.Error!router.RouteResult {
+    const fenced = (try route_copper_state.appendPerimeter(alloc, placement, routed)).?;
+    return route_copper_state.reconcile(alloc, placement, fenced, zones);
+}
+
+const CaptureError = sidecar_store.StoreError || error{ CandidateNameExists, NoSavedPlacement };
+
+fn captureCandidate(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    target: []const u8,
+) CaptureError!void {
+    if (pcb_layout_page.mcpReadWorking(alloc, project_dir, name, target) != null) return error.CandidateNameExists;
+    var entry = pcb_layout_page.mcpReadWorking(alloc, project_dir, name, null) orelse return error.NoSavedPlacement;
+    entry.name = target;
+    entry.default = false;
+    entry.parts = pcb_layout_page.posesFromPlacement(alloc, placement) orelse return error.OutOfMemory;
+    var routes = try saved_route_copper.fromResult(alloc, routed, placement.nets, null);
+    routes.zones = if (entry.routes) |prior| prior.zones else &.{};
+    entry.routes = routes;
+    try pcb_layout_page.mcpCreateWorking(alloc, project_dir, name, entry);
 }
 
 fn hashScalar(hash: *u64, value: anytype) void {
@@ -547,6 +609,16 @@ pub fn writeJson(w: *std.Io.Writer, results: []const BoardResult) json_writer.Wr
                 r.timing.counters.field_static_cache_hits,
             },
         );
+        if (r.quality.candidate.layout) |target| {
+            try w.writeAll(",\"candidate_layout\":");
+            try json_writer.writeString(w, target);
+            if (r.quality.candidate.err) |err| {
+                try w.writeAll(",\"candidate_error\":");
+                try json_writer.writeString(w, err);
+            }
+        }
+        try w.writeAll(",\"perimeter_included\":true");
+        try pcb_layout_page.writeRouteSeedStats(w, r.copper.seeds);
         try w.print(",\"connected_trace_mm\":{d:.2},\"open_trace_mm\":{d:.2},\"field_query_cache_hits\":{d},\"field_live_cache_hits\":{d},\"open\":", .{
             r.copper.connected_mm,
             r.copper.open_mm,
@@ -647,6 +719,8 @@ const Args = struct {
     cli: bench_args.Common = .{},
     route_space: []const u8 = "lattice",
     breakdown: bool = false,
+    saved_module_routes: bool = true,
+    save_candidate: ?[]const u8 = null,
 };
 
 /// Parse the shared bench flags plus the path-director A/B selector and the
@@ -665,6 +739,15 @@ fn takeExtra(out: *Args, args: []const []const u8, i: *usize) bool {
         if (i.* < args.len and (std.mem.eql(u8, args[i.*], "field") or std.mem.eql(u8, args[i.*], "margin"))) out.route_space = "field";
         return true;
     }
+    if (std.mem.eql(u8, args[i.*], "--save-candidate")) {
+        i.* += 1;
+        out.save_candidate = if (i.* < args.len) args[i.*] else "";
+        return true;
+    }
+    if (std.mem.eql(u8, args[i.*], "--no-saved-module-routes")) {
+        out.saved_module_routes = false;
+        return true;
+    }
     if (std.mem.eql(u8, args[i.*], "--breakdown")) {
         out.breakdown = true;
         return true;
@@ -677,17 +760,23 @@ fn takeExtra(out: *Args, args: []const []const u8, i: *usize) bool {
 fn benchAll(
     allocator: std.mem.Allocator,
     arena: std.mem.Allocator,
-    project_dir: []const u8,
     names: []const []const u8,
-    breakdown: bool,
-    route_space: []const u8,
+    config: Args,
 ) std.mem.Allocator.Error![]const BoardResult {
+    const project_dir = config.cli.project_dir;
+    const breakdown = config.breakdown;
+    const route_space = config.route_space;
     var results: std.ArrayList(BoardResult) = .empty;
     for (names) |n| {
         var board_arena = std.heap.ArenaAllocator.init(allocator);
         defer board_arena.deinit();
         const provider: route_policy.RouteSpace = if (std.mem.eql(u8, route_space, "field")) .{ .field = .{ .scratch = allocator } } else .lattice;
-        var r = benchOneConfigured(board_arena.allocator(), project_dir, n, breakdown, provider);
+        var r = benchOneConfigured(board_arena.allocator(), project_dir, n, .{
+            .breakdown = breakdown,
+            .route_space = provider,
+            .saved_module_routes = config.saved_module_routes,
+            .save_candidate = config.save_candidate,
+        });
         r.name = try arena.dupe(u8, n);
         // The open names point into the board arena this loop is about to free.
         const open = try arena.alloc([]const u8, r.nets.open.len);
@@ -699,6 +788,9 @@ fn benchAll(
             dst.name = try arena.dupe(u8, src.name);
         }
         r.copper.per_net = per_net;
+        const attempts = try arena.dupe(subcircuit_route.Attempt, r.copper.seeds.attempts);
+        for (attempts) |*attempt| attempt.path = try arena.dupe(u8, attempt.path);
+        r.copper.seeds.attempts = attempts;
         if (breakdown) {
             for (&r.timing.slow_nets) |*s| {
                 if (s.ns > 0) s.name = try arena.dupe(u8, s.name);
@@ -910,21 +1002,28 @@ fn writeBaselineReport(w: *std.Io.Writer, report: BaselineReport, baseline_path:
 
 /// CLI entry: `netlisp bench-route --project-dir <dir> [--route-space lattice|field] [--json] [--baseline <file>] [--breakdown] [<design> ...]`.
 pub fn cmdBenchRoute(allocator: std.mem.Allocator, args: []const []const u8) BenchError!void {
+    var buf: [4096]u8 = undefined;
+    var fw = std.Io.File.stdout().writer(infra_fs.currentIo(), &buf);
+    return runBenchRoute(allocator, args, &fw.interface);
+}
+
+fn runBenchRoute(allocator: std.mem.Allocator, args: []const []const u8, writer: *std.Io.Writer) BenchError!void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
     const parsed = try parseArgs(arena, args);
+    if (parsed.save_candidate) |target| {
+        if (target.len == 0 or std.mem.startsWith(u8, target, "--")) return error.InvalidCandidateName;
+    }
     const names = if (parsed.cli.named.items.len > 0)
         parsed.cli.named.items
     else
         try corpus(arena, parsed.cli.project_dir);
-    const results = try benchAll(allocator, arena, parsed.cli.project_dir, names, parsed.breakdown, parsed.route_space);
+    const results = try benchAll(allocator, arena, names, parsed);
 
-    var buf: [4096]u8 = undefined;
-    var fw = std.Io.File.stdout().writer(infra_fs.currentIo(), &buf);
-    if (parsed.cli.json) try writeJson(&fw.interface, results) else try writeTable(&fw.interface, results);
-    if (parsed.breakdown) try writeBreakdown(&fw.interface, results);
+    if (parsed.cli.json) try writeJson(writer, results) else try writeTable(writer, results);
+    if (parsed.breakdown) try writeBreakdown(writer, results);
 
     // The durable regression gate: compare scored boards to a committed
     // baseline and fail (non-zero exit) on any regression. Record a baseline
@@ -935,11 +1034,12 @@ pub fn cmdBenchRoute(allocator: std.mem.Allocator, args: []const []const u8) Ben
         // the command exits non-zero (a missing/corrupt baseline is never a pass).
         const baseline = loadBaseline(arena, path) catch return error.BaselineRegression;
         const report = checkBaseline(arena, results, &baseline) catch return error.BaselineRegression;
-        try writeBaselineReport(&fw.interface, report, path);
-        try fw.interface.flush();
+        try writeBaselineReport(writer, report, path);
+        try writer.flush();
         if (!report.pass) return error.BaselineRegression;
     }
-    try fw.interface.flush();
+    try writer.flush();
+    for (results) |result| if (result.quality.candidate.err != null) return error.CandidateSaveFailed;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -947,6 +1047,7 @@ pub fn cmdBenchRoute(allocator: std.mem.Allocator, args: []const []const u8) Ben
 const testing = std.testing;
 
 // spec: bench-route - --route-space field selects the signed-margin path director while lattice remains the default
+// spec: bench-route - --no-saved-module-routes measures generated routing without module snapshot tracks or vias; saved placement and shown pours remain inputs, and JSON reports the selected policy plus each local attempt
 test "route-space CLI selects field and defaults to lattice" {
     var default_args = try parseArgs(testing.allocator, &.{});
     defer default_args.cli.named.deinit(testing.allocator);
@@ -955,6 +1056,11 @@ test "route-space CLI selects field and defaults to lattice" {
     defer field_args.cli.named.deinit(testing.allocator);
     try testing.expectEqualStrings("field", field_args.route_space);
     try testing.expectEqualStrings("board-a", field_args.cli.named.items[0]);
+    var fresh_args = try parseArgs(testing.allocator, &.{ "--no-saved-module-routes", "board-a" });
+    defer fresh_args.cli.named.deinit(testing.allocator);
+    try testing.expect(default_args.saved_module_routes);
+    try testing.expect(!fresh_args.saved_module_routes);
+    try testing.expectEqualStrings("board-a", fresh_args.cli.named.items[0]);
 }
 
 // spec: bench-route - a board's completion fraction is its routed share of routable nets, and a board with nothing to route counts complete
@@ -1003,7 +1109,7 @@ test "an unplaced board is listed but not scored" {
     try testing.expect(!mixed[1].scorable());
     try testing.expectEqual(@as(f64, 1), geomeanCompletion(&mixed));
 
-    var buf: [1024]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     try writeTable(&w, &mixed);
     const s = w.buffered();
@@ -1032,7 +1138,7 @@ test "json output carries every board and the geomean" {
             .wall_ms = 107700,
         },
     };
-    var buf: [1024]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     try writeJson(&w, &results);
     const s = w.buffered();
@@ -1055,7 +1161,7 @@ test "json output escapes the board name" {
         .placed = true,
         .nets = .{ .routed = 1, .total = 1 },
     }};
-    var buf: [1024]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     try writeJson(&w, &results);
 
@@ -1086,7 +1192,7 @@ test "json output names the open nets in sorted order" {
         .nets = .{ .routed = 88, .total = 91, .open = sortedOpen(testing.allocator, &open) },
     }};
     defer testing.allocator.free(results[0].nets.open);
-    var buf: [1024]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     try writeJson(&w, &results);
     const s = w.buffered();
@@ -1188,4 +1294,77 @@ test "baseline gate rejects a new connectivity defect" {
     try testing.expect(!report.pass);
     try testing.expectEqual(@as(usize, 1), report.defect_regressed.len);
     try testing.expectEqualStrings("a", report.defect_regressed[0]);
+}
+
+// spec: bench-route - --save-candidate writes the measured copper and solved poses to a new layout, preserving the source layout and its star and refusing a name collision
+// spec: bench-route - benchmark candidates include generated perimeter copper and use the physical connectivity oracle before measurement and capture
+test "benchmark candidate capture preserves source and refuses collisions" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/foo.layouts.json", .data = "{\"layouts\":[]}" });
+    var parts = [_]optimizer.Part{.{ .ref_des = "U1", .kind = .hub, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false, .x = 10, .y = 5, .locked = true }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{.{ .name = "GND", .pins = &.{} }},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 20,
+        .maxy = 10,
+        .generated = false,
+        .board_rect = .{ .minx = 0, .miny = 0, .w = 20, .h = 10 },
+        .rules = .{ .perimeter_fence = .{ .via_dia = 0.4, .via_drill = 0.2, .spacing = 1, .edge_offset = 0.5 } },
+    };
+    // Deliberately stale solver counts must not survive physical reconciliation.
+    const raw = router.RouteResult{ .tracks = &.{}, .vias = &.{}, .routed = 7, .total = 8, .failed = &.{"stale"} };
+    const routed = try finishCandidate(alloc, placement, raw, &.{});
+    try testing.expect(routed.vias.len > 0);
+    try testing.expectEqual(@as(usize, 0), routed.total);
+    try testing.expectEqual(@as(usize, 0), routed.failed.len);
+    try testing.expectError(error.NoSavedPlacement, captureCandidate(alloc, project, "foo", placement, routed, "trial"));
+    const source = pcb_layout_page.SavedLayout{
+        .name = "source",
+        .kind = "manual",
+        .ts = 1,
+        .score = null,
+        .parts = &.{.{ .ref = "U1", .x = 42, .y = 7, .rot = 0 }},
+        .default = true,
+        .outline = .{ .x = 0, .y = 0, .w = 20, .h = 10 },
+        .texts = &.{.{ .x = 2, .y = 2, .text = "KEEP" }},
+    };
+    try pcb_layout_page.mcpPersistWorking(alloc, project, "foo", source, true);
+    try captureCandidate(alloc, project, "foo", placement, routed, "trial");
+    const saved = pcb_layout_page.mcpReadWorking(alloc, project, "foo", "trial").?;
+    try testing.expect(!saved.default);
+    try testing.expectEqual(@as(f64, 10), saved.parts[0].x);
+    try testing.expect(saved.parts[0].locked);
+    try testing.expectEqual(routed.vias.len, saved.routes.?.vias.len);
+    try testing.expectEqualStrings("KEEP", saved.texts[0].text);
+    try testing.expectEqual(@as(f64, 20), saved.outline.?.w);
+    const original = pcb_layout_page.mcpReadWorking(alloc, project, "foo", null).?;
+    try testing.expectEqualStrings("source", original.name);
+    try testing.expect(original.routes == null);
+    // Exercise both the early check and the locked create-only persistence gate.
+    try testing.expectError(error.CandidateNameExists, captureCandidate(alloc, project, "foo", placement, raw, "trial"));
+    try testing.expectError(error.CandidateNameExists, pcb_layout_page.mcpCreateWorking(alloc, project, "foo", source));
+    try testing.expectEqual(routed.vias.len, pcb_layout_page.mcpReadWorking(alloc, project, "foo", "trial").?.routes.?.vias.len);
+    const refused = benchOneConfigured(alloc, project, "foo", .{ .save_candidate = "trial" });
+    try testing.expectEqualStrings("CandidateNameExists", refused.quality.candidate.err.?);
+    try testing.expect(!refused.ok);
+    const missing = benchOneConfigured(alloc, project, "missing-design", .{ .save_candidate = "trial" });
+    try testing.expect(!missing.ok);
+    try testing.expectEqualStrings("CandidateNotProduced", missing.quality.candidate.err.?);
+    var output: std.Io.Writer.Allocating = .init(alloc);
+    try testing.expectError(error.CandidateSaveFailed, runBenchRoute(alloc, &.{ "--project-dir", project, "--save-candidate", "trial", "foo" }, &output.writer));
+    try testing.expectError(error.InvalidCandidateName, runBenchRoute(alloc, &.{"--save-candidate"}, &output.writer));
+    try testing.expectError(error.BaselineRegression, runBenchRoute(alloc, &.{ "--project-dir", project, "--baseline", "missing-baseline.json", "foo" }, &output.writer));
 }

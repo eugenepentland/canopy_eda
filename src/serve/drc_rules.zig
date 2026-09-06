@@ -84,17 +84,23 @@ fn defaultSeverity(k: drc.Kind) drc.Severity {
 /// case) or on allocation failure (reporting unfiltered beats reporting
 /// nothing).
 pub fn apply(alloc: std.mem.Allocator, rules: Rules, list: []const drc.Violation) []const drc.Violation {
+    return applyChecked(alloc, rules, list) catch list;
+}
+
+/// Apply severity overrides for an acceptance gate. An allocation failure
+/// propagates; a warning promoted to an error must never fall back to a warning.
+pub fn applyChecked(alloc: std.mem.Allocator, rules: Rules, list: []const drc.Violation) std.mem.Allocator.Error![]const drc.Violation {
     if (rules.isDefault()) return list;
     var out: std.ArrayList(drc.Violation) = .empty;
     for (list) |v| {
         const a = rules.ov[@backingInt(v.kind)] orelse {
-            out.append(alloc, v) catch return list;
+            try out.append(alloc, v);
             continue;
         };
         if (a == .ignore) continue;
         var m = v;
         m.severity = if (a == .warn) .warn else .err;
-        out.append(alloc, m) catch return list;
+        try out.append(alloc, m);
     }
     return out.items;
 }
@@ -218,6 +224,13 @@ fn loadRelease(alloc: std.mem.Allocator, project_dir: []const u8, name: []const 
     return .{ .rules = s.rules };
 }
 
+/// Load all authored severity overrides for a mutation gate. An unreadable or
+/// malformed sidecar is distinct from an absent optional one.
+pub fn loadForValidation(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?Rules {
+    const loaded = loadRelease(alloc, project_dir, name);
+    return if (loaded.complete) loaded.rules else null;
+}
+
 /// Run DRC and apply the design's overrides in one step — the wrapper every
 /// serve-layer violation producer calls. This seam (NOT `drc.check`) is where
 /// the `net_open` connectivity check joins the geometric rules: the router's
@@ -286,9 +299,20 @@ pub fn checkRelease(
 ) ReleaseCheck {
     const raw = drc_compose.checkDefaultRulesReport(alloc, in);
     const loaded = loadRelease(alloc, project_dir, name);
+    return finishRelease(alloc, raw, loaded);
+}
+
+fn finishRelease(alloc: std.mem.Allocator, raw: drc_compose.CheckReport, loaded: ReleaseRules) ReleaseCheck {
+    const effective = applyChecked(alloc, loaded.rules, raw.violations) catch return .{
+        .raw = raw.violations,
+        .effective = raw.violations,
+        .net_report = raw.net_report,
+        .complete = false,
+        .rules = loaded.rules,
+    };
     return .{
         .raw = raw.violations,
-        .effective = apply(alloc, loaded.rules, raw.violations),
+        .effective = effective,
         .net_report = raw.net_report,
         .complete = raw.complete and loaded.complete,
         .rules = loaded.rules,
@@ -600,6 +624,25 @@ pub fn setApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerEr
     try writeRulesResponse(&aw.writer, rules);
     res.content_type = .JSON;
     res.body = aw.written();
+}
+
+// spec: Web Server - Acceptance DRC reports remain incomplete if severity overrides cannot be applied in full
+test "rules applyChecked refuses incomplete severity overrides" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var rules = Rules{};
+    rules.ov[@backingInt(drc.Kind.silk_over_pad)] = .err;
+    const violations = [_]drc.Violation{.{ .x = 0, .y = 0, .gap = 0, .clearance = 0, .kind = .silk_over_pad, .severity = .warn }};
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, applyChecked(failing.allocator(), rules, &violations));
+    const raw = drc_compose.CheckReport{ .violations = &violations, .net_report = .{ .violations = &.{}, .connectivity = &.{} } };
+    const refused = finishRelease(failing.allocator(), raw, .{ .rules = rules });
+    try std.testing.expect(!refused.complete);
+    try std.testing.expectEqual(@as(usize, 1), refused.raw.len);
+    const complete = finishRelease(alloc, raw, .{ .rules = rules });
+    try std.testing.expect(complete.complete);
+    try std.testing.expectEqual(drc.Severity.err, complete.effective[0].severity);
 }
 
 // spec: Web Server - Per-design DRC rule overrides retag or drop violations before every reporting surface

@@ -139,7 +139,7 @@ const mcp_ok_layout_fmt = "{{\"ok\":true,\"live_version\":{d},\"layout\":";
 
 /// A single requested pose from `set_part_poses` (`x_mm`/`y_mm` in mm; `rot`/
 /// `side`/`locked` optional — absent keeps the part's current value).
-const McpReqPose = struct {
+pub const McpReqPose = struct {
     ref: []const u8,
     has_xy: bool,
     x: f64,
@@ -161,7 +161,7 @@ pub fn mcpArgStr(args_val: ?std.json.Value, key: []const u8) ?[]const u8 {
 }
 
 /// `args.key` as a bool (absent / non-bool ⇒ false).
-fn mcpArgBool(args_val: ?std.json.Value, key: []const u8) bool {
+pub fn mcpArgBool(args_val: ?std.json.Value, key: []const u8) bool {
     return mcpArgBoolOpt(args_val, key) orelse false;
 }
 
@@ -306,36 +306,7 @@ pub fn mcpPersistWorking(
     entry_in: SavedLayout,
     star: bool,
 ) sidecar_store.StoreError!void {
-    var entry = entry_in;
-    entry.kind = kind_manual;
-    // Every agent mutation is an edit, including an outline/route update to an
-    // existing named layout. Refresh the timestamp so the editor's default
-    // newest-edited-first ordering reflects the actual working layout.
-    entry.ts = clock.timestamp();
-    // Read the list, upsert one row, write it back with `rev + 1`: the same
-    // read-modify-write `saveNamedLayoutApi` performs, so it takes the same
-    // hold — an agent's CLI write and an open tab's save target one file.
-    const guard = lockSidecar(name, null);
-    defer guard.unlock();
-    const existing = (try readSidecarDoc(alloc, project_dir, name, null)).layouts;
-    var out: std.ArrayList(SavedLayout) = .empty;
-    var replaced = false;
-    for (existing) |L| {
-        if (!replaced and std.mem.eql(u8, L.name, entry.name)) {
-            entry.default = star or L.default;
-            replaced = true;
-        } else {
-            var e = L;
-            if (star) e.default = false;
-            out.append(alloc, e) catch return error.OutOfMemory;
-        }
-    }
-    if (!replaced) entry.default = star;
-    // Keep the physical history newest-first too, which resolves ties between
-    // edits stamped during the same second before the stable display sort.
-    out.insert(alloc, 0, entry) catch return error.OutOfMemory;
-    starFirstEver(out.items);
-    try mcpProtectedWrite(alloc, project_dir, name, out.items);
+    return persistWorking(false, alloc, project_dir, name, entry_in, star);
 }
 
 const routeArcOwnsTrack = @import("../saved_route_copper.zig").arcOwnsTrack;
@@ -381,8 +352,8 @@ fn mcpNetsTouchingRefs(
 /// stitches, so moving an RF part must take its fence with its copper. Keyed on
 /// `net` alone the fence would survive every reroute of the trace it hugs and
 /// slowly become a row of vias beside nothing.
-const McpDroppedRoutes = struct { routes: ?SavedRoutes, dropped: usize };
-fn mcpDropRoutesForNets(
+pub const McpDroppedRoutes = struct { routes: ?SavedRoutes, dropped: usize };
+pub fn mcpDropRoutesForNets(
     alloc: std.mem.Allocator,
     sr: ?SavedRoutes,
     drop: *const std.StringHashMapUnmanaged(void),
@@ -419,7 +390,7 @@ fn mcpDropRoutesForNets(
 /// boards often need one obsolete stitch removed without erasing hundreds of
 /// unrelated GND segments. Tracks, zones, RF paths, and non-matching vias are
 /// retained byte-for-byte.
-fn mcpDropViasNear(
+pub fn mcpDropViasNear(
     alloc: std.mem.Allocator,
     sr: ?SavedRoutes,
     drop: *const std.StringHashMapUnmanaged(void),
@@ -458,7 +429,7 @@ fn mcpDropViasNear(
 /// `route_pcb` `nets` scope). Zones deliberately stay with the retained base,
 /// avoiding duplicate board geometry when the two route sets merge. Null when
 /// no track/via matches.
-fn mcpKeepRoutesForNets(
+pub fn mcpKeepRoutesForNets(
     alloc: std.mem.Allocator,
     sr: SavedRoutes,
     keep: *const std.StringHashMapUnmanaged(void),
@@ -480,7 +451,7 @@ fn mcpKeepRoutesForNets(
 /// Concatenate two optional route sets (either may be null), carrying one copy
 /// of the persistent custom zones. Scoped fresh copper normally has no zones;
 /// the fallback handles a zone-only side if either helper is used independently.
-fn mcpMergeRoutes(alloc: std.mem.Allocator, a: ?SavedRoutes, b: ?SavedRoutes) std.mem.Allocator.Error!?SavedRoutes {
+pub fn mcpMergeRoutes(alloc: std.mem.Allocator, a: ?SavedRoutes, b: ?SavedRoutes) std.mem.Allocator.Error!?SavedRoutes {
     const ta = if (a) |x| x.tracks else &[_]SavedTrack{};
     const tb = if (b) |x| x.tracks else &[_]SavedTrack{};
     const va = if (a) |x| x.vias else &[_]SavedVia{};
@@ -506,7 +477,7 @@ fn mcpMergeRoutes(alloc: std.mem.Allocator, a: ?SavedRoutes, b: ?SavedRoutes) st
 /// Parse the `poses` argument of `set_part_poses` into `[]McpReqPose`. Null
 /// when the arg is absent or not an array. Non-object entries are skipped;
 /// per-item `x_mm`/`y_mm` presence is validated by the caller.
-fn mcpParsePoses(alloc: std.mem.Allocator, args_val: ?std.json.Value) ?[]McpReqPose {
+pub fn mcpParsePoses(alloc: std.mem.Allocator, args_val: ?std.json.Value) ?[]McpReqPose {
     const av = args_val orelse return null;
     if (av != .object) return null;
     const v = av.object.get("poses") orelse return null;
@@ -540,7 +511,7 @@ fn mcpParsePoses(alloc: std.mem.Allocator, args_val: ?std.json.Value) ?[]McpReqP
 /// The origin part of a possibly-prefixed key: "buck/U1" → "U1"; "C3" → "C3".
 /// Pairs with `refPrefix` so a request can name a part by its module-local
 /// origin key ("buck/C_IN") the same way a saved pose stores it.
-fn mcpOriginOf(s: []const u8) []const u8 {
+pub fn mcpOriginOf(s: []const u8) []const u8 {
     const p = refPrefix(s);
     return if (p.len > 0 and s.len > p.len) s[p.len + 1 ..] else s;
 }
@@ -560,6 +531,10 @@ pub fn mcpSetPartPoses(
     const reqs = mcpParsePoses(alloc, args_val) orelse return mcpFail(out, alloc, "missing or malformed \"poses\" array");
     if (reqs.len == 0) return mcpFail(out, alloc, "\"poses\" is empty");
     const layout_arg = mcpArgStr(args_val, "layout");
+    const copper_scope = mcpArgStr(args_val, "copper_scope") orelse "nets";
+    const local_copper = std.mem.eql(u8, copper_scope, "local");
+    if (!local_copper and !std.mem.eql(u8, copper_scope, "nets"))
+        return mcpFail(out, alloc, "copper_scope must be nets or local");
 
     var eval = Evaluator.init(alloc, project_dir);
     defer eval.deinit();
@@ -584,6 +559,7 @@ pub fn mcpSetPartPoses(
         }
     }
 
+    var windows: std.ArrayList(MoveWindow) = .empty;
     var moved = std.StringHashMapUnmanaged(void).empty;
     var updated: std.ArrayList([]const u8) = .empty;
     for (reqs) |rq| {
@@ -603,8 +579,13 @@ pub fn mcpSetPartPoses(
         if (rq.has_rot) p.rot = rq.rot;
         if (rq.has_side) p.side = rq.side;
         if (rq.has_locked) p.locked = rq.locked;
-        if (before_x != p.x or before_y != p.y or before_rot != p.rot or before_side != p.side)
+        if (before_x != p.x or before_y != p.y or before_rot != p.rot or before_side != p.side) {
             try moved.put(alloc, p.ref, {});
+            const part = placement.parts[i];
+            const radius = std.math.hypot(part.hw, part.hh) + placement.rules.design.clearance;
+            try windows.append(alloc, .{ .x = before_x, .y = before_y, .radius = radius });
+            try windows.append(alloc, .{ .x = p.x, .y = p.y, .radius = radius });
+        }
         try updated.append(alloc, p.ref);
     }
 
@@ -612,19 +593,22 @@ pub fn mcpSetPartPoses(
     // the working layout's outline / texts / other-net copper intact.
     const working = mcpReadWorking(alloc, project_dir, name, layout_arg);
     var drop = try mcpNetsTouchingRefs(alloc, placement, &moved);
-    const filtered = try mcpDropRoutesForNets(alloc, if (working) |w| w.routes else null, &drop);
+    const routes = if (working) |w| w.routes else null;
+    const filtered = if (local_copper)
+        try mcpDropMovedCopper(alloc, routes, &drop, windows.items)
+    else
+        try mcpDropRoutesForNets(alloc, routes, &drop);
 
-    const entry = SavedLayout{
+    var entry = working orelse SavedLayout{
         .name = mcpWorkingName(alloc, project_dir, name, layout_arg),
         .kind = kind_manual,
         .ts = 0,
         .score = null,
         .parts = base,
-        .routes = filtered.routes,
-        .outline = if (working) |w| w.outline else null,
-        .texts = if (working) |w| w.texts else &.{},
-        .dimensions = mcpWorkingDimensions(working),
     };
+    entry.parts = base;
+    entry.routes = filtered.routes;
+    entry.score = null;
     try mcpPersistWorking(alloc, project_dir, name, entry, false);
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -653,7 +637,7 @@ fn mcpNestedPts(rect_v: ?std.json.Value) ?std.json.Value {
 /// `pts` polygon (top-level or under `rect`) wins, its bbox filling the rect
 /// fields; else the `rect` (or top-level) `{x,y,w,h}`. Same validation as the
 /// sidecar reader (`parseOutlinePts` / `parseSavedOutline`), so it round-trips.
-fn mcpParseOutlineArg(alloc: std.mem.Allocator, av: std.json.Value) ?SavedOutline {
+pub fn mcpParseOutlineArg(alloc: std.mem.Allocator, av: std.json.Value) ?SavedOutline {
     const rect_v: ?std.json.Value = av.object.get("rect");
     const pts_v: ?std.json.Value = av.object.get("pts") orelse mcpNestedPts(rect_v);
     if (pts_v) |pv| {
@@ -729,7 +713,7 @@ pub fn mcpSetBoardOutline(
 /// Parse and validate `set_copper_zones`' complete replacement set. This tool
 /// authors conductive pours only: every member needs a real net, a routable
 /// (non-plane-claimed) copper layer, and a simple positive-area polygon.
-fn mcpBuildCopperZones(
+pub fn mcpBuildCopperZones(
     alloc: std.mem.Allocator,
     out: *std.ArrayList(u8),
     placement: optimizer.Placement,
@@ -974,7 +958,7 @@ fn mcpConcat(comptime T: type, alloc: std.mem.Allocator, a: []const T, b: []cons
 
 /// Overlay learned path topology on the authored plan without erasing its wave
 /// priorities, hard layer limits, via budgets, or lane reservations.
-fn mcpApplyReferenceGuides(
+pub fn mcpApplyReferenceGuides(
     alloc: std.mem.Allocator,
     options: *route_policy.Options,
     placement: optimizer.Placement,
@@ -1066,7 +1050,7 @@ fn scopeNetNames(
 /// A resolved + validated ad-hoc route scope: `mask` and `names` select the same
 /// nets (index mask + full names), `matched` counts them, and `has_scope` is
 /// false only when no selector token was named (⇒ route the whole board).
-const McpScope = struct {
+pub const McpScope = struct {
     mask: []const bool,
     names: []const []const u8,
     matched: usize,
@@ -1078,7 +1062,7 @@ const McpScope = struct {
 /// and `clear_routes`. On an unknown token or a scope matching no net it writes
 /// the `{ok:false}` error into `out` and returns null (the handler returns
 /// false); a request with no selector returns `has_scope = false`.
-fn mcpResolveRouteScope(
+pub fn mcpResolveRouteScope(
     alloc: std.mem.Allocator,
     out: *std.ArrayList(u8),
     block: *const env_mod.DesignBlock,
@@ -1157,7 +1141,7 @@ pub fn mcpExistingCopper(
 
 /// Apply route_pcb's optional persisted-run effort override. False means the
 /// caller supplied a string other than the two public tiers.
-fn mcpApplyRouteEffort(options: *route_policy.Options, args_val: ?std.json.Value) bool {
+pub fn mcpApplyRouteEffort(options: *route_policy.Options, args_val: ?std.json.Value) bool {
     const word = mcpArgStr(args_val, "effort") orelse return true;
     if (std.mem.eql(u8, word, "one_shot") or std.mem.eql(u8, word, "one-shot")) {
         options.effort = .one_shot;
@@ -1185,7 +1169,7 @@ pub fn mcpRoutePcb(
     return routePcbWithCancel(alloc, project_dir, args_val, out, null);
 }
 
-fn routePcbWithCancel(
+pub fn routePcbWithCancel(
     alloc: std.mem.Allocator,
     project_dir: []const u8,
     args_val: ?std.json.Value,
@@ -1230,6 +1214,7 @@ fn routePcbWithCancel(
     const prior_routes = if (working) |wl| wl.routes else null;
     var route_options = lowered_plan.options;
     route_options.stop.cancel = cancel;
+    route_options.guides.saved_module_routes = mcpArgBoolOpt(args_val, "saved_module_routes") orelse true;
     if (!mcpApplyRouteEffort(&route_options, args_val))
         return mcpFail(out, alloc, "effort must be \"one_shot\" or \"standard\"");
     // Hand-authored pours are retained physical copper. Every CLI route sees
@@ -1377,26 +1362,30 @@ pub fn mcpSavePcbLayout(
     const star = mcpArgBool(args_val, "star");
 
     if (!mcpBlockExists(alloc, project_dir, name)) return mcpFail(out, alloc, mcp_err_no_design);
-    // Read the current working state (the blessed layout) to re-save.
-    const working = mcpReadWorking(alloc, project_dir, name, null) orelse
+    const source_project = mcpArgStr(args_val, "source_project_dir") orelse project_dir;
+    const source_layout = mcpArgStr(args_val, "layout");
+    const importing = !std.mem.eql(u8, source_project, project_dir);
+    if (importing and (layout_name == null or source_layout == null))
+        return mcpFail(out, alloc, "importing requires an explicit source layout and new layout_name");
+    const working = mcpReadWorking(alloc, source_project, name, source_layout) orelse
         return mcpFail(out, alloc, "no working layout to save — set poses (or an outline) first");
 
     // No `layout_name` = save the working layout back into itself. Naming one
     // forks the working state into a new snapshot alongside it — that fork is
     // how an agent banks a routing candidate before trying the next.
     const target_name: []const u8 = layout_name orelse working.name;
-    const entry = SavedLayout{
-        .name = target_name,
-        .kind = kind_manual,
-        .ts = 0,
-        .score = working.score,
-        .parts = working.parts,
-        .routes = working.routes,
-        .outline = working.outline,
-        .texts = working.texts,
-        .dimensions = working.dimensions,
-    };
-    try mcpPersistWorking(alloc, project_dir, name, entry, star);
+    var entry = working;
+    entry.name = target_name;
+    entry.kind = kind_manual;
+    entry.ts = 0;
+    if (importing) {
+        mcpCreateWorking(alloc, project_dir, name, entry) catch |err| switch (err) {
+            error.CandidateNameExists => return mcpFail(out, alloc, "candidate name already exists"),
+            else => |other| return other,
+        };
+    } else {
+        try mcpPersistWorking(alloc, project_dir, name, entry, star);
+    }
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
     const w = &aw.writer;
@@ -1432,6 +1421,7 @@ fn mcpClearGroupNames(
         mr.eval.deinit();
         alloc.destroy(mr.eval);
     };
+    // UNTESTED-ERROR: Existing CLI error-to-response adapter relocated without changing its recovery behavior.
     const solved = solveForRequest(alloc, project_dir, name, .{}, &eval, &module_res) catch |e| {
         _ = try mcpFailFmt(out, alloc, mcp_err_resolve_layout, .{@errorName(e)});
         return null;
@@ -1442,7 +1432,7 @@ fn mcpClearGroupNames(
 
 /// Remove all route-wave output while retaining user-authored zone intent.
 /// Null means no zone remains, so the layout truly has no route object.
-fn mcpClearAllRoutedCopper(sr: SavedRoutes) ?SavedRoutes {
+pub fn mcpClearAllRoutedCopper(sr: SavedRoutes) ?SavedRoutes {
     if (sr.zones.len == 0) return null;
     return .{
         .tracks = &.{},
@@ -1544,7 +1534,7 @@ pub fn mcpClearRoutes(
 
 /// One requested polyline of agent-authored copper: a net, a signal-layer NAME ("F.Cu"),
 /// ≥2 points in board mm, and an optional width override (0 = the net's class).
-const McpReqTrack = struct {
+pub const McpReqTrack = struct {
     net: []const u8,
     layer: []const u8,
     pts: []const [2]f64,
@@ -1552,7 +1542,7 @@ const McpReqTrack = struct {
 };
 
 /// One requested via (0 dia/drill = the net's `(net-class …)` via geometry).
-const McpReqVia = struct {
+pub const McpReqVia = struct {
     net: []const u8,
     x: f64,
     y: f64,
@@ -1646,7 +1636,7 @@ fn mcpParseAddVias(alloc: std.mem.Allocator, args_val: ?std.json.Value) ?[]McpRe
 /// lower them to persisted copper. Writes its own error and returns null on the
 /// first unknown net / unknown layer / too-short polyline, so a bad request
 /// never half-lands.
-fn mcpBuildAddedCopper(
+pub fn mcpBuildAddedCopper(
     alloc: std.mem.Allocator,
     out: *std.ArrayList(u8),
     placement: optimizer.Placement,
@@ -4106,4 +4096,119 @@ test "routing audit mutation and inspection regressions" {
     try std.testing.expect(committed.get("applied").?.bool);
     try std.testing.expectEqual(@as(i64, 2), committed.get("routed").?.integer);
     try std.testing.expectEqual(@as(i64, 2), committed.get("total").?.integer);
+}
+
+pub const MoveWindow = struct { x: f64, y: f64, radius: f64 };
+
+fn copperTouchesMove(windows: []const MoveWindow, t: SavedTrack) bool {
+    // A saved arc may bow beyond its chord: clear it conservatively on a moved net.
+    if (t.xm != null or t.ym != null) return true;
+    for (windows) |box| {
+        const r = box.radius + t.w / 2;
+        if (@max(t.x1, t.x2) < box.x - r or @min(t.x1, t.x2) > box.x + r) continue;
+        if (@max(t.y1, t.y2) < box.y - r or @min(t.y1, t.y2) > box.y + r) continue;
+        return true;
+    }
+    return false;
+}
+
+pub fn mcpDropMovedCopper(
+    alloc: std.mem.Allocator,
+    sr: ?SavedRoutes,
+    drop: *const std.StringHashMapUnmanaged(void),
+    windows: []const MoveWindow,
+) std.mem.Allocator.Error!McpDroppedRoutes {
+    const saved = sr orelse return .{ .routes = null, .dropped = 0 };
+    var tracks: std.ArrayList(SavedTrack) = .empty;
+    var vias: std.ArrayList(SavedVia) = .empty;
+    var rf_paths: std.ArrayList(SavedRfPath) = .empty;
+    var dropped: usize = 0;
+    for (saved.tracks) |t| {
+        if (drop.contains(t.net) and copperTouchesMove(windows, t)) {
+            dropped += 1;
+        } else try tracks.append(alloc, t);
+    }
+    for (saved.vias) |v| {
+        const point = SavedTrack{ .x1 = v.x, .y1 = v.y, .x2 = v.x, .y2 = v.y, .w = v.d };
+        const nearby = drop.contains(v.net) and copperTouchesMove(windows, point);
+        if (nearby or (v.f.len > 0 and drop.contains(v.f))) {
+            dropped += 1;
+        } else try vias.append(alloc, v);
+    }
+    // Swept RF paths are atomic, including their associated fence vias.
+    for (saved.rf_paths) |path| if (!drop.contains(path.net)) try rf_paths.append(alloc, path);
+    return .{ .routes = .{ .tracks = tracks.items, .vias = vias.items, .zones = saved.zones, .rf_paths = rf_paths.items }, .dropped = dropped };
+}
+
+pub fn mcpCreateWorking(
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    entry: SavedLayout,
+) (sidecar_store.StoreError || error{CandidateNameExists})!void {
+    return persistWorking(true, alloc, project_dir, name, entry, false);
+}
+
+fn persistWorking(
+    comptime create_only: bool,
+    alloc: std.mem.Allocator,
+    project_dir: []const u8,
+    name: []const u8,
+    entry_in: SavedLayout,
+    star: bool,
+) (if (create_only) sidecar_store.StoreError || error{CandidateNameExists} else sidecar_store.StoreError)!void {
+    var entry = entry_in;
+    entry.kind = kind_manual;
+    // Every agent mutation is an edit, including an outline/route update to an
+    // existing named layout. Refresh the timestamp so the editor's default
+    // newest-edited-first ordering reflects the actual working layout.
+    entry.ts = clock.timestamp();
+    // Read the list, upsert one row, write it back with `rev + 1`: the same
+    // read-modify-write `saveNamedLayoutApi` performs, so it takes the same
+    // hold — an agent's CLI write and an open tab's save target one file.
+    const guard = lockSidecar(name, null);
+    defer guard.unlock();
+    const existing = (try readSidecarDoc(alloc, project_dir, name, null)).layouts;
+    var out: std.ArrayList(SavedLayout) = .empty;
+    var replaced = false;
+    for (existing) |L| {
+        if (create_only and std.mem.eql(u8, L.name, entry.name)) return error.CandidateNameExists;
+        if (!replaced and std.mem.eql(u8, L.name, entry.name)) {
+            entry.default = star or L.default;
+            replaced = true;
+        } else {
+            var e = L;
+            if (star) e.default = false;
+            out.append(alloc, e) catch return error.OutOfMemory;
+        }
+    }
+    if (!replaced) entry.default = star;
+    // Keep the physical history newest-first too, which resolves ties between
+    // edits stamped during the same second before the stable display sort.
+    out.insert(alloc, 0, entry) catch return error.OutOfMemory;
+    starFirstEver(out.items);
+    try mcpProtectedWrite(alloc, project_dir, name, out.items);
+}
+
+// spec: Web Server - Local pose copper invalidation preserves far trunks and other-net copper while removing moved-net copper near both poses and preserving layout metadata
+test "local pose invalidation preserves distant rail trunks and foreign copper" {
+    var arena_i = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_i.deinit();
+    const a = arena_i.allocator();
+    var drop = std.StringHashMapUnmanaged(void).empty;
+    try drop.put(a, "GND", {});
+    const tracks = [_]SavedTrack{
+        .{ .x1 = 0, .y1 = 0, .x2 = 1, .y2 = 0, .w = 0.2, .net = "GND" },
+        .{ .x1 = 10, .y1 = 0, .x2 = 20, .y2 = 0, .w = 0.2, .net = "GND" },
+        .{ .x1 = 0, .y1 = 1, .x2 = 1, .y2 = 1, .w = 0.2, .net = "SIG" },
+    };
+    const vias = [_]SavedVia{
+        .{ .x = 0, .y = 0, .d = 0.4, .net = "GND" },
+        .{ .x = 15, .y = 0, .d = 0.4, .net = "GND" },
+    };
+    const filtered = try mcpDropMovedCopper(a, .{ .tracks = &tracks, .vias = &vias }, &drop, &.{.{ .x = 0, .y = 0, .radius = 2 }});
+    try std.testing.expectEqual(@as(usize, 2), filtered.dropped);
+    try std.testing.expectEqualDeep(tracks[1], filtered.routes.?.tracks[0]);
+    try std.testing.expectEqualDeep(tracks[2], filtered.routes.?.tracks[1]);
+    try std.testing.expectEqualDeep(vias[1], filtered.routes.?.vias[0]);
 }

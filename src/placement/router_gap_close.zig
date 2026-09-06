@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const optimizer = @import("optimizer.zig");
+const gap_state = @import("gap_state.zig");
 const gap_policy = @import("gap_policy.zig");
 const cdt_layers = @import("cdt_layers.zig");
 const pad_exit = @import("pad_exit.zig");
@@ -169,7 +170,7 @@ pub fn closeGaps(
         .board = board,
         .opts = opts,
         .dead = try arena.alloc(bool, board.tracks.len),
-        .holes = try pad_exit.boardHoles(arena, placement, try viaHoles(arena, board.vias)),
+        .holes = try pad_exit.boardHoles(arena, placement, try pad_exit.viaHoles(arena, board.vias)),
         .term_ban = try arena.alloc(bool, ctx.grid.nx * ctx.grid.ny),
     };
     @memset(state.dead, false);
@@ -182,18 +183,32 @@ pub fn closeGaps(
     // against the copper instead of against the widest class's raster margin.
     ctx.exact = .{ .near = try arena.alloc(bool, ctx.occ.len * ctx.grid.nx * ctx.grid.ny) };
     for (gaps, 0..) |gap, i| {
+        if (routeCancelled(&ctx)) break;
         if (gap.net_i < placement.nets.len) {
+            var physical = try state.physical(gap.net_i);
+            defer physical.restore();
             // A finishing hop is raw maze copper that never reaches the
             // `finishRoute` straighten pass, so gloss it here — otherwise the
             // metal a nearly-done board GAINS is the only metal on it that
             // keeps its staircases (see `straighten.glossHop`).
-            if (try closeOneGap(&state, gap)) |raw| out[i] = try straighten.glossHop(.{
-                .ctx = &ctx,
-                .placement = placement,
-                .net = @intCast(gap.net_i),
-                .hop = raw,
-                .board = try liveCopper(&state, raw.ripped),
-            });
+            if (try closeOneGap(&physical.state, gap)) |raw| {
+                const path = try straighten.glossHop(.{
+                    .ctx = &ctx,
+                    .placement = placement,
+                    .net = @intCast(gap.net_i),
+                    .hop = raw,
+                    .board = try liveCopper(&physical.state, raw.ripped),
+                });
+                if (path) |candidate| {
+                    if (gap_policy.allows(candidate, ctx.allowed_layers, ctx.max_vias))
+                        out[i] = candidate
+                    else
+                        physical.state.reason = .policy;
+                }
+            }
+            state.reason = physical.state.reason;
+            state.routing_net = physical.state.routing_net;
+            state.rip_tried = physical.state.rip_tried;
             // Only copper the caller KEEPS goes onto the live board the rest of
             // this round routes against (see `GapJudge`).
             if (out[i]) |path| {
@@ -235,54 +250,7 @@ fn viaHoles(arena: std.mem.Allocator, vias: []const Via) std.mem.Allocator.Error
 /// Live state of one `closeGaps` batch: the routing context, the board copper
 /// it started from, which of those tracks have been ripped, and the copper the
 /// batch has laid down so far.
-pub const GapState = struct {
-    ctx: *Ctx,
-    placement: optimizer.Placement,
-    board: GapBoard,
-    opts: GapOptions,
-    dead: []bool,
-    holes: []const PadHole,
-    added_tracks: std.ArrayList(Track) = .empty,
-    added_vias: std.ArrayList(Via) = .empty,
-    /// How the hop currently in flight ended (see `GapReason`). Carried on the
-    /// state rather than threaded through every return type: only the batch
-    /// loop reads it, and only right after the hop it belongs to.
-    /// The net whose hop is in flight. A rip filter that must weigh victim
-    /// against beneficiary — "may THIS net take THAT one's copper" — cannot
-    /// answer from the victim alone, and the batch loop is too coarse: one
-    /// round carries hops for many nets.
-    routing_net: i32 = -1,
-    reason: GapReason = .routed,
-    /// Scratch via-ban mask for the hop in flight (see `markTerminalViaBan`).
-    /// One buffer for the whole batch, rewritten per hop.
-    term_ban: []bool,
-    /// Rip candidates already routed against during the hop in flight, as their
-    /// (sorted) killed-track index sets. Cleared per hop by `closeOneGap`.
-    rip_tried: std.ArrayList([]const usize) = .empty,
-
-    /// Has this exact rip already been routed against during this hop? Both
-    /// rip-up tiers converge on the same victims — the reach ladder saturates
-    /// once it has caught all of a victim's segments, and the path-blocker probe
-    /// re-nominates nets the terminal tier already cleared outright. Nothing
-    /// else about the board moves between attempts within a hop, so a repeat is
-    /// a re-stamp plus a full maze sweep for an answer already known.
-    fn ripAlreadyTried(self: *GapState, kill: []const usize) std.mem.Allocator.Error!bool {
-        for (self.rip_tried.items) |past| {
-            if (std.mem.eql(usize, past, kill)) return true;
-        }
-        try self.rip_tried.append(self.ctx.arena, kill);
-        return false;
-    }
-
-    /// Fold a landed hop into the batch's running board view.
-    fn absorb(self: *GapState, path: GapPath) std.mem.Allocator.Error!void {
-        try self.added_tracks.appendSlice(self.ctx.arena, path.tracks);
-        try self.added_vias.appendSlice(self.ctx.arena, path.vias);
-        for (path.ripped) |i| {
-            if (i < self.dead.len) self.dead[i] = true;
-        }
-    }
-};
+pub const GapState = gap_state.State(Ctx);
 
 /// The board copper as it stands for the next hop: the original tracks minus
 /// the ripped ones (and minus `extra_dead`, a rip being *tried*), plus every
@@ -393,8 +361,8 @@ fn closeOneGap(state: *GapState, gap: Gap) std.mem.Allocator.Error!?GapPath {
         base_ceiling * effort,
     );
     const net: i32 = @intCast(gap.net_i);
-    state.ctx.allowed_layers = gapLayers(state.ctx, net);
     state.reason = .routed;
+    if (!try applyGapPolicy(state, gap)) return null;
     clearSearchLimit(state.ctx, gap.net_i);
     markTerminalViaBan(state, gap, net);
     const live = try liveCopper(state, &.{});
@@ -404,7 +372,9 @@ fn closeOneGap(state: *GapState, gap: Gap) std.mem.Allocator.Error!?GapPath {
     const to = if (gap.to) |t|
         padExitPoint(state.ctx, t, net)
     else stitch: {
-        if (try stitchHop(state, live, from, net)) |path| return path;
+        if (state.ctx.allow_vias) {
+            if (try stitchHop(state, live, from, net)) |path| return path;
+        } else state.reason = .policy;
         const fallback = gap.stitch_fallback orelse return null;
         break :stitch padExitPoint(state.ctx, fallback, net);
     };
@@ -509,7 +479,7 @@ fn mazeHop(state: *GapState, live: GapBoard, from: NetPt, to: NetPt, net: i32) s
         // legal breakout site beside a fine-pitch pad. Seeding that exact via
         // and handing the remainder back to the maze is the automatic form of
         // the tiny terminal nudge a designer otherwise has to draw by hand.
-        if (state.opts.terminal_via == .smd_ok) {
+        if (state.opts.constraints.terminal_via == .smd_ok) {
             if (try exactGapRescue(state, live, from, to, net)) |path| {
                 state.reason = .routed;
                 return path;
@@ -1302,9 +1272,9 @@ pub fn markTerminalViaBan(state: *GapState, gap: Gap, net: i32) void {
     @memset(state.term_ban, false);
     const reach = viaR(ctx.params) + ctx.params.clearance;
     const smd_stitch = gap.to == null and !gap.from.thru;
-    if (!smd_stitch and state.opts.terminal_via.bans(gap.from)) markPadViaBan(ctx, state.term_ban, gap.from, net, reach);
+    if (!smd_stitch and state.opts.constraints.terminal_via.bans(gap.from)) markPadViaBan(ctx, state.term_ban, gap.from, net, reach);
     if (gap.to) |to| {
-        if (state.opts.terminal_via.bans(to)) markPadViaBan(ctx, state.term_ban, to, net, reach);
+        if (state.opts.constraints.terminal_via.bans(to)) markPadViaBan(ctx, state.term_ban, to, net, reach);
     }
     ctx.via_forbidden_mask = state.term_ban;
     ctx.via_forbidden_net = net;
@@ -1418,7 +1388,7 @@ fn termBanNodes(
         .ctx = &ctx,
         .placement = placement,
         .board = .{},
-        .opts = .{ .terminal_via = policy },
+        .opts = .{ .constraints = .{ .terminal_via = policy } },
         .dead = &.{},
         .holes = &.{},
         .term_ban = try arena.alloc(bool, ctx.grid.nx * ctx.grid.ny),
@@ -1486,7 +1456,7 @@ test "a fine gap rescue uses exact multi-via terminal escapes" {
         .ctx = &ctx,
         .placement = placement,
         .board = .{},
-        .opts = .{ .terminal_via = .smd_ok },
+        .opts = .{ .constraints = .{ .terminal_via = .smd_ok } },
         .dead = &.{},
         .holes = &.{},
         .term_ban = try arena.alloc(bool, ctx.grid.nx * ctx.grid.ny),
@@ -1529,7 +1499,7 @@ test "a fine gap rescue falls back to the opposite outer face" {
         .ctx = &ctx,
         .placement = placement,
         .board = .{},
-        .opts = .{ .terminal_via = .smd_ok },
+        .opts = .{ .constraints = .{ .terminal_via = .smd_ok } },
         .dead = &.{},
         .holes = &.{},
         .term_ban = try arena.alloc(bool, ctx.grid.nx * ctx.grid.ny),
@@ -1851,4 +1821,32 @@ test "the additive gap closer falls back to the shape hop before it rips" {
     // `route_close.additiveOnly` keeps the whole transaction on.
     try testing.expectEqual(@as(usize, 0), path.ripped.len);
     try testing.expect(path.tracks.len > 0);
+}
+
+fn applyGapPolicy(state: *GapState, gap: Gap) std.mem.Allocator.Error!bool {
+    const ctx = state.ctx;
+    const available = gapLayers(ctx, state.routing_net);
+    if (state.opts.constraints.net.len == 0) {
+        ctx.allowed_layers = available;
+        return true;
+    }
+    ctx.net_policy = state.opts.constraints.net;
+    const pts = try ctx.arena.alloc(NetPt, 2);
+    pts[0] = gap.from;
+    pts[1] = gap.to orelse gap.stitch_fallback orelse gap.from;
+    router_ctx.setNetRoutePolicy(ctx, gap.net_i, pts);
+    ctx.allowed_layers = if (ctx.allowed_layers == 0) available else ctx.allowed_layers & available;
+    if (ctx.allowed_layers == 0) {
+        state.reason = .policy;
+        return false;
+    }
+    if (ctx.max_vias) |limit| {
+        var spent: usize = 0;
+        for (state.added_vias.items) |v| if (v.net == state.routing_net) {
+            spent += 1;
+        };
+        ctx.max_vias = limit - @as(u16, @intCast(@min(spent, limit)));
+    }
+    ctx.allow_vias = ctx.max_vias != 0;
+    return true;
 }

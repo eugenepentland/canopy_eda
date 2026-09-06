@@ -120,6 +120,7 @@ pub fn mcpRouteExperiment(
     const params = solved.placement.rules.design.routeParams();
     const exp_opts = route_plan.ExperimentOpts{
         .project_dir = project_dir,
+        .saved_module_routes = argBool(args_val, "saved_module_routes") orelse true,
         .plan = plan_override,
         .effort = effort,
         .zones = solved.shown_zones.sources,

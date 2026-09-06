@@ -25,6 +25,7 @@ const optimizer = @import("optimizer.zig");
 const flat_netlist = @import("../flat_netlist.zig");
 const geometry = @import("geometry.zig");
 const pad_grid = @import("pad_grid.zig");
+const route_result = @import("route_result.zig");
 
 /// One drill a new barrel owes a hole-to-hole wall: centre, bore radius, and
 /// the world half-vector to an oval slot's arc centres (`{0,0}` for a round
@@ -54,6 +55,15 @@ pub fn padHoles(arena: std.mem.Allocator, placement: optimizer.Placement) std.me
             }
             try out.append(arena, .{ .x = c[0], .y = c[1], .r = pad.drill / 2, .shx = shx, .shy = shy });
         }
+    }
+    return out.toOwnedSlice(arena);
+}
+
+/// The drills of already-routed vias, for `boardHoles`.
+pub fn viaHoles(arena: std.mem.Allocator, vias: []const route_result.Via) std.mem.Allocator.Error![]const Hole {
+    var out: std.ArrayList(Hole) = .empty;
+    for (vias) |v| {
+        if (v.drill > 0) try out.append(arena, .{ .x = v.x, .y = v.y, .r = v.drill / 2 });
     }
     return out.toOwnedSlice(arena);
 }

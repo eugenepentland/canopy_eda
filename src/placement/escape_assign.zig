@@ -218,6 +218,9 @@ pub const Request = struct {
     hub: []const u8 = "",
     /// Signal layer for the emitted guides; null picks the hub's own side.
     layer: ?u8 = null,
+    /// Plan a nearby package exit on the selected pins' common courtyard side,
+    /// with room for vias, instead of a corridor toward their destinations.
+    pin_side: bool = false,
 };
 
 /// How far past the cross-section each lane guide runs (mm) — long enough to be
@@ -236,6 +239,8 @@ const cut_min_mm: f64 = 0.4;
 const cut_max_mm: f64 = 8.0;
 /// Step of the constriction scan.
 const cut_step_mm: f64 = 0.4;
+/// A package exit stays local; a remote constriction is a separate problem.
+const pin_cut_max_mm: f64 = 2.0;
 /// Extra lane-axis span beyond the source-pad extent, per contended net.
 const span_pad_per_net: f64 = 1.0;
 /// Fallback lane pitch when the board declares no track/clearance rules.
@@ -271,7 +276,7 @@ pub fn plan(arena: Allocator, placement: optimizer.Placement, req: Request) Allo
         } else try off_hub.append(arena, net_i);
     }
     sources = sources[0..n];
-    return finishPlan(arena, placement, hub_i, sources, off_hub.items, req.layer);
+    return finishPlan(arena, placement, hub_i, sources, off_hub.items, req);
 }
 
 /// Finish a plan after its pose-dependent source points have been resolved.
@@ -284,15 +289,18 @@ fn finishPlan(
     hub_i: usize,
     sources: []Source,
     off_hub: []const usize,
-    requested_layer: ?u8,
+    req: Request,
 ) Allocator.Error!Plan {
     if (sources.len < 2) return .{ .reason = "fewer than two nets reach the hub with a destination" };
     const hub = placement.parts[hub_i];
-    const dir = escapeDirection(sources);
-    const layer = requested_layer orelse defaultLayer(placement, hub);
-    const cut = try chooseCut(arena, .{ .placement = placement, .hub = hub_i, .dir = dir, .sources = sources });
+    const dir = if (req.pin_side)
+        commonPinSide(hub, sources) orelse return .{ .reason = "selected pins leave different package sides; split the escape group", .hub = hub.ref_des }
+    else
+        escapeDirection(sources);
+    const layer = req.layer orelse defaultLayer(placement, hub);
+    const cut = try chooseCut(arena, .{ .placement = placement, .hub = hub_i, .dir = dir, .sources = sources, .pin_side = req.pin_side });
     if (cut.lanes.len == 0) return .{ .reason = "no free lane along the escape corridor", .hub = hub.ref_des };
-    for (sources) |*s| s.ideal_pos = idealPos(s.*, cut.corridor);
+    for (sources) |*s| s.ideal_pos = if (req.pin_side) s.at[if (dir.lanesAlongY()) 1 else 0] else idealPos(s.*, cut.corridor);
     const sched = try schedule(arena, sources, cut);
     const assignments = try buildAssignments(arena, sources, sched, off_hub);
     var corridor = cut.corridor;
@@ -523,6 +531,26 @@ fn escapeDirection(sources: []const Source) Direction {
     return best;
 }
 
+/// Pin ordering follows the source edge even when all destinations lie behind
+/// the package. Refuse mixed edges instead of voting some pins through the IC.
+fn commonPinSide(hub: optimizer.Part, sources: []const Source) ?Direction {
+    var common: ?Direction = null;
+    const rect = optimizer.worldCourtyard(&hub);
+    for (sources) |source| {
+        const gaps = [4]f64{
+            @abs(source.at[1] - rect.miny),          @abs(rect.miny + rect.h - source.at[1]),
+            @abs(rect.minx + rect.w - source.at[0]), @abs(source.at[0] - rect.minx),
+        };
+        var nearest = dir_order[0];
+        for (dir_order) |side| {
+            if (gaps[@backingInt(side)] < gaps[@backingInt(nearest)]) nearest = side;
+        }
+        if (common) |side| if (side != nearest) return null;
+        common = nearest;
+    }
+    return common;
+}
+
 /// Signal layer for the guides: F.Cu (0) for a top-side hub, B.Cu (1) for a
 /// bottom-side one — the face the escape physically leaves on.
 fn defaultLayer(placement: optimizer.Placement, hub: optimizer.Part) u8 {
@@ -538,6 +566,7 @@ const CutInput = struct {
     hub: usize,
     dir: Direction,
     sources: []const Source,
+    pin_side: bool = false,
 };
 
 const Cut = struct {
@@ -550,9 +579,10 @@ const Cut = struct {
 /// scheduled through. When no cut fits everybody, keep the widest seen, so a
 /// genuinely over-subscribed corridor still assigns as many nets as it can.
 fn chooseCut(arena: Allocator, in: CutInput) Allocator.Error!Cut {
-    const pitch = lanePitch(in.placement, in.sources);
+    const pitch = if (in.pin_side) pinLanePitch(in.placement, in.sources) else lanePitch(in.placement, in.sources);
     const span = laneSpan(in);
     const start = cutStart(in);
+    const bounds = boardLimits(in.placement, !in.dir.lanesAlongY());
     // Direction and part poses stay fixed throughout the 20-position scan.
     // Reduce each foreign courtyard to cut/lane extents once instead of
     // rebuilding its rotated world rectangle at every candidate cut.
@@ -561,8 +591,9 @@ fn chooseCut(arena: Allocator, in: CutInput) Allocator.Error!Cut {
     var best_corridor: Corridor = .{};
     var best_count: usize = 0;
     var offset: f64 = cut_min_mm;
-    while (offset <= cut_max_mm) : (offset += cut_step_mm) {
+    while (offset <= (if (in.pin_side) pin_cut_max_mm else cut_max_mm)) : (offset += cut_step_mm) {
         const at = start + in.dir.outward() * offset;
+        if (at < bounds.lo or at > bounds.hi) continue;
         const corridor = Corridor{ .dir = in.dir, .cut = at, .lo = span.lo, .hi = span.hi, .pitch = pitch };
         const count = laneCountAt(boxes, corridor, blocked);
         if (count == 0) continue;
@@ -570,6 +601,7 @@ fn chooseCut(arena: Allocator, in: CutInput) Allocator.Error!Cut {
             best_corridor = corridor;
             best_count = count;
         }
+        if (in.pin_side and count >= in.sources.len) break;
     }
     if (best_count == 0) return .{};
     return .{ .corridor = best_corridor, .lanes = try lanesAt(arena, boxes, best_corridor) };
@@ -621,6 +653,21 @@ fn lanePitch(placement: optimizer.Placement, sources: []const Source) f64 {
     }
     const pitch = width + clearance;
     return if (pitch > 0) pitch else fallback_pitch_mm;
+}
+
+/// Leave room for through-via copper, not just parallel surface tracks. This
+/// is a capacity estimate; the router still validates every actual via site.
+fn pinLanePitch(placement: optimizer.Placement, sources: []const Source) f64 {
+    const design = placement.rules.design;
+    var diameter = design.via_dia;
+    var clearance = design.clearance;
+    for (sources) |source| {
+        if (source.net >= placement.rules.net.len) continue;
+        const rule = placement.rules.net[source.net];
+        diameter = @max(diameter, rule.via_dia);
+        clearance = @max(clearance, rule.clearance);
+    }
+    return @max(lanePitch(placement, sources), diameter + clearance);
 }
 
 /// The escape-axis coordinate the scan starts from: the hub courtyard's face on
@@ -1445,7 +1492,7 @@ fn planIndexed(arena: Allocator, in: HubScan, nets: []const usize) Allocator.Err
             n += 1;
         } else try off_hub.append(arena, net_i);
     }
-    return finishPlan(arena, in.placement, in.hub, sources[0..n], off_hub.items, null);
+    return finishPlan(arena, in.placement, in.hub, sources[0..n], off_hub.items, .{ .nets = &.{} });
 }
 
 fn sourceOfIndexed(in: HubScan, net_i: usize) ?Source {
@@ -1586,6 +1633,86 @@ test "the shared hub and escape direction come from the contended set" {
     try testing.expect(p.ok);
     try testing.expectEqualStrings("J1", p.hub);
     try testing.expectEqual(Direction.west, p.corridor.dir);
+}
+
+// spec: placement/escape-assign - pin-side assignment follows the common source edge and source ordering even when destinations lie behind the package, using nearby via-spaced lanes
+test "pin-side assignment escapes the package before heading toward destinations" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+    var f: FourNet = undefined;
+    f.setupBoard(null);
+    for (f.parts[1..5]) |*part| part.x = 20;
+    var placement = f.placement(f.parts[0..5]);
+    placement.maxx = 21;
+    placement.rules.design = .{ .track_width = 0.127, .clearance = 0.127, .via_dia = 0.4 };
+    const corridor = try plan(arena, placement, .{ .nets = &all_four });
+    try testing.expectEqual(Direction.east, corridor.corridor.dir);
+    const exit = try plan(arena, placement, .{ .nets = &all_four, .pin_side = true });
+    try testing.expect(exit.ok);
+    try testing.expectEqual(Direction.west, exit.corridor.dir);
+    try testing.expectApproxEqAbs(@as(f64, 8.6), exit.corridor.cut, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0.527), exit.corridor.pitch, 1e-9);
+    try testing.expectEqual(@as(usize, 0), exit.schedule.unassigned.len);
+    try testing.expectEqual(@as(usize, 4), exit.schedule.assignments.len);
+    try testing.expectApproxEqAbs(@as(f64, -1.5), exit.schedule.assignments[0].fit.ideal, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 1.5), exit.schedule.assignments[3].fit.ideal, 1e-9);
+}
+
+// spec: placement/escape-assign - pin-side assignment refuses a group whose source pins leave different package edges
+test "pin-side assignment refuses mixed package edges" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    var f: FourNet = undefined;
+    f.setupBoard(null);
+    f.hub_pads[3].x = 0.5;
+    const assigned = try plan(arena_i.allocator(), f.placement(f.parts[0..5]), .{ .nets = &all_four, .pin_side = true });
+    try testing.expect(!assigned.ok);
+    try testing.expect(std.mem.indexOf(u8, assigned.reason, "different package sides") != null);
+    try testing.expectEqual(@as(usize, 0), assigned.schedule.assignments.len);
+}
+
+// spec: placement/escape-assign - an escape cross-section outside the board outline is never offered as available capacity
+test "a package exit cannot borrow lanes beyond the board edge" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    var f: FourNet = undefined;
+    f.setupBoard(null);
+    for (f.parts[1..5]) |*part| part.x = 20;
+    var p = f.placement(f.parts[0..5]);
+    p.maxx = 21;
+    p.board_rect = .{ .minx = 9.25, .miny = -5, .w = 11.75, .h = 10 };
+    const assigned = try plan(arena_i.allocator(), p, .{ .nets = &all_four, .pin_side = true });
+    try testing.expect(!assigned.ok);
+    try testing.expectEqualStrings("no free lane along the escape corridor", assigned.reason);
+}
+
+// spec: placement/escape-assign - pin-side assignment follows rotated and mirrored package poses
+test "pin-side assignment follows rotated and mirrored packages" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const Case = struct { rot: f64, side: optimizer.Side, exit: Direction };
+    const cases = [_]Case{
+        .{ .rot = 90, .side = .top, .exit = .north },
+        .{ .rot = 180, .side = .top, .exit = .east },
+        .{ .rot = 270, .side = .top, .exit = .south },
+        .{ .rot = 0, .side = .bottom, .exit = .east },
+    };
+    for (cases) |case| {
+        var f: FourNet = undefined;
+        f.setupBoard(null);
+        f.parts[0].rot = case.rot;
+        f.parts[0].side = case.side;
+        var p = f.placement(f.parts[0..5]);
+        p.minx = -20;
+        p.maxx = 20;
+        p.miny = -15;
+        p.maxy = 15;
+        const assigned = try plan(arena_i.allocator(), p, .{ .nets = &all_four, .pin_side = true });
+        try testing.expect(assigned.ok);
+        try testing.expectEqual(case.exit, assigned.corridor.dir);
+        try testing.expectEqual(@as(u8, if (case.side == .bottom) 1 else 0), assigned.layer);
+    }
 }
 
 // spec: placement/escape-assign - a net set with no part in common assigns nothing and says so

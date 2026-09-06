@@ -420,6 +420,11 @@ Public functions: solve
 
 ## placement/router
 
+- gap closing honors authored layer restrictions and new-via limits before accepting or absorbing copper
+- gap closing refuses an opposite-face bridge when the net has no new-via allowance
+- reconciliation counts generated vias against the original allowance while retaining existing vias
+- a gap batch spends via allowance only on accepted hops and does not reset it for later requests
+
 Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJunctions, glossFinishedTracks, foldNetBranches, cleanupBoard
 
 - maze-routes a two-pad net into connected track segments
@@ -428,7 +433,7 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - a maze leg is charged for the escape stub each pad gateway implies, so it buys the entry that points where the route goes instead of the outermost free one
 - a connection that routes far past its own span is retried once on another face and keeps whichever route costs the board less
 - a net whose policy forbids vias keeps its detour rather than gaining one from the detour guard
-- a failed broad net retries its repair-waypoints before lower waves can claim the corridor, without perturbing a successful ordinary route
+- a deferred repair corridor cannot escape authored layer and via limits
 - an authored branch tree routes a multi-drop net through one corridor per drop, bound to the terminals by geometry rather than by authored order
 - a branch tree that cannot be bound to distinct terminals guides nothing, leaving the net to the ordinary multi-terminal router
 - a timed deferred repair corridor runs under one flat probe budget, so corridor length cannot scale its claim on the shared deadline
@@ -698,6 +703,22 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 
 ## serve/subcircuit-route
 
+- join-weighted module budgets are opt-in and equal module shares remain the default
+
+
+- local signal routing and standalone recovery preserve foreign parent and child lane reservations and the destination board's hard layer and via limits
+- local supply stitches keep their tracks and vias out of foreign reserved signal lanes
+
+- a bypass attempt retains only accepted copper in its caller allocator and releases its temporary search and DRC world before the next bond
+- local signal search, recovery and timeout validation release their temporary memory before the next module, retaining only value-only seed copper in the caller allocator
+- a weighted timed local phase shares its remaining budget by enabled local terminal joins and keeps the global deadline reserved
+- each timed module reserves its selected signal join share before supply-bond search, preserves exact bond policy, and reports the supply allowance and selected signal total even when search expires
+
+- explicit bypass bonds use module bounds while retaining assembled-board obstacles and acceptance; unchanged rails are not folded again and expired slices start no new signal or recovery search
+
+- local attempt reports identify the module, allotted and spent time, supply-bond time, primary signal time and connectivity, recovery time, and timeout status without starting a diagnostic route
+- callers can disable saved module routing; even a timed-out local search cannot copy saved module tracks or vias in that mode
+
 - a child without an authored plan uses standalone defaults instead of inheriting global waypoints
 
 Public functions: routeAll, regressed
@@ -720,6 +741,9 @@ copper for the single global pass.
 - a module-only retry drops an impossible parent-only route constraint, follows standalone surface and pad-neck geometry, then must pass the parent's via budget and full-board DRC
 - local signal routing treats the same module's exact supply bonds as immutable physical obstacles
 - a timed-out local pass retains only oracle-complete selected signal trees for board-level DRC acceptance
+- timeout harvesting builds connectivity graphs only for selected signal nets and reports their verified primary connectivity
+- module-signals guided makes unrestricted fresh local signal routes revisable hints while fixed remains the default
+- module-signals accepts fixed or guided only in the route section
 - ordinary local recovery crosses onto the opposite routable outer face on a six-layer plane stack and preserves hard layer and via limits
 - saved module copper can replace a rejected fresh candidate but cannot supersede or collide with accepted fresh copper
 - completeness-waiver: empty inputs (a block with no sub-circuits or no net with two local terminals returns empty copper and the caller takes the plain global path)
@@ -747,6 +771,11 @@ Public functions: edgeInset, pointInset, clearsOutline, buildOutlineMask, netOff
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot)
 
 ## bench-route
+
+- --save-candidate writes the measured copper and solved poses to a new layout, preserving the source layout and its star and refusing a name collision
+- benchmark candidates include generated perimeter copper and use the physical connectivity oracle before measurement and capture
+
+- --no-saved-module-routes measures generated routing without module snapshot tracks or vias; saved placement and shown pours remain inputs, and JSON reports the selected policy plus each local attempt
 
 Public functions: geomeanCompletion, benchOne, corpus, writeTable, writeJson, cmdBenchRoute
 
@@ -1355,6 +1384,7 @@ with `cancelled=true`; it never persists as a completed automatic route.
 - an expired route deadline stops before the first net and returns a valid cancelled partial board
 - an expired route deadline keeps the additive connectivity gate from starting new hops
 - a route deadline reached during an additive gap hop stops that hop's maze rather than waiting for its expansion ceiling
+- a stopped gap batch keeps completed hops without reporting skipped hops as attempts
 - a route deadline that expires while a gate hop is routing drops that hop's copper instead of committing it
 - topology planning consumes the same route deadline as detailed routing rather than starting an untimed pre-pass
 - completeness-waiver: empty inputs (an absent form lowers to zero and preserves the historical clock-free behavior)
@@ -1397,6 +1427,11 @@ refusal only leaves the net routing the way it did before the form existed.
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
 ## placement/escape-assign
+
+- pin-side assignment follows the common source edge and source ordering even when destinations lie behind the package, using nearby via-spaced lanes
+- pin-side assignment refuses a group whose source pins leave different package edges
+- pin-side assignment follows rotated and mirrored package poses
+- an escape cross-section outside the board outline is never offered as available capacity
 
 Public functions: plan, guideTracks
 
@@ -1504,6 +1539,7 @@ result never depends on lane order.
 - an authored reserved lane holds its corridor for its owner against a net that routes earlier, which a soft guide cannot do
 - a finishing hop is refused a lane reserved for another net, and the same hop lands when nothing is reserved
 - a net routes through its OWN reserved lane freely, so a reservation costs its owner nothing
+- a supply stitch cannot cross a foreign reserved lane to reach an otherwise legal via site in its own pour
 - completeness-waiver: empty inputs (an empty lane list early-outs before any grid is touched — unit-tested)
 - completeness-waiver: large inputs (cost is lanes x lanes x nodes-per-lane, and a lane is a few millimetres of an escape corridor; the whole board is never scanned)
 - completeness-waiver: unauthorized access (a pure in-memory stamp over caller-owned slices — access control lives in serve/auth)
@@ -3365,6 +3401,9 @@ question each caller answers honestly through `Zone.component`.
 
 ## placement/drc
 
+- candidate-net checks retain full-board geometry and exact target-rail demands while omitting unrelated current solves
+
+
 - a bottleneck cross-section is judged by the same verdict whether it is found at a trace end, in mid-span, or refused as a flank graze
 - a scoped connectivity pass carries the nets one copper edit could not reach and reports exactly what a cold pass over the same board reports
 - a pour audit given the placement's retained pad shapes reports exactly what one that builds them per pass reports, and a scoped audit whose fills all held builds none at all
@@ -4457,6 +4496,8 @@ alone is never evidence.
 - Generated per-pin bypass connection nets share fabricated copper with their parent rail
 - Dotted net names without matching explicit bypass-loop and pin evidence remain electrically distinct
 - Alias connectivity does not duplicate parent-only orphan copper into every bypass-stub open-net report
+- Whole-board connectivity, open-pad diagnosis and net-open DRC check each physical parent rail against all proven bypass-family pads while preserving each child connection's endpoint contract
+- Gap routing recognizes proven bypass-family pads and copper as the requested physical net without changing geometry, rip indices, hard policy or the next hop's identity
 - completeness-waiver: empty inputs (an empty netlist produces an empty identity map and exact comparisons)
 - completeness-waiver: large inputs (construction is one bounded loop scan with linear net lookup; physical comparisons are constant-time)
 - completeness-waiver: unauthorized access (pure in-process identity over an already-authorized placement)
@@ -6656,6 +6697,8 @@ Public functions: runSyncPlan, syncKicadPcbApi
 
 ## serve/route-plan
 
+- a completed scoped route skips residual search for failures outside its selected nets while preserving whole-board connectivity reporting
+
 - cancelled candidates reconcile retained copper with the connectivity oracle without continuing search
 - diagnostic routing produces the ordinary route geometry before probing the final copper
 
@@ -6720,7 +6763,9 @@ order, preferred/allowed layer masks, waypoints, via budgets).
 - the remaining route budget is divided among the unblock LADDERS still live, so a planned target whose net an earlier refusal abandoned stops taking a share, and one net's several planned slots take a single share between them
 - an unblock ladder takes another rung only while the remainder still covers a floor slice for every net behind it that has not yet had its first attempt, so re-entry can never spend a planned target's only turn
 - every repeated tail gate pass is full-gated, so copper a pass closes is never victim-dropped wholesale at a phase boundary
-- deferred repair selection uses only authored repair-waypoints, never ordinary waypoints, reference branches, or scoped/retained copper
+- deferred repair selection honors scope and authored repair-waypoints against retained copper, excluding ordinary waypoints and reference branches
+- guided repair closes a selected net without changing retained copper or relaxing its allowed layers
+- guided repair shares its new-via allowance with the preceding route passes
 - the bounded broad seed phase excludes repair-only waypoint corridors
 - repair-only waypoints do not replace ordinary broad-pass waypoints
 - a fresh route drops DRC-implicated mutable copper and reports the affected net open instead of returning a fab error
@@ -7564,6 +7609,33 @@ is what makes the predicate exact rather than approximately right.
 
 ## Web Server
 
+- Saving from an explicit source project creates a separate review candidate, retains complete layout metadata, refuses name collisions, and preserves the destination star
+
+
+- preview_escape_assignment rejects invalid pin-side options and unknown named layouts before planning another placement
+
+- Finishing must retain every shown pour obstacle or report allocation failure before searching
+
+- Final finishing validation cannot return a complete candidate after a checker allocation failure
+
+- Acceptance DRC reports remain incomplete if severity overrides cannot be applied in full
+- Finishing refuses malformed DRC policy before routing or persisting a saved layout
+
+- Finishing validation propagates allocation failures instead of reporting clean geometry or completed connectivity
+- Every failed allocation in a finishing hop leaves accepted tracks, vias and earlier rip marks intact
+
+- Finishing propagates the route plan's layer masks, reservations and remaining new-via allowance through every round and retry without resetting the allowance
+- An expired finishing search skips grid allocation and further retries while retaining already accepted copper
+- Finishing rejects invalid search budgets and never extends an already armed deadline
+- Finishing accepts zero ordinary rounds without silently routing the open nets
+- Finishing rejects malformed round counts before evaluating or changing a layout
+- An expired finishing deadline still gates completed copper and rolls back a hop whose victim cannot be repaired
+
+- When the nearest island bridge has failed, close_open_nets can try an untried same-face pad pair on those same islands without repeating the failed hop
+
+- Finishing reports round failures only for nets still open in the final physical tally
+- Finishing restores saved RF regions for every connectivity and DRC check, protects them from ordinary rip-up, and maps arc chords back to their single saved owner
+- Finishing a saved layout preserves its mechanical assembly, fabrication layers and driving dimensions while updating only routed copper
 - route_order_search connectivity dominates any copper cost on equally legal boards
 
 - cancelled CLI routing preserves the sidecar and reports retained connectivity separately from its candidate
@@ -7789,6 +7861,9 @@ is what makes the predicate exact rather than approximately right.
 - The add_tracks result separates fab-blocking DRC errors from total violations
 - The add_tracks rollback gate counts only geometry violations, never an open net, so an unfinished escape stub is kept
 - The close_open_nets tool keeps a hop only when the connectivity oracle reports fewer islands on that net
+- The close_open_nets accept gate includes proven bypass-family pads when measuring progress on a parent supply rail
+- Finishing repairs exact same-face bypass intent on an already-connected rail without adding vias or breaking other authored bonds
+- Local pose copper invalidation preserves far trunks and other-net copper while removing moved-net copper near both poses and preserving layout metadata
 - A fine gap rescue tries an exact outer-face escape before its inner-layer multi-via fallback after the ordinary raster drains
 - A fine gap rescue on a plane-only four-layer stack uses the opposite outer face when its terminal face is blocked
 - The close_open_nets global fine detour is reserved for a bounded number of long exhausted bridges in the last few open nets
@@ -8106,6 +8181,8 @@ is what makes the predicate exact rather than approximately right.
 - the board PNG strokes a routed arc as a curve and drops the chords it owns
 - RF-only saved paths paint the same butt-ended swept polygons as Gerber instead of round-capped conservative DRC chords
 - the board PNG paints bottom-side parts under top-side parts
+- A named copper-layer PNG isolates that layer's tracks and fills while keeping through vias and holes visible
+- The PCB image tool and HTTP endpoint select the same named copper layer and reject unknown layers
 - A DRC violation carries a stable 4-hex id emitted by the shared JSON writer
 - The whole-rail power-width warning ships its own kind word and the power-solve status that forced it
 - The shared DRC JSON writer emits each violation's named parties and omits the sides the checker could not name
@@ -8465,6 +8542,8 @@ Public functions: fatal, failure
 
 ## eval/pcb-plan
 
+- An escape assignment records pin-side mode and peer nets independently of the wave's own net selector and hard policies
+
 The top-level `(pcb-plan (place (wave …)…) (route (wave …)…))` form declares the
 ordered plan for completing a PCB layout. It parses and stores only — a later
 slice resolves the selector member names into part/net sets.
@@ -8533,6 +8612,8 @@ Public functions: compute, writeJson
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
 ## placement/plan-resolve
+
+- escape peers receive joint guides without changing their owning waves, layer restrictions, via limits or waypoints
 
 - scoped stable guide origins survive ref renumbering and ambiguous bare aliases never choose the first part
 

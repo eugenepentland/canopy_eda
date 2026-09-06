@@ -972,6 +972,7 @@ fn toolCompareLayoutToStarred(allocator: std.mem.Allocator, project_dir: []const
 fn toolGetPcbImage(allocator: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8)) !bool {
     const name = requireString(args_val, "name") orelse return missingArg(out, allocator, "name");
     var opts = pcb_layout_page.PngRequest{
+        .layer = optionalString(args_val, "layer"),
         .highlight_nets = pcb_layout_page.mcpArgStrList(allocator, args_val, "nets"),
         .highlight_refs = pcb_layout_page.mcpArgStrList(allocator, args_val, "refs"),
         .route = optionalBool(args_val, "route") orelse false,

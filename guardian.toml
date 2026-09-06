@@ -746,6 +746,7 @@ reason = "the rev-free raw sidecar serializer applies no concurrency, history, o
 
 [[ban]]
 chain = ["writeLayoutsFile"]
+# CLI persistence moved intact from the page; mcpProtectedWrite holds the same revision/history guards.
 allow = ["src/layout_sidecar_store.zig", "src/serve/pcb_layout_page.zig"]
 reason = "raw `.layouts.json` disk write (no rev check, no history snapshot) — persist layouts through the guarded save path in src/serve/pcb_layout_page.zig instead"
 

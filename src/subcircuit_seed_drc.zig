@@ -305,7 +305,7 @@ pub fn reject(alloc: std.mem.Allocator, input: anytype) std.mem.Allocator.Error!
             try accepted_vias.append(alloc, item);
         };
         const routed = try routedResult(SeedTrack, SeedVia, alloc, accepted_tracks.items, accepted_vias.items);
-        const violations = try drc.check(alloc, placement, routed, params.clearance);
+        const violations = try drc.checkForNet(alloc, placement, routed, params.clearance, ni);
         const touched = try alloc.alloc(bool, placement.nets.len);
         @memset(touched, false);
         for (violations) |v| markViolation(touched, v);

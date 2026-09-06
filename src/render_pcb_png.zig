@@ -232,6 +232,8 @@ pub const PourInputs = struct {
 /// Render options: output size, focus-mode highlight sets, optional routed
 /// copper / DRC overlay, and the caption.
 pub const Options = struct {
+    /// Show only this physical copper layer; null overlays the whole stack.
+    layer: ?board_layers.StackIndex = null,
     /// Requested output width in px (clamped to [MIN_W, MAX_W]; height follows
     /// the board aspect, clamped to MAX_H).
     width: u32 = 1200,
@@ -299,6 +301,16 @@ pub const Options = struct {
     /// The shared pour inputs of this render (see `PourInputs`).
     pours: PourInputs = .{},
 };
+
+/// Resolve a physical copper-layer name, including dedicated inner planes.
+/// Signal-only lookup deliberately cannot select a layer claimed by a plane.
+pub fn resolveLayer(rules: optimizer.BoardRules, name: []const u8) ?board_layers.StackIndex {
+    const table = rules.layerTable();
+    for (table.rows()) |row| {
+        if (std.ascii.eqlIgnoreCase(row.kicadName(), name)) return row.stack;
+    }
+    return null;
+}
 
 /// Render `p` to PNG bytes owned by `alloc`.
 pub fn render(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options) png.Error![]u8 {
@@ -667,6 +679,8 @@ pub fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Optio
             .crop = part.ref_des,
             .crop_r = @max(4.0, @max(part.hw, part.hh) + 3.0),
             .pin_refs = pin_one,
+            .layer = opts.layer,
+            .user_zones = opts.user_zones,
             .names = opts.names,
             .params = opts.params,
             .routed = opts.routed,
@@ -960,6 +974,19 @@ const Ctx = struct {
         );
     }
 
+    fn signalVisible(self: *const Ctx, signal: u8) bool {
+        const selected = self.opts.layer orelse return true;
+        return self.p.rules.signalStackIndex(signal) == selected.int();
+    }
+
+    fn sideVisible(self: *const Ctx, side: optimizer.Side) bool {
+        return self.signalVisible(if (side == .bottom) 1 else 0);
+    }
+
+    fn padVisible(self: *const Ctx, part: optimizer.Part, pad: geometry.Pad) bool {
+        return pad.thru or pad.drill > 0 or self.sideVisible(part.side);
+    }
+
     fn stagePlaneFills(self: *Ctx) void {
         var arena_state = std.heap.ArenaAllocator.init(self.cv.alloc);
         defer arena_state.deinit();
@@ -978,6 +1005,7 @@ const Ctx = struct {
     /// outer face's `(pour …)` or an inner `(plane …)`), then the hand-drawn
     /// user pours that sit on it.
     fn fillLayer(self: *Ctx, arena: std.mem.Allocator, row: *const board_layers.Row, count: u8, labels: *f32) void {
+        if (self.opts.layer) |selected| if (row.stack != selected) return;
         // The row's OWN colour — the same string `trackColor` resolves and the
         // blob ships — so a plane on In1 and a track on In1 can never read as
         // two different layers. `board_layers.stackColor` stays the one place
@@ -1086,6 +1114,10 @@ const Ctx = struct {
         for (self.p.parts, 0..) |part, pi| {
             if (part.side != side) continue;
             const active = self.partActive(part);
+            if (!self.sideVisible(side)) {
+                self.drawPads(part, active);
+                continue;
+            }
             const base_a: f32 = if (active) 1.0 else dim_a;
             // Courtyard (rotated quad about the box centre — offset from the
             // part origin when the library rect is off-origin). KiCad-style:
@@ -1137,6 +1169,7 @@ const Ctx = struct {
     /// ink belongs under near-side ink wherever two footprints overlap in X/Y.
     fn drawFootprintSilk(self: *Ctx) void {
         for ([_]optimizer.Side{ .bottom, .top }) |side| {
+            if (!self.sideVisible(side)) continue;
             for (self.p.parts) |part| {
                 if (part.side != side) continue;
                 const base_a: f32 = if (self.partActive(part)) 1.0 else dim_a;
@@ -1157,6 +1190,7 @@ const Ctx = struct {
 
     fn drawPads(self: *Ctx, part: optimizer.Part, active: bool) void {
         for (part.pads) |pad| {
+            if (!self.padVisible(part, pad)) continue;
             const hot = self.focus and self.netHot(self.netOf(part.ref_des, pad.number));
             // Layer-coloured pads (KiCad): SMD pads in their face's copper
             // colour, plated through-hole pads gold on every layer, NPTH
@@ -1300,6 +1334,7 @@ const Ctx = struct {
     /// same suppression rule, so the picture and the fab output agree.
     fn drawRouted(self: *Ctx, r: router.RouteResult) void {
         for (r.tracks) |t| {
+            if (!self.signalVisible(t.layer)) continue;
             if (export_gerber.arcOwnsTrack(r.arcs, t)) continue;
             if (path_copper.ownsTrack(r.rf_port_outcomes, t)) continue;
             const col = trackColor(self.p.rules, t.layer);
@@ -1308,6 +1343,7 @@ const Ctx = struct {
         const arcs = path_copper.filterArcs(self.copper_arena, r.rf_port_outcomes, r.arcs) catch r.arcs;
         for (arcs) |a| self.drawArc(a);
         for (r.rf_port_outcomes) |path| {
+            if (!self.signalVisible(path.physical.layer)) continue;
             if (!path.success or path.physical.gate_removed or path.physical.samples.len < 2) continue;
             const pieces = variable_width_copper.pieces(self.copper_arena, path.physical.samples) catch continue;
             const col = trackColor(self.p.rules, path.physical.layer);
@@ -1348,6 +1384,7 @@ const Ctx = struct {
     /// connectivity tolerance. A degenerate (collinear) arc falls back to its
     /// chord, which is what its geometry actually is.
     fn drawArc(self: *Ctx, a: router.Arc) void {
+        if (!self.signalVisible(a.layer)) return;
         const w = @max(self.len(a.width), self.pw(0.6));
         const col = trackColor(self.p.rules, a.layer);
         const circle = outline.arcCircle(.{ .p1 = a.p1, .pm = a.pm, .p2 = a.p2 }) orelse {
@@ -1379,6 +1416,7 @@ const Ctx = struct {
 
     fn drawViolations(self: *Ctx, violations: []const drc.Violation) void {
         for (violations) |v| {
+            if (v.layer) |layer| if (!self.signalVisible(layer.int())) continue;
             const c = [_]f32{ self.xpx(v.x), self.ypx(v.y) };
             self.cv.ring(c[0], c[1], self.pw(5), self.pw(1.6), drc_col, 1.0);
         }
@@ -1734,6 +1772,7 @@ const Ctx = struct {
     fn drawLabels(self: *Ctx) void {
         const h = self.pw(9);
         for (self.p.parts, 0..) |part, pi| {
+            if (!self.sideVisible(part.side)) continue;
             if (self.isTestPoint(pi)) continue; // generated board silk is the one authoritative TP label
             const active = self.partActive(part);
             if (self.focus and !active) continue;
@@ -1755,6 +1794,7 @@ const Ctx = struct {
     /// the manufactured paths. Bottom-side text mirrors x and the whole string
     /// rotates about its anchor.
     fn drawOneBoardText(self: *Ctx, t: font.BoardText) void {
+        if (!self.sideVisible(if (t.bottom) .bottom else .top)) return;
         const Pen = struct {
             ctx: *Ctx,
             cx: f64,
@@ -1803,6 +1843,7 @@ const Ctx = struct {
     /// footprint's authored silkscreen artwork.
     fn drawBoardSilkscreen(self: *Ctx) void {
         for (self.pin_one_silk) |marker| {
+            if (!self.sideVisible(marker.side)) continue;
             const col = if (marker.side == .bottom) silk_bot else silk_rgb;
             self.cv.disc(
                 self.xpx(marker.x),
@@ -1813,6 +1854,7 @@ const Ctx = struct {
             );
         }
         for (self.sub_silk) |annotation| {
+            if (!self.sideVisible(annotation.side)) continue;
             const col = if (annotation.side == .bottom) silk_bot else silk_rgb;
             for (annotation.visibleSegments()) |segment| {
                 self.cv.line(
@@ -1840,6 +1882,7 @@ const Ctx = struct {
         for (self.p.parts, 0..) |part, part_i| {
             if (!self.pinLabeled(part, part_i)) continue;
             for (part.pads, 0..) |pad, pad_i| {
+                if (!self.padVisible(part, pad)) continue;
                 const net = self.netOf(part.ref_des, pad.number) orelse continue;
                 const c = self.lp(part, pad.x, pad.y);
                 // Cap the glyph height to the pad's smaller extent so labels on
@@ -1862,7 +1905,13 @@ const Ctx = struct {
     fn drawHeader(self: *Ctx) void {
         const pad = self.pw(6);
         if (self.opts.title.len > 0) {
-            self.cv.text(pad, self.pw(3), self.opts.title, self.pw(13), text_col, 1.0, .start);
+            var title_buf: [256]u8 = undefined;
+            var layer_buf: [board_layers.name_buf_len]u8 = undefined;
+            const title = if (self.opts.layer) |selected|
+                std.fmt.bufPrint(&title_buf, "{s} · {s}", .{ self.opts.title, self.p.rules.layerTable().stack.nameOfStack(selected, &layer_buf) }) catch self.opts.title
+            else
+                self.opts.title;
+            self.cv.text(pad, self.pw(3), title, self.pw(13), text_col, 1.0, .start);
         }
         // Objective decomposition — every render is self-documenting.
         const b = self.p.breakdown;
@@ -1912,14 +1961,15 @@ const Ctx = struct {
         x = self.legendItem(x, y, aw_gnd, "GND");
         x = self.legendItem(x, y, aw_sig, "SIGNAL");
         if (routed) {
-            x = self.legendItem(x, y, track_top, "F.CU");
-            x = self.legendItem(x, y, track_bot, "B.CU");
+            if (self.signalVisible(0)) x = self.legendItem(x, y, track_top, "F.CU");
+            if (self.signalVisible(1)) x = self.legendItem(x, y, track_bot, "B.CU");
             // Inner routable layers (a >2-signal stackup): one entry each,
             // named from the stackup so the legend matches the Gerber files.
             const n_sig = self.p.rules.signalLayerCount();
             var lname_buf: [16]u8 = undefined;
             var sig: u8 = 2;
             while (sig < n_sig) : (sig += 1) {
+                if (!self.signalVisible(sig)) continue;
                 const nm = self.p.rules.signalLayerName(sig, &lname_buf);
                 x = self.legendItem(x, y, trackColor(self.p.rules, sig), nm);
             }
@@ -2201,6 +2251,12 @@ test "PNG paints an inner plane's copper and carves a foreign via's antipad in i
     // (b) inside the foreign via's antipad: honestly carved bare board.
     const in_antipad = (row + 12 * px_mm + 22) * 3;
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x10, 0x23 }, cv.buf[in_antipad .. in_antipad + 3]);
+    var top = try renderPhysicalCanvas(alloc, p, .{ .width = 600, .routed = routed, .bare = true, .layer = .front });
+    defer top.deinit();
+    try std.testing.expectEqualSlices(u8, &.{ bg.r, bg.g, bg.b }, top.buf[in_plane..][0..3]);
+    var inner = try renderPhysicalCanvas(alloc, p, .{ .width = 600, .routed = routed, .bare = true, .layer = resolveLayer(p.rules, "In1.Cu") });
+    defer inner.deinit();
+    try std.testing.expectEqualSlices(u8, cv.buf[in_plane..][0..3], inner.buf[in_plane..][0..3]);
 }
 
 // spec: Web Server - the board PNG strokes a routed arc as a curve and drops the chords it owns
@@ -2238,6 +2294,9 @@ test "PNG draws a routed arc off its true curve, not its chords" {
     const on_curve = (@as(usize, @intFromFloat(@round((mid[1] + 2) * @as(f64, px_mm)))) * cv.iw +
         @as(usize, @intFromFloat(@round((mid[0] + 2) * @as(f64, px_mm))))) * 3;
     try std.testing.expect(cv.buf[on_curve] > 0x80);
+    var hidden = try renderPhysicalCanvas(alloc, p, .{ .width = 600, .routed = routed, .bare = true, .layer = resolveLayer(p.rules, "B.Cu") });
+    defer hidden.deinit();
+    try std.testing.expect(!containsCopperRedPixel(hidden.buf));
     // The chord midpoint between the arc's start and its own middle sample sits
     // INSIDE the circle; with the chords suppressed it is bare board there.
     const inside = (@as(usize, @intFromFloat(@round(13.0 * @as(f64, px_mm)))) * cv.iw +
@@ -2298,6 +2357,9 @@ test "PNG draws exact swept RF copper without round end caps" {
     // An otherwise empty board has no copper-red pixels. The RF-only proof
     // therefore has to be painted for any such pixel to exist.
     try std.testing.expect(containsCopperRedPixel(cv.buf));
+    var hidden = try renderPhysicalCanvas(alloc, p, .{ .width = 600, .routed = routed, .bare = true, .layer = resolveLayer(p.rules, "B.Cu") });
+    defer hidden.deinit();
+    try std.testing.expect(!containsCopperRedPixel(hidden.buf));
     const px_mm = @as(f64, @floatFromInt(cv.iw)) / 14.0; // 10 mm board + two 2 mm margins
     const y: usize = @intFromFloat(@round(4 * px_mm)); // world y=2 plus the 2 mm view margin
     const start_x: usize = @intFromFloat(@round(4 * px_mm));
@@ -2338,6 +2400,10 @@ test "PNG paints a bottom-side part under the top-side part it overlaps" {
     // F.Cu pad red (#C83434) wins over the B.Cu pad blue (#4D7FC4) underneath.
     try std.testing.expect(cv.buf[at] > 0x90);
     try std.testing.expect(cv.buf[at + 2] < 0x60);
+    var bottom = try renderCanvas(alloc, p, .{ .width = 600, .bare = true, .layer = resolveLayer(p.rules, "B.Cu") });
+    defer bottom.deinit();
+    try std.testing.expect(bottom.buf[at] < 0x60);
+    try std.testing.expect(bottom.buf[at + 2] > 0x90);
 }
 
 // spec: Web Server - a via-in-pad keeps its drilled centre visible after component pads paint above routed copper
@@ -2716,4 +2782,54 @@ fn expectTracksMatchTable(rules: optimizer.BoardRules) !void {
         const got = trackColor(rules, sig);
         try std.testing.expectEqualSlices(u8, &[_]u8{ want.r, want.g, want.b }, &[_]u8{ got.r, got.g, got.b });
     }
+}
+
+// spec: Web Server - A named copper-layer PNG isolates that layer's tracks and fills while keeping through vias and holes visible
+test "PNG copper layer selection isolates tracks and keeps through vias" {
+    const alloc = std.testing.allocator;
+    const p = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &.{},
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 20,
+        .maxy = 20,
+        .generated = false,
+        .rules = .{ .copper_layers = 4, .plane_nets = &.{} },
+    };
+    const tracks = [_]router.Track{
+        .{ .x1 = 4, .y1 = 5, .x2 = 16, .y2 = 5, .width = 0.4, .net = 0, .layer = 0 },
+        .{ .x1 = 4, .y1 = 10, .x2 = 16, .y2 = 10, .width = 0.4, .net = 0, .layer = 1 },
+    };
+    const vias = [_]router.Via{.{ .x = 10, .y = 15, .dia = 0.8, .drill = 0.3, .net = 0 }};
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &vias, .routed = 0, .total = 0 };
+    var all = try renderCanvas(alloc, p, .{ .width = 600, .bare = true, .routed = routed });
+    defer all.deinit();
+    var top = try renderCanvas(alloc, p, .{ .width = 600, .bare = true, .routed = routed, .layer = .front });
+    defer top.deinit();
+    var bottom = try renderCanvas(alloc, p, .{ .width = 600, .bare = true, .routed = routed, .layer = resolveLayer(p.rules, "B.Cu") });
+    defer bottom.deinit();
+    const top_at = (7 * 50 * top.iw + 12 * 50) * 3;
+    const bottom_at = (12 * 50 * top.iw + 12 * 50) * 3;
+    const via_at = (17 * 50 * top.iw + 12 * 50 + 13) * 3;
+    try std.testing.expectEqualSlices(u8, all.buf[top_at..][0..3], top.buf[top_at..][0..3]);
+    try std.testing.expectEqualSlices(u8, &.{ bg.r, bg.g, bg.b }, bottom.buf[top_at..][0..3]);
+    try std.testing.expectEqualSlices(u8, &.{ bg.r, bg.g, bg.b }, top.buf[bottom_at..][0..3]);
+    try std.testing.expectEqualSlices(u8, all.buf[bottom_at..][0..3], bottom.buf[bottom_at..][0..3]);
+    try std.testing.expect(!std.mem.eql(u8, &.{ bg.r, bg.g, bg.b }, top.buf[via_at..][0..3]));
+    try std.testing.expectEqualSlices(u8, top.buf[via_at..][0..3], bottom.buf[via_at..][0..3]);
+}
+
+test "PNG copper layer selection resolves planes and rejects missing layers" {
+    const rules = optimizer.BoardRules{ .copper_layers = 6, .plane_nets = &.{"GND"}, .planes = .{ .declared = &.{.{ .index = 2, .net = "GND" }} } };
+    try std.testing.expectEqual(board_layers.StackIndex.front, resolveLayer(rules, "f.cu").?);
+    try std.testing.expectEqual(board_layers.StackIndex.of(2), resolveLayer(rules, "In1.Cu").?);
+    try std.testing.expectEqual(board_layers.StackIndex.of(6), resolveLayer(rules, "B.Cu").?);
+    try std.testing.expect(resolveLayer(rules, "In9.Cu") == null);
+    try std.testing.expect(resolveLayer(rules, "F.SilkS") == null);
 }

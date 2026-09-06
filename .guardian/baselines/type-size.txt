@@ -71,6 +71,7 @@
 8 src/placement/plan_resolve.zig|ResolvedWave
 8 src/placement/pour.zig|Grid
 8 src/placement/progress.zig|Inputs
+9 src/placement/route_policy.zig|Guides
 11 src/placement/route_policy.zig|Options
 14 src/placement/route_result.zig|RouteResult
 10 src/placement/route_timing.zig|PhaseTimer
@@ -84,7 +85,7 @@
 8 src/placement/thermal_field.zig|ScenarioResult
 24 src/pll_loop.zig|Profile
 9 src/pll_loop.zig|Results
-24 src/render_pcb_png.zig|Options
+25 src/render_pcb_png.zig|Options
 14 src/render_svg/context.zig|FlatInst
 18 src/render_svg/context.zig|RenderCtx
 13 src/review.zig|ReviewDoc
@@ -102,7 +103,8 @@
 34 src/serve/pcb_layout_blob.zig|PcbDataOpts
 10 src/serve/pcb_layout_blob.zig|RoutedMetrics
 9 src/serve/pcb_layout_chrome.zig|SidebarOpts
-27 src/serve/pcb_layout_page.zig|PngRequest
+10 src/serve/pcb_layout_mcp.zig|McpReqPose
+28 src/serve/pcb_layout_page.zig|PngRequest
 13 src/serve/pcb_layout_page.zig|ShownView
 9 src/serve/pcb_layout_page.zig|SolvedRequest
 8 src/serve/saved_zone.zig|SavedZone

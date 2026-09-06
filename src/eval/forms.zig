@@ -1181,7 +1181,7 @@ pub const scope_form_docs = blk: {
     t[@backingInt(ScopeForm.pcb_plan)] = .{ .scope = tl, .doc = .{
         .syntax = "(pcb-plan [(topology)] (place (wave \"name\" [(refs \"REF\"…)] [(sections \"S\"…)] " ++
             "[(sub-blocks \"slug\"…)] [(rest)] [(reason \"…\")])…) " ++
-            "(route [(effort one-shot|standard)] [(max-route-seconds N)] " ++
+            "(route [(effort one-shot|standard)] [(max-route-seconds N)] [(module-signals fixed|guided)] [(module-budget equal|weighted)] " ++
             "(wave \"name\" [(classes atom…)] [(net-classes \"name\"…)] [(nets \"NET\"…)] " ++
             "[(preferred-layers " ++ doc_f_cu ++ "…)] [(allowed-layers " ++ doc_f_cu ++ "…)] " ++
             "[(max-vias N)] [(waypoints (at X Y " ++ doc_f_cu ++ ")…)] " ++
@@ -1190,7 +1190,7 @@ pub const scope_form_docs = blk: {
             "[(guides (escape-from \"REF\" \"PIN\" " ++ doc_f_cu ++ ") " ++
             "(between-pins \"REF\" \"PIN\" \"REF\" \"PIN\" " ++ doc_f_cu ++ ") " ++
             "(beside \"REF\" north|south|east|west " ++ doc_f_cu ++ ")…)] " ++
-            "[(assign-escapes [" ++ doc_f_cu ++ "] [\"HUBREF\"] [(reserve)])] [(topology)] [(seed-first)] [(rest)] [(reason \"…\")])…))",
+            "[(assign-escapes [" ++ doc_f_cu ++ "] [\"HUBREF\"] [(pin-side)] [(with-nets \"NET\"…)] [(reserve)])] [(topology)] [(seed-first)] [(rest)] [(reason \"…\")])…))",
         .summary = "Declare the ordered plan for completing the PCB layout: (place …) waves order " ++
             "part placement, (route …) waves order net routing, each wave named and applied in " ++
             "authored order. (max-route-seconds N) gives the entire route transaction a cooperative wall-clock deadline; omitted keeps the historical unbounded-by-clock behavior. A PLACE wave selects parts with (refs …) ref-des, (sections …) " ++
@@ -1232,7 +1232,7 @@ pub const scope_form_docs = blk: {
             "lets the first ones starve the rest. The lanes become SOFT per-net router guides, so an " ++
             "unusable lane costs a net a detour, never the net. Both strings are optional overrides: " ++
             "the copper face to fan out on (default: the hub's own side) and the hub ref (default: the " ++
-            "part hosting pads of the most nets in the wave). Its optional (reserve) sub-form makes each " ++
+            "part hosting pads of the most nets in the wave). (pin-side) instead plans a nearby exit on the selected pins' common package edge, keeps their source ordering even when destinations lie behind the package, and spaces lanes for vias; mixed source edges are refused. This is placement-only capacity planning, and the router still validates actual copper. (with-nets NET…) adds peers to that joint assignment without changing their owning waves, layer restrictions, via limits or waypoints. Its optional (reserve) sub-form makes each " ++
             "assigned lane a HARD reservation as well: the lane's own net routes through it freely and " ++
             "every other net is refused it for the whole run, so a later net cannot take the channel the " ++
             "assignment was built around. Without it the lanes stay soft, which is the default because a " ++

@@ -227,7 +227,8 @@ pub fn escapeAssignedMask(
     // `resolveAuthored` lowers its guides on.
     for (s.route, 0..) |w, wi| {
         if (w.corridor.assign_escapes == null or wi >= route.len) continue;
-        for (route[wi].members) |n| {
+        const members = try escapeMembers(arena, .{ .wave = w, .members = route[wi].members, .ctx = ctx }, &warns);
+        for (members) |n| {
             if (n < mask.len) mask[n] = true;
         }
     }
@@ -575,6 +576,19 @@ const EscapeOut = struct {
     reserved: *std.ArrayList(route_policy.ReservedLane),
 };
 
+/// Assignment peers add steering only. They never claim a routing priority
+/// slot or replace the hard policy of the wave that already owns the net.
+fn escapeMembers(arena: Allocator, in: EscapeWave, warns: *std.ArrayList(Warning)) Allocator.Error![]const usize {
+    const spec = in.wave.corridor.assign_escapes orelse return in.members;
+    if (spec.with_nets.len == 0) return in.members;
+    const scope = try resolveNetScope(arena, .{ .nets = spec.with_nets }, in.ctx);
+    for (scope.unknown) |name| try warns.append(arena, try mkWarning(arena, in.wave.name, name, "escape peer net"));
+    for (in.members) |net| scope.mask[net] = true;
+    var members: std.ArrayList(usize) = .empty;
+    for (scope.mask, 0..) |yes, net| if (yes) try members.append(arena, net);
+    return members.toOwnedSlice(arena);
+}
+
 fn lowerEscapes(
     arena: Allocator,
     out: EscapeOut,
@@ -586,9 +600,10 @@ fn lowerEscapes(
     if (spec.layer.len > 0 and signalLayerIndex(rules, spec.layer) == null)
         try warns.append(arena, try mkLayerWarning(arena, in.wave.name, spec.layer));
     const assigned = try escape_assign.plan(arena, in.ctx.placement, .{
-        .nets = in.members,
+        .nets = try escapeMembers(arena, in, warns),
         .hub = spec.hub,
         .layer = if (spec.layer.len > 0) signalLayerIndex(rules, spec.layer) else null,
+        .pin_side = spec.pin_side,
     });
     if (!assigned.ok) {
         const why = try std.fmt.allocPrint(arena, "{s} — its nets route unassigned", .{assigned.reason});
@@ -1780,6 +1795,43 @@ test "wave lowering emits exactly the assigner's own guides" {
         try testing.expectApproxEqAbs(a.x2, b.x2, 1e-12);
         try testing.expectApproxEqAbs(a.y2, b.y2, 1e-12);
     }
+}
+
+// spec: placement/plan-resolve - escape peers receive joint guides without changing their owning waves, layer restrictions, via limits or waypoints
+test "escape peers preserve distinct routing policies" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+    var f: PartialEscape = .{};
+    f.build();
+    var p = f.placement();
+    p.parts = f.parts[0..4];
+    const waves = [_]env.PlanWave{
+        .{ .name = "first", .nets = &.{"A"}, .allowed_layers = &.{"F.Cu"}, .max_vias = 0 },
+        .{ .name = "second", .nets = &.{"B"}, .allowed_layers = &.{"B.Cu"}, .max_vias = 3, .corridor = .{
+            .assign_escapes = .{ .hub = "J1", .pin_side = true, .with_nets = &.{ "A", "C", "A" }, .reserve = true },
+        } },
+        .{ .name = "third", .nets = &.{"C"}, .allowed_layers = &.{ "F.Cu", "B.Cu" }, .max_vias = 7, .corridor = .{
+            .waypoints = &.{.{ .x = 0, .y = 0, .layer = "B.Cu" }},
+        } },
+    };
+    const ctx = Context{ .placement = p };
+    const lowered = try resolve(arena, .{ .route = &waves }, ctx);
+    const policies = try routePolicies(arena, lowered, p, true);
+    try testing.expectEqual(@as(usize, 0), lowered.warnings.len);
+    try testing.expectEqual(@as(usize, 3), lowered.escape_guides.len);
+    try testing.expectEqual(@as(usize, 3), lowered.escape_reserved.len);
+    try testing.expectEqual(@as(u64, 1), policies[0].allowed_layers);
+    try testing.expectEqual(@as(?u16, 0), policies[0].max_vias);
+    try testing.expectEqual(@as(u64, 2), policies[1].allowed_layers);
+    try testing.expectEqual(@as(?u16, 3), policies[1].max_vias);
+    try testing.expectEqual(@as(u64, 3), policies[2].allowed_layers);
+    try testing.expectEqual(@as(?u16, 7), policies[2].max_vias);
+    try testing.expectEqual(@as(usize, 1), policies[2].waypoints.len);
+    try testing.expect(policies[0].wave.priority > policies[1].wave.priority);
+    try testing.expect(policies[1].wave.priority > policies[2].wave.priority);
+    const mask = try escapeAssignedMask(arena, .{ .route = &waves }, ctx);
+    try testing.expectEqualSlices(bool, &.{ true, true, true }, mask);
 }
 
 // spec: eval/pcb-plan - (pcb-plan (topology)) - A plan-level (topology) sets the resolved topology flag on every route wave including the implicit rest wave

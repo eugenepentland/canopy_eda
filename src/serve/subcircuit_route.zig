@@ -8,6 +8,7 @@
 //! caller can validate and freeze it before starting the global route.
 
 const std = @import("std");
+const json_writer = @import("../json_writer.zig");
 const env = @import("../eval/env.zig");
 const export_kicad = @import("../export_kicad.zig");
 const optimizer = @import("../placement/optimizer.zig");
@@ -19,6 +20,7 @@ const route_plan = @import("route_plan.zig");
 const pad_neck_shape = @import("../pad_neck_shape.zig");
 const seed_drc = @import("../subcircuit_seed_drc.zig");
 const clock = @import("../infra/clock.zig");
+const process_alloc = @import("../infra/process_alloc.zig");
 const drc = @import("../placement/drc.zig");
 const fab_readiness = @import("../fab_readiness.zig");
 
@@ -35,10 +37,12 @@ pub const SeedVia = struct {
 /// Copper produced by all isolated sub-circuit passes, plus a parent-net mask
 /// identifying which nets should supersede saved module-snapshot seeds.
 pub const Result = struct {
+    attempts: []const Attempt = &.{},
     tracks: []const SeedTrack = &.{},
     vias: []const SeedVia = &.{},
     nets: []const bool = &.{},
     complete_planes: []const bool = &.{},
+    protected: []const bool = &.{},
     phase: struct {
         attempted_subcircuits: usize = 0,
         completed_subcircuits: usize = 0,
@@ -47,6 +51,47 @@ pub const Result = struct {
         carrier_drop_vias: usize = 0,
     } = .{},
 };
+
+/// Per-module work accounting. Primary connectivity is measured before the
+/// optional standalone recovery and before assembled-board seed acceptance.
+/// A null budget means no deadline; timings never determine acceptance.
+pub const Attempt = struct {
+    path: []const u8,
+    timing: struct {
+        budget_ms: ?f64 = null,
+        supply_budget_ms: ?f64 = null,
+        wall_ms: f64 = 0,
+        supply_bond_ms: f64 = 0,
+        signal_ms: f64 = 0,
+        recovery_ms: f64 = 0,
+    } = .{},
+    primary: struct { total: usize = 0, connected: usize = 0 } = .{},
+    timed_out: bool = false,
+};
+
+pub fn writeAttempts(w: *std.Io.Writer, attempts: []const Attempt) std.Io.Writer.Error!void {
+    try w.writeByte('[');
+    for (attempts, 0..) |a, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.writeAll("{\"path\":");
+        try json_writer.writeScriptString(w, a.path);
+        try w.writeAll(",\"budget_ms\":");
+        if (a.timing.budget_ms) |budget| try w.print("{d:.2}", .{budget}) else try w.writeAll("null");
+        try w.writeAll(",\"supply_budget_ms\":");
+        if (a.timing.supply_budget_ms) |budget| try w.print("{d:.2}", .{budget}) else try w.writeAll("null");
+        try w.print(",\"wall_ms\":{d:.2},\"supply_bond_ms\":{d:.2}," ++
+            "\"signal_ms\":{d:.2},\"recovery_ms\":{d:.2},\"primary_total\":{d}," ++
+            "\"primary_connected\":{d},\"timed_out\":{}}}", .{
+            a.timing.wall_ms, a.timing.supply_bond_ms, a.timing.signal_ms, a.timing.recovery_ms,
+            a.primary.total,  a.primary.connected,     a.timed_out,
+        });
+    }
+    try w.writeByte(']');
+}
+
+fn elapsedMs(start: i128) f64 {
+    return @as(f64, @floatFromInt(clock.nanoTimestamp() - start)) / clock.ns_per_ms;
+}
 
 fn memberRef(path: []const u8, ref_des: []const u8) bool {
     return ref_des.len > path.len and std.mem.startsWith(u8, ref_des, path) and ref_des[path.len] == '/';
@@ -285,18 +330,6 @@ fn selectedGuideVias(
     return out.items;
 }
 
-fn selectedReserved(
-    alloc: std.mem.Allocator,
-    values: []const route_policy.ReservedLane,
-    selected: []const bool,
-) std.mem.Allocator.Error![]const route_policy.ReservedLane {
-    var out: std.ArrayList(route_policy.ReservedLane) = .empty;
-    for (values) |value| if (value.net >= 0 and @as(usize, @intCast(value.net)) < selected.len and selected[@intCast(value.net)]) {
-        try out.append(alloc, value);
-    };
-    return out.items;
-}
-
 fn localOptions(
     alloc: std.mem.Allocator,
     base: route_policy.Options,
@@ -334,16 +367,16 @@ fn localOptions(
         options.net = policies;
     }
     options.selected_nets = selected;
-    // Isolation means no saved track, via, pour, keepout, or foreign reserved
-    // lane from the assembled board participates in this phase. Authored policy
-    // for the selected nets still applies.
+    // Isolate reusable track/via copper. Physical exclusions and authored
+    // reservations still constrain every child, including lanes whose owners
+    // will only route later in the global phase.
     options.existing_tracks = &.{};
     options.existing_vias = &.{};
     // Pours and keepouts are board geometry, not reusable module copper. Keep
     // them so supply drops can prove a live landing and signal routes cannot
     // cross an authored exclusion. Tracks/vias remain isolated.
     options.existing_zones = base.existing_zones;
-    // Narrow ONLY the three net-indexed guide lists to the selected nets.
+    // Narrow the soft track/via guides to the selected nets.
     // Everything else `Guides` carries — the route-space director, the coupled
     // pair's channel tier, and the pinch log that tier writes into — is a
     // run-level choice the parent made for the whole transaction, and a
@@ -353,7 +386,10 @@ fn localOptions(
     // back to the lattice for every sub-block it owns.
     options.guides.tracks = try selectedGuideTracks(alloc, base.guides.tracks, selected);
     options.guides.vias = try selectedGuideVias(alloc, base.guides.vias, selected);
-    options.guides.reserved = try selectedReserved(alloc, base.guides.reserved, selected);
+    options.guides.reserved = if (module) |child|
+        try std.mem.concat(alloc, route_policy.ReservedLane, &.{ base.guides.reserved, child.guides.reserved })
+    else
+        base.guides.reserved;
     // A child router must not leak its local net-by-net timeline into the board
     // stream. `routeAllClassified` emits one parent-indexed cumulative frame
     // after the child finishes instead.
@@ -373,11 +409,49 @@ fn localPhaseDeadline(base: route_policy.Options) i128 {
     return now + @divTrunc(base.stop.deadline_ns - now, 4);
 }
 
-fn sliceDeadline(phase_deadline: i128, remaining: usize) i128 {
+fn localWork(placement: optimizer.Placement, path: []const u8, base: route_policy.Options) usize {
+    if (!base.guides.module_budget_weighted) return 1;
+    // One setup unit, then one unit for each local terminal join. This includes
+    // supply bonds; tiny modules no longer receive the same slice as a PLL.
+    var weight: usize = 1;
+    for (placement.nets, 0..) |net, ni| {
+        if (!enabled(base, ni)) continue;
+        var terminals: usize = 0;
+        for (net.pins) |pin| if (memberRef(path, pin.ref_des)) {
+            terminals += 1;
+        };
+        weight +|= terminals -| 1;
+    }
+    return weight;
+}
+
+fn sliceDeadline(phase_deadline: i128, weight: usize, remaining: usize) i128 {
     if (phase_deadline == 0 or remaining == 0) return phase_deadline;
     const now = clock.nanoTimestamp();
     if (phase_deadline <= now) return now;
-    return now + @divTrunc(phase_deadline - now, @as(i128, @intCast(remaining)));
+    return now + @divTrunc((phase_deadline - now) * @as(i128, @intCast(weight)), @as(i128, @intCast(remaining)));
+}
+
+/// Give supply bonds their share of this module's remaining join work. Signals
+/// retain the module deadline and may also use supply time that was not spent.
+/// This changes search scheduling only: exact cap-to-pin surface policy and
+/// the assembled-board acceptance gate remain mandatory for every kept bond.
+fn supplyPhaseOptions(
+    base: route_policy.Options,
+    local: optimizer.Placement,
+    signals: []const bool,
+    module_work: usize,
+) route_policy.Options {
+    if (!base.guides.module_budget_weighted) return base;
+    var signal_work: usize = 0;
+    for (local.nets, 0..) |net, ni| {
+        if (ni < signals.len and signals[ni]) signal_work +|= net.pins.len -| 1;
+    }
+    if (signal_work == 0) return base;
+    const bond_work = @max(1, module_work -| signal_work);
+    var options = base;
+    options.stop.deadline_ns = sliceDeadline(base.stop.deadline_ns, bond_work, bond_work +| signal_work);
+    return options;
 }
 
 fn failed(routed: router.RouteResult, placement: optimizer.Placement, net_i: usize) bool {
@@ -489,14 +563,18 @@ fn standaloneRetryOptions(
     var out = try localOptions(alloc, base, module, selected);
     if (module == null) {
         const policies = try alloc.alloc(route_policy.NetPolicy, selected.len);
-        for (policies) |*policy| policy.* = .{};
+        for (policies, 0..) |*policy, ni| {
+            const parent = if (ni < base.net.len) base.net[ni] else route_policy.NetPolicy{};
+            policy.* = .{ .allowed_layers = parent.allowed_layers, .max_vias = parent.max_vias };
+        }
         out.net = policies;
         out.effort = .standard;
     }
     out.existing_tracks = &.{};
     out.existing_vias = &.{};
-    out.existing_zones = &.{};
+    const reserved = out.guides.reserved;
     out.guides = if (module) |child| child.guides else .{};
+    out.guides.reserved = reserved;
     return out;
 }
 
@@ -627,7 +705,7 @@ const RetryCloseContext = struct {
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
     params: router.RouteParams,
-    stop: route_policy.Stop,
+    options: route_policy.Options,
     out: CopperOutput,
 };
 
@@ -657,22 +735,34 @@ fn appendSuccessfulCopper(
 /// only oracle-complete signal trees; the assembled-board seed DRC still
 /// validates their geometry before they can become frozen source copper.
 fn appendLocalSignals(
+    scratch: std.mem.Allocator,
     out: CopperOutput,
     routed: router.RouteResult,
     placement: optimizer.Placement,
     selected: []const bool,
     options: route_policy.Options,
-) std.mem.Allocator.Error!void {
+) std.mem.Allocator.Error!usize {
     var checked = routed;
     if (routed.cancelled) {
-        const tally = try fab_readiness.routableTally(out.alloc, placement, .{
+        var names: std.ArrayList([]const u8) = .empty;
+        for (placement.nets, 0..) |net, ni| {
+            if (ni < selected.len and selected[ni]) try names.append(scratch, net.name);
+        }
+        const open = try fab_readiness.openNetsAmong(scratch, placement, .{
             .tracks = routed.tracks,
             .vias = routed.vias,
-            .zones = try route_plan.retainedZones(out.alloc, placement, options),
-        });
-        checked.failed = tally.open;
+            .zones = try route_plan.retainedZones(scratch, placement, options),
+        }, names.items);
+        var failed_names: std.ArrayList([]const u8) = .empty;
+        for (open) |net| try failed_names.append(scratch, net.net);
+        checked.failed = failed_names.items;
     }
     try appendSuccessfulCopper(out, checked, placement, selected);
+    var connected: usize = 0;
+    for (selected, 0..) |yes, ni| {
+        if (yes and !failed(checked, placement, ni)) connected += 1;
+    }
+    return connected;
 }
 
 fn appendTwoTerminalClosures(
@@ -692,13 +782,13 @@ fn appendTwoTerminalClosures(
             ctx.alloc,
             ctx.placement,
             ctx.params,
-            .{},
+            .{ .zones = ctx.options.existing_zones, .reserved_lanes = ctx.options.guides.reserved },
             &gaps,
-            .{ .ripup = false, .raster = .{ .stop = ctx.stop } },
+            .{ .ripup = false, .constraints = .{ .net = ctx.options.net }, .raster = .{ .stop = ctx.options.stop } },
         );
         const path = paths[0] orelse continue;
-        for (path.tracks) |track| try appendTrack(ctx.alloc, ctx.out.tracks, track);
-        for (path.vias) |via| try appendVia(ctx.alloc, ctx.out.vias, via);
+        for (path.tracks) |track| try appendTrack(ctx.out.alloc, ctx.out.tracks, track);
+        for (path.vias) |via| try appendVia(ctx.out.alloc, ctx.out.vias, via);
         if (path.tracks.len > 0 or path.vias.len > 0) ctx.out.nets[ni] = true;
     }
 }
@@ -720,6 +810,7 @@ fn retryFailedSignals(
     primary: router.RouteResult,
     selected: []const bool,
 ) std.mem.Allocator.Error!void {
+    if (stopped(ctx.base)) return;
     const retry_selected = try failedSelection(ctx.alloc, selected, primary, ctx.primary_view);
     if (!anySelected(retry_selected)) return;
     const standalone = (try standalonePlacement(ctx.alloc, ctx.board, ctx.sub.name)) orelse return;
@@ -736,13 +827,16 @@ fn retryFailedSignals(
         retry_routed = try runStandaloneRetry(retry_ctx, retry_selected, true);
     }
     if (!anyRecovered(retry_selected, retry_routed, retry_view)) {
+        const lowered = try route_plan.lower(ctx.alloc, ctx.sub.block, retry_view);
+        const focused = try ctx.alloc.dupe(bool, retry_selected);
+        const options = try standaloneRetryOptions(ctx.alloc, ctx.base, if (lowered.applied) lowered.options else null, focused);
         try appendTwoTerminalClosures(.{
             .alloc = ctx.alloc,
             .placement = retry_view,
             .params = ctx.params,
-            .stop = ctx.base.stop,
+            .options = options,
             .out = ctx.out,
-        }, retry_routed, retry_selected);
+        }, retry_routed, focused);
         return;
     }
 
@@ -1073,7 +1167,13 @@ fn attemptBond(
     net: usize,
     options: route_policy.Options,
 ) std.mem.Allocator.Error!?BondCopper {
-    const alloc = ctx.alloc;
+    // The caller commonly owns a whole-board arena. A child arena backed by
+    // it would still retain each bond's search grids and full-board DRC world
+    // until that board finished. Own and release those temporary pages here;
+    // only the accepted, value-only copper is copied into the caller's lifetime.
+    var scratch = std.heap.ArenaAllocator.init(process_alloc.durable);
+    defer scratch.deinit();
+    const alloc = scratch.allocator();
     const routed = try router.routeWithOptions(alloc, pair, ctx.params, options);
     if (failed(routed, pair, net)) return null;
     const want: i32 = @intCast(net);
@@ -1088,8 +1188,12 @@ fn attemptBond(
         try appendVia(alloc, &vias, via);
     };
     if (tracks.items.len == 0 and vias.items.len == 0) return null;
-    if (!try bondAccepted(ctx, net, tracks.items, vias.items)) return null;
-    return .{ .tracks = tracks.items, .vias = vias.items };
+    var gate_ctx = ctx;
+    gate_ctx.alloc = alloc;
+    if (!try bondAccepted(gate_ctx, net, tracks.items, vias.items)) return null;
+    const kept_tracks = try ctx.alloc.dupe(SeedTrack, tracks.items);
+    errdefer ctx.alloc.free(kept_tracks);
+    return .{ .tracks = kept_tracks, .vias = try ctx.alloc.dupe(SeedVia, vias.items) };
 }
 
 /// Newly emitted vias an authored cap-to-pin bypass bond may spend.
@@ -1116,6 +1220,7 @@ const bypass_bond_max_vias: u16 = 0;
 fn appendUncarriedSupplyBonds(
     ctx: SupplyBondContext,
 ) std.mem.Allocator.Error!void {
+    if (stopped(ctx.base)) return;
     const alloc = ctx.alloc;
     const placement = ctx.placement;
     var idx_of = std.StringHashMapUnmanaged(usize).empty;
@@ -1124,6 +1229,9 @@ fn appendUncarriedSupplyBonds(
         if (ni >= ctx.supply.len or !ctx.supply[ni]) continue;
         if (!enabled(ctx.base, ni)) continue;
         if (router.netHasPlane(placement, net.name)) continue;
+        if (stopped(ctx.base)) return;
+        const track_start = ctx.tracks.items.len;
+        const via_start = ctx.vias.items.len;
         const pts = try router.netPoints(alloc, placement, &idx_of, net);
         for (try router.localSupplyBonds(alloc, placement, pts)) |bond| {
             if (stopped(ctx.base)) return;
@@ -1132,10 +1240,11 @@ fn appendUncarriedSupplyBonds(
             pins[1] = .{ .ref_des = pts[bond.hub].ref_des, .pin = pts[bond.hub].pin };
             const pair_nets = try alloc.dupe(optimizer.FlatNet, ctx.board.nets);
             pair_nets[ni].pins = pins;
-            // The bond belongs to this module, but a long authored leg must
-            // see every assembled-board component it could otherwise wander
-            // through before the final seed gate gets a chance to reject it.
-            var pair = ctx.board;
+            // Keep the module's bounded search lattice. Its physical view
+            // already contains every assembled-board component and the real
+            // outline, so a local search still sees foreign obstacles. The
+            // full-board gate remains authoritative after each candidate.
+            var pair = placement;
             pair.nets = pair_nets;
             pair.rules.plane_nets = &.{};
             pair.rules.planes = .{};
@@ -1178,9 +1287,8 @@ fn appendUncarriedSupplyBonds(
             // overlap is electrically inert, a missing bypass bond is not. The
             // retry exists only when there IS rail copper to hide, so the first
             // bond of a rail still costs exactly one attempt.
-            if (drawn == null and
-                (rail_tracks.len > foreign_tracks.len or rail_vias.len > foreign_vias.len))
-            {
+            const has_rail_copper = rail_tracks.len > foreign_tracks.len or rail_vias.len > foreign_vias.len;
+            if (drawn == null and !stopped(bond_options) and has_rail_copper) {
                 bond_options.existing_tracks = foreign_tracks;
                 bond_options.existing_vias = foreign_vias;
                 drawn = try attemptBond(ctx, pair, ni, bond_options);
@@ -1198,7 +1306,10 @@ fn appendUncarriedSupplyBonds(
         // above. Making the group same-net for the fold and keeping it foreign
         // for the search cannot be expressed through the routing entry points:
         // one track list serves both, so only a POST-route seam separates them.
-        try foldRailBonds(ctx, ni);
+        // No new bond means the rail is unchanged; rebuilding a whole-board
+        // folding context would just recheck an earlier module's same copper.
+        if (!stopped(ctx.base) and (ctx.tracks.items.len != track_start or ctx.vias.items.len != via_start))
+            try foldRailBonds(ctx, ni);
     }
 }
 
@@ -1352,11 +1463,13 @@ fn carrierDrops(ctx: DropContext, selected: []const bool) std.mem.Allocator.Erro
     const params = ctx.params;
     const base = ctx.base;
     var dropped: usize = 0;
+    if (deferExpiredCarriers(ctx, selected)) return 0;
     var idx_of = std.StringHashMapUnmanaged(usize).empty;
     for (local_in.parts, 0..) |part, i| try idx_of.put(alloc, part.ref_des, i);
 
     for (local_in.nets, 0..) |net, ni| {
         if (ni >= selected.len or !selected[ni]) continue;
+        if (deferExpiredCarriers(ctx, selected)) break;
         const pts = try router.netPoints(alloc, local_in, &idx_of, net);
         if (pts.len == 0) continue;
         if (router.netHasPlane(local_in, net.name) and pts.len != net.pins.len) ctx.plane_ok[ni] = false;
@@ -1398,9 +1511,9 @@ fn carrierDrops(ctx: DropContext, selected: []const bool) std.mem.Allocator.Erro
             alloc,
             local_in,
             params,
-            .{ .zones = base.existing_zones },
+            .{ .zones = base.existing_zones, .reserved_lanes = base.guides.reserved },
             gaps.items,
-            .{ .ripup = false, .terminal_via = .smd_ok, .raster = .{ .stop = base.stop } },
+            .{ .ripup = false, .constraints = .{ .net = base.net, .terminal_via = .smd_ok }, .raster = .{ .stop = base.stop } },
         );
         for (paths) |maybe| {
             const path = maybe orelse {
@@ -1415,6 +1528,26 @@ fn carrierDrops(ctx: DropContext, selected: []const bool) std.mem.Allocator.Erro
         }
     }
     return dropped;
+}
+
+fn deferExpiredCarriers(ctx: DropContext, selected: []const bool) bool {
+    if (!stopped(ctx.base)) return false;
+    for (selected, 0..) |yes, ni| {
+        if (yes and ni < ctx.plane_ok.len) ctx.plane_ok[ni] = false;
+    }
+    return true;
+}
+
+fn protectModulePolicies(protected: []bool, selected: []const bool, module: route_policy.Options) void {
+    for (selected, 0..) |yes, ni| {
+        if (!yes or ni >= module.net.len) continue;
+        const policy = module.net[ni];
+        if (route_policy.authorsLayers(policy) or policy.max_vias != null) protected[ni] = true;
+    }
+    for (module.guides.reserved) |lane| {
+        const ni = std.math.cast(usize, lane.net) orelse continue;
+        if (ni < protected.len) protected[ni] = true;
+    }
 }
 
 /// Route every first-level sub-circuit independently and concatenate its
@@ -1432,11 +1565,20 @@ pub fn routeAllClassified(
     var vias: std.ArrayList(SeedVia) = .empty;
     const nets = try alloc.alloc(bool, placement.nets.len);
     @memset(nets, false);
+    const protected = try alloc.alloc(bool, placement.nets.len);
+    for (protected, 0..) |*yes, ni| yes.* = ni < supply.len and supply[ni];
     const complete_planes = try alloc.alloc(bool, placement.nets.len);
     for (complete_planes, 0..) |*yes, ni| {
         yes.* = ni < supply.len and supply[ni] and router.netHasPlane(placement, placement.nets[ni].name);
     }
 
+    const work = try alloc.alloc(usize, block.sub_blocks.len);
+    var remaining_work: usize = 0;
+    for (block.sub_blocks, work) |sub, *weight| {
+        weight.* = localWork(placement, sub.name, base);
+        remaining_work +|= weight.*;
+    }
+    const attempts = try alloc.alloc(Attempt, block.sub_blocks.len);
     var attempted: usize = 0;
     var completed: usize = 0;
     var timed_out: usize = 0;
@@ -1453,9 +1595,16 @@ pub fn routeAllClassified(
 
     for (block.sub_blocks, 0..) |sub, sub_i| {
         if (base.stop.cancel) |cancel| if (cancel.load(.monotonic)) break;
+        const started = clock.nanoTimestamp();
+        const attempt = &attempts[attempted];
+        attempt.* = .{ .path = sub.name };
         attempted += 1;
+        defer attempt.timing.wall_ms = elapsedMs(started);
         var sub_base = base;
-        sub_base.stop.deadline_ns = sliceDeadline(phase_deadline, block.sub_blocks.len - sub_i);
+        sub_base.stop.deadline_ns = sliceDeadline(phase_deadline, work[sub_i], remaining_work);
+        defer remaining_work -|= work[sub_i];
+        if (sub_base.stop.deadline_ns != 0)
+            attempt.timing.budget_ms = @as(f64, @floatFromInt(@max(0, sub_base.stop.deadline_ns - started))) / clock.ns_per_ms;
         try progress.emit(.subcircuit_start, sub.name, attempted, block.sub_blocks.len);
         const local = (try localPlacement(alloc, placement, sub.name)) orelse {
             completed += 1;
@@ -1468,12 +1617,21 @@ pub fn routeAllClassified(
         // An absent child plan is the standalone default policy, not consent
         // to inherit the assembled board's global waypoints and wave order.
         const module_options = lowered.options;
+        protectModulePolicies(protected, selected, module_options);
+        const signal_options = try localOptions(alloc, sub_base, module_options, selected);
+        for (selected) |yes| if (yes) {
+            attempt.primary.total += 1;
+        };
+        const bond_base = supplyPhaseOptions(sub_base, local, selected, work[sub_i]);
         // Exact bypass intent is mandatory local topology. Freeze its legal
         // surface copper before discretionary signal candidates so the final
         // ordered seed gate preserves the supply bond and defers a later
         // signal that happens to conflict with it, rather than the reverse.
         const bond_track_mark = tracks.items.len;
         const bond_via_mark = vias.items.len;
+        const bond_start = clock.nanoTimestamp();
+        if (bond_base.stop.deadline_ns != 0)
+            attempt.timing.supply_budget_ms = @as(f64, @floatFromInt(@max(0, bond_base.stop.deadline_ns - bond_start))) / clock.ns_per_ms;
         try appendUncarriedSupplyBonds(.{
             .alloc = alloc,
             .board = placement,
@@ -1482,44 +1640,56 @@ pub fn routeAllClassified(
             // applied while routing the parent's original net names.
             .placement = local,
             .params = params,
-            .base = sub_base,
+            .base = bond_base,
             .module = module_options,
             .supply = supply,
             .tracks = &tracks,
             .vias = &vias,
             .routed_nets = nets,
         });
+        attempt.timing.supply_bond_ms = elapsedMs(bond_start);
         const signal_track_mark = tracks.items.len;
         const signal_via_mark = vias.items.len;
-        if (anySelected(selected)) {
+        if (anySelected(selected) and !stopped(sub_base)) {
+            // Release this module's grids, candidate gates and recovery work
+            // before the next module. Only value-only seed copper escapes via
+            // CopperOutput; the caller's whole-board arena must not own these
+            // temporary pages, even when its free() cannot reclaim them.
+            var signal_scratch = std.heap.ArenaAllocator.init(process_alloc.durable);
+            defer signal_scratch.deinit();
+            const signal_alloc = signal_scratch.allocator();
             // Run the same completion tier as the module's own Route button.
             // The assembled-board gate remains authoritative, but feeding it
             // an intentionally unfinished one-shot candidate creates a false
             // hierarchy penalty: nets that finish standalone never exist here
             // to be validated or kept.
+            const signal_start = clock.nanoTimestamp();
             const routed = try route_plan.routeLowered(
-                alloc,
+                signal_alloc,
                 plan_view,
                 params,
                 try withLocalObstacles(
-                    alloc,
-                    try localOptions(alloc, sub_base, module_options, selected),
+                    signal_alloc,
+                    signal_options,
                     tracks.items[bond_track_mark..],
                     vias.items[bond_via_mark..],
                 ),
             );
+            attempt.timing.signal_ms = elapsedMs(signal_start);
             const copper_out = CopperOutput{ .alloc = alloc, .nets = nets, .tracks = &tracks, .vias = &vias };
-            try appendLocalSignals(copper_out, routed, plan_view, selected, sub_base);
+            attempt.primary.connected = try appendLocalSignals(signal_alloc, copper_out, routed, plan_view, selected, sub_base);
             if (routed.cancelled and stopped(sub_base)) {
                 timed_out += 1;
+                attempt.timed_out = true;
                 try progress.emit(.subcircuit_failed, sub.name, attempted, block.sub_blocks.len);
                 continue;
             }
 
             // Retry only primary failures in the standalone physical view,
             // then offer the reordered result to the full-board DRC below.
+            const recovery_start = clock.nanoTimestamp();
             try retryFailedSignals(.{
-                .alloc = alloc,
+                .alloc = signal_alloc,
                 .board = placement,
                 .primary_view = plan_view,
                 .sub = sub,
@@ -1529,8 +1699,10 @@ pub fn routeAllClassified(
                 .signal_track_mark = signal_track_mark,
                 .signal_via_mark = signal_via_mark,
             }, routed, selected);
+            attempt.timing.recovery_ms = elapsedMs(recovery_start);
         }
         const timed_out_here = stopped(sub_base) and phase_deadline != 0;
+        attempt.timed_out = timed_out_here;
         if (timed_out_here) timed_out += 1 else completed += 1;
         try progress.emit(
             if (timed_out_here) .subcircuit_failed else .subcircuit_complete,
@@ -1572,10 +1744,12 @@ pub fn routeAllClassified(
         if (is_supply and enabled(base, ni) and !complete) deferred_supply += 1;
     }
     return .{
+        .attempts = attempts[0..attempted],
         .tracks = tracks.items,
         .vias = vias.items,
         .nets = nets,
         .complete_planes = complete_planes,
+        .protected = protected,
         .phase = .{
             .attempted_subcircuits = attempted,
             .completed_subcircuits = completed,
@@ -1619,6 +1793,7 @@ pub fn regressed(
 const testing = std.testing;
 
 // spec: serve/subcircuit-route - a timed-out local pass retains only oracle-complete selected signal trees for board-level DRC acceptance
+// spec: serve/subcircuit-route - timeout harvesting builds connectivity graphs only for selected signal nets and reports their verified primary connectivity
 test "hierarchical timeout preserves complete signals without trusting attempt counts" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1660,7 +1835,7 @@ test "hierarchical timeout preserves complete signals without trusting attempt c
     var vias: std.ArrayList(SeedVia) = .empty;
     var emitted = [_]bool{ false, false };
     const out = CopperOutput{ .alloc = alloc, .tracks = &tracks, .vias = &vias, .nets = &emitted };
-    try appendLocalSignals(out, partial, placement, &.{ true, true }, .{});
+    try testing.expectEqual(@as(usize, 1), try appendLocalSignals(alloc, out, partial, placement, &.{ true, true }, .{}));
     try testing.expectEqual(@as(usize, 1), tracks.items.len);
     try testing.expect(emitted[0] and !emitted[1]);
     var rejected = [_]bool{ false, false };
@@ -1669,8 +1844,48 @@ test "hierarchical timeout preserves complete signals without trusting attempt c
 
     tracks.clearRetainingCapacity();
     @memset(&emitted, false);
-    try appendLocalSignals(out, partial, placement, &.{ false, true }, .{});
+    // Nothing is selected: do not allocate any unrelated connectivity graph.
+    var no_graph = testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    try testing.expectEqual(@as(usize, 0), try appendLocalSignals(no_graph.allocator(), out, partial, placement, &.{ false, false }, .{}));
+    try testing.expectEqual(@as(usize, 0), try appendLocalSignals(alloc, out, partial, placement, &.{ false, true }, .{}));
     try testing.expectEqual(@as(usize, 0), tracks.items.len);
+
+    // Timeout validation and the final two-terminal retry have a different
+    // lifetime from their output. Both must leave the seed arrays in the
+    // caller's small buffer after the search arena is released.
+    var output_bytes: [4096]u8 = undefined;
+    var output_buffer = std.heap.FixedBufferAllocator.init(&output_bytes);
+    const bounded_out = CopperOutput{
+        .alloc = output_buffer.allocator(),
+        .tracks = &tracks,
+        .vias = &vias,
+        .nets = &emitted,
+    };
+    tracks = .empty;
+    vias = .empty;
+    {
+        var scratch = std.heap.ArenaAllocator.init(process_alloc.durable);
+        defer scratch.deinit();
+        const temp = scratch.allocator();
+        try testing.expectEqual(@as(usize, 1), try appendLocalSignals(temp, bounded_out, partial, placement, &.{ true, true }, .{}));
+        var open = partial;
+        open.failed = &.{"OPEN"};
+        try appendTwoTerminalClosures(.{
+            .alloc = temp,
+            .placement = placement,
+            .params = .{},
+            .options = .{ .net = &.{ .{}, .{ .allowed_layers = 1, .max_vias = 0 } } },
+            .out = bounded_out,
+        }, open, &.{ false, true });
+    }
+    try testing.expect(emitted[0] and emitted[1]);
+    try testing.expect(tracks.items.len > 1);
+    const start = @intFromPtr(tracks.items.ptr);
+    const end = start + @sizeOf(SeedTrack) * tracks.items.len;
+    try testing.expect(start >= @intFromPtr(&output_bytes));
+    try testing.expect(end <= @intFromPtr(&output_bytes) + output_bytes.len);
+    try testing.expectEqual(@as(usize, 0), tracks.items[0].net);
+    try testing.expectEqual(@as(usize, 1), tracks.items[tracks.items.len - 1].net);
 }
 
 fn setRecoverySide(parts: []optimizer.Part, side: optimizer.Side) void {
@@ -1735,6 +1950,8 @@ test "hierarchical recovery uses the opposite routable face through a surface ba
 
 // spec: serve/subcircuit-route - a sub-circuit routing view keeps every board component as an obstacle, exposes only its own net terminals, and uses local bounds
 // spec: serve/subcircuit-route - a child without an authored plan uses standalone defaults instead of inheriting global waypoints
+// spec: serve/subcircuit-route - local attempt reports identify the module, allotted and spent time, supply-bond time, primary signal time and connectivity, recovery time, and timeout status without starting a diagnostic route
+// spec: serve/subcircuit-route - local signal search, recovery and timeout validation release their temporary memory before the next module, retaining only value-only seed copper in the caller allocator
 test "isolated sub-circuit view retains foreign physical obstacles" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1790,6 +2007,11 @@ test "isolated sub-circuit view retains foreign physical obstacles" {
     const routed = try routeAll(alloc, &board, placement, .{}, .{});
     try testing.expect(routed.nets[0]);
     try testing.expect(routed.tracks.len > 0);
+    try testing.expectEqual(@as(usize, 1), routed.attempts.len);
+    try testing.expectEqualStrings("amp", routed.attempts[0].path);
+    try testing.expectEqual(@as(usize, 1), routed.attempts[0].primary.total);
+    try testing.expectEqual(@as(usize, 1), routed.attempts[0].primary.connected);
+    try testing.expect(!routed.attempts[0].timed_out);
     // No authored child plan: a board guide toward the external terminal must
     // wait for the global pass, not drag this four-mm local join off its board.
     const global_points = [_]route_policy.Waypoint{.{ .x = 80, .y = 70, .layer = 0 }};
@@ -1798,6 +2020,22 @@ test "isolated sub-circuit view retains foreign physical obstacles" {
     try testing.expect(guided.nets[0]);
     try testing.expectEqualDeep(routed.tracks, guided.tracks);
     try testing.expectEqual(@as(usize, 0), guided.vias.len);
+
+    // The caller retains seed copper and small placement/report metadata, not
+    // this module's temporary signal grids or recovery validation world.
+    var output_bytes: [32 * 1024]u8 = undefined;
+    var output_buffer = std.heap.FixedBufferAllocator.init(&output_bytes);
+    const bounded = try routeAll(output_buffer.allocator(), &board, placement, .{}, .{});
+    try testing.expectEqualDeep(routed.tracks, bounded.tracks);
+    try testing.expectEqualDeep(routed.vias, bounded.vias);
+    try testing.expectEqual(routed.attempts[0].primary, bounded.attempts[0].primary);
+
+    // Expiry prevents routing, not honest reporting of the selected local work.
+    const expired = try routeAll(alloc, &board, placement, .{}, .{ .stop = .{ .deadline_ns = 1 } });
+    try testing.expectEqual(@as(usize, 1), expired.attempts[0].primary.total);
+    try testing.expectEqual(@as(usize, 0), expired.attempts[0].primary.connected);
+    try testing.expectEqual(@as(usize, 0), expired.tracks.len);
+    try testing.expect(expired.attempts[0].timed_out);
 }
 
 // spec: serve/subcircuit-route - an unselected scoped net is never routed by a sub-circuit phase
@@ -1830,6 +2068,7 @@ test "isolated sub-circuit selection respects the caller's net scope" {
 }
 
 // spec: Web Server - A hard route deadline gives all local sub-circuit completion attempts at most one quarter of the initially remaining time and preserves the original absolute deadline for the global phase
+// spec: serve/subcircuit-route - a weighted timed local phase shares its remaining budget by enabled local terminal joins and keeps the global deadline reserved
 test "local phase cutoff reserves three quarters of a board deadline" {
     const now = clock.nanoTimestamp();
     const board_deadline = now + 400 * clock.ns_per_ms;
@@ -1837,6 +2076,74 @@ test "local phase cutoff reserves three quarters of a board deadline" {
     try testing.expect(cutoff > now);
     try testing.expect(cutoff <= now + 110 * clock.ns_per_ms);
     try testing.expect(board_deadline - cutoff >= 290 * clock.ns_per_ms);
+    const weighted = sliceDeadline(board_deadline, 3, 4);
+    try testing.expect(weighted >= now + 295 * clock.ns_per_ms);
+    try testing.expect(weighted <= now + 310 * clock.ns_per_ms);
+    const pins = [_]export_kicad.FlatPin{
+        .{ .ref_des = "big/A", .pin = "1" },  .{ .ref_des = "big/B", .pin = "1" },
+        .{ .ref_des = "big/C", .pin = "1" },  .{ .ref_des = "big/D", .pin = "1" },
+        .{ .ref_des = "tiny/A", .pin = "1" }, .{ .ref_des = "tiny/B", .pin = "1" },
+    };
+    const nets = [_]optimizer.FlatNet{.{ .name = "BUS", .pins = &pins }};
+    const p = optimizer.Placement{
+        .parts = &.{},
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = 0,
+        .miny = 0,
+        .maxx = 1,
+        .maxy = 1,
+        .generated = false,
+    };
+    try testing.expectEqual(@as(usize, 1), localWork(p, "big", .{}));
+    try testing.expectEqual(@as(usize, 4), localWork(p, "big", .{ .guides = .{ .module_budget_weighted = true } }));
+    try testing.expectEqual(@as(usize, 2), localWork(p, "tiny", .{ .guides = .{ .module_budget_weighted = true } }));
+    try testing.expectEqual(@as(usize, 1), localWork(p, "big", .{ .selected_nets = &.{false} }));
+}
+
+// spec: serve/subcircuit-route - each timed module reserves its selected signal join share before supply-bond search, preserves exact bond policy, and reports the supply allowance and selected signal total even when search expires
+test "supply search leaves time for selected local signal joins" {
+    const now = clock.nanoTimestamp();
+    const end = now + 10000 * clock.ns_per_ms;
+    var placement = std.mem.zeroes(optimizer.Placement);
+    placement.nets = &.{.{ .name = "SIGNAL", .pins = &.{
+        .{ .ref_des = "A", .pin = "1" }, .{ .ref_des = "B", .pin = "1" },
+        .{ .ref_des = "C", .pin = "1" }, .{ .ref_des = "D", .pin = "1" },
+    } }};
+    const base = route_policy.Options{
+        .guides = .{ .module_budget_weighted = true },
+        .stop = .{ .deadline_ns = end },
+        .net = &.{.{ .allowed_layers = 1, .max_vias = 0 }},
+    };
+    // Three signal joins out of five units leave at least half the module
+    // window after the supply cutoff; the global/module deadline never moves.
+    const bonds = supplyPhaseOptions(base, placement, &.{true}, 5);
+    try std.testing.expect(bonds.stop.deadline_ns > now);
+    try std.testing.expect(bonds.stop.deadline_ns < now + 5000 * clock.ns_per_ms);
+    try std.testing.expectEqual(end, base.stop.deadline_ns);
+    try std.testing.expectEqualDeep(base.net, bonds.net);
+    try std.testing.expectEqual(end, supplyPhaseOptions(base, placement, &.{false}, 5).stop.deadline_ns);
+    try std.testing.expectEqual(@as(i128, 0), supplyPhaseOptions(.{}, placement, &.{true}, 5).stop.deadline_ns);
+    const expired = supplyPhaseOptions(.{ .stop = .{ .deadline_ns = 1 } }, placement, &.{true}, 5);
+    try std.testing.expect(stopped(expired));
+
+    var bytes: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try writeAttempts(&writer, &.{.{
+        .path = "module",
+        .timing = .{ .budget_ms = 10, .supply_budget_ms = 4 },
+        .primary = .{ .total = 3, .connected = 0 },
+        .timed_out = true,
+    }});
+    const report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer report.deinit();
+    const entry = report.value.array.items[0].object;
+    try std.testing.expectEqual(@as(f64, 4), entry.get("supply_budget_ms").?.float);
+    try std.testing.expectEqual(@as(i64, 3), entry.get("primary_total").?.integer);
 }
 
 // spec: Web Server - A hierarchical local pass resolves each child PCB plan in the child's net namespace, including flattened port renames, while the destination board may narrow hard layer and via constraints
@@ -1981,9 +2288,10 @@ test "module-only retry follows standalone surface and pad-neck geometry" {
     var standalone_selected = [_]bool{true};
     const standalone_options = try standaloneRetryOptions(alloc, .{ .net = &policies, .effort = .one_shot }, null, &standalone_selected);
     try testing.expectEqual(route_policy.Effort.standard, standalone_options.effort);
-    try testing.expectEqual(@as(u64, 0), standalone_options.net[0].allowed_layers);
+    // Recovery clears soft preferences, retaining the board's hard limits.
+    try testing.expectEqual(@as(u64, 0b11), standalone_options.net[0].allowed_layers);
     try testing.expectEqual(@as(u64, 0), standalone_options.net[0].preferred_layers);
-    try testing.expectEqual(@as(?u16, null), standalone_options.net[0].max_vias);
+    try testing.expectEqual(@as(?u16, 2), standalone_options.net[0].max_vias);
 
     const search = try searchAtPadNeck(alloc, placement, &.{true});
     try testing.expectEqual(@as(f64, 0.1524), search.rules.net[0].width);
@@ -2065,7 +2373,7 @@ test "local signals preserve exact supply bond obstacles" {
 }
 
 // A sub-block routes on the same terms as the board that owns it: only the
-// net-indexed guide lists are scoped down, never the run-level directors. A
+// soft guide lists are scoped down, never reservations or run-level directors. A
 // partial `Guides` literal in `localOptions` silently reset a field-space
 // parent to the lattice for every sub-block, with nothing at the call site to
 // say so.
@@ -2088,7 +2396,7 @@ test "local options keep the parent's run-level guide directors" {
 
     var selected = [_]bool{ true, false };
     const options = try localOptions(alloc, parent, null, &selected);
-    // The three net-indexed lists are the only fields this scoping owns.
+    // Soft guides follow the selected nets.
     try testing.expectEqual(@as(usize, 1), options.guides.tracks.len);
     try testing.expectEqual(@as(i32, 0), options.guides.tracks[0].net);
     // Everything else is the parent's run-level choice and rides through.
@@ -2100,6 +2408,132 @@ test "local options keep the parent's run-level guide directors" {
 
 fn expectNoNet(tracks: []const route_policy.ExistingTrack, omit: i32) !void {
     for (tracks) |track| try testing.expect(track.net != omit);
+}
+
+// spec: serve/subcircuit-route - local signal routing and standalone recovery preserve foreign parent and child lane reservations and the destination board's hard layer and via limits
+test "local routes preserve foreign reservations through recovery" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const Pad = std.meta.Child(@FieldType(optimizer.Part, "pads"));
+    const pads = [_]Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "m/A", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "m/B", .kind = .passive, .hw = 0.3, .hh = 0.3, .pads = &pads, .fallback = false, .x = 4, .y = 0 },
+    };
+    const pins = [_]export_kicad.FlatPin{ .{ .ref_des = "m/A", .pin = "1" }, .{ .ref_des = "m/B", .pin = "1" } };
+    const nets = [_]optimizer.FlatNet{
+        .{ .name = "SIG", .pins = &pins },
+        .{ .name = "BOARD_LANE", .pins = &.{} },
+        .{ .name = "CHILD_LANE", .pins = &.{} },
+    };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -1,
+        .miny = -2,
+        .maxx = 5,
+        .maxy = 2,
+        .generated = false,
+        .rules = .{ .plane_nets = &.{}, .copper_layers = 2 },
+    };
+    const lanes = [_]route_policy.ReservedLane{
+        .{ .net = 1, .x1 = 1.5, .y1 = -0.45, .x2 = 1.5, .y2 = 0.45, .layer = 0, .width = 0.6 },
+        .{ .net = 2, .x1 = 2.5, .y1 = -0.45, .x2 = 2.5, .y2 = 0.45, .layer = 0, .width = 0.6 },
+    };
+    const parent = route_policy.Options{
+        .net = &.{ .{ .allowed_layers = 1, .max_vias = 0 }, .{}, .{} },
+        .guides = .{ .reserved = lanes[0..1] },
+    };
+    const child = route_policy.Options{
+        .net = &.{ .{ .preferred_layers = 2, .allowed_layers = 3, .max_vias = 2 }, .{}, .{} },
+        .guides = .{ .reserved = lanes[1..] },
+    };
+    var selected = [_]bool{ true, false, false };
+    const Case = struct { options: route_policy.Options, lanes: []const route_policy.ReservedLane };
+    const cases = [_]Case{
+        .{ .options = try localOptions(alloc, parent, child, &selected), .lanes = &lanes },
+        .{ .options = try standaloneRetryOptions(alloc, parent, child, &selected), .lanes = &lanes },
+        .{ .options = try standaloneRetryOptions(alloc, parent, null, &selected), .lanes = lanes[0..1] },
+    };
+    for (cases) |case| {
+        const routed = try router.routeWithOptions(alloc, placement, .{}, case.options);
+        try testing.expect(!failed(routed, placement, 0));
+        try testing.expect(routed.tracks.len > 0);
+        try testing.expectEqual(@as(usize, 0), routed.vias.len);
+        for (routed.tracks) |track| {
+            try testing.expectEqual(@as(u8, 0), track.layer);
+            for (case.lanes) |lane| {
+                const gap = drc.segSegDist(track.x1, track.y1, track.x2, track.y2, lane.x1, lane.y1, lane.x2, lane.y2);
+                try testing.expect(gap >= lane.width / 2);
+            }
+        }
+    }
+}
+
+// spec: serve/subcircuit-route - local supply stitches keep their tracks and vias out of foreign reserved signal lanes
+test "local carrier stitches preserve foreign reservations" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const Pad = std.meta.Child(@FieldType(optimizer.Part, "pads"));
+    const pads = [_]Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.5, .h = 0.5 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "m/C1", .kind = .passive, .hw = 0.4, .hh = 0.4, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+    };
+    const pins = [_]export_kicad.FlatPin{.{ .ref_des = "m/C1", .pin = "1" }};
+    const nets = [_]optimizer.FlatNet{ .{ .name = "GND", .pins = &pins }, .{ .name = "LATER_SIGNAL", .pins = &.{} } };
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -2,
+        .miny = -2,
+        .maxx = 2,
+        .maxy = 2,
+        .generated = false,
+        .rules = .{ .plane_nets = &.{"GND"}, .copper_layers = 4 },
+    };
+    var tracks: std.ArrayList(SeedTrack) = .empty;
+    var vias: std.ArrayList(SeedVia) = .empty;
+    var plane_ok = [_]bool{ true, false };
+    var ctx = DropContext{
+        .alloc = alloc,
+        .local = placement,
+        .params = .{},
+        .base = .{},
+        .tracks = &tracks,
+        .vias = &vias,
+        .plane_ok = &plane_ok,
+    };
+    try testing.expect(try carrierDrops(ctx, &.{ true, false }) > 0);
+    const first = vias.items[0].copper;
+    const lanes = [_]route_policy.ReservedLane{.{
+        .net = 1,
+        .x1 = first.x - 0.5,
+        .y1 = first.y,
+        .x2 = first.x + 0.5,
+        .y2 = first.y,
+        .layer = 0,
+        .width = 0.5,
+    }};
+    tracks.clearRetainingCapacity();
+    vias.clearRetainingCapacity();
+    ctx.base.guides.reserved = &lanes;
+    _ = try carrierDrops(ctx, &.{ true, false });
+    // This reservation covers the source pad itself. Neither a via there nor
+    // a stub out to another site can satisfy it, so the carrier must defer.
+    try testing.expectEqual(@as(usize, 0), vias.items.len);
+    try testing.expectEqual(@as(usize, 0), tracks.items.len);
 }
 
 // An earlier bond's copper reaches the next bond of the same rail as an
@@ -2173,6 +2607,8 @@ fn expectSeedTracks(tracks: []const SeedTrack, net: usize, max_x: ?f64) !void {
 }
 
 // spec: Web Server - Carrier-backed ground terminals receive independent local drops and never a routed pad-to-pad surface web. Other carried power/input rails may keep authored exact-target bypass cap-to-pin surface bonds; without a declared plane or retained pour, authored passive-to-IC bonds and validated starred module copper complete bounded local supply trees while the board-spanning remainder waits for global routing
+// spec: serve/subcircuit-route - explicit bypass bonds use module bounds while retaining assembled-board obstacles and acceptance; unchanged rails are not folded again and expired slices start no new signal or recovery search
+// spec: serve/subcircuit-route - a bypass attempt retains only accepted copper in its caller allocator and releases its temporary search and DRC world before the next bond
 test "supply nets drop to a plane and uncarried supply routes its local passive bond" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -2219,6 +2655,21 @@ test "supply nets drop to a plane and uncarried supply routes its local passive 
         .generated = false,
         .rules = .{ .plane_nets = &.{"VCC"}, .copper_layers = 4 },
     };
+    // An expired carrier pass allocates no grid and defers its completion claim.
+    var no_carrier_grid = testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    var expired_tracks: std.ArrayList(SeedTrack) = .empty;
+    var expired_vias: std.ArrayList(SeedVia) = .empty;
+    var plane_ok = [_]bool{true};
+    try testing.expectEqual(@as(usize, 0), try carrierDrops(.{
+        .alloc = no_carrier_grid.allocator(),
+        .local = placement,
+        .params = .{},
+        .base = .{ .stop = .{ .deadline_ns = 1 } },
+        .tracks = &expired_tracks,
+        .vias = &expired_vias,
+        .plane_ok = &plane_ok,
+    }, &.{true}));
+    try testing.expect(!plane_ok[0]);
     const planed = try routeAllClassified(alloc, &board, placement, .{}, .{}, &.{true});
     try testing.expect(!savedSupplyFallbackAllowed(placement, .{}, "power", 0));
     try testing.expect(planed.vias.len >= 1);
@@ -2241,6 +2692,41 @@ test "supply nets drop to a plane and uncarried supply routes its local passive 
         if (track.copper.x1 < 3.5 and track.copper.x2 < 3.5) local_bond = true;
     }
     try testing.expect(local_bond);
+
+    // A two-mm bypass bond must not allocate a whole-board fine lattice.
+    // The local view retains all physical parts and the board DRC gate, but
+    // distant empty board area does not make this local path unroutable.
+    var wide_board = placement;
+    wide_board.maxx = 1000;
+    wide_board.maxy = 1000;
+    const bounded = try routeAllClassified(alloc, &board, wide_board, .{}, .{}, &.{true});
+    try testing.expect(bounded.tracks.len > 0);
+    try expectSeedTracks(bounded.tracks, 0, 3.5);
+
+    // A small retained-output budget must not also retain a whole search grid
+    // and DRC world for each bypass attempt. Only accepted seed copper escapes.
+    var output_bytes: [4096]u8 = undefined;
+    var output_buffer = std.heap.FixedBufferAllocator.init(&output_bytes);
+    var bond_tracks: std.ArrayList(SeedTrack) = .empty;
+    var bond_vias: std.ArrayList(SeedVia) = .empty;
+    var routed_mask = [_]bool{false};
+    var pair = placement;
+    pair.nets = &.{.{ .name = "VCC", .pins = pins[0..2] }};
+    const bond = (try attemptBond(.{
+        .alloc = output_buffer.allocator(),
+        .board = placement,
+        .placement = pair,
+        .params = .{},
+        .base = .{},
+        .module = null,
+        .supply = &.{true},
+        .tracks = &bond_tracks,
+        .vias = &bond_vias,
+        .routed_nets = &routed_mask,
+    }, pair, 0, .{ .selected_nets = &.{true}, .net = &.{.{ .allowed_layers = 1, .max_vias = 0 }} })) orelse return error.TestExpectedBond;
+    try testing.expect(bond.tracks.len > 0);
+    try expectSeedTracks(bond.tracks, 0, 3.5);
+    try testing.expectEqual(@as(usize, 0), bond.vias.len);
 
     const thru_pads = [_]Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.7, .h = 0.7, .thru = true, .drill = 0.3 }};
     parts[0].pads = &thru_pads;

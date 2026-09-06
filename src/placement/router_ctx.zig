@@ -25,6 +25,7 @@
 //! Split out of `router.zig` verbatim (2026-09-05).
 
 const std = @import("std");
+const lane_reserve = @import("lane_reserve.zig");
 const board_layers = @import("../board_layers.zig");
 const clock = @import("../infra/clock.zig");
 const optimizer = @import("optimizer.zig");
@@ -504,6 +505,7 @@ pub fn pointMissesBox(point: [2]f64, x0: f64, y0: f64, x1: f64, y1: f64, reach: 
 /// arbitrary point must check the tracks itself or it can cross them outright
 /// (the classic breakout-stub-through-a-rail short).
 pub fn segClearsTracks(ctx: *Ctx, tracks: []const Track, a: [2]f64, b: [2]f64, net: i32, layer: u8) bool {
+    if (lane_reserve.segmentBlocked(ctx.reserved_lanes, ctx.grid, layer, net, a, b)) return false;
     // The RF crossing shadow rides here too. The direct / dogleg / octilinear
     // synthesis emits a segment whole or not at all and never sees the maze cost
     // model, so the only way to price a shortcut that RUNS ALONG a protected
@@ -723,7 +725,8 @@ pub fn findGroundVia(
     {
         const s = grid.snap(c[0], c[1]);
         if (plane_via.inLandBarrelFits(padCopperAt(ctx, s, net, layer), s, ctx.params.via_dia) and
-            groundViaPointClear(ctx, placed, tracks, s, net) and segClearsPadsOnLayer(ctx, c, s, net, null))
+            groundViaPointClear(ctx, placed, tracks, s, net) and segClearsPadsOnLayer(ctx, c, s, net, null) and
+            segClearsTracks(ctx, tracks, c, s, net, layer))
             return s;
     }
     // A big pad (a thermal land) usually still has room a couple of tenths off
@@ -735,7 +738,8 @@ pub fn findGroundVia(
     if (padCopperAt(ctx, c, net, layer)) |pad| {
         var scan = plane_via.InPad.init(pad, c, ctx.params.via_dia);
         while (scan.next()) |s| {
-            if (groundViaPointClear(ctx, placed, tracks, s, net) and segClearsPadsOnLayer(ctx, c, s, net, null))
+            if (groundViaPointClear(ctx, placed, tracks, s, net) and segClearsPadsOnLayer(ctx, c, s, net, null) and
+                segClearsTracks(ctx, tracks, c, s, net, layer))
                 return s;
         }
     }
@@ -772,6 +776,7 @@ pub fn groundViaPointClear(
     point: [2]f64,
     net: i32,
 ) bool {
+    if (lane_reserve.viaBlocked(ctx.reserved_lanes, ctx.grid, net, point)) return false;
     if (!viaClearsOutline(ctx, point[0], point[1], net)) return false;
     if (!viaClearsPads(ctx, point[0], point[1], net)) return false;
     if (!viaClearsVias(ctx, placed, point[0], point[1], net)) return false;

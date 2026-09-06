@@ -2174,6 +2174,11 @@ pub const PlanGuide = union(enum) {
 pub const PlanEscapeSpec = struct {
     layer: []const u8 = "",
     hub: []const u8 = "",
+    /// `(pin-side)`: schedule the nearby common package exit, with via pitch.
+    pin_side: bool = false,
+    /// `(with-nets ...)`: include these peers in the assignment without
+    /// changing the route waves, layer masks or via budgets that own them.
+    with_nets: []const []const u8 = &.{},
     /// `(reserve)`: also RESERVE each assigned lane for its net rather than only
     /// biasing the maze toward it. A soft guide is a cost bonus a later net may
     /// ignore outright, so an assignment survives only until something else
@@ -2268,6 +2273,9 @@ pub const PlanEffort = enum {
 /// design (a duplicate is warned and the first kept); the enclosing optional on
 /// `DesignBlock.pcb_plan` is null when no plan is authored.
 pub const PcbPlanSpec = struct {
+    module_signals_guided: bool = false,
+    /// Experimental join-weighted module slices; equal shares preserve the default scheduler.
+    module_budget_weighted: bool = false,
     place: []const PlanWave = &.{},
     route: []const PlanWave = &.{},
     /// Authored `(route (effort …))`, or null to keep the router's default.

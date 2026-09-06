@@ -485,6 +485,15 @@ const via_pad_max_mm: f64 = 0.65;
 /// copper rule (mm), edge to edge; per-net `(net-class …)` overrides come from
 /// `placement.rules.net` and board rules from `placement.rules.design`. With no
 /// classes and an absent form the output is byte-identical to before.
+/// Exact authored capacitor-to-IC surface connectivity, independent of remote carriers.
+pub fn checkBypasses(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    tracks: []const router.Track,
+) std.mem.Allocator.Error![]Violation {
+    return @import("bypass_open.zig").check(arena, placement, tracks);
+}
+
 pub fn check(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
@@ -517,6 +526,31 @@ pub fn checkMemoised(
     memo: ?pour.FillMemo,
 ) std.mem.Allocator.Error![]Violation {
     return checkImpl(arena, placement, routed, clearance, &.{}, .{ .fills = memo });
+}
+
+/// Candidate-net gate: every geometric obstacle remains, while current solves
+/// are limited to the target's physical rail family. Only findings involving
+/// `net_i` are authoritative; unrelated power-width findings are not a report.
+/// Preserve all equal-leaf demands so the power resolver's ambiguity rule and
+/// exact-name precedence remain identical to a whole-board check.
+pub fn checkForNet(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    routed: router.RouteResult,
+    clearance: f64,
+    net_i: usize,
+) std.mem.Allocator.Error![]Violation {
+    const identity = try net_identity.Identity.init(arena, placement);
+    const signed = std.math.cast(i32, net_i) orelse return check(arena, placement, routed, clearance);
+    const name = identity.canonicalName(placement.nets, signed);
+    const leaf = @import("../net_name.zig").leaf;
+    var rails: std.ArrayList(@import("../eval/power_budget.zig").Rail) = .empty;
+    for (placement.rules.physical.rails) |rail| {
+        if (std.ascii.eqlIgnoreCase(leaf(rail.net), leaf(name))) try rails.append(arena, rail);
+    }
+    var scoped = placement;
+    scoped.rules.physical.rails = rails.items;
+    return check(arena, scoped, routed, clearance);
 }
 
 /// `check` with hand-authored copper zones credited as real same-net copper
@@ -5333,4 +5367,39 @@ test "the via-spacing rule falls back to clearance and an authored value overrid
     // A net-class clearance raises the fallback for its own net, too.
     pl.rules = .{ .design = .{}, .net = &[_]optimizer.NetRule{.{ .clearance = 0.8 }} };
     try testing.expectEqual(@as(usize, 1), countKind(try check(arena, pl, rr, 0.127), .via_spacing));
+}
+
+// spec: placement/drc - candidate-net checks retain full-board geometry and exact target-rail demands while omitting unrelated current solves
+test "checkForNet preserves target power and foreign copper findings" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const rails = [_]@import("../eval/power_budget.zig").Rail{
+        .{ .net = "VDD", .load_max_a = 1.2, .any_max_load = true, .status = .no_source },
+        .{ .net = "OTHER", .load_max_a = 2, .any_max_load = true, .status = .no_source },
+    };
+    const nets = [_]FlatNet{ .{ .name = "VDD", .pins = &.{} }, .{ .name = "OTHER", .pins = &.{} } };
+    const rules = [_]optimizer.NetRule{ .{ .width = 0.8 }, .{ .width = 1 } };
+    var placement = partsOnly(&.{});
+    placement.nets = &nets;
+    placement.rules.net = &rules;
+    placement.rules.physical.rails = &rails;
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 2, .y2 = 0, .width = 0.2, .layer = 0, .net = 0 },
+        .{ .x1 = 1, .y1 = -1, .x2 = 1, .y2 = 1, .width = 0.2, .layer = 0, .net = 1 },
+    };
+    const routed = router.RouteResult{ .tracks = &tracks, .vias = &.{}, .routed = 0, .total = 2 };
+    const all = try check(alloc, placement, routed, 0.127);
+    const scoped = try checkForNet(alloc, placement, routed, 0.127, 0);
+    const target_all = try targetFindings(alloc, all, 0);
+    const target_scoped = try targetFindings(alloc, scoped, 0);
+    try testing.expectEqualDeep(target_all, target_scoped);
+    try testing.expectEqual(@as(usize, 1), countKind(target_scoped, .track_track));
+    try testing.expect(target_scoped.len > 1);
+}
+
+fn targetFindings(alloc: std.mem.Allocator, items: []const Violation, net: i32) std.mem.Allocator.Error![]const Violation {
+    var result: std.ArrayList(Violation) = .empty;
+    for (items) |v| if (v.who.net_a == net or v.who.net_b == net) try result.append(alloc, v);
+    return result.items;
 }

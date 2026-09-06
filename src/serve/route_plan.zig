@@ -112,7 +112,7 @@ fn resolveOptions(alloc: std.mem.Allocator, req: Request) std.mem.Allocator.Erro
         // lanes from any wave that also authored `(reserve)` — one bundle, so
         // the two halves of one assignment cannot be handed over apart. Empty
         // for every plan without the form, so those designs route unchanged.
-        .guides = .{ .tracks = resolved.escape_guides, .reserved = resolved.escape_reserved },
+        .guides = .{ .tracks = resolved.escape_guides, .reserved = resolved.escape_reserved, .module_signals_guided = req.spec.module_signals_guided, .module_budget_weighted = req.spec.module_budget_weighted },
     };
     // Topology planning is part of routing, not untimed setup. Arm the one
     // board deadline before `topo_lower.merge`: the router receives the same
@@ -185,6 +185,7 @@ pub fn lowerWithWaves(
     });
     return .{
         .options = .{
+            .guides = .{ .tracks = resolved.escape_guides, .reserved = resolved.escape_reserved, .module_signals_guided = if (block.pcb_plan) |p| p.module_signals_guided else false, .module_budget_weighted = if (block.pcb_plan) |p| p.module_budget_weighted else false },
             .net = try plan_resolve.routePolicies(alloc, resolved, placement, block.pcb_plan != null),
             .effort = effortOf(if (block.pcb_plan) |p| p.effort else null),
             .stop = .{ .max_route_ms = routeBudgetMs(if (block.pcb_plan) |p| p.max_route_seconds else null) },
@@ -357,17 +358,17 @@ fn withTimedWaypointSeeds(
     return out;
 }
 
-fn waypointSeedMask(
+fn repairCorridorMask(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
     options: route_policy.Options,
 ) std.mem.Allocator.Error!?[]bool {
-    if (options.selected_nets.len != 0 or options.existing_tracks.len != 0 or
-        options.existing_vias.len != 0) return null;
     const selected = try alloc.alloc(bool, placement.nets.len);
     @memset(selected, false);
     var count: usize = 0;
     for (selected, 0..) |*yes, net_i| {
+        if (options.selected_nets.len != 0 and
+            (net_i >= options.selected_nets.len or !options.selected_nets[net_i])) continue;
         if (net_i >= options.net.len or !options.net[net_i].wave.seed_first or
             options.net[net_i].wave.repair_waypoints.len == 0) continue;
         yes.* = true;
@@ -405,7 +406,7 @@ pub fn finishLoweredCandidate(
         stopped.cancelled = true;
         return stopped;
     }
-    const converged = if (!options.effort.retries() or first.failed.len == 0)
+    const converged = if (!options.effort.retries() or !hasScopedFailure(placement, options, first.failed))
         first
     else
         try finishLoweredResidual(alloc, placement, params, options, first);
@@ -496,6 +497,15 @@ fn rollbackTaperNets(
     out.total = baseline.total;
     out.failed = baseline.failed;
     return out;
+}
+
+fn hasScopedFailure(placement: optimizer.Placement, options: route_policy.Options, failed: []const []const u8) bool {
+    if (options.selected_nets.len == 0) return failed.len > 0;
+    for (placement.nets, 0..) |net, ni| {
+        if (ni >= options.selected_nets.len or !options.selected_nets[ni]) continue;
+        if (namedFailed(net.name, failed)) return true;
+    }
+    return false;
 }
 
 fn finishLoweredResidual(
@@ -747,7 +757,7 @@ fn retryLatticeGuided(
     memo: *const route_close.HopMemo,
 ) std.mem.Allocator.Error!router.RouteResult {
     var baseline = first;
-    const seed_mask = try waypointSeedMask(alloc, placement, base_options) orelse return baseline;
+    const seed_mask = try repairCorridorMask(alloc, placement, base_options) orelse return baseline;
     var order: std.ArrayList(usize) = .empty;
     for (seed_mask, 0..) |seeded, net_i| if (seeded) try order.append(alloc, net_i);
     const priorities = try alloc.alloc(u64, placement.nets.len);
@@ -788,14 +798,12 @@ fn retryLatticeGuided(
         retry_options.selected_nets = selected;
         retry_options.existing_tracks = tracks.items;
         retry_options.existing_vias = vias.items;
-        // The broad wave can stay conservative (often outer faces only) while
-        // its repair corridor explicitly names an inner-layer crossing. During
-        // this selected retry the ordered waypoints, not the broad layer mask,
-        // are the hard physical constraint.
-        const retry_policies = try alloc.dupe(route_policy.NetPolicy, base_options.net);
-        retry_policies[net_i].allowed_layers = 0;
-        retry_policies[net_i].preferred_layers = 0;
-        retry_policies[net_i].waypoints = retry_policies[net_i].wave.repair_waypoints;
+        // A repair corridor still obeys the enclosing hard layer/via policy.
+        // Copper generated earlier in this transaction has already spent part
+        // of its via allowance, even though it is frozen during this retry.
+        const remaining = try route_close.remainingPolicies(alloc, base_options.net, base_options.existing_vias, baseline.vias);
+        const retry_policies = try alloc.dupe(route_policy.NetPolicy, remaining);
+        applyDeferredRepair(&retry_policies[net_i]);
         retry_options.net = retry_policies;
         retry_options.stop.max_route_ms = 0;
         // The retry's ROUTE runs on a per-net slice; its GATE must not. The
@@ -1253,7 +1261,6 @@ fn retryFieldCluster(
 
 fn applyDeferredRepair(policy: *route_policy.NetPolicy) void {
     if (policy.wave.repair_waypoints.len == 0) return;
-    policy.allowed_layers = 0;
     policy.preferred_layers = 0;
     policy.waypoints = policy.wave.repair_waypoints;
 }
@@ -4236,10 +4243,11 @@ fn unblockGapCandidate(
         .tracks = trial_base.tracks,
         .vias = trial_base.vias,
         .zones = run.options.existing_zones,
+        .reserved_lanes = run.options.guides.reserved,
     }, &.{request}, .{
+        .constraints = .{ .net = try route_close.remainingPolicies(alloc, run.options.net, run.options.existing_vias, trial_base.vias) },
         .ripup = false,
         .judge = .{ .ctx = null, .keep = route_close.additiveOnly },
-        .terminal_via = .banned,
         .raster = .{
             .window = route_close.hopWindow(request),
             .stop = .{ .deadline_ns = deadline_ns },
@@ -4579,11 +4587,12 @@ fn unblockShapeHop(
         .tracks = board.tracks,
         .vias = board.vias,
         .zones = run.options.existing_zones,
+        .reserved_lanes = run.options.guides.reserved,
     }, &.{request}, .{
+        .constraints = .{ .net = try route_close.remainingPolicies(run.alloc, run.options.net, run.options.existing_vias, board.vias) },
         .ripup = false,
         .shape = .only,
         .judge = .{ .ctx = null, .keep = route_close.additiveOnly },
-        .terminal_via = .banned,
         .raster = .{
             .window = route_close.hopWindow(request),
             .stop = .{ .deadline_ns = deadline_ns },
@@ -5641,6 +5650,11 @@ fn gateReconcile(
     cfg: GateConfig,
 ) std.mem.Allocator.Error!route_close.Reconciled {
     return route_close.reconcile(alloc, placement, params, raw, options.existing_zones, .{
+        .constraints = .{
+            .net = options.net,
+            .retained_vias = options.existing_vias,
+            .reserved = options.guides.reserved,
+        },
         .only_nets = options.selected_nets,
         // Deterministic distance/count bounds make failed-net joins safe to
         // attempt before EITHER effort tier returns; standard gets the larger
@@ -6873,6 +6887,7 @@ pub const Experiment = struct {
 pub const ExperimentOpts = struct {
     /// Library root enables the same local module routing as the commit path.
     project_dir: ?[]const u8 = null,
+    saved_module_routes: bool = true,
     /// A complete `(pcb-plan …)` spec that REPLACES the block's authored plan
     /// for this run only. Null routes the authored plan.
     plan: ?env_mod.PcbPlanSpec = null,
@@ -6926,6 +6941,7 @@ pub fn routeExperiment(
     }
     if (opts.effort) |e| options.effort = e;
     options.existing_zones = opts.zones;
+    options.guides.saved_module_routes = opts.saved_module_routes;
     var seeds: pcb_layout_page.SubcircuitRouteSeedStats = .{};
     const fresh = if (opts.project_dir) |project_dir| blk: {
         const seeded = try pcb_layout_page.routeWithSubcircuitSeeds(alloc, project_dir, block, placement, params, options);
@@ -7338,15 +7354,17 @@ test "topology planning and detailed routing share one armed deadline" {
         .rest = true,
         .corridor = .{ .topology = true },
     }};
-    const block = fixtureBlock(.{ .route = &waves, .max_route_seconds = 1 });
+    const block = fixtureBlock(.{ .route = &waves, .max_route_seconds = 1, .module_signals_guided = true, .module_budget_weighted = true });
     const lowered = try lower(arena, &block, fixturePlacement(&parts, &nets));
     try testing.expect(lowered.topology != null);
     try testing.expectEqual(@as(u64, 1000), lowered.options.stop.max_route_ms);
+    try testing.expect(lowered.options.guides.module_signals_guided);
+    try testing.expect(lowered.options.guides.module_budget_weighted);
     try testing.expect(lowered.options.stop.deadline_ns != 0);
 }
 
-// spec: serve/route-plan - deferred repair selection uses only authored repair-waypoints, never ordinary waypoints, reference branches, or scoped/retained copper
-test "deferred repair selection uses only fresh whole-board repair corridors" {
+// spec: serve/route-plan - deferred repair selection honors scope and authored repair-waypoints against retained copper, excluding ordinary waypoints and reference branches
+test "deferred repair selection honors scope and retained copper" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -7361,14 +7379,21 @@ test "deferred repair selection uses only fresh whole-board repair corridors" {
         .{ .wave = .{ .seed_first = true, .repair_waypoints = &points } },
         .{ .branches = &.{.{ .waypoints = &points }} },
     };
-    const selected = (try waypointSeedMask(arena, placement, .{
+    const selected = (try repairCorridorMask(arena, placement, .{
         .net = &policies,
     })).?;
     try testing.expectEqualSlices(bool, &.{ true, false }, selected);
 
-    try testing.expect((try waypointSeedMask(arena, placement, .{
+    const retained = [_]route_policy.ExistingTrack{.{ .x1 = 0, .y1 = 2, .x2 = 4, .y2 = 2, .width = 0.2, .net = 1, .layer = 0 }};
+    const scoped = (try repairCorridorMask(arena, placement, .{
         .net = &policies,
         .selected_nets = &.{ true, false },
+        .existing_tracks = &retained,
+    })).?;
+    try testing.expectEqualSlices(bool, &.{ true, false }, scoped);
+    try testing.expect((try repairCorridorMask(arena, placement, .{
+        .net = &policies,
+        .selected_nets = &.{ false, true },
     })) == null);
 }
 
@@ -7395,6 +7420,71 @@ test "repeated tail gates close an open net fully gated" {
     try testing.expectEqual(@as(usize, 1), out.routed);
     try testing.expectEqual(@as(usize, 0), out.failed.len);
     try testing.expect(out.tracks.len > 0);
+}
+
+// spec: serve/route-plan - guided repair closes a selected net without changing retained copper or relaxing its allowed layers
+test "guided repair closes a selected net while preserving retained copper" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parts = twoPadParts();
+    const nets = [_]optimizer.FlatNet{
+        .{ .name = "SIG", .pins = &fixture_pins },
+        .{ .name = "OTHER", .pins = &.{} },
+    };
+    var placement = fixturePlacement(&parts, &nets);
+    placement.maxy = 3;
+    const frozen_tracks = [_]router.Track{.{ .x1 = 0, .y1 = 2, .x2 = 3, .y2 = 2, .width = 0.2, .net = 1, .layer = 1 }};
+    const frozen_vias = [_]router.Via{.{ .x = 3, .y = 2, .dia = 0.6, .drill = 0.3, .net = 1 }};
+    const tracks = [_]route_policy.ExistingTrack{trackAsExisting(frozen_tracks[0])};
+    const vias = [_]route_policy.ExistingVia{viaAsExisting(frozen_vias[0])};
+    const policies = [_]route_policy.NetPolicy{
+        .{ .allowed_layers = 1, .max_vias = 0, .wave = .{
+            .seed_first = true,
+            .repair_waypoints = &.{.{ .x = 1.5, .y = 0, .layer = 0 }},
+        } },
+        .{},
+    };
+    const first = router.RouteResult{ .tracks = &frozen_tracks, .vias = &frozen_vias, .routed = 0, .total = 1, .failed = &.{"SIG"} };
+    var memo = route_close.HopMemo.init(arena);
+    defer memo.deinit();
+    const result = try retryLatticeGuided(arena, placement, .{}, .{
+        .net = &policies,
+        .selected_nets = &.{ true, false },
+        .existing_tracks = &tracks,
+        .existing_vias = &vias,
+    }, first, &memo);
+    try testing.expectEqual(@as(usize, 0), result.failed.len);
+    try testing.expectEqual(@as(usize, 1), result.routed);
+    try testing.expect((try retainsExistingCopper(arena, result, &tracks, &vias, &.{})) == null);
+    try testing.expectEqual(@as(usize, 1), result.vias.len);
+    for (result.tracks) |track| try testing.expect(track.net != 0 or track.layer == 0);
+}
+
+// spec: serve/route-plan - guided repair shares its new-via allowance with the preceding route passes
+test "guided repair cannot spend a via allowance used by an earlier pass" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parts = twoPadParts();
+    parts[1].side = .bottom;
+    const nets = [_]optimizer.FlatNet{.{ .name = "SIG", .pins = &fixture_pins }};
+    var placement = fixturePlacement(&parts, &nets);
+    placement.maxy = 3;
+    const generated_vias = [_]router.Via{.{ .x = 3, .y = 2, .dia = 0.6, .drill = 0.3, .net = 0 }};
+    const policies = [_]route_policy.NetPolicy{.{ .max_vias = 1, .wave = .{
+        .seed_first = true,
+        .repair_waypoints = &.{
+            .{ .x = 1.5, .y = 0, .layer = 0 },
+            .{ .x = 1.5, .y = 0, .layer = 1 },
+        },
+    } }};
+    const first = router.RouteResult{ .tracks = &.{}, .vias = &generated_vias, .routed = 0, .total = 1, .failed = &.{"SIG"} };
+    var memo = route_close.HopMemo.init(arena);
+    defer memo.deinit();
+    const result = try retryLatticeGuided(arena, placement, .{}, .{ .net = &policies, .selected_nets = &.{true} }, first, &memo);
+    try testing.expectEqualSlices(router.Via, &generated_vias, result.vias);
+    try testing.expectEqual(@as(usize, 1), result.failed.len);
 }
 
 // spec: serve/route-plan - a pour-carried net may be a per-gap unblock target though never a whole-net one, and a plane- or pour-carried ground net may be one too, while unbacked ground, diff-pair, RF and fenced nets are excluded from both
@@ -9103,8 +9193,10 @@ test "lowerWithWaves returns the waves the options came from" {
         .{ .name = "first", .nets = &.{"RF"} },
         .{ .name = "rest", .rest = true },
     };
-    const block = fixtureBlock(.{ .route = &waves });
+    const block = fixtureBlock(.{ .route = &waves, .module_signals_guided = true, .module_budget_weighted = true });
     const lw = try lowerWithWaves(arena, &block, fixturePlacement(&parts, &nets));
+    try testing.expect(lw.options.guides.module_signals_guided);
+    try testing.expect(lw.options.guides.module_budget_weighted);
     try testing.expectEqual(@as(usize, 2), lw.waves.len);
     try testing.expectEqualStrings("first", lw.waves[0].name);
     try testing.expectEqualStrings("rest", lw.waves[1].name);
@@ -11482,4 +11574,19 @@ test "routing audit cancellation oracle and diagnostic parity" {
     try testing.expectEqualDeep(plain.tracks, diagnostic.result.tracks);
     try testing.expectEqualDeep(plain.vias, diagnostic.result.vias);
     try testing.expectEqual(plain.routed, diagnostic.result.routed);
+}
+
+// spec: serve/route-plan - a completed scoped route skips residual search for failures outside its selected nets while preserving whole-board connectivity reporting
+test "scoped completion ignores deferred out-of-scope failures" {
+    var parts = twoPadParts();
+    const nets = [_]optimizer.FlatNet{
+        .{ .name = "SIGNAL", .pins = &fixture_pins },
+        .{ .name = "DEFERRED_SUPPLY", .pins = &.{} },
+    };
+    const p = fixturePlacement(&parts, &nets);
+    const scoped = route_policy.Options{ .selected_nets = &.{ true, false } };
+    try testing.expect(!hasScopedFailure(p, scoped, &.{"DEFERRED_SUPPLY"}));
+    try testing.expect(hasScopedFailure(p, scoped, &.{ "SIGNAL", "DEFERRED_SUPPLY" }));
+    try testing.expect(hasScopedFailure(p, .{}, &.{"DEFERRED_SUPPLY"}));
+    try testing.expect(!hasScopedFailure(p, .{}, &.{}));
 }

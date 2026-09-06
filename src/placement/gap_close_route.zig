@@ -119,6 +119,33 @@ fn minTrackGap(tracks: []const Track, r: Rect) f64 {
     return best;
 }
 
+// spec: placement/route-deadline - a stopped gap batch keeps completed hops without reporting skipped hops as attempts
+test "closeGaps stops reporting attempts after cancellation and keeps completed hops" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const Watch = struct {
+        cancel: std.atomic.Value(bool) = .init(false),
+        events: usize = 0,
+
+        fn emit(raw: ?*anyopaque, _: GapEvent) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.events += 1;
+            self.cancel.store(true, .monotonic);
+        }
+    };
+    var watch = Watch{};
+    const placement = try gapBridgePlacement(arena, .top);
+    const gap = Gap{ .net_i = 0, .from = .{ .x = 0, .y = 0, .layer = 0 }, .to = .{ .x = 2, .y = 0, .layer = 0 } };
+    const paths = try closeGaps(arena, placement, .{}, .{}, &.{ gap, gap }, .{
+        .raster = .{ .stop = .{ .cancel = &watch.cancel } },
+        .sink = .{ .ctx = &watch, .emit = Watch.emit },
+    });
+    try testing.expect(paths[0] != null);
+    try testing.expect(paths[1] == null);
+    try testing.expectEqual(@as(usize, 1), watch.events);
+}
+
 // spec: placement/router - closeGaps bridges two same-net pads around foreign pad copper and welds both pad centres into the new track chain
 test "closeGaps detours a bridge around the foreign pad sealing the straight line" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
@@ -142,6 +169,96 @@ test "closeGaps detours a bridge around the foreign pad sealing the straight lin
     // which is only possible by going around: the straight line runs through it.
     const blocker = Rect{ .x0 = 0.6, .y0 = -0.4, .x1 = 1.4, .y1 = 0.4 };
     try testing.expect(minTrackGap(path.tracks, blocker) >= params.track_width / 2 + params.clearance - clearance_eps);
+}
+
+// spec: placement/router - gap closing refuses an opposite-face bridge when the net has no new-via allowance
+test "closeGaps honors a zero-via policy on an opposite-face bridge" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const placement = try gapBridgePlacement(arena, .bottom);
+    const gaps = [_]Gap{.{
+        .net_i = 0,
+        .from = .{ .x = 0, .y = 0, .layer = 0 },
+        .to = .{ .x = 2, .y = 0, .layer = 1 },
+    }};
+    const free = try closeGaps(arena, placement, .{}, .{}, &gaps, .{ .ripup = false });
+    try testing.expect(free[0] != null);
+    try testing.expect(free[0].?.vias.len > 0);
+    const constrained = try closeGaps(arena, placement, .{}, .{}, &gaps, .{
+        .ripup = false,
+        .constraints = .{ .net = &.{.{ .max_vias = 0 }} },
+    });
+    try testing.expect(constrained[0] == null);
+}
+
+// spec: placement/router - gap closing honors authored layer restrictions and new-via limits before accepting or absorbing copper
+test "gap policy refuses a forbidden layer detour and a two-via path over budget" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const placement = try walledPlacement(arena);
+    const wall = wallTracks();
+    // Only the top face is walled; going around on the bottom needs two vias.
+    const board = router.GapBoard{ .tracks = wall[0..1] };
+    const gaps = [_]Gap{walledGap()};
+    const free = try closeGaps(arena, placement, .{}, board, &gaps, .{ .ripup = false });
+    try testing.expect(free[0] != null);
+    try testing.expect(free[0].?.vias.len >= 2);
+    const surface = try closeGaps(arena, placement, .{}, board, &gaps, .{
+        .ripup = false,
+        .constraints = .{ .net = &.{.{ .allowed_layers = 1 }} },
+    });
+    try testing.expect(surface[0] == null);
+    var log = GapEventLog{};
+    const limited = try closeGaps(arena, placement, .{}, board, &gaps, .{
+        .ripup = false,
+        .constraints = .{ .net = &.{.{ .max_vias = 1 }} },
+        .sink = .{ .ctx = &log, .emit = GapEventLog.emit },
+    });
+    try testing.expect(limited[0] == null);
+    try testing.expectEqual(GapReason.policy, log.seen[0].why);
+}
+
+// spec: placement/router - a gap batch spends via allowance only on accepted hops and does not reset it for later requests
+test "gap policy shares the batch via allowance and refunds vetoed hops" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    var placement = try gapBridgePlacement(arena, .bottom);
+    const parts = try arena.alloc(Part, 6);
+    @memcpy(parts[0..3], placement.parts);
+    @memcpy(parts[3..], placement.parts);
+    parts[3].ref_des = "A2";
+    parts[4].ref_des = "B2";
+    parts[5].ref_des = "X2";
+    for (parts[3..]) |*part| part.y += 4;
+    placement.parts = parts;
+    placement.maxy = 6;
+    const nets = try arena.dupe(FlatNet, placement.nets);
+    nets[0].pins = &.{
+        .{ .ref_des = "A", .pin = "1" },  .{ .ref_des = "B", .pin = "1" },
+        .{ .ref_des = "A2", .pin = "1" }, .{ .ref_des = "B2", .pin = "1" },
+    };
+    nets[1].pins = &.{ .{ .ref_des = "X", .pin = "1" }, .{ .ref_des = "X2", .pin = "1" } };
+    placement.nets = nets;
+    const gaps = [_]Gap{
+        .{ .net_i = 0, .from = .{ .x = 0, .y = 0, .layer = 0 }, .to = .{ .x = 2, .y = 0, .layer = 1 } },
+        .{ .net_i = 0, .from = .{ .x = 0, .y = 4, .layer = 0 }, .to = .{ .x = 2, .y = 4, .layer = 1 } },
+    };
+    const free = try closeGaps(arena, placement, .{}, .{}, &gaps, .{ .ripup = false });
+    try testing.expect(free[0] != null);
+    try testing.expect(free[1] != null);
+    var opts = router.GapOptions{ .ripup = false, .constraints = .{ .net = &.{.{ .max_vias = 1 }} } };
+    const limited = try closeGaps(arena, placement, .{}, .{}, &gaps, opts);
+    try testing.expectEqual(@as(usize, 1), limited[0].?.vias.len);
+    try testing.expect(limited[1] == null);
+    var veto = VetoFirstHop{};
+    opts.judge = .{ .ctx = &veto, .keep = VetoFirstHop.keep };
+    const judged = try closeGaps(arena, placement, .{}, .{}, &gaps, opts);
+    try testing.expect(judged[0] != null);
+    try testing.expect(judged[1] != null);
+    try testing.expectEqual(@as(usize, 2), veto.asked);
 }
 
 /// Records every `GapEvent` a pass emits, so a test can assert the report is
@@ -801,6 +918,33 @@ test "closeGaps refuses a plane stitch into a pour a higher-priority pour clippe
     // Outranked by SIG's own pour, the same board stitches: the copper is there.
     const path = (try stitchUnderPours(arena, 0)) orelse return error.GapNotClosed;
     try testing.expect(path.vias.len > 0);
+}
+
+// spec: placement/reserved-lanes - a supply stitch cannot cross a foreign reserved lane to reach an otherwise legal via site in its own pour
+test "a supply stitch respects reservations along its stub as well as at its via" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+    const placement = try clippedPourPlacement(arena);
+    // The only carrier starts beyond x=1.2. A via can land there, but its
+    // surface stub must cross x=0.7 to get from the pad at the origin.
+    const polygon = [_][2]f64{ .{ 1.2, -1 }, .{ 3, -1 }, .{ 3, 1 }, .{ 1.2, 1 } };
+    const zones = [_]route_policy.ExistingZone{.{ .polygon = &polygon, .layer = 1, .net = 0 }};
+    const gaps = [_]Gap{.{ .net_i = 0, .from = .{ .x = 0, .y = 0, .layer = 0 } }};
+    const options = router.GapOptions{
+        .ripup = false,
+        .constraints = .{ .net = &.{.{ .allowed_layers = 1, .max_vias = 1 }} },
+    };
+    const open = try closeGaps(arena, placement, .{}, .{ .zones = &zones }, &gaps, options);
+    const direct = open[0] orelse return error.GapNotClosed;
+    try testing.expect(direct.tracks.len > 0);
+    try testing.expectEqual(@as(usize, 1), direct.vias.len);
+    var lanes = [_]route_policy.ReservedLane{.{ .net = 1, .x1 = 0.7, .y1 = -10, .x2 = 0.7, .y2 = 10, .layer = 0, .width = 0.3 }};
+    const blocked = try closeGaps(arena, placement, .{}, .{ .zones = &zones, .reserved_lanes = &lanes }, &gaps, options);
+    try testing.expect(blocked[0] == null);
+    lanes[0].net = 0;
+    const owned = try closeGaps(arena, placement, .{}, .{ .zones = &zones, .reserved_lanes = &lanes }, &gaps, options);
+    try testing.expect(owned[0] != null);
 }
 
 /// Two same-net terminals `A`/`B` with a FOREIGN VIA already on the board.

@@ -35,6 +35,11 @@ pub fn mcpPreviewEscapeAssignment(
     const name = argStr(args_val, "name") orelse return fail(out, alloc, "missing required arg: name");
     const wanted = pcb_layout_page.mcpArgStrList(alloc, args_val, "nets");
     if (wanted.len < 2) return fail(out, alloc, "nets must name at least two contended nets");
+    const pin_value = args_val.?.object.get("pin_side") orelse std.json.Value{ .bool = false };
+    if (pin_value != .bool) return fail(out, alloc, "pin_side must be a boolean");
+    const layout = argStr(args_val, "layout");
+    const working = pcb_layout_page.mcpReadWorking(alloc, project_dir, name, layout);
+    if (layout != null and working == null) return fail(out, alloc, "no saved layout matches the requested name");
 
     var eval = Evaluator.init(alloc, project_dir);
     defer eval.deinit();
@@ -43,7 +48,8 @@ pub fn mcpPreviewEscapeAssignment(
         mr.eval.deinit();
         alloc.destroy(mr.eval);
     };
-    const solved = pcb_layout_page.solveForRequest(alloc, project_dir, name, .{}, &eval, &module_res) catch |e|
+    const pin_side = pin_value.bool;
+    const solved = pcb_layout_page.solveForRequest(alloc, project_dir, name, .{ .layout = layout }, &eval, &module_res) catch |e|
         return failFmt(out, alloc, "could not resolve layout: {s}", .{@errorName(e)});
 
     const scope = route_plan.resolveScope(alloc, solved.block, solved.placement, .{ .nets = wanted }) catch |e|
@@ -59,6 +65,7 @@ pub fn mcpPreviewEscapeAssignment(
         .nets = members.items,
         .hub = argStr(args_val, "hub") orelse "",
         .layer = layerArg(solved.placement, args_val),
+        .pin_side = pin_side,
     }) catch |e| return failFmt(out, alloc, "assignment failed: {s}", .{@errorName(e)});
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -68,6 +75,8 @@ pub fn mcpPreviewEscapeAssignment(
         .placement = solved.placement,
         .assigned = assigned,
         .unknown = scope.unknown,
+        .layout = if (working) |saved| saved.name else null,
+        .pin_side = pin_side,
     });
     try out.appendSlice(alloc, aw.written());
     return true;
@@ -80,11 +89,16 @@ const Result = struct {
     placement: optimizer.Placement,
     assigned: escape_assign.Plan,
     unknown: []const []const u8,
+    layout: ?[]const u8 = null,
+    pin_side: bool = false,
 };
 
 fn writeResult(w: *std.Io.Writer, r: Result) std.Io.Writer.Error!void {
     try w.writeAll("{\"name\":");
     try pcb_layout_page.writeJsonStr(w, r.name);
+    try w.writeAll(",\"layout\":");
+    if (r.layout) |layout| try pcb_layout_page.writeJsonStr(w, layout) else try w.writeAll("null");
+    try w.print(",\"pin_side\":{s},\"retained_copper_considered\":false", .{if (r.pin_side) "true" else "false"});
     try w.print(",\"ok\":{s},\"reason\":", .{if (r.assigned.ok) "true" else "false"});
     try pcb_layout_page.writeJsonStr(w, r.assigned.reason);
     try w.writeAll(",\"hub\":");
@@ -127,7 +141,30 @@ fn writeResult(w: *std.Io.Writer, r: Result) std.Io.Writer.Error!void {
     }
     try w.writeAll("],\"dsl\":");
     try writeDsl(w, r);
+    try w.writeAll(",\"assignment_form\":");
+    try writeAssignmentForm(w, r);
     try w.writeAll("}");
+}
+
+/// Insert this sub-form into an existing route wave. Unlike a replacement
+/// waypoint plan it keeps every selected net's existing policy ownership.
+fn writeAssignmentForm(w: *std.Io.Writer, r: Result) std.Io.Writer.Error!void {
+    if (!r.assigned.ok) return w.writeAll("null");
+    var buf: std.Io.Writer.Allocating = .init(r.alloc);
+    const b = &buf.writer;
+    var layer_buf: [16]u8 = undefined;
+    try b.writeAll("(assign-escapes ");
+    try pcb_layout_page.writeJsonStr(b, r.placement.rules.signalLayerName(r.assigned.layer, &layer_buf));
+    try b.writeAll(" ");
+    try pcb_layout_page.writeJsonStr(b, r.assigned.hub);
+    if (r.pin_side) try b.writeAll(" (pin-side)");
+    try b.writeAll(" (with-nets");
+    for (r.assigned.schedule.assignments) |a| {
+        try b.writeAll(" ");
+        try pcb_layout_page.writeJsonStr(b, netName(r.placement, a.net));
+    }
+    try b.writeAll("))");
+    try pcb_layout_page.writeJsonStr(w, buf.written());
 }
 
 fn writeAssignment(w: *std.Io.Writer, r: Result, a: escape_assign.Assignment) std.Io.Writer.Error!void {
@@ -237,6 +274,23 @@ test "preview_escape_assignment needs at least two contended nets" {
     try testing.expect(std.mem.indexOf(u8, out.items, "at least two") != null);
 }
 
+// spec: Web Server - preview_escape_assignment rejects invalid pin-side options and unknown named layouts before planning another placement
+test "preview_escape_assignment refuses invalid mode and missing candidate layout" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+    const cases = [_][]const u8{
+        "{\"name\":\"missing\",\"nets\":[\"A\",\"B\"],\"pin_side\":\"true\"}",
+        "{\"name\":\"missing\",\"nets\":[\"A\",\"B\"],\"layout\":\"missing candidate\"}",
+    };
+    for (cases) |input| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, arena, input, .{});
+        var out: std.ArrayList(u8) = .empty;
+        try testing.expect(!try mcpPreviewEscapeAssignment(arena, "", parsed.value, &out));
+        try testing.expect(std.mem.indexOf(u8, out.items, "\"error\":") != null);
+    }
+}
+
 // spec: Web Server - preview_escape_assignment renders its assignment as a pasteable per-net waypoint plan
 test "preview_escape_assignment renders assigned lanes as DSL waypoints" {
     var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
@@ -285,14 +339,21 @@ test "preview_escape_assignment renders assigned lanes as DSL waypoints" {
         .placement = placement,
         .assigned = assigned,
         .unknown = &.{},
+        .layout = "candidate",
+        .pin_side = true,
     });
     const json = aw.written();
     try testing.expect(std.mem.indexOf(u8, json, "\"hub\":\"J1\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"direction\":\"west\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"layout\":\"candidate\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"pin_side\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"retained_copper_considered\":false") != null);
     // The DSL block is JSON-escaped, so the wave heads read with \" quoting.
     try testing.expect(std.mem.indexOf(u8, json, "escape-SPI_A") != null);
     try testing.expect(std.mem.indexOf(u8, json, "escape-SPI_B") != null);
     try testing.expect(std.mem.indexOf(u8, json, "(waypoints (at ") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"assignment_form\":\"(assign-escapes ") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "(pin-side) (with-nets ") != null);
 }
 
 // spec: Web Server - preview_escape_assignment reports the nets its assignment refused and why

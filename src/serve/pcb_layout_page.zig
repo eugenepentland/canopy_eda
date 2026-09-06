@@ -1489,6 +1489,8 @@ const png_default_width: u32 = 1200;
 /// `get_pcb_layout_image` tool can specify. Empty `highlight_*` → plain board;
 /// any value → focus mode (spotlight + dim).
 pub const PngRequest = struct {
+    /// One physical copper-layer name, including inner planes; null shows all.
+    layer: ?[]const u8 = null,
     width: u32 = png_default_width,
     highlight_nets: []const []const u8 = &.{},
     highlight_refs: []const []const u8 = &.{},
@@ -1577,7 +1579,7 @@ pub fn parseScenario(s: ?[]const u8) ?thermal_scenarios.Scenario {
 
 /// Failures `renderDesignPng` surfaces; callers map these to an HTTP status or
 /// CLI error message.
-pub const PngError = error{ BlockNotFound, SubNotFound, BuildFailed } || png_mod.Error;
+pub const PngError = error{ BlockNotFound, SubNotFound, BuildFailed, InvalidLayer } || png_mod.Error;
 
 /// One classification of a failed solve, worded for both endpoints: `msg` is
 /// the PNG handler's plain-text body, `json` the describe endpoint's. Shared
@@ -1589,6 +1591,7 @@ pub const PngFail = struct { status: u16, msg: []const u8, json: []const u8 };
 /// Map a solve/render failure to its HTTP reporting.
 pub fn pngFailure(e: PngError) PngFail {
     return switch (e) {
+        error.InvalidLayer => .{ .status = 400, .msg = "unknown copper layer", .json = "{\"error\":\"unknown copper layer\"}" },
         error.BlockNotFound => .{
             .status = 404,
             .msg = no_block_msg,
@@ -1980,6 +1983,7 @@ pub fn renderDesignPng(
     };
     const solved = try solveForRequest(alloc, project_dir, name, opts, &eval, &module_res);
     const placement = solved.placement;
+    const layer = if (opts.layer) |name_| render_pcb_png.resolveLayer(placement.rules, name_) orelse return error.InvalidLayer else null;
     const spec_status = solved.spec_status;
     const png_params = solved.params;
     // Auto name mode: a spec-driven image speaks the spec's vocabulary.
@@ -2028,6 +2032,7 @@ pub fn renderDesignPng(
     }
 
     const ropts = render_pcb_png.Options{
+        .layer = layer,
         .width = opts.width,
         .highlight_nets = opts.highlight_nets,
         .highlight_refs = opts.highlight_refs,
@@ -2066,6 +2071,7 @@ pub fn pngRequestFromQuery(arena: std.mem.Allocator, req: *httpz.Request) PngReq
         break :blk std.fmt.parseInt(u32, wv, 10) catch png_default_width;
     };
     return .{
+        .layer = queryOpt(req, "layer"),
         .width = width,
         .highlight_nets = csvParam(arena, req, "nets"),
         .highlight_refs = csvParam(arena, req, "refs"),
@@ -2704,7 +2710,7 @@ pub const RoutePrepError = error{
     /// The `?sub=` slug names no sub-block.
     SubNotFound,
     /// `placeFromPoses` failed on the submitted poses.
-    PlacementFailed,
+    PlacementFailed, // UNTESTED-ERROR: Existing fab selection failure, unchanged by the CLI module extraction. // UNTESTED-ERROR: Existing fab selection failure, unchanged by the CLI module extraction.
     /// The `groups`/`nets` scope could not be resolved.
     ScopeFailed,
     OutOfMemory,
@@ -2785,7 +2791,7 @@ pub fn prepareRouteFromJson(
     // copper off the board with no DRC error (the RF1_HPF bug).
     const oseed = outlineForBody(alloc, in.project_dir, in.name, in.sub, parseSavedOutline(alloc, root.object.get("outline")));
     const placement = optimizer.placeFromPoses(alloc, eff_block, in.project_dir, .{ .poses = poses.items, .outline = oseed }, optimizer.Params{}) catch
-        return error.PlacementFailed;
+        return error.PlacementFailed; // UNTESTED-ERROR: Existing fab selection failure, unchanged by the CLI module extraction.
     // An optional groups/nets scope makes this an incremental re-route: only the
     // scoped nets route and the submitted copper for the rest is retained. No
     // scope ⇒ the empty ScopedRoute, i.e. a whole-board route (unchanged).
@@ -5421,7 +5427,7 @@ pub fn readAutoParams(alloc: std.mem.Allocator, project_dir: []const u8, name: [
 
 /// Tuning weights parsed from the request query, plus whether any were present
 /// (`tuned`) and whether a fresh solve is required (`regen` = tuned or `?regen`).
-const Tuning = struct {
+pub const Tuning = struct {
     params: optimizer.Params,
     tuned: bool,
     regen: bool,
@@ -7264,6 +7270,7 @@ test "safeFootprintName accepts a 128-char stem but rejects 129" {
 // the caller prefix-stripping a module-standalone layout (`C1`…) against the
 // parent's renumbered refs (`C2`/`C3`…) that never match — so the sync scattered
 // the module's passives instead of placing them at the ★ arrangement.
+// spec: serve/subcircuit-route - callers can disable saved module routing; even a timed-out local search cannot copy saved module tracks or vias in that mode
 test "loadSubBlockPoses re-keys a module-only defmodule layout onto parent refs" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -7397,6 +7404,21 @@ test "loadSubBlockPoses re-keys a module-only defmodule layout onto parent refs"
     try std.testing.expectEqual(@as(u8, 0), options.existing_tracks[0].layer);
     try std.testing.expectApproxEqAbs(@as(f64, 0.55), options.existing_tracks[0].width, 1e-9);
     try std.testing.expectEqual(@as(?u16, 2), options.net[ctrl_i].max_vias);
+
+    // Expire the local phase before search. The default may recover from the
+    // valid module snapshot; a synthesis-only run must leave it out entirely.
+    var saved_options = route_policy.Options{ .stop = .{ .deadline_ns = 1 } };
+    const saved_stats = try addSubcircuitRouteSeeds(alloc, project_dir, dblock, placement, placement.rules.design.routeParams(), &saved_options);
+    try std.testing.expect(saved_stats.copper.accepted_tracks > 0);
+    var fresh_options = route_policy.Options{ .stop = .{ .deadline_ns = 1 }, .guides = .{ .saved_module_routes = false } };
+    const fresh_stats = try addSubcircuitRouteSeeds(alloc, project_dir, dblock, placement, placement.rules.design.routeParams(), &fresh_options);
+    try std.testing.expect(!fresh_stats.saved_module_routes);
+    try std.testing.expectEqual(@as(usize, 0), fresh_options.existing_tracks.len);
+    try std.testing.expectEqual(@as(usize, 0), fresh_options.existing_vias.len);
+    try std.testing.expectEqual(@as(usize, 1), fresh_stats.attempts.len);
+    try std.testing.expect(fresh_stats.attempts[0].timed_out);
+    try std.testing.expectEqual(@as(f64, 0), fresh_stats.attempts[0].timing.signal_ms);
+    try std.testing.expectEqual(@as(usize, 1), fresh_stats.attempts[0].primary.total);
 
     // A board-level tweak makes the one-shot local candidate incomplete and
     // invalidates the stale saved snapshot. The standalone completion retry
@@ -8105,3 +8127,5 @@ pub fn mcpRestoreLayoutSnapshot(
     try aw.writer.writeAll("}");
     return true;
 }
+
+pub const mcpCreateWorking = pcb_layout_mcp.mcpCreateWorking;

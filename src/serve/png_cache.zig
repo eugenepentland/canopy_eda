@@ -89,7 +89,7 @@ pub const config: read_cache.Config = .{
     .keyed_params = &.{
         "layout",   "width",   "names",   "nets",  "refs",     "pins",
         "crop",     "r",       "cropnet", "sheet", "critique", "thermal",
-        "scenario", "ambient",
+        "scenario", "ambient", "layer",
     },
     .max_entries = 32,
     .max_bytes = 32 * 1024 * 1024,

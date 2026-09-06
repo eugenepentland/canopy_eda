@@ -88,6 +88,35 @@ pub const Identity = struct {
         return out.items;
     }
 
+    /// A whole-board connectivity query checks the physical owner against
+    /// every proven bypass terminal on its rail. Child connection nets keep
+    /// their own endpoint contract; a root cannot be called connected while a
+    /// complete cap-to-pin branch floats away from its supply.
+    /// Low-level pair routing still passes its explicit net directly to the
+    /// graph builder and does not expand that deliberately narrow pin set.
+    pub fn connectivityNet(
+        self: Identity,
+        arena: std.mem.Allocator,
+        nets: []const optimizer.FlatNet,
+        net_i: usize,
+    ) std.mem.Allocator.Error!optimizer.FlatNet {
+        const original = nets[net_i];
+        if (!self.isRoot(net_i)) return original;
+        const family = try self.familyOf(arena, net_i);
+        if (family.len == 1) return original;
+        var result = original;
+        var pins: std.ArrayList(@import("../flat_netlist.zig").FlatPin) = .empty;
+        for (family) |member| {
+            if (member >= nets.len) continue;
+            for (nets[member].pins) |pin| {
+                result.pins = pins.items;
+                if (!hasPin(result, pin.ref_des, pin.pin)) try pins.append(arena, pin);
+            }
+        }
+        result.pins = pins.items;
+        return result;
+    }
+
     /// Return the physical owner's flattened name, or empty for an invalid net.
     pub fn canonicalName(self: Identity, nets: []const optimizer.FlatNet, net: i32) []const u8 {
         const canonical_i = self.canonical(net);
@@ -198,8 +227,21 @@ test "only a structurally proven bypass connection aliases its parent rail" {
     try std.testing.expectEqualSlices(usize, &.{ 0, 1 }, try identity.familyOf(arena, 1));
     try std.testing.expectEqualSlices(usize, &.{2}, try identity.familyOf(arena, 2));
 
+    const physical = try identity.connectivityNet(arena, &nets, 0);
+    try std.testing.expectEqualStrings(nets[0].name, physical.name);
+    try std.testing.expectEqualDeep(stub_pins[0..], physical.pins);
+    const child = try identity.connectivityNet(arena, &nets, 1);
+    try std.testing.expectEqualDeep(nets[1], child);
+    const lookalike = try identity.connectivityNet(arena, &nets, 2);
+    try std.testing.expectEqualDeep(nets[2], lookalike);
+    var shared_pad = nets;
+    shared_pad[0].pins = stub_pins[0..1];
+    const deduplicated = try identity.connectivityNet(arena, &shared_pad, 0);
+    try std.testing.expectEqualDeep(stub_pins[0..], deduplicated.pins);
+
     // Without proof the family is the singleton, byte for byte the old rule.
     const bare = Identity{};
     try std.testing.expect(bare.isRoot(1));
     try std.testing.expectEqualSlices(usize, &.{1}, try bare.familyOf(arena, 1));
+    try std.testing.expectEqualDeep(nets[0], try bare.connectivityNet(arena, &nets, 0));
 }

@@ -880,3 +880,58 @@ New from the wave:
 
 ## 2026-09-05 · codex · IC package test registration
 - **friction:** New test-bearing modules must be added to both `src/test_root.zig` and `src/test_shards.zig`; importing them through `main.zig` is enough for focused tests but not the sharded release suite. The first package release gate caught five missing module registrations after a 118-second run and cancelled its concurrent build. Document these two registries in the inner-loop instructions, and run the focused shard-manifest/import-bridge checks when adding test files.
+
+## 2026-09-05 · codex · Three-board autorouter completion measurements
+- **friction:** `bench-route --json` buffers the entire corpus result until every board finishes. A three-board process was killed with exit 137 under memory pressure after several minutes, losing the completed rows along with the unfinished one. Its logs did not identify completed board counts.
+- **idea:** Emit a flushed per-board checkpoint or JSONL result as each board finishes, including input and seed-source policy. This would preserve expensive measurements after an interruption and expose which board is still running.
+- **workaround:** Run heavy boards serially in separate invocations, each with its own JSON and stderr log. Current evidence is under `/tmp/autorouter-completion-20260905`.
+- **status:** mitigated
+
+
+## 2026-09-05 · codex · Constraint-aware autorouter finishing
+- **friction:** `diagnose_net` on Barracuda's last LOCK_DET open reports pad islands and geometry DRC but cannot identify blocked corridors or show the effective wave layer/via policy. Its layout image overlays all copper layers, making the 60 mm cross-board route hard to inspect. The earlier scoped finisher consumed over 14 minutes before being stopped and had not persisted its tentative copper.
+- **idea:** Expose effective per-net policy and bounded corridor probes in diagnosis, add per-layer layout images, and give `close_open_nets` a wall-clock budget that returns and persists its accepted partial result. These tools would replace source inspection and unbounded routing trials when investigating a single residual net.
+- **status:** open
+
+## 2026-09-05 · codex · Scoped corridor diagnosis and layer-image follow-up
+- **resolution:** `2b2c9067` adds physical copper-layer selection to PCB images, addressing the layer-overlap part of the earlier constraint-aware-finishing entry. Three actual Barracuda RF renders separate top, bottom and In2 copper.
+- **friction:** A selected LOCK_DET route took 84 seconds but never entered guided repair because retained copper and net scope disabled its selection mask. This was visible only by combining phase logs with source inspection; `diagnose_net` did not expose the skipped phase or its reason.
+- **idea:** Include effective repair policy and phase eligibility in net diagnosis, alongside the still-needed bounded corridor probe. This would reveal a skipped repair before another expensive board trial.
+- **status:** partially resolved; layer images implemented, diagnosis and bounded finishing still open
+
+
+## 2026-09-05 · codex · Finishing replay input provenance
+- **friction:** A copied autorouter experiment directory had already advanced beyond its recorded 56/59 Black Canyon baseline. A `close_open_nets` replay spent 8.86 seconds on a zero-hop cleanup before its result exposed the mistaken starting-state assumption; correcting it required restoring the recorded snapshot and independently describing it before the real replay.
+- **idea:** Include the input layout revision/copper fingerprint and before/after connectivity in mutating routing-tool results. This would make accidental reuse of an advanced candidate visible without reconstructing its history from sidecars and a separate full-board inspection.
+- **workaround:** Restore the recorded immutable history snapshot with `restore_layout_snapshot`, then verify the starting tally with `describe_pcb_layout` before a comparison; a directory name is not provenance.
+- **status:** mitigated
+
+## 2026-09-05 · codex · Isolating autorouter repair phases
+- **friction:** A `close_open_nets` experiment intended to start at wholesale repair sent `rounds:0`, outside the old schema's minimum of 1. The handler silently substituted four ordinary rounds, so an expensive search started in the wrong phase. Even supported ordinary calls could spend the full deadline before wholesale repair was reached.
+- **resolution:** `fa04b8d8` supports and documents zero ordinary rounds, rejects malformed explicit counts before layout evaluation, and retains the four-round default when omitted. `rounds:0, vacate:true` now directly exercises wholesale repair with its own bounded invocation. A regression reproduces three unintended hops before the fix and none afterward.
+- **status:** resolved for explicit phase isolation; automatic allocation of time between phases remains open
+
+
+## 2026-09-05 · codex · Escape preview candidate provenance
+- **friction:** `preview_escape_assignment` cannot name a layout and uses the default layout, while RF routing experiments used a separate generated candidate. Establishing that its U13 preview applied required inspecting sidecars and comparing all 225 part poses. The preview also chose east from destination vectors for four west-edge pins, providing no answer about their immediate escape congestion.
+- **idea:** Accept a layout name and return its revision/fingerprint in `mcp_escape_assign`; distinguish the package exit from the destination corridor and show whether retained copper was considered. This would avoid pose-comparison scripts and unsuitable corridor trials during candidate review.
+- **workaround:** Compare all candidate/default part poses before using a preview, and treat its corridor as placement-only evidence rather than proof of a routable pin breakout.
+- **status:** open
+
+
+## 2026-09-05 · codex · Package exit planning and candidate selection
+- **resolution:** `0d6bbda6` adds named-layout selection and missing-candidate rejection to `preview_escape_assignment`, plus explicit placement-only disclosure. Its new pin-side mode schedules U13's four west-edge controls west at x=135.1 mm instead of east at x=144.1 mm. `assignment_form` and `(with-nets ...)` let the group be added to an existing wave while preserving each net's hard policies.
+- **status:** partially resolved; actual retained-copper clearance, exact candidate revision provenance and coordinated via-site selection remain future work. The scoped RF trial improves from 126/130 to 128/130 but does not beat the separate 129/130 candidate.
+
+## 2026-09-05 · codex · Supply-family repair diagnosis
+- **friction:** On the generated Barracuda RF candidate, `close_open_nets` planned six supply islands but rejected all six routed feeds as `no_merge`. The planner included proven bypass-family pads while its transaction query counted only original parent pads. The generic remedy suggested changing pour priority, and the unsuccessful diagnostic trial cost 75 seconds and 8,286,396 KiB peak RSS.
+- **resolution:** `cad0cfdf`, `d121a35e` and `24020474` align the board checker, gap search and transaction gate; a matched run now keeps all six feeds and independently verifies 129/130 with zero geometry errors.
+- **idea:** Include the planner's and transaction's before/after island counts and endpoint counts in each failed-hop diagnostic. That would expose inconsistent query scope directly instead of directing users toward unrelated pour changes.
+- **status:** routing bug resolved; diagnostic evidence remains an improvement opportunity
+
+
+## 2026-09-06 · codex · publish autorouter review candidates
+- **friction:** The live HTTP save endpoint requires Ward authentication, and `save_pcb_layout` could previously copy only the blessed row within one project. Publishing an already inspected frozen experiment therefore needed a new guarded CLI source-layout import path. That path now preserves metadata, rejects collisions, and retains the destination star.
+- **friction:** `/tmp` rejected installs and fixture writes with DiskQuota despite reporting 3 GiB free. Archiving this task's old measurement binaries onto the disk filesystem, retaining symlinks at their recorded paths, released about 4 GiB and restored fixture runs.
+- **idea:** Report subcircuit seed-validation time separately from search time: the Base trial spent 199 seconds repeating unrelated current solves inside the DRC seed gate, exhausting the global deadline after apparently timely local passes.
+- **status:** mitigated

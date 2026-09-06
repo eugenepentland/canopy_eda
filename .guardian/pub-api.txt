@@ -1232,6 +1232,7 @@ src/fab_readiness.zig::Stats struct_
 src/fab_readiness.zig::Tally struct_
 src/fab_readiness.zig::buildNetGraph | fn buildNetGraph( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, net: export_kicad.FlatNet, net_i: i32, ) std.mem.Allocator.Error!NetGraph
 src/fab_readiness.zig::buildNetGraphPrepared | fn buildNetGraphPrepared( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, net: export_kicad.FlatNet, net_i: i32, fills: SharedFills, ) std.mem.Allocator.Error!NetGraph
+src/fab_readiness.zig::buildPhysicalNetGraph | fn buildPhysicalNetGraph( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, net_i: usize, ) std.mem.Allocator.Error!NetGraph
 src/fab_readiness.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ctx: Context, ) std.mem.Allocator.Error!Report
 src/fab_readiness.zig::declaredOutline | fn declaredOutline(board: env_mod.BoardSpec) outline_mod.Declared
 src/fab_readiness.zig::netConnectivity | fn netConnectivity( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ) std.mem.Allocator.Error![]const NetStatus
@@ -2301,6 +2302,8 @@ src/placement/drc.zig::bridgePoints | fn bridgePoints(self: Parties) ?[4]f64
 src/placement/drc.zig::build | fn build( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, ) std.mem.Allocator.Error!TrackAdditionGate
 src/placement/drc.zig::build | fn build( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, probe: router.Via, ) std.mem.Allocator.Error!ViaAdditionGate
 src/placement/drc.zig::check | fn check( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, ) std.mem.Allocator.Error![]Violation
+src/placement/drc.zig::checkBypasses | fn checkBypasses( arena: std.mem.Allocator, placement: optimizer.Placement, tracks: []const router.Track, ) std.mem.Allocator.Error![]Violation
+src/placement/drc.zig::checkForNet | fn checkForNet( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, net_i: usize, ) std.mem.Allocator.Error![]Violation
 src/placement/drc.zig::checkMemoised | fn checkMemoised( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, memo: ?pour.FillMemo, ) std.mem.Allocator.Error![]Violation
 src/placement/drc.zig::checkTopology | fn checkTopology( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, zones: []const TopologyZone, ) std.mem.Allocator.Error![]Violation
 src/placement/drc.zig::checkWithPreparedCopper | fn checkWithPreparedCopper( arena: std.mem.Allocator, placement: optimizer.Placement, routed: router.RouteResult, clearance: f64, prepared: PreparedCopper, ) std.mem.Allocator.Error![]Violation
@@ -2493,6 +2496,7 @@ src/placement/gap_policy.zig::RipBreadth enum_
 src/placement/gap_policy.zig::RipFilter struct_
 src/placement/gap_policy.zig::ShapeTier enum_
 src/placement/gap_policy.zig::TerminalVia enum_
+src/placement/gap_policy.zig::allows | fn allows(path: GapPath, layers: u64, max_vias: ?u16) bool
 src/placement/gap_policy.zig::around | fn around(gap: Gap, margin: f64) GapWindow
 src/placement/gap_policy.zig::bans | fn bans(self: TerminalVia, pt: NetPt) bool
 src/placement/gap_policy.zig::forTier | fn forTier(rip_from: usize) RipBreadth
@@ -2501,6 +2505,7 @@ src/placement/gap_policy.zig::lastKRungs | fn lastKRungs(failed: usize, lim: Las
 src/placement/gap_policy.zig::meshes | fn meshes(self: ShapeTier) bool
 src/placement/gap_policy.zig::rip_tiers value
 src/placement/gap_policy.zig::ripup_reaches value
+src/placement/gap_state.zig::State | fn State(comptime Ctx: type) type
 src/placement/geometry.zig::CopperPourKeepout struct_
 src/placement/geometry.zig::CopperSide enum_
 src/placement/geometry.zig::FootprintFeatures struct_
@@ -2781,6 +2786,7 @@ src/placement/net_graph.zig::joinsFor | fn joinsFor(alloc: std.mem.Allocator, in
 src/placement/net_identity.zig::Identity struct_
 src/placement/net_identity.zig::canonical | fn canonical(self: Identity, net: i32) i32
 src/placement/net_identity.zig::canonicalName | fn canonicalName(self: Identity, nets: []const optimizer.FlatNet, net: i32) []const u8
+src/placement/net_identity.zig::connectivityNet | fn connectivityNet( self: Identity, arena: std.mem.Allocator, nets: []const optimizer.FlatNet, net_i: usize, ) std.mem.Allocator.Error!optimizer.FlatNet
 src/placement/net_identity.zig::familyOf | fn familyOf( self: Identity, arena: std.mem.Allocator, net: usize, ) std.mem.Allocator.Error![]const usize
 src/placement/net_identity.zig::init | fn init(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!Identity
 src/placement/net_identity.zig::isRoot | fn isRoot(self: Identity, net: usize) bool
@@ -2961,6 +2967,7 @@ src/placement/pad_exit.zig::netPoints | fn netPoints( arena: std.mem.Allocator, 
 src/placement/pad_exit.zig::ownBox | fn ownBox(obs: []const pad_grid.PadObs, at: [2]f64, net: i32, slack: f64) ?[4]f64
 src/placement/pad_exit.zig::padHoles | fn padHoles(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error![]const Hole
 src/placement/pad_exit.zig::straightEscapePair | fn straightEscapePair(a: Term, b: Term) bool
+src/placement/pad_exit.zig::viaHoles | fn viaHoles(arena: std.mem.Allocator, vias: []const route_result.Via) std.mem.Allocator.Error![]const Hole
 src/placement/pad_exit.zig::wallGap | fn wallGap(h: Hole, x: f64, y: f64, drill: f64) ?f64
 src/placement/pad_grid.zig::Bounds struct_
 src/placement/pad_grid.zig::PadGrid struct_
@@ -3376,6 +3383,7 @@ src/placement/route_close.zig::reconcile | fn reconcile( arena: std.mem.Allocato
 src/placement/route_close.zig::refusals | fn refusals(self: *const HopMemo, net_i: usize) usize
 src/placement/route_close.zig::refuse | fn refuse(self: *HopMemo, gap: router.Gap, wide: bool) std.mem.Allocator.Error!void
 src/placement/route_close.zig::refuseShape | fn refuseShape(self: *HopMemo, gap: router.Gap) std.mem.Allocator.Error!void
+src/placement/route_close.zig::remainingPolicies | fn remainingPolicies( alloc: std.mem.Allocator, policies: []const route_policy.NetPolicy, retained: []const route_policy.ExistingVia, present: []const router.Via, ) std.mem.Allocator.Error![]const route_policy.NetPolicy
 src/placement/route_close.zig::sealed | fn sealed(self: *const HopMemo, net_i: usize) bool
 src/placement/route_close.zig::seen | fn seen(self: *const HopMemo, gap: router.Gap, wide: bool) bool
 src/placement/route_close.zig::shapeRefusals | fn shapeRefusals(self: *const HopMemo, net_i: usize) usize
@@ -3436,6 +3444,7 @@ src/placement/route_policy.zig::authorsLayers | fn authorsLayers(policy: NetPoli
 src/placement/route_policy.zig::fieldAllocator | fn fieldAllocator(self: RouteSpace) ?std.mem.Allocator
 src/placement/route_policy.zig::fieldCache | fn fieldCache(self: RouteSpace) ?*route_space_cache.Cache
 src/placement/route_policy.zig::fromName | fn fromName(text: []const u8) ?Effort
+src/placement/route_policy.zig::guideLayersAllowed | fn guideLayersAllowed(mask: u64, points: []const Waypoint) bool
 src/placement/route_policy.zig::hasBranchTree | fn hasBranchTree(policy: NetPolicy) bool
 src/placement/route_policy.zig::meshes | fn meshes(self: PairChannel) bool
 src/placement/route_policy.zig::name | fn name(self: RouteSpace) []const u8
@@ -3806,7 +3815,7 @@ src/placement/router_direct.zig::tryGuidedTree | fn tryGuidedTree( run: DirectRu
 src/placement/router_direct.zig::tryMazeGuidedTree | fn tryMazeGuidedTree( run: DirectRun, pts: []const NetPt, waypoints: []const route_policy.Waypoint, ) std.mem.Allocator.Error!bool
 src/placement/router_direct.zig::trySharedGuidedTree | fn trySharedGuidedTree( run: DirectRun, pts: []const NetPt, waypoints: []const route_policy.Waypoint, ) std.mem.Allocator.Error!bool
 src/placement/router_direct.zig::tryTwoViaSeededMaze | fn tryTwoViaSeededMaze(run: DirectRun, from: NetPt, to: NetPt) std.mem.Allocator.Error!bool
-src/placement/router_gap_close.zig::GapState struct_
+src/placement/router_gap_close.zig::GapState value
 src/placement/router_gap_close.zig::buildGapCtx | fn buildGapCtx( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, divisor: f64, window: ?GapWindow, ) std.mem.Allocator.Error!CtxResult
 src/placement/router_gap_close.zig::closeGaps | fn closeGaps( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, board: GapBoard, gaps: []const Gap, opts: GapOptions, ) std.mem.Allocator.Error![]const ?GapPath
 src/placement/router_gap_close.zig::exactGapRescue | fn exactGapRescue( state: *GapState, live: GapBoard, from: NetPt, to: NetPt, net: i32, ) std.mem.Allocator.Error!?GapPath
@@ -4186,6 +4195,7 @@ src/render_pcb_png.zig::cropnet_margin_mm value
 src/render_pcb_png.zig::nearestPadNumber | fn nearestPadNumber(pads: []const geometry.Pad, lx: f64, ly: f64) ?[]const u8
 src/render_pcb_png.zig::render | fn render(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options) png.Error![]u8
 src/render_pcb_png.zig::renderSheet | fn renderSheet(alloc: std.mem.Allocator, p: optimizer.Placement, opts: Options) png.Error![]u8
+src/render_pcb_png.zig::resolveLayer | fn resolveLayer(rules: optimizer.BoardRules, name: []const u8) ?board_layers.StackIndex
 src/render_pcb_png.zig::trackColor | fn trackColor(rules: optimizer.BoardRules, layer: u8) Rgb
 src/render_pcb_png.zig::view_margin_mm value
 src/render_schematic_png.zig::Error value
@@ -4695,6 +4705,7 @@ src/serve/drc_rules.zig::Rules struct_
 src/serve/drc_rules.zig::ScopedApiReport struct_
 src/serve/drc_rules.zig::SharedFills value
 src/serve/drc_rules.zig::apply | fn apply(alloc: std.mem.Allocator, rules: Rules, list: []const drc.Violation) []const drc.Violation
+src/serve/drc_rules.zig::applyChecked | fn applyChecked(alloc: std.mem.Allocator, rules: Rules, list: []const drc.Violation) std.mem.Allocator.Error![]const drc.Violation
 src/serve/drc_rules.zig::checkDefaultRules value
 src/serve/drc_rules.zig::checkFilled value
 src/serve/drc_rules.zig::checkFiltered | fn checkFiltered( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, placement: optimizer.Placement, r: router.RouteResult, clearance: f64, ) []const drc.Violation
@@ -4711,6 +4722,7 @@ src/serve/drc_rules.zig::fillMemoStats value
 src/serve/drc_rules.zig::getApi | fn getApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/drc_rules.zig::isDeferredKind value
 src/serve/drc_rules.zig::load | fn load(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) Rules
+src/serve/drc_rules.zig::loadForValidation | fn loadForValidation(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?Rules
 src/serve/drc_rules.zig::padShapes value
 src/serve/drc_rules.zig::reconcile | fn reconcile(self: Deferred, routed: *?router.RouteResult) void
 src/serve/drc_rules.zig::resolveDeferred | fn resolveDeferred( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, in: DeferredInputs, ) Deferred
@@ -5180,22 +5192,44 @@ src/serve/pcb_layout_fab.zig::standaloneDossierReviewBoardHtml | fn standaloneDo
 src/serve/pcb_layout_fab.zig::standaloneReleaseAssemblyHtml | fn standaloneReleaseAssemblyHtml( ctx: *Server, req: *httpz.Request, name: []const u8, block: *const env_mod.DesignBlock, fv: FabView, identity: standalone_assembly.ReleaseIdentity, ) HandlerError![]const u8
 src/serve/pcb_layout_fab.zig::write value
 src/serve/pcb_layout_import.zig::writeImportedStarredLayout | fn writeImportedStarredLayout( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, imported: import_layout.Imported, ) bool
+src/serve/pcb_layout_mcp.zig::McpDroppedRoutes struct_
 src/serve/pcb_layout_mcp.zig::McpExistingCopper struct_
+src/serve/pcb_layout_mcp.zig::McpReqPose struct_
+src/serve/pcb_layout_mcp.zig::McpReqTrack struct_
+src/serve/pcb_layout_mcp.zig::McpReqVia struct_
+src/serve/pcb_layout_mcp.zig::McpScope struct_
+src/serve/pcb_layout_mcp.zig::MoveWindow struct_
 src/serve/pcb_layout_mcp.zig::addTracksFixture | fn addTracksFixture(parts: []optimizer.Part, nets: []const export_kicad.FlatNet, rules: []const optimizer.NetRule) optimizer.Placement
 src/serve/pcb_layout_mcp.zig::addTracksParts | fn addTracksParts() [2]optimizer.Part
 src/serve/pcb_layout_mcp.zig::add_tracks_nets value
 src/serve/pcb_layout_mcp.zig::add_tracks_pad value
 src/serve/pcb_layout_mcp.zig::mcpAddTracks | fn mcpAddTracks( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpApplyReferenceGuides | fn mcpApplyReferenceGuides( alloc: std.mem.Allocator, options: *route_policy.Options, placement: optimizer.Placement, saved: SavedRoutes, ) std.mem.Allocator.Error!usize
+src/serve/pcb_layout_mcp.zig::mcpApplyRouteEffort | fn mcpApplyRouteEffort(options: *route_policy.Options, args_val: ?std.json.Value) bool
+src/serve/pcb_layout_mcp.zig::mcpArgBool | fn mcpArgBool(args_val: ?std.json.Value, key: []const u8) bool
 src/serve/pcb_layout_mcp.zig::mcpArgStr | fn mcpArgStr(args_val: ?std.json.Value, key: []const u8) ?[]const u8
 src/serve/pcb_layout_mcp.zig::mcpArgStrList | fn mcpArgStrList(alloc: std.mem.Allocator, args_val: ?std.json.Value, key: []const u8) []const []const u8
+src/serve/pcb_layout_mcp.zig::mcpBuildAddedCopper | fn mcpBuildAddedCopper( alloc: std.mem.Allocator, out: *std.ArrayList(u8), placement: optimizer.Placement, rp: router.RouteParams, reqs: []const McpReqTrack, vreqs: []const McpReqVia, ) HandlerError!?SavedRoutes
+src/serve/pcb_layout_mcp.zig::mcpBuildCopperZones | fn mcpBuildCopperZones( alloc: std.mem.Allocator, out: *std.ArrayList(u8), placement: optimizer.Placement, args_val: ?std.json.Value, ) HandlerError!?[]const SavedZone
 src/serve/pcb_layout_mcp.zig::mcpCleanRouteTopology | fn mcpCleanRouteTopology( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpClearAllRoutedCopper | fn mcpClearAllRoutedCopper(sr: SavedRoutes) ?SavedRoutes
 src/serve/pcb_layout_mcp.zig::mcpClearRoutes | fn mcpClearRoutes( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpCreateWorking | fn mcpCreateWorking( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, entry: SavedLayout, ) (sidecar_store.StoreError || error{CandidateNameExists})!void
+src/serve/pcb_layout_mcp.zig::mcpDropMovedCopper | fn mcpDropMovedCopper( alloc: std.mem.Allocator, sr: ?SavedRoutes, drop: *const std.StringHashMapUnmanaged(void), windows: []const MoveWindow, ) std.mem.Allocator.Error!McpDroppedRoutes
+src/serve/pcb_layout_mcp.zig::mcpDropRoutesForNets | fn mcpDropRoutesForNets( alloc: std.mem.Allocator, sr: ?SavedRoutes, drop: *const std.StringHashMapUnmanaged(void), ) std.mem.Allocator.Error!McpDroppedRoutes
+src/serve/pcb_layout_mcp.zig::mcpDropViasNear | fn mcpDropViasNear( alloc: std.mem.Allocator, sr: ?SavedRoutes, drop: *const std.StringHashMapUnmanaged(void), x: f64, y: f64, radius: f64, ) std.mem.Allocator.Error!McpDroppedRoutes
 src/serve/pcb_layout_mcp.zig::mcpExistingCopper | fn mcpExistingCopper( alloc: std.mem.Allocator, routed: router.RouteResult, selected: []const bool, ) std.mem.Allocator.Error!McpExistingCopper
 src/serve/pcb_layout_mcp.zig::mcpFail | fn mcpFail(out: *std.ArrayList(u8), alloc: std.mem.Allocator, msg: []const u8) (std.mem.Allocator.Error || std.Io.Writer.Error)!bool
+src/serve/pcb_layout_mcp.zig::mcpKeepRoutesForNets | fn mcpKeepRoutesForNets( alloc: std.mem.Allocator, sr: SavedRoutes, keep: *const std.StringHashMapUnmanaged(void), ) std.mem.Allocator.Error!?SavedRoutes
+src/serve/pcb_layout_mcp.zig::mcpMergeRoutes | fn mcpMergeRoutes(alloc: std.mem.Allocator, a: ?SavedRoutes, b: ?SavedRoutes) std.mem.Allocator.Error!?SavedRoutes
 src/serve/pcb_layout_mcp.zig::mcpNormalizeJunctions | fn mcpNormalizeJunctions( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpOriginOf | fn mcpOriginOf(s: []const u8) []const u8
+src/serve/pcb_layout_mcp.zig::mcpParseOutlineArg | fn mcpParseOutlineArg(alloc: std.mem.Allocator, av: std.json.Value) ?SavedOutline
+src/serve/pcb_layout_mcp.zig::mcpParsePoses | fn mcpParsePoses(alloc: std.mem.Allocator, args_val: ?std.json.Value) ?[]McpReqPose
 src/serve/pcb_layout_mcp.zig::mcpPersistWorking | fn mcpPersistWorking( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, entry_in: SavedLayout, star: bool, ) sidecar_store.StoreError!void
 src/serve/pcb_layout_mcp.zig::mcpReadWorking | fn mcpReadWorking( alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layout_arg: ?[]const u8, ) ?SavedLayout
 src/serve/pcb_layout_mcp.zig::mcpRepairLandTransit | fn mcpRepairLandTransit( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
+src/serve/pcb_layout_mcp.zig::mcpResolveRouteScope | fn mcpResolveRouteScope( alloc: std.mem.Allocator, out: *std.ArrayList(u8), block: *const env_mod.DesignBlock, placement: optimizer.Placement, groups: []const []const u8, nets: []const []const u8, ) HandlerError!?McpScope
 src/serve/pcb_layout_mcp.zig::mcpRoutePcb | fn mcpRoutePcb( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
 src/serve/pcb_layout_mcp.zig::mcpSavePcbLayout | fn mcpSavePcbLayout( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) HandlerError!bool
 src/serve/pcb_layout_mcp.zig::mcpSavedRoutesFrom value
@@ -5207,6 +5241,7 @@ src/serve/pcb_layout_mcp.zig::mcpWorkingName | fn mcpWorkingName( alloc: std.mem
 src/serve/pcb_layout_mcp.zig::mcpWriteStrArray | fn mcpWriteStrArray(w: *std.Io.Writer, items: []const []const u8) std.Io.Writer.Error!void
 src/serve/pcb_layout_mcp.zig::mcp_err_missing_name value
 src/serve/pcb_layout_mcp.zig::normalizeJunctionsApi | fn normalizeJunctionsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/pcb_layout_mcp.zig::routePcbWithCancel | fn routePcbWithCancel( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), cancel: ?*std.atomic.Value(bool), ) HandlerError!bool
 src/serve/pcb_layout_mcp.zig::scopeFixture | fn scopeFixture(parts: *[1]optimizer.Part) struct { placement: optimizer.Placement, block: env_mod.DesignBlock }
 src/serve/pcb_layout_page.zig::CacheSlot value
 src/serve/pcb_layout_page.zig::DeferredJob struct_
@@ -5251,6 +5286,7 @@ src/serve/pcb_layout_page.zig::SyncPose value
 src/serve/pcb_layout_page.zig::SyncVia struct_
 src/serve/pcb_layout_page.zig::ThermalPng struct_
 src/serve/pcb_layout_page.zig::Toggles struct_
+src/serve/pcb_layout_page.zig::Tuning struct_
 src/serve/pcb_layout_page.zig::View struct_
 src/serve/pcb_layout_page.zig::addSubcircuitRouteSeeds value
 src/serve/pcb_layout_page.zig::applyDeferred | fn applyDeferred(ctx: *Server, name: []const u8, placement: optimizer.Placement, view: *ShownView) void
@@ -5280,6 +5316,7 @@ src/serve/pcb_layout_page.zig::mcpAddTracks value
 src/serve/pcb_layout_page.zig::mcpArgStrList value
 src/serve/pcb_layout_page.zig::mcpCleanRouteTopology value
 src/serve/pcb_layout_page.zig::mcpClearRoutes value
+src/serve/pcb_layout_page.zig::mcpCreateWorking value
 src/serve/pcb_layout_page.zig::mcpNormalizeJunctions value
 src/serve/pcb_layout_page.zig::mcpPersistWorking value
 src/serve/pcb_layout_page.zig::mcpProtectedWrite | fn mcpProtectedWrite(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8, layouts: []const SavedLayout) sidecar_store.StoreError!void
@@ -5634,6 +5671,7 @@ src/serve/style_score.zig::styleScore | fn styleScore(alloc: std.mem.Allocator, 
 src/serve/style_score.zig::w_edge value
 src/serve/style_score.zig::w_gap value
 src/serve/style_score.zig::w_rot value
+src/serve/subcircuit_route.zig::Attempt struct_
 src/serve/subcircuit_route.zig::Result struct_
 src/serve/subcircuit_route.zig::SeedTrack struct_
 src/serve/subcircuit_route.zig::SeedVia struct_
@@ -5642,6 +5680,7 @@ src/serve/subcircuit_route.zig::routeAll | fn routeAll( alloc: std.mem.Allocator
 src/serve/subcircuit_route.zig::routeAllClassified | fn routeAllClassified( alloc: std.mem.Allocator, block: *const env.DesignBlock, placement: optimizer.Placement, params: router.RouteParams, base: route_policy.Options, supply: []const bool, ) std.mem.Allocator.Error!Result
 src/serve/subcircuit_route.zig::savedNetUsesMultipleLayers | fn savedNetUsesMultipleLayers(tracks: anytype, net: []const u8) bool
 src/serve/subcircuit_route.zig::savedSupplyFallbackAllowed | fn savedSupplyFallbackAllowed( placement: optimizer.Placement, options: route_policy.Options, subcircuit: []const u8, net: usize, ) bool
+src/serve/subcircuit_route.zig::writeAttempts | fn writeAttempts(w: *std.Io.Writer, attempts: []const Attempt) std.Io.Writer.Error!void
 src/serve/subprocess.zig::Outcome enum_
 src/serve/subprocess.zig::Result struct_
 src/serve/subprocess.zig::deinit | fn deinit(self: Result, allocator: std.mem.Allocator) void

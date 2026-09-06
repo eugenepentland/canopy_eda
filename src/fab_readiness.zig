@@ -2030,7 +2030,8 @@ pub fn netConnectivityPrepared(
     const physical = try export_gerber.physicalCopper(arena, copper);
     var out: std.ArrayList(NetStatus) = .empty;
     for (placement.nets, 0..) |net, net_i| {
-        const graph = try buildNetGraphPrepared(arena, placement, physical, net, @intCast(net_i), fills);
+        const physical_net = try fills.identity.connectivityNet(arena, placement.nets, net_i);
+        const graph = try buildNetGraphPrepared(arena, placement, physical, physical_net, @intCast(net_i), fills);
         try out.append(arena, try netStatusFromGraph(arena, net.name, graph, true));
     }
     return out.toOwnedSlice(arena);
@@ -2213,7 +2214,8 @@ fn openNetsWith(
             }
             if (!selected) continue;
         }
-        const detail = try openNetDetail(arena, placement, physical, net, @intCast(ni), fills);
+        const physical_net = try fills.identity.connectivityNet(arena, placement.nets, ni);
+        const detail = try openNetDetail(arena, placement, physical, physical_net, @intCast(ni), fills);
         if (detail) |d| try out.append(arena, d);
     }
     return out.toOwnedSlice(arena);
@@ -2572,6 +2574,23 @@ pub fn buildNetGraph(
     return buildNetGraphPrepared(arena, placement, physical, net, net_i, .{
         .zone_fills = zone_fills,
         .identity = try net_identity.Identity.init(arena, placement),
+    });
+}
+
+/// Board-level query for one net. A physical parent rail owns all of its
+/// proven bypass-family pads; child queries retain their endpoint contract.
+/// Keep `buildNetGraph` for deliberately narrow local endpoint queries.
+pub fn buildPhysicalNetGraph(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    copper: export_gerber.Copper,
+    net_i: usize,
+) std.mem.Allocator.Error!NetGraph {
+    const identity = try net_identity.Identity.init(arena, placement);
+    const net = try identity.connectivityNet(arena, placement.nets, net_i);
+    return buildNetGraphPrepared(arena, placement, try export_gerber.physicalCopper(arena, copper), net, @intCast(net_i), .{
+        .zone_fills = try userZoneFills(arena, placement, copper, null),
+        .identity = identity,
     });
 }
 

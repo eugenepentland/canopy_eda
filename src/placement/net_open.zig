@@ -45,6 +45,7 @@ const fab = @import("../fab_readiness.zig");
 const routed_copper = @import("routed_copper.zig");
 const flat_netlist = @import("../flat_netlist.zig");
 const net_identity = @import("net_identity.zig");
+const route_policy = @import("route_policy.zig");
 
 const eps: f64 = 1e-9;
 
@@ -277,7 +278,8 @@ fn checkNet(
     net: flat_netlist.FlatNet,
     net_i: i32,
 ) std.mem.Allocator.Error!fab.NetStatus {
-    const g = try fab.buildNetGraphPrepared(arena, board.placement, board.copper, net, net_i, .{
+    const physical_net = try board.identity.connectivityNet(arena, board.placement.nets, @intCast(net_i));
+    const g = try fab.buildNetGraphPrepared(arena, board.placement, board.copper, physical_net, net_i, .{
         .zone_fills = board.zone_fills,
         .base = board.base,
         .plane_fills = board.plane_fills,
@@ -1095,7 +1097,162 @@ test "a bypass alias borrows parent copper without duplicating parent orphan isl
         .{ .x1 = 0, .y1 = 0, .x2 = 4, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
         .{ .x1 = 8, .y1 = 1, .x2 = 9, .y2 = 1, .layer = 0, .width = 0.2, .net = 0 },
     };
-    try testing.expectEqual(@as(usize, 0), count(try check(arena, placement, .{ .tracks = &tracks }, null)));
+    const violations = try check(arena, placement, .{ .tracks = &tracks }, null);
+    // The physical parent now owns the bypass pads too. Its real orphan is
+    // reported once even when the parent has no separately listed pins.
+    try testing.expectEqual(@as(usize, 1), count(violations));
+    try testing.expectEqual(@as(i32, 0), violations[0].who.net_a);
+}
+
+// spec: placement/physical-net-identity - Whole-board connectivity, open-pad diagnosis and net-open DRC check each physical parent rail against all proven bypass-family pads while preserving each child connection's endpoint contract
+// spec: placement/physical-net-identity - Gap routing recognizes proven bypass-family pads and copper as the requested physical net without changing geometry, rip indices, hard policy or the next hop's identity
+test "physical supply connectivity includes bypass pads in the parent rail" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 1, .h = 1 }};
+    var parts = [_]optimizer.Part{
+        .{ .ref_des = "J1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false },
+        .{ .ref_des = "TP1", .kind = .passive, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 4 },
+        .{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 6 },
+        .{ .ref_des = "U1", .kind = .hub, .hw = 1, .hh = 1, .pads = &pads, .fallback = false, .x = 10 },
+    };
+    const root_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "J1", .pin = "1" }, .{ .ref_des = "TP1", .pin = "1" } };
+    const stub_pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "C1", .pin = "1" }, .{ .ref_des = "U1", .pin = "1" } };
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "VDD", .pins = &root_pins },
+        .{ .name = "VDD.U1.1", .pins = &stub_pins },
+    };
+    const land = optimizer.PadRect{ .x = 0, .y = 0, .w = 1, .h = 1 };
+    const loops = [_]optimizer.Loop{.{
+        .cap = 2,
+        .hub = 3,
+        .cap_pwr = land,
+        .cap_gnd = land,
+        .hub_pwr = &.{},
+        .hub_pwr_pin = land,
+        .hub_gnd = &.{},
+        .pwr_net = 1,
+        .explicit_pin = "1",
+    }};
+    var placement = twoPadPlacement(&parts, &nets);
+    placement.loops = &loops;
+    const tracks = [_]router.Track{
+        .{ .x1 = 0, .y1 = 0, .x2 = 4, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+        .{ .x1 = 6.2, .y1 = 0, .x2 = 10, .y2 = 0, .layer = 0, .width = 0.2, .net = 1 },
+        .{ .x1 = 4, .y1 = 0, .x2 = 5.8, .y2 = 0, .layer = 0, .width = 0.2, .net = 0 },
+    };
+    // Each logical connection is closed, but the bypass branch is unpowered.
+    const split = routed_copper.Copper{ .tracks = tracks[0..2] };
+    // A low-level exact pair still means exactly those requested endpoints.
+    // Expanding that query would break isolated cap-to-pin routing.
+    const exact = try fab.buildNetGraph(arena, placement, split, nets[0], 0);
+    const exact_status = try fab.netStatusFromGraph(arena, nets[0].name, exact, false);
+    try testing.expect(exact_status.connected);
+    try testing.expectEqual(@as(usize, 2), exact.n_pads);
+    const statuses = try fab.netConnectivity(arena, placement, split);
+    try testing.expect(!statuses[0].connected);
+    try testing.expectEqual(@as(usize, 2), statuses[0].islands);
+    try testing.expect(statuses[1].connected);
+    const opens = try fab.openNets(arena, placement, split);
+    try testing.expectEqual(@as(usize, 1), opens.len);
+    try testing.expectEqualStrings("VDD", opens[0].net);
+    try testing.expectEqual(@as(usize, 4), opens[0].pads.len);
+    const violations = try check(arena, placement, split, null);
+    try testing.expectEqual(@as(usize, 1), count(violations));
+    try testing.expect(violations[0].who.part_a >= 0 and violations[0].who.part_b >= 0);
+    const tally = try fab.routableTally(arena, placement, split);
+    try testing.expectEqual(@as(usize, 1), tally.routed);
+    try testing.expectEqual(@as(usize, 2), tally.total);
+    try testing.expectEqual(@as(usize, 0), tally.unique_routed);
+
+    // The new feed and bypass trace connect THROUGH the cap land. Their
+    // centrelines do not touch, so borrowing only alias copper cannot prove it.
+    const joined = routed_copper.Copper{ .tracks = &tracks };
+    const connected = try fab.netConnectivity(arena, placement, joined);
+    try testing.expect(connected[0].connected and connected[1].connected);
+    try testing.expectEqual(@as(usize, 0), count(try check(arena, placement, joined, null)));
+    try testing.expectEqual(@as(usize, 0), (try fab.openNets(arena, placement, joined)).len);
+
+    // The repair engine must recognize these same physical pads and copper.
+    // Treating C1's proven alias as foreign falsely seals this clear bridge.
+    const gaps = [_]router.Gap{.{
+        .net_i = 0,
+        .from = .{ .x = 4, .y = 0, .layer = 0, .thru = false, .ref_des = "TP1", .pin = "1" },
+        .to = .{ .x = 6, .y = 0, .layer = 0, .thru = false, .ref_des = "C1", .pin = "1" },
+    }};
+    const policies = [_]route_policy.NetPolicy{ .{ .allowed_layers = 1, .max_vias = 0 }, .{} };
+    const paths = try router.closeGaps(arena, placement, .{}, .{ .tracks = tracks[0..2] }, &gaps, .{
+        .ripup = false,
+        .constraints = .{ .net = &policies },
+    });
+    const bridge = paths[0] orelse return error.TestExpectedSupplyBridge;
+    try testing.expect(bridge.tracks.len > 0);
+    try testing.expectEqual(@as(usize, 0), bridge.vias.len);
+    try testing.expectEqual(@as(usize, 0), bridge.ripped.len);
+
+    // Alternating parent/child queries share the batch's grids, but every
+    // hop must start with the original identity and a fresh static verdict.
+    const batch = [_]router.Gap{
+        gaps[0],
+        .{ .net_i = 1, .from = gaps[0].to.?, .to = .{
+            .x = 10,
+            .y = 0,
+            .layer = 0,
+            .thru = false,
+            .ref_des = "U1",
+            .pin = "1",
+        } },
+        .{ .net_i = 0, .from = gaps[0].to.?, .to = gaps[0].from },
+    };
+    const batched = try router.closeGaps(arena, placement, .{}, .{ .tracks = tracks[0..2] }, &batch, .{
+        .ripup = false,
+        .constraints = .{ .net = &policies },
+    });
+    for (batched, batch) |maybe, gap| {
+        const path = maybe orelse return error.TestExpectedSupplyBridge;
+        for (path.tracks) |track| try testing.expectEqual(@as(i32, @intCast(gap.net_i)), track.net);
+        try testing.expectEqual(@as(usize, 0), path.ripped.len);
+    }
+    var unrelated = placement;
+    unrelated.loops = &.{};
+    const refused = try router.closeGaps(arena, unrelated, .{}, .{ .tracks = tracks[0..2] }, &gaps, .{
+        .ripup = false,
+        .constraints = .{ .net = &policies },
+    });
+    try testing.expect(refused[0] == null);
+
+    const zone_poly = [_][2]f64{ .{ -1, -1 }, .{ 11, -1 }, .{ 11, 1 }, .{ -1, 1 } };
+    const zones = [_]route_policy.ExistingZone{.{ .net = 0, .layer = 1, .polygon = &zone_poly }};
+    const feed = [_]router.Via{.{ .x = 0, .y = 0, .dia = 0.6, .drill = 0.3, .net = 0 }};
+    const stitch_gap = [_]router.Gap{.{ .net_i = 0, .from = gaps[0].to.? }};
+    const stitch_board = router.GapBoard{ .tracks = tracks[0..2], .vias = &feed, .zones = &zones };
+    const stitched = try router.closeGaps(arena, placement, .{}, stitch_board, &stitch_gap, .{
+        .ripup = false,
+        .constraints = .{ .net = &.{ .{ .allowed_layers = 3, .max_vias = 2 }, .{} } },
+    });
+    const stitch = stitched[0] orelse return error.TestExpectedSupplyStitch;
+    try testing.expect(stitch.vias.len > 0);
+    const all_tracks = try std.mem.concat(arena, router.Track, &.{ tracks[0..2], stitch.tracks });
+    const all_vias = try std.mem.concat(arena, router.Via, &.{ &feed, stitch.vias });
+    const supplied = try fab.netConnectivity(arena, placement, .{
+        .tracks = all_tracks,
+        .vias = all_vias,
+        .zones = &.{.{ .net = "VDD", .layer = 1, .poly = &zone_poly }},
+    });
+    try testing.expect(supplied[0].connected and supplied[1].connected);
+    const no_vias = try router.closeGaps(arena, placement, .{}, stitch_board, &stitch_gap, .{
+        .ripup = false,
+        .constraints = .{ .net = &policies },
+    });
+    try testing.expect(no_vias[0] == null);
+    var reserved_board = stitch_board;
+    reserved_board.reserved_lanes = &.{.{ .net = 1, .layer = 0, .width = 4, .x1 = 4, .y1 = 0, .x2 = 8, .y2 = 0 }};
+    const reserved = try router.closeGaps(arena, placement, .{}, reserved_board, &stitch_gap, .{
+        .ripup = false,
+        .constraints = .{ .net = &.{ .{ .allowed_layers = 3, .max_vias = 2 }, .{} } },
+    });
+    try testing.expect(reserved[0] == null);
 }
 
 // spec: placement/drc - a via joining two same-net islands across layers clears the net-open flag

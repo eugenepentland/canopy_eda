@@ -3593,12 +3593,14 @@ pub fn routeNet(
     if (!routed) {
         const primary_zone_partial = ctx.zone_partial;
         const primary_tree_partial = ctx.tree_partial;
-        if (try retryDeferredWaypoints(ctx, net, ordered_pts, tracks, vias)) return true;
-        ctx.zone_partial = ctx.zone_partial or primary_zone_partial;
-        ctx.tree_partial = ctx.tree_partial or primary_tree_partial;
-        if (ctx.zone_partial or ctx.tree_partial) return false;
-        rollbackDirectRun(run, track_mark, via_mark);
-        routed = try escapeDirectRescue(ctx, net, ordered_pts, tracks, vias);
+        routed = try retryDeferredWaypoints(ctx, net, ordered_pts, tracks, vias);
+        if (!routed) {
+            ctx.zone_partial = ctx.zone_partial or primary_zone_partial;
+            ctx.tree_partial = ctx.tree_partial or primary_tree_partial;
+            if (ctx.zone_partial or ctx.tree_partial) return false;
+            rollbackDirectRun(run, track_mark, via_mark);
+            routed = try escapeDirectRescue(ctx, net, ordered_pts, tracks, vias);
+        }
     }
     if (!routed) {
         rollbackDirectRun(run, track_mark, via_mark);
@@ -3682,19 +3684,16 @@ fn retryDeferredWaypoints(
     if (repair.len == 0) return false;
 
     const saved_preferred = ctx.preferred_layers;
-    const saved_allowed = ctx.allowed_layers;
     const saved_waypoints = ctx.waypoints;
     const saved_branches = ctx.guide_branches;
     const saved_budget = ctx.direct_budget;
     defer {
         ctx.preferred_layers = saved_preferred;
-        ctx.allowed_layers = saved_allowed;
         ctx.waypoints = saved_waypoints;
         ctx.guide_branches = saved_branches;
         ctx.direct_budget = saved_budget;
     }
     ctx.preferred_layers = 0;
-    ctx.allowed_layers = 0;
     ctx.waypoints = repair;
     ctx.guide_branches = &.{};
     if (ctx.deadline_ns != 0) ctx.direct_budget = deferred_repair_probe_budget;
@@ -3745,6 +3744,10 @@ pub fn routeNetAttempt(
     tracks: *std.ArrayList(Track),
     vias: *std.ArrayList(Via),
 ) std.mem.Allocator.Error!bool {
+    // Virtual guide terminals cannot authorize copper on a forbidden layer.
+    // Direct guide segments otherwise bypass the maze's allowed-layer filter.
+    if (!route_policy.guideLayersAllowed(ctx.allowed_layers, ctx.waypoints)) return false;
+    for (ctx.guide_branches) |branch| if (!route_policy.guideLayersAllowed(ctx.allowed_layers, branch.waypoints)) return false;
     if (ctx.guide_branches.len > 0) {
         const direct = DirectRun{ .ctx = ctx, .net = net, .tracks = tracks, .vias = vias };
         return try tryGuidedTree(direct, pts, ctx.guide_branches);
@@ -4761,67 +4764,6 @@ test "route connects a simple two-pad net" {
     try testing.expect(route_timeline.traceLen(detoured.tracks) > 3.1);
 }
 
-// spec: placement/router - a failed broad net retries its repair-waypoints before lower waves can claim the corridor, without perturbing a successful ordinary route
-test "a failed ordinary net takes its deferred repair corridor immediately" {
-    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_inst.deinit();
-    const arena = arena_inst.allocator();
-
-    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
-    var parts = [_]Part{
-        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
-        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 3, .y = 0 },
-    };
-    const pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
-    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &pins }};
-    const placement = optimizer.Placement{
-        .parts = &parts,
-        .links = &.{},
-        .loops = &.{},
-        .stubs = &.{},
-        .instances = &.{},
-        .nets = &nets,
-        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
-        .minx = -0.5,
-        .miny = -0.5,
-        .maxx = 3.5,
-        .maxy = 0.5,
-        .generated = true,
-        .board_rect = .{ .minx = -0.5, .miny = -0.5, .w = 4, .h = 1 },
-        .rules = .{ .copper_layers = 2 },
-    };
-    const wall_poly = [_][2]f64{
-        .{ 1.3, -0.5 }, .{ 1.7, -0.5 }, .{ 1.7, 0.5 }, .{ 1.3, 0.5 },
-    };
-    const top_wall = [_]route_policy.ExistingZone{.{
-        .polygon = &wall_poly,
-        .layer = 0,
-        .net = -2,
-        .tracks_blocked = true,
-        .vias_blocked = true,
-        .copper = false,
-    }};
-    const repair = [_]route_policy.Waypoint{
-        .{ .x = 0.8, .y = 0, .layer = 0 },
-        .{ .x = 0.8, .y = 0, .layer = 1 },
-        .{ .x = 2.2, .y = 0, .layer = 1 },
-        .{ .x = 2.2, .y = 0, .layer = 0 },
-    };
-    const policies = [_]route_policy.NetPolicy{.{
-        .wave = .{ .repair_waypoints = &repair },
-        .allowed_layers = 1,
-        .max_vias = 2,
-    }};
-
-    const routed = try routeWithOptions(arena, placement, .{}, .{
-        .net = &policies,
-        .existing_zones = &top_wall,
-    });
-    try testing.expectEqual(@as(usize, 1), routed.routed);
-    try testing.expectEqual(@as(usize, 2), routed.vias.len);
-    try testing.expect(trackLenOnLayer(routed.tracks, 1) > 1.0);
-}
-
 // spec: placement/router - a timed deferred repair corridor runs under one flat probe budget, so corridor length cannot scale its claim on the shared deadline
 test "a timed deferred repair corridor routes under its flat probe budget" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
@@ -4870,18 +4812,25 @@ test "a timed deferred repair corridor routes under its flat probe budget" {
     };
     const policies = [_]route_policy.NetPolicy{.{
         .wave = .{ .repair_waypoints = &repair },
-        .allowed_layers = 1,
+        .allowed_layers = 3,
         .max_vias = 2,
     }};
 
-    const timed = try routeWithOptions(arena, placement, .{}, .{
+    const core = try testRouteCore(try routeCoreStart(arena, placement, .{}, .{
         .net = &policies,
+        .selected_nets = &.{false},
         .existing_zones = &top_wall,
         .stop = .{ .max_route_ms = 60_000 },
-    });
-    try testing.expectEqual(@as(usize, 1), timed.routed);
-    try testing.expectEqual(@as(usize, 2), timed.vias.len);
-    try testing.expect(trackLenOnLayer(timed.tracks, 1) > 1.0);
+    }, .off));
+    const pts = [_]NetPt{ .{ .x = 0, .y = 0, .layer = 0 }, .{ .x = 3, .y = 0, .layer = 0 } };
+    setNetParams(core.ctx, placement, 0);
+    setNetRoutePolicy(core.ctx, 0, &pts);
+    var tracks: std.ArrayList(Track) = .empty;
+    var vias: std.ArrayList(Via) = .empty;
+    try testing.expect(try retryDeferredWaypoints(core.ctx, 0, &pts, &tracks, &vias));
+    try testing.expectEqual(@as(usize, 2), vias.items.len);
+    try testing.expect(trackLenOnLayer(tracks.items, 1) > 1.0);
+    try testing.expectEqual(@as(u64, 3), core.ctx.allowed_layers);
 }
 
 /// Three drops in a row with both F.Cu channels walled off: the ordinary maze
@@ -4962,20 +4911,31 @@ test "an authored branch tree routes each drop through its own corridor" {
     };
     const policies = [_]route_policy.NetPolicy{.{
         .wave = .{ .branches = &branches },
-        .allowed_layers = 1,
+        .allowed_layers = 3,
         .max_vias = 4,
     }};
 
     const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
     var parts = walledClockParts(&pads);
-    const routed = try routeWithOptions(arena, walledClockBoard(&parts), .{}, .{
+    const placement = walledClockBoard(&parts);
+    const core = try testRouteCore(try routeCoreStart(arena, placement, .{}, .{
         .net = &policies,
+        .selected_nets = &.{false},
         .existing_zones = &walled_clock_zones,
-    });
-    try testing.expectEqual(@as(usize, 1), routed.routed);
+    }, .off));
+    const pts = [_]NetPt{
+        .{ .x = -3, .y = 0, .layer = 0 },
+        .{ .x = 0, .y = 0, .layer = 0 },
+        .{ .x = 3, .y = 0, .layer = 0 },
+    };
+    setNetParams(core.ctx, placement, 0);
+    setNetRoutePolicy(core.ctx, 0, &pts);
+    var tracks: std.ArrayList(Track) = .empty;
+    var vias: std.ArrayList(Via) = .empty;
+    try testing.expect(try routeNet(core.ctx, 0, &pts, &tracks, &vias));
     // One dive per drop: the tree is two independent limbs, not one trunk.
-    try testing.expectEqual(@as(usize, 4), routed.vias.len);
-    try testing.expect(trackLenOnLayer(routed.tracks, 1) > 2.0);
+    try testing.expectEqual(@as(usize, 4), vias.items.len);
+    try testing.expect(trackLenOnLayer(tracks.items, 1) > 2.0);
 }
 
 // spec: placement/router - a branch tree that cannot be bound to distinct terminals guides nothing, leaving the net to the ordinary multi-terminal router
@@ -8000,4 +7960,86 @@ test "a rescue context's stamped keepout halo opens inside an admitting escape z
     stampBoardCopper(&ctx, &foreign, &.{}, 2);
     try testing.expectEqual(@as(i32, 1), ctx.occ[0][grid.node(60, 111)]);
     try testing.expect(!moveClearsCopper(&ctx, 2, grid.node(59, 111), 0, grid.node(60, 111)));
+}
+
+// spec: placement/router - a deferred repair corridor cannot escape authored layer and via limits
+test "a deferred repair corridor cannot escape authored layer and via limits" {
+    var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const pads = [_]geometry.Pad{.{ .number = "1", .x = 0, .y = 0, .w = 0.4, .h = 0.4 }};
+    var parts = [_]Part{
+        .{ .ref_des = "R1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 0, .y = 0 },
+        .{ .ref_des = "R2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &pads, .fallback = false, .x = 3, .y = 0 },
+    };
+    const pins = [_]flat_netlist.FlatPin{ .{ .ref_des = "R1", .pin = "1" }, .{ .ref_des = "R2", .pin = "1" } };
+    const nets = [_]FlatNet{.{ .name = "SIG", .pins = &pins }};
+    const placement = optimizer.Placement{
+        .parts = &parts,
+        .links = &.{},
+        .loops = &.{},
+        .stubs = &.{},
+        .instances = &.{},
+        .nets = &nets,
+        .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 },
+        .minx = -0.5,
+        .miny = -0.5,
+        .maxx = 3.5,
+        .maxy = 0.5,
+        .generated = true,
+        .board_rect = .{ .minx = -0.5, .miny = -0.5, .w = 4, .h = 1 },
+        .rules = .{ .copper_layers = 2 },
+    };
+    const wall_poly = [_][2]f64{
+        .{ 1.3, -0.5 }, .{ 1.7, -0.5 }, .{ 1.7, 0.5 }, .{ 1.3, 0.5 },
+    };
+    const top_wall = [_]route_policy.ExistingZone{.{
+        .polygon = &wall_poly,
+        .layer = 0,
+        .net = -2,
+        .tracks_blocked = true,
+        .vias_blocked = true,
+        .copper = false,
+    }};
+    const repair = [_]route_policy.Waypoint{
+        .{ .x = 0.8, .y = 0, .layer = 0 },
+        .{ .x = 0.8, .y = 0, .layer = 1 },
+        .{ .x = 2.2, .y = 0, .layer = 1 },
+        .{ .x = 2.2, .y = 0, .layer = 0 },
+    };
+    const policies = [_]route_policy.NetPolicy{.{
+        .wave = .{ .repair_waypoints = &repair },
+        .allowed_layers = 1,
+        .max_vias = 2,
+    }};
+
+    const routed = try routeWithOptions(arena, placement, .{}, .{
+        .net = &policies,
+        .existing_zones = &top_wall,
+    });
+    try testing.expectEqual(@as(usize, 0), routed.routed);
+    try testing.expectEqual(@as(usize, 0), routed.vias.len);
+    try testing.expectEqual(@as(f64, 0), trackLenOnLayer(routed.tracks, 1));
+
+    // Force the ordinary guide into the wall. The repair can cross on B.Cu,
+    // but its two transitions exceed the one-via cap and must roll back.
+    const budgeted = [_]route_policy.NetPolicy{.{
+        .wave = .{ .repair_waypoints = &repair },
+        .waypoints = &.{.{ .x = 1.5, .y = 0, .layer = 0 }},
+        .allowed_layers = 3,
+        .max_vias = 1,
+    }};
+    const core = try testRouteCore(try routeCoreStart(arena, placement, .{}, .{
+        .net = &budgeted,
+        .selected_nets = &.{false},
+        .existing_zones = &top_wall,
+    }, .off));
+    const pts = [_]NetPt{ .{ .x = 0, .y = 0, .layer = 0 }, .{ .x = 3, .y = 0, .layer = 0 } };
+    setNetParams(core.ctx, placement, 0);
+    setNetRoutePolicy(core.ctx, 0, &pts);
+    var tracks: std.ArrayList(Track) = .empty;
+    var vias: std.ArrayList(Via) = .empty;
+    _ = try routeNet(core.ctx, 0, &pts, &tracks, &vias);
+    try testing.expect(vias.items.len <= budgeted[0].max_vias.?);
 }

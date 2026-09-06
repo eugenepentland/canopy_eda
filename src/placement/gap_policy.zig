@@ -24,6 +24,7 @@
 //! `route_policy.zig`, which is deliberately router-neutral and sits below).
 
 const std = @import("std");
+const board_layers = @import("../board_layers.zig");
 const router = @import("router.zig");
 const route_policy = @import("route_policy.zig");
 
@@ -81,6 +82,15 @@ pub const GapPath = struct {
     ripped_nets: []const i32 = &.{},
 };
 
+/// Validate candidate copper before the caller judges or absorbs it. Every
+/// search tier uses the same layer mask and remaining new-via allowance.
+pub fn allows(path: GapPath, layers: u64, max_vias: ?u16) bool {
+    if (max_vias) |limit| if (path.vias.len > limit) return false;
+    const allowed = board_layers.LayerSet.fromRaw(layers);
+    for (path.tracks) |t| if (!allowed.contains(board_layers.SignalIndex.of(t.layer))) return false;
+    return true;
+}
+
 /// What became of one requested hop, reported the moment it finishes. A
 /// finishing pass on a full board spends minutes inside `closeGaps`, so without
 /// a per-hop report the caller cannot tell a slow board from a hung one, nor
@@ -126,6 +136,8 @@ pub const GapReason = enum {
     /// a SKIPPED hop reports its own state instead of inheriting the previous
     /// hop's diagnosis (which read `routed` on a hop that produced no copper).
     no_such_net,
+    /// The available layers or new-via budget refused the candidate copper.
+    policy,
 };
 
 /// Where a gap pass reports each hop as it finishes.
@@ -218,6 +230,16 @@ pub const Raster = struct {
 
 /// Knobs a caller can turn on one gap pass.
 pub const GapOptions = struct {
+    /// Hard routing constraints, shared by every search tier.
+    constraints: struct {
+        /// Per-net layer choices and new-via limits from the enclosing route plan.
+        /// Waypoint topology belongs to that enclosing route, not each repair hop.
+        /// Empty keeps the historical gap policy. Via limits cover the whole batch.
+        net: []const route_policy.NetPolicy = &.{},
+        /// Whether a hop may put its escape via on its own terminal pad (see
+        /// `TerminalVia`). Default: no, on every pad.
+        terminal_via: TerminalVia = .banned,
+    } = .{},
     /// Allow ripping foreign copper out of a sealed pad's escape and retrying.
     ripup: bool = true,
     /// Where on the rip-up ladder to start (0 = the narrowest rip, `rip_tiers-1`
@@ -237,9 +259,6 @@ pub const GapOptions = struct {
     /// Optional filter on which nets a rip may take copper from (see
     /// `RipFilter`). Absent = any foreign net.
     rip_filter: ?RipFilter = null,
-    /// Whether a hop may put its escape via on its own terminal pad (see
-    /// `TerminalVia`). Default: no, on every pad.
-    terminal_via: TerminalVia = .banned,
     /// The raster this call searches on: how fine, and how much of the board
     /// (see `Raster`).
     raster: Raster = .{},
