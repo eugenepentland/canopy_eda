@@ -3,10 +3,22 @@
 # Zig makes the Debug suite fail after one second while the fake ReleaseSafe job
 # would run for 30; the gate must terminate its whole process group promptly.
 set -euo pipefail
-# A git hook exports GIT_DIR (and friends) to everything it spawns; this
-# script builds throwaway repositories, so those variables would silently
-# redirect every git command below at the real repository. Scrub them first.
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+# Hermetic re-exec. The build's tree-policy step and the release hook both
+# reach this script with a working environment attached — git's hook
+# variables (GIT_DIR …), the release script's exported ZIG and cache dir,
+# deploy knobs, Guardian switches — and every one of them can redirect the
+# throwaway repository and stubbed tools below at the real ones. Restart under
+# a minimal environment so the fixture sees only what it sets up itself.
+if [ -z "${NETLISP_HERMETIC_TEST:-}" ]; then
+  # Fixtures go under the cache dir, never /tmp: that tmpfs carries a per-user
+  # quota here, and a full one makes these tests fail in ways that look like
+  # logic bugs (a git init that cannot write, a marker that never appears).
+  hermetic_tmp="${TMPDIR:-$HOME/.cache/netlisp/tmp}"
+  mkdir -p "$hermetic_tmp"
+  exec env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" LANG=C.UTF-8 \
+    TMPDIR="$hermetic_tmp" ${XDG_RUNTIME_DIR:+XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR"} \
+    NETLISP_HERMETIC_TEST=1 bash "$0" "$@"
+fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
