@@ -559,8 +559,8 @@ test "derived checks read resistor values through the canonical ohms parser" {
     try std.testing.expect(parseOhms("bogus") == null);
 }
 
-// spec: req_derived_checks - feedback-divider and SET-current checks reject the mismatched values used by straps
-test "derived regulator checks catch straps voltage mismatches" {
+// spec: req_derived_checks - feedback-divider and SET-current checks reject the mismatched values used by board-d
+test "derived regulator checks catch board-d voltage mismatches" {
     const allocator = std.heap.page_allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

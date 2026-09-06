@@ -424,7 +424,7 @@ test "moduleNameFromPath extracts the module name only for lib/modules sexps" {
 
     // A `src/` design source is not a module → not tracked (its board layout
     // drives no maturity dot and would re-render the page on every solve).
-    try testing.expect(moduleNameFromPath("projects/designs/src/barracuda/barracuda-base.sexp") == null);
+    try testing.expect(moduleNameFromPath("projects/designs/src/board-a/board-a-base.sexp") == null);
     // Library files that aren't modules, and non-`.sexp` paths, are ignored.
     try testing.expect(moduleNameFromPath("projects/designs/lib/components/res-0402.sexp") == null);
     try testing.expect(moduleNameFromPath("projects/designs/lib/modules/w55rp20.layouts.json") == null);

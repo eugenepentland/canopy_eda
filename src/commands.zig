@@ -53,11 +53,23 @@ const out_of_memory_msg = "Out of memory\n";
 const build_error_fmt = "Build error: {}\n";
 const diag_error_fmt = "{s}:{d}:{d}: error: {s}\n";
 const diag_warning_fmt = "{s}:{d}:{d}: warning: {s}\n";
-const build_failed_assertion_msg = "Build failed: assertion violations\n";
+/// What `build` and the exporters print before exiting 1 on a failed
+/// assertion. It states the layer rule rather than only the verdict, because
+/// the two layers deliberately differ and a reader hitting this line is
+/// exactly the reader who needs to know that `check` will still report.
+const build_failed_assertion_msg =
+    "Build failed: the design's own assertions do not hold — nothing was emitted.\n" ++
+    "  Evaluation never stops at an assertion, so every one above was checked; a\n" ++
+    "  command that EMITS refuses to write a netlist, BOM or export the design's\n" ++
+    "  own arithmetic contradicts. `netlisp check` reports the same failures as\n" ++
+    "  findings beside ERC, prints its whole report, and exits 1.\n";
 const cannot_write_fmt = "Cannot write {s}: {}\n";
 const pass_fmt = "PASS: {s}\n";
 const warn_fmt = "WARN: {s}\n";
 const fail_fmt = "FAIL: {s}\n";
+/// `FAIL:` carrying the `(assert …)` form's own position, so a failing
+/// assertion is as jumpable as a compiler diagnostic.
+const fail_located_fmt = "FAIL: {s}:{d}:{d}: {s}\n";
 const identity_resolution_error_fmt = "Identity resolution error: {}\n";
 const wrote_bytes_fmt = "Wrote {s} ({d} bytes)\n";
 const check_usage =
@@ -287,6 +299,46 @@ fn writeCheckErc(w: anytype, violations: []const erc_mod.Violation, filter: ?[]c
         try w.print("— {s}\n", .{violation.message});
     }
     return counts;
+}
+
+/// Print every recorded assertion and return how many HARD ones failed.
+///
+/// This is the emitting layer's half of the language's one assertion rule,
+/// which `netlisp help` states and the exporters and `build` share:
+///
+///   * Evaluation never stops at a failed assertion. The design is evaluated
+///     to the end and every assertion is recorded, so one run reports all of
+///     them rather than the first.
+///   * A command that EMITS an artifact (`build`, `export-kicad`, …) then
+///     refuses to write one when a hard assertion failed: it exits 1 and no
+///     netlist, BOM or export appears.
+///   * A command that REPORTS (`check`, the review PDF, the served pages)
+///     records the same failure as one finding among the ERC and requirement
+///     findings and still prints its whole report.
+///   * An advisory assertion (`is_warning` — the frequency-plan and PLL
+///     analyses raise these) prints as WARN and blocks nothing, either layer.
+///
+/// A failing line carries `file:line:col` of the `(assert …)` form so the
+/// author can jump to it; an assertion synthesised by an analysis has no
+/// source form and falls back to the bare message.
+fn reportAssertions(eval: *const Evaluator, board_path: []const u8) usize {
+    var failures: usize = 0;
+    for (eval.assertions.items) |assertion| {
+        if (assertion.passed) {
+            std.debug.print(pass_fmt, .{assertion.message});
+        } else if (assertion.is_warning) {
+            std.debug.print(warn_fmt, .{assertion.message});
+        } else {
+            failures += 1;
+            if (assertion.span.line == 0 and assertion.span.col == 0) {
+                std.debug.print(fail_fmt, .{assertion.message});
+                continue;
+            }
+            const file = if (assertion.file.len > 0) assertion.file else board_path;
+            std.debug.print(fail_located_fmt, .{ file, assertion.span.line, assertion.span.col, assertion.message });
+        }
+    }
+    return failures;
 }
 
 fn writeCheckAssertions(w: anytype, eval: *const Evaluator, filter: ?[]const u8) !CheckCounts {
@@ -560,21 +612,7 @@ pub fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) CommandE
         std.debug.print(diag_warning_fmt, .{ file, w.span.line, w.span.col, w.message });
     }
 
-    var has_failure = false;
-    for (eval.assertions.items) |assertion| {
-        if (assertion.passed) {
-            std.debug.print(pass_fmt, .{assertion.message});
-        } else if (assertion.is_warning) {
-            std.debug.print(warn_fmt, .{assertion.message});
-        } else {
-            std.debug.print(fail_fmt, .{assertion.message});
-            has_failure = true;
-        }
-    }
-
-    if (has_failure) {
-        exit.fatal(build_failed_assertion_msg, .{});
-    }
+    if (reportAssertions(&eval, board_path) > 0) exit.fatal(build_failed_assertion_msg, .{});
 
     {
         {
@@ -702,21 +740,7 @@ pub fn cmdExportKicad(allocator: std.mem.Allocator, args: []const []const u8) Co
     // part. See `persistIdsForExport`.
     persistIdsForExport(allocator, board_path, &eval);
 
-    var has_failure = false;
-    for (eval.assertions.items) |assertion| {
-        if (assertion.passed) {
-            std.debug.print(pass_fmt, .{assertion.message});
-        } else if (assertion.is_warning) {
-            std.debug.print(warn_fmt, .{assertion.message});
-        } else {
-            std.debug.print(fail_fmt, .{assertion.message});
-            has_failure = true;
-        }
-    }
-
-    if (has_failure) {
-        exit.fatal(build_failed_assertion_msg, .{});
-    }
+    if (reportAssertions(&eval, board_path) > 0) exit.fatal(build_failed_assertion_msg, .{});
 
     {
         {
@@ -900,8 +924,8 @@ fn parseSyncSchArgs(args: []const []const u8) SyncSchArgs {
 }
 
 /// CLI entry point for `netlisp sync-kicad-sch`. Exports the design's schematic
-/// under its KiCad PROJECT's name (`Cyclops Digital.kicad_sch`, not
-/// `stm32n6.kicad_sch`) and writes it into the directory holding the board the
+/// under its KiCad PROJECT's name (`Board B Digital.kicad_sch`, not
+/// `board-c.kicad_sch`) and writes it into the directory holding the board the
 /// design declares, so the KiCad project carries both halves.
 ///
 /// It refuses rather than overwrites: an existing sheet is replaced only when
@@ -1436,56 +1460,56 @@ fn pushToServer(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
 
 // spec: system-review - CLI system review commands share project, system, and output argument parsing
 test "system review CLI accepts project and output flags around the system name" {
-    const args = [_][]const u8{ "barracuda", "--output", "review.zip", project_dir_flag, "projects/designs" };
+    const args = [_][]const u8{ "board-a", "--output", "review.zip", project_dir_flag, "projects/designs" };
     const parsed = try parseSystemReviewArgs(&args, true);
     try std.testing.expectEqualStrings("projects/designs", parsed.project_dir);
-    try std.testing.expectEqualStrings("barracuda", parsed.name);
+    try std.testing.expectEqualStrings("board-a", parsed.name);
     try std.testing.expectEqualStrings("review.zip", parsed.output.?);
 }
 
 // spec: system-review - CLI system review commands reject unknown flags, missing option values, duplicate positionals, and draft output flags on readiness checks
 test "system review CLI rejects ambiguous and command-specific arguments" {
-    try std.testing.expectError(error.UnknownOption, parseSystemReviewArgs(&.{ "barracuda", "--wat" }, true));
-    try std.testing.expectError(error.MissingOptionValue, parseSystemReviewArgs(&.{ "barracuda", "--output" }, true));
-    try std.testing.expectError(error.TooManyPositionals, parseSystemReviewArgs(&.{ "barracuda", "another" }, true));
-    try std.testing.expectError(error.OutputNotAllowed, parseSystemReviewArgs(&.{ "barracuda", "--output", "review.zip" }, false));
-    try std.testing.expectError(error.DuplicateOption, parseSystemReviewArgs(&.{ project_dir_flag, "one", project_dir_flag, "two", "barracuda" }, true));
+    try std.testing.expectError(error.UnknownOption, parseSystemReviewArgs(&.{ "board-a", "--wat" }, true));
+    try std.testing.expectError(error.MissingOptionValue, parseSystemReviewArgs(&.{ "board-a", "--output" }, true));
+    try std.testing.expectError(error.TooManyPositionals, parseSystemReviewArgs(&.{ "board-a", "another" }, true));
+    try std.testing.expectError(error.OutputNotAllowed, parseSystemReviewArgs(&.{ "board-a", "--output", "review.zip" }, false));
+    try std.testing.expectError(error.DuplicateOption, parseSystemReviewArgs(&.{ project_dir_flag, "one", project_dir_flag, "two", "board-a" }, true));
 }
 
 test "parseSyncSchArgs: flags in any order, lone positional is the design" {
     // spec: kicad_sch_push - The sync-kicad-sch CLI reads --project-dir, --dry-run and --force in any order and takes the lone positional as the design
-    const flags_first = [_][]const u8{ project_dir_flag, "projects/designs", "--dry-run", "stm32n6" };
+    const flags_first = [_][]const u8{ project_dir_flag, "projects/designs", "--dry-run", "board-c" };
     const a = parseSyncSchArgs(&flags_first);
     try std.testing.expectEqualStrings("projects/designs", a.project_dir);
-    try std.testing.expectEqualStrings("stm32n6", a.design);
+    try std.testing.expectEqualStrings("board-c", a.design);
     try std.testing.expect(a.dry_run and !a.force);
 
     // The design may also lead, and --force is independent of --dry-run. The
     // whole argv reaches here verbatim: the dispatcher must not re-slice it,
     // which is exactly how the project-dir flag once went missing.
-    const name_first = [_][]const u8{ "stm32n6", "--force", project_dir_flag, "/p" };
+    const name_first = [_][]const u8{ "board-c", "--force", project_dir_flag, "/p" };
     const b = parseSyncSchArgs(&name_first);
     try std.testing.expectEqualStrings("/p", b.project_dir);
-    try std.testing.expectEqualStrings("stm32n6", b.design);
+    try std.testing.expectEqualStrings("board-c", b.design);
     try std.testing.expect(b.force and !b.dry_run);
 }
 
 test "parseBuildArgs: bare positional does not imply push" {
     // spec: commands - a lone positional design name builds without pushing
-    const args = [_][]const u8{ project_dir_flag, "projects/designs", "stm32n6" };
+    const args = [_][]const u8{ project_dir_flag, "projects/designs", "board-c" };
     const got = parseBuildArgs(&args);
     try std.testing.expectEqualStrings("projects/designs", got.project_dir);
-    try std.testing.expectEqualStrings("stm32n6", got.design.?);
+    try std.testing.expectEqualStrings("board-c", got.design.?);
     try std.testing.expect(!got.want_push);
     try std.testing.expect(got.output_dir == null);
 }
 
 test "parseBuildArgs: --push <name> requests a push of that design" {
     // spec: commands - --push with an explicit name pushes that design
-    const args = [_][]const u8{ "--push", "stm32n6" };
+    const args = [_][]const u8{ "--push", "board-c" };
     const got = parseBuildArgs(&args);
     try std.testing.expect(got.want_push);
-    try std.testing.expectEqualStrings("stm32n6", got.design.?);
+    try std.testing.expectEqualStrings("board-c", got.design.?);
 }
 
 test "parseBuildArgs: bare --push pushes the positional design" {

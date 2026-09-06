@@ -623,26 +623,26 @@ const fixture_signals = [_]system_review.InterfaceSignal{
 
 const fixture_boards = [_]BoardMember{
     .{
-        .name = "barracuda",
+        .name = "board-a",
         .role = "rf",
-        .source = "src/boards/barracuda.sexp",
-        .part_number = "BARRACUDA-RF",
+        .source = "src/boards/board-a.sexp",
+        .part_number = "BOARD-A-RF",
         .revision = "B3",
-        .layout = "Barracuda V2",
+        .layout = "Board A V2",
     },
     .{
-        .name = "barracuda-base",
+        .name = "board-a-base",
         .role = "base",
-        .source = "src/boards/barracuda-base.sexp",
-        .part_number = "BARRACUDA-BASE",
+        .source = "src/boards/board-a-base.sexp",
+        .part_number = "BOARD-A-BASE",
         .revision = "B3",
     },
 };
 
 const fixture_interfaces = [_]InterfaceContract{.{
     .id = "j1-board-to-board",
-    .left = .{ .board = "barracuda", .connector = "J1" },
-    .right = .{ .board = "barracuda-base", .connector = "base-interface/J1" },
+    .left = .{ .board = "board-a", .connector = "J1" },
+    .right = .{ .board = "board-a-base", .connector = "base-interface/J1" },
     .contact_count = fixture_signals.len,
     .signals = &fixture_signals,
 }};
@@ -650,8 +650,8 @@ const fixture_interfaces = [_]InterfaceContract{.{
 fn fixture() SystemSpec {
     return .{
         .schema = system_review.schema_v1,
-        .name = "barracuda",
-        .title = "Barracuda OC-303-1-01",
+        .name = "board-a",
+        .title = "Board A OC-303-1-01",
         .part_number = "OC-303-1-01",
         .revision = "B3",
         .boards = &fixture_boards,
@@ -705,9 +705,9 @@ test "renderSystemSvg frames a self-contained SVG naming every board" {
     try testing.expect(std.mem.indexOf(u8, out, "class=\"dg-") == null);
 
     for ([_][]const u8{
-        "barracuda",    "barracuda-base", "rf",   "base",
-        "BARRACUDA-RF", "BARRACUDA-BASE", "rev ", "B3",
-        "Barracuda V2",
+        "board-a",    "board-a-base", "rf",   "base",
+        "BOARD-A-RF", "BOARD-A-BASE", "rev ", "B3",
+        "Board A V2",
     }) |needle| {
         try testing.expect(std.mem.indexOf(u8, out, needle) != null);
     }
@@ -720,7 +720,7 @@ test "renderSystemSvg groups interface contacts into labeled lanes" {
     defer testing.allocator.free(out);
 
     try testing.expect(std.mem.indexOf(u8, out, "j1-board-to-board") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "11 contacts \u{00b7} barracuda J1") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "11 contacts \u{00b7} board-a J1") != null);
     // Two power contacts, two comms, two control, one clock, one RF, three GND.
     try testing.expect(std.mem.indexOf(u8, out, "POWER \u{00b7} 2 contacts") != null);
     try testing.expect(std.mem.indexOf(u8, out, "COMMS \u{00b7} 2 contacts") != null);
@@ -770,20 +770,20 @@ test "renderSystemSvg handles board counts other than two" {
     spec.boards = fixture_boards[0..1];
     const one = try render(testing.allocator, &spec);
     defer testing.allocator.free(one);
-    try testing.expect(std.mem.indexOf(u8, one, "barracuda") != null);
+    try testing.expect(std.mem.indexOf(u8, one, "board-a") != null);
     try testing.expect(std.mem.endsWith(u8, one, "</svg></div>"));
 
     const three = fixture_boards ++ [_]BoardMember{.{
-        .name = "barracuda-fan",
+        .name = "board-a-fan",
         .role = "thermal",
-        .source = "src/boards/barracuda-fan.sexp",
-        .part_number = "BARRACUDA-FAN",
+        .source = "src/boards/board-a-fan.sexp",
+        .part_number = "BOARD-A-FAN",
         .revision = "A1",
     }};
     spec.boards = &three;
     const wide = try render(testing.allocator, &spec);
     defer testing.allocator.free(wide);
-    try testing.expect(std.mem.indexOf(u8, wide, "barracuda-fan") != null);
+    try testing.expect(std.mem.indexOf(u8, wide, "board-a-fan") != null);
     try testing.expect(std.mem.endsWith(u8, wide, "</svg></div>"));
 }
 
@@ -793,7 +793,7 @@ test "renderSystemSvg renders boards for a system with no interfaces" {
     spec.interfaces = &.{};
     const out = try render(testing.allocator, &spec);
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "barracuda-base") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "board-a-base") != null);
     try testing.expect(std.mem.indexOf(u8, out, "j1-board-to-board") == null);
 }
 
@@ -820,7 +820,7 @@ test "renderSystemDocumentSvg emits a self-standing SVG document" {
     try testing.expect(std.mem.indexOf(u8, document, " width=\"") != null);
     try testing.expect(std.mem.indexOf(u8, document, "<rect width=\"100%\" height=\"100%\"") != null);
     // Same body as the page fragment: every board node still reads the same.
-    try testing.expect(std.mem.indexOf(u8, document, "barracuda-base") != null);
+    try testing.expect(std.mem.indexOf(u8, document, "board-a-base") != null);
     try testing.expect(std.mem.indexOf(u8, document, "j1-board-to-board") != null);
 
     const again = try renderDocument(testing.allocator, &spec);

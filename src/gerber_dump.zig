@@ -23,8 +23,8 @@
 //! same one aperture, several millimetres of spurious copper. Nothing counts
 //! that. The emitted bytes do:
 //!
-//!   netlisp gerber-dump barracuda > base.txt   # built from the base binary
-//!   netlisp gerber-dump barracuda > cand.txt   # …and from the candidate
+//!   netlisp gerber-dump board-a > base.txt   # built from the base binary
+//!   netlisp gerber-dump board-a > cand.txt   # …and from the candidate
 //!   diff -I '^#' base.txt cand.txt             # must be empty
 //!
 //! `scripts/corpus_diff.sh` runs exactly that over the whole board corpus,
@@ -333,7 +333,7 @@ pub fn cmdGerberDump(allocator: std.mem.Allocator, args: []const []const u8) Dum
 fn runParsed(allocator: std.mem.Allocator, w: *std.Io.Writer, parsed: Args) DumpError!void {
     var unresolved: usize = 0;
     for (parsed.names) |name| {
-        // A per-board arena: a poured barracuda-class package holds hundreds of
+        // A per-board arena: a poured board-a-class package holds hundreds of
         // megabytes of artwork, and a corpus dump must peak at one board's worth
         // rather than the sum of them.
         var board_state = std.heap.ArenaAllocator.init(allocator);
@@ -357,7 +357,7 @@ test "gerber-dump CLI parses flags and positionals" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const parsed = try parseArgs(arena, &.{ "--project-dir", "p", "--layout", "star", "--digest", "barracuda", "cyclops" });
+    const parsed = try parseArgs(arena, &.{ "--project-dir", "p", "--layout", "star", "--digest", "board-a", "board-b" });
     try testing.expectEqualStrings("p", parsed.project_dir);
     try testing.expectEqualStrings("star", parsed.layout.?);
     try testing.expect(parsed.digest);

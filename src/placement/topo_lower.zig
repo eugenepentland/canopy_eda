@@ -171,7 +171,7 @@ fn netInput(f: Facts, net_i: usize) topo_plan.NetInput {
 /// Such a net needs no corridor: the plane already reaches every one of its
 /// pads. Planning one is the most expensive thing the planner can do (a rail on
 /// fifty pads is fifty terminals of star flow) for an answer nothing reads —
-/// barracuda's `GND` was landing on `no_path` by accident, which was the right
+/// board-a's `GND` was landing on `no_path` by accident, which was the right
 /// outcome reached the wrong way.
 fn planeCarried(pl: optimizer.Placement, net_i: usize) bool {
     if (net_i >= pl.nets.len) return false;

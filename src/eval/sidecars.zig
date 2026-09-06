@@ -4,7 +4,7 @@
 //! A board's `.sexp` accumulates two kinds of content that are not the
 //! circuit: verification sign-offs, and the physical/diagram declarations
 //! (`pcb-plan`, `net-class`, `net-envelope`, `stackup`, `diagram-layout`, …).
-//! Measured on `boards/barracuda`, those were 39% of a 1867-line file against
+//! Measured on `boards/board-a`, those were 39% of a 1867-line file against
 //! 7.6% for the actual `(section …)` bodies. `<name>.checks.sexp` already
 //! carried the first kind; this module generalises that one-off into a named
 //! set of three sidecars:

@@ -12,7 +12,7 @@
 //! The post-route gap closer's vacate tier (`serve/mcp_close_gaps.zig` +
 //! `vacate_policy.zig`) proved the mechanism: take a small, CHEAP-TO-RESTORE
 //! subset of the copper in the way off the board, re-route the cluster, and
-//! keep the result only if the board strictly improved. It took barracuda 85 →
+//! keep the result only if the board strictly improved. It took board-a 85 →
 //! 91 nets. But it runs only from CLI, on a saved layout, after the fact — a
 //! from-zero `bench-route` never sees it. This module brings the same mechanism
 //! INSIDE the route, generalized along the axis the vacate tier lacks: the
@@ -26,7 +26,7 @@
 //!   1. **The blockers are found GEOMETRICALLY, not only by probe.** Rip-up
 //!      nominates from `detectBlockers` alone — the foreign nets a completed
 //!      soft path walked through. A foreign PAD is a hard wall to that probe, so
-//!      a net boxed in by pads yields NOTHING to rip: measured on barracuda, six
+//!      a net boxed in by pads yields NOTHING to rip: measured on board-a, six
 //!      of the seven nets reaching this tier report an empty probe result, which
 //!      is why rip-up is a no-op for them. `corridorCandidates` adds the
 //!      straight-hop sweep the post-route vacate tier nominates from, and that
@@ -51,13 +51,13 @@
 //! ## What it is measured to be worth
 //!
 //! From zero (`bench-route`, ReleaseSafe, whole corpus, A/B against the same
-//! binary with `Limits.max_victims = 0`): **cyclops-xband-sip 18 → 19**
+//! binary with `Limits.max_victims = 0`): **board-b-xband-sip 18 → 19**
 //! (`RxADV_1V8`, victim-first, three displaced blockers all restored),
-//! **straps 79 → 80** (`RF_AMP_OUT`, same shape), black-canyon closes one more
+//! **board-d 79 → 80** (`RF_AMP_OUT`, same shape), board-e closes one more
 //! net by the router's own count at an unchanged oracle count, and no board
-//! loses one. Wall cost 1.10x (barracuda) to 1.27x (straps).
+//! loses one. Wall cost 1.10x (board-a) to 1.27x (board-d).
 //!
-//! **Barracuda is unchanged at 82/91, and the trace says why.** All seven of its
+//! **Board A is unchanged at 82/91, and the trace says why.** All seven of its
 //! residual nets form clusters and every attempt is rolled back: the victim
 //! fails to route with its three nearest corridor occupants entirely off the
 //! board, in either order, at the escalated budget. Removing copper is simply
@@ -264,7 +264,7 @@ pub fn judge(f: BlockerFacts, victim: Victim) Verdict {
 /// net already PARTLY on the board whose islands need joining, so any freed
 /// channel helps and the only real risk is the restore. This tier's victim has
 /// NO copper at all: the cluster is worth forming only if it contains the nets
-/// actually standing where the victim must go. Measured on barracuda's
+/// actually standing where the victim must go. Measured on board-a's
 /// `SPI_MOSI` under cheapness-first: the picks were two unrelated 12- and
 /// 13-element nets and the four sibling SPI lines sharing its connector
 /// corridor — the jam the board is actually stuck on — were all refused
@@ -395,7 +395,7 @@ pub fn orderIsNovel(o: Order, victim_pri: u32, blockers: []const Nomination) boo
 ///
 /// The shared `router.ripScoreBetter` gate that rip-up uses also accepts an
 /// equal-count board carrying shorter copper. For a rip-up round that is a real
-/// improvement; for a RESCUE tier it is churn, and measured churn: on barracuda
+/// improvement; for a RESCUE tier it is churn, and measured churn: on board-a
 /// it kept a transaction that routed its victim and broke a displaced blocker —
 /// the same routed count, a different open list, and a whole cluster of copper
 /// redrawn for nothing. So this predicate gates ENTRY to the candidate set, and
@@ -555,7 +555,7 @@ fn probeCandidates(
 /// This exists because the soft probe REPORTS NOTHING for a net whose corridor
 /// is walled by pads rather than by copper — `softProbe` records blockers only
 /// on a path it actually completed, and `softEnter` treats a foreign pad as a
-/// hard wall (a pad can never be ripped). Measured on barracuda's residual set:
+/// hard wall (a pad can never be ripped). Measured on board-a's residual set:
 /// six of the seven nets this tier sees produce an EMPTY probe result, so a
 /// probe-only tier is starved of input and can never fire. The straight-line
 /// sweep is what the post-route vacate tier nominates from, and it is the half
@@ -685,7 +685,7 @@ fn tryOrders(request: OrderRun) std.mem.Allocator.Error!void {
 /// `Limits.cluster_budget`).
 ///
 /// A fine-grid WINDOW retry of the victim inside the transaction was measured
-/// here and removed: gated to the victim-first order it cost barracuda 13.2 s →
+/// here and removed: gated to the victim-first order it cost board-a 13.2 s →
 /// 22.0 s (1.8x the ungated route) and closed nothing. The one transaction it
 /// changed was a lateral swap — the victim routed and a displaced blocker did
 /// not — which the accept gate above now refuses on its own.

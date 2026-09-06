@@ -6,7 +6,7 @@
 //! always a TOP-level net. That leaves every node one step further in
 //! unnameable — the far side of a module's own input ferrite (`buck_5v75/VIN_F`,
 //! `hmc733/V_5VA_FILT`, `lna/VDD_FILT`), which is where a module's decoupling
-//! and its feedback divider actually sit. On Barracuda that was 139 of the 172
+//! and its feedback divider actually sit. On Board A that was 139 of the 172
 //! `component-rating-unproven` findings: the parts were correctly chosen, the
 //! board simply had no vocabulary for the net they are on.
 //!
@@ -309,7 +309,7 @@ fn applyRuleSeeds(
 /// Bound a still-unknown net by the declared absolute maximum of the one device
 /// pin sitting on it — an IC's internal-regulator or bias node behind its
 /// bypass capacitor, which no series conductor reaches and which was therefore
-/// the single biggest class of hand-authored `(net-envelope …)` on Barracuda
+/// the single biggest class of hand-authored `(net-envelope …)` on Board A
 /// (39 of the 53 the walk still could not name).
 ///
 /// The ceiling is `min(pin maximum, the widest potential the part itself
@@ -487,7 +487,7 @@ fn seedRails(
 /// statement: this is what the port drives, or what the board is fed. On an
 /// INTERNAL INPUT it is the opposite — the pin's tolerated range, the datasheet
 /// absolute maximum. Seeding those would let a consumer's tolerance rewrite the
-/// potential of the rail feeding it: Barracuda ties `bcuda-boost25`'s
+/// potential of the rail feeding it: Board A ties `board-a-boost25`'s
 /// `(port "EN_25V" in signal (nominal 3.3) (rated 0.0 3.6))` straight to
 /// `V_5VA`, and reading that 0 V floor as a rail fact widened the whole 5 V
 /// domain to 0–5.25 V, which then "proved" a 91 Ω LNA feed resistor at 0.30 W
@@ -1040,7 +1040,7 @@ test "build carries a rail envelope across a module-internal ferrite" {
     var scratch = arena();
     defer scratch.deinit();
     const alloc = scratch.allocator();
-    // The shape every buck on Barracuda has: the board rail is bridged onto the
+    // The shape every buck on Board A has: the board rail is bridged onto the
     // module's VIN port, and the module's OWN input bead separates that from the
     // VIN_F node its decoupling and its converter pin actually sit on.
     const bead = env_mod.Instance{
@@ -1088,7 +1088,7 @@ test "build ignores an internal input port's rated range" {
     var scratch = arena();
     defer scratch.deinit();
     const alloc = scratch.allocator();
-    // Barracuda ties a boost converter's `(port "EN_25V" in signal (rated 0.0 3.6))`
+    // Board A ties a boost converter's `(port "EN_25V" in signal (rated 0.0 3.6))`
     // straight to V_5VA. Reading that 0 V floor as a rail fact used to widen the
     // whole 5 V domain and manufacture a dissipation failure downstream.
     const inner_nets = [_]env_mod.Net{
@@ -1335,7 +1335,7 @@ test "a pin maximum bounds a cap-terminated bias node the topology cannot reach"
     var scratch = arena();
     defer scratch.deinit();
     const alloc = scratch.allocator();
-    // The shape 38 of Barracuda's hand-authored envelopes have: an IC's
+    // The shape 38 of Board A's hand-authored envelopes have: an IC's
     // internal-regulator output behind its own bypass capacitor. No series
     // conductor touches it, so no domain reaches it — only the library does.
     const instances = [_]env_mod.Instance{

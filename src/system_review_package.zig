@@ -4190,12 +4190,12 @@ test "system release token changes with either board lock" {
 
 test "board identity requires the exact resolved root source" {
     try std.testing.expect(boardSourceMatches(
-        "src/boards/barracuda/barracuda.sexp",
-        "src/boards/barracuda/barracuda.sexp",
+        "src/boards/board-a/board-a.sexp",
+        "src/boards/board-a/board-a.sexp",
     ));
     try std.testing.expect(!boardSourceMatches(
         "lib/modules/base-interface.sexp",
-        "src/boards/barracuda/barracuda.sexp",
+        "src/boards/board-a/board-a.sexp",
     ));
 }
 
@@ -4279,7 +4279,7 @@ fn fixtureEngineering(allocator: std.mem.Allocator) !board_review.Engineering {
     return .{
         .power = rails,
         .frequency = try fixtureFrequencyPlans(allocator),
-        // The barracuda shape: the board-coupled ladder wants airflow where the
+        // The board-a shape: the board-coupled ladder wants airflow where the
         // datasheet screen called the same board passively fine, and most of
         // the population declares no power at all.
         .thermal = .{
@@ -4316,7 +4316,7 @@ fn fixtureEngineering(allocator: std.mem.Allocator) !board_review.Engineering {
     };
 }
 
-/// The Barracuda shape: a swept X-band source behind a filter pair that does
+/// The Board A shape: a swept X-band source behind a filter pair that does
 /// NOT reach the bottom of the window the plan demands, a fixed LO whose image
 /// nothing declared removes, and a spur table that claims one co-channel
 /// product and leaves the rest stating placement only.
@@ -4356,12 +4356,12 @@ fn fixtureFrequencyPlans(allocator: std.mem.Allocator) ![]const board_review.Fre
         .{
             .screen = "band_closure",
             .status = .fail,
-            .message = "Barracuda Band 1: the high-side RF window 11000.000-12450.000 MHz for output band 50.000-1500.000 MHz leaves the delivered passband 11100.000-12900.000 MHz",
+            .message = "Board A Band 1: the high-side RF window 11000.000-12450.000 MHz for output band 50.000-1500.000 MHz leaves the delivered passband 11100.000-12900.000 MHz",
         },
         .{
             .screen = "spur_coverage",
             .status = .warn,
-            .message = "Barracuda Band 1: 1 of the high-side co-channel products carry no declared suppression",
+            .message = "Board A Band 1: 1 of the high-side co-channel products carry no declared suppression",
         },
     });
     const plans = try allocator.dupe(board_review.FrequencyPlanSideband, &.{.{
@@ -4384,7 +4384,7 @@ fn fixtureFrequencyPlans(allocator: std.mem.Allocator) ![]const board_review.Fre
         .screens = .{ .pass = 4, .warn = 1, .fail = 1, .failing = failing },
     }});
     return allocator.dupe(board_review.FrequencyPlanReport, &.{.{
-        .name = "Barracuda Band 1",
+        .name = "Board A Band 1",
         .mode = .gate,
         .outcome = .screened,
         .profile = .{
@@ -4706,7 +4706,7 @@ test "the frequency-plan section renders the closure gap, the image and every pr
     const analysis = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), true);
 
     const plan = try renderSection(allocator, analysis, "frequency-plan-summary");
-    try std.testing.expect(std.mem.indexOf(u8, plan, "### main frequency plan Barracuda Band 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "### main frequency plan Board A Band 1") != null);
     // The profile line states the LO, its drive against the mixer's window,
     // the commanded band, the delivered source and the enumeration bound.
     try std.testing.expect(std.mem.indexOf(
@@ -4746,7 +4746,7 @@ test "the frequency-plan section renders the closure gap, the image and every pr
     // declared in-band limit.
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, plan, " dBc"));
     // Non-passing screens are listed with their messages, as the loop section does.
-    try std.testing.expect(std.mem.indexOf(u8, plan, "| `band_closure` | fail | Barracuda Band 1: the high-side RF window 11000.000-12450.000 MHz") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "| `band_closure` | fail | Board A Band 1: the high-side RF window 11000.000-12450.000 MHz") != null);
     try std.testing.expect(std.mem.indexOf(u8, plan, "| `spur_coverage` | warn |") != null);
 }
 
@@ -4761,7 +4761,7 @@ test "the frequency-plan section states an unrealizable sideband and its own cap
     const refused = try allocator.dupe(board_review.FrequencyScreen, &.{.{
         .screen = "rf_window",
         .status = .fail,
-        .message = "Barracuda Band 1: the low-side RF window 9450.000-10900.000 MHz is not a realizable sweep",
+        .message = "Board A Band 1: the low-side RF window 9450.000-10900.000 MHz is not a realizable sweep",
     }});
     // A truncated plan: fewer retained rows and screens than the engine produced.
     const rows = try allocator.dupe(board_review.SpurProduct, &.{.{
@@ -4782,7 +4782,7 @@ test "the frequency-plan section states an unrealizable sideband and its own cap
     });
     var engineering: board_review.Engineering = .{};
     engineering.frequency = try allocator.dupe(board_review.FrequencyPlanReport, &.{.{
-        .name = "Barracuda Band 1",
+        .name = "Board A Band 1",
         .mode = .advisory,
         .outcome = .unrealizable,
         .profile = .{},
@@ -4797,7 +4797,7 @@ test "the frequency-plan section states an unrealizable sideband and its own cap
         "This sideband is not a realizable plan against the declared LO: no RF window closed, so no products were enumerated.",
     ) != null);
     // The refusal still carries its verdict; it does not become an empty table.
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "| `rf_window` | fail | Barracuda Band 1: the low-side RF window") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "| `rf_window` | fail | Board A Band 1: the low-side RF window") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "| Product | Band |") != null);
     // Both caps are stated in the rendered text where they bite.
     try std.testing.expect(std.mem.indexOf(u8, rendered, "Table capped at 1 of 83 enumerated products.") != null);
@@ -4815,9 +4815,9 @@ test "failing frequency-plan screens reach the open-items register" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         items,
-        "| `main` | frequency plan (high side) | fail | Barracuda Band 1: the high-side RF window",
+        "| `main` | frequency plan (high side) | fail | Board A Band 1: the high-side RF window",
     ) != null);
-    try std.testing.expect(std.mem.indexOf(u8, items, "| `main` | frequency plan (high side) | warn | Barracuda Band 1: 1 of the high-side") != null);
+    try std.testing.expect(std.mem.indexOf(u8, items, "| `main` | frequency plan (high side) | warn | Board A Band 1: 1 of the high-side") != null);
     // The same register still carries the loop screens beside them.
     try std.testing.expect(std.mem.indexOf(u8, items, "| `main` | PLL fitted | fail |") != null);
     try expectSummariesAddDetail(items);

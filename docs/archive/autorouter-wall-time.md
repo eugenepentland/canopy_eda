@@ -235,7 +235,7 @@ quantifies what it saves on a failing board (~450 s on stm32n6).
 ### Explicitly not proposed
 
 - Replacing the direct synthesis with a negotiated/rip-up congestion pass — the
-  prior audit measured that as net-negative (see `docs/autorouter-plan.md` §1).
+  prior audit measured that as net-negative (see `docs/archive/autorouter-plan.md` §1).
 - Parallelizing the greedy pass — net order is load-bearing (priority, pairs,
   first-routed-wins); a thread pool would need the exact index and occupancy to
   be per-thread, a large refactor with no measured upside yet.

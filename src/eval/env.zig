@@ -2652,6 +2652,13 @@ pub const AssertionResult = struct {
     /// True when the evaluator owns a dynamically formatted message and must
     /// release it during deinit. Source-backed assertion strings stay false.
     message_owned: bool = false,
+    /// Where the `(assert …)` / `(assert-range …)` form was written, and in
+    /// which file. `span.zero` with an empty `file` means the assertion has no
+    /// source form at all — the frequency-plan and PLL analyses synthesise
+    /// theirs — and a reporter must then fall back to the design's own path.
+    /// `netlisp build` prints a failing assertion at `file:line:col` from this.
+    span: ast.Span = ast.Span.zero,
+    file: []const u8 = "",
 };
 
 /// Lexical environment with parent chain.

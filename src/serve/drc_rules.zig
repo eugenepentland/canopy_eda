@@ -1011,11 +1011,12 @@ test "viewer exposes the physical stack and a persistent B-key active side" {
 // spec: Web Server - the /pcb-layout action toolbar carries a first-class pour-refill button gated to designs that declare outer-layer copper pours
 test "toolbar exposes a pour-refill button gated on declared pours" {
     const js = @embedFile("assets/pcb_board.js");
-    const page = @embedFile("pcb_layout_page.zig");
+    const chrome = @embedFile("pcb_layout_chrome.zig");
+    const blob = @embedFile("pcb_layout_blob.zig");
     // The button ships in the action toolbar, and the blob emits the declared
     // flag the client reads to hide it when no outer pour is declared.
-    try std.testing.expect(std.mem.indexOf(u8, page, "id=\\\"pcb-pour\\\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, page, "pours_declared") != null);
+    try std.testing.expect(std.mem.indexOf(u8, chrome, "id=\\\"pcb-pour\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, blob, "pours_declared") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "PCB.pours_declared") != null);
 }
 
@@ -1046,11 +1047,11 @@ test "toolbar pour button tracks staleness and gates under replay" {
 // spec: Web Server - the /pcb-layout toolbar carries a custom copper-pour tool that draws a polygon zone, picks its net and layer, persists it with the layout, and refills its fill
 test "toolbar exposes a custom copper-pour drawing tool wired to zones" {
     const js = @embedFile("assets/pcb_board.js");
-    const page = @embedFile("pcb_layout_page.zig");
+    const chrome = @embedFile("pcb_layout_chrome.zig");
     // The pour-draw button ships in BOTH toolbars (distinct id from the ⟳ refill
     // button #pcb-pour) and the viewer wires the polygon tool, the net/layer
     // dialog, deletion, and zone persistence.
-    try std.testing.expect(std.mem.indexOf(u8, page, "id=\\\"pcb-pour-zone\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, chrome, "id=\\\"pcb-pour-zone\\\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function pourArm") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function openPourDialog") != null);
     try std.testing.expect(std.mem.indexOf(u8, js, "function createZone") != null);
@@ -1119,7 +1120,7 @@ test "viewer sends custom copper pours with the whole-board route" {
 
 // spec: Web Server - The route_pcb CLI tool counts DRC against the shown custom pours through the direct pour-aware checker result
 test "route_pcb uses the direct pour-aware DRC result" {
-    const page = @embedFile("pcb_layout_page.zig");
+    const page = @embedFile("pcb_layout_mcp.zig");
     const fn_start = std.mem.indexOf(u8, page, "pub fn mcpRoutePcb(") orelse
         return error.TestRoutePcbMissing;
     const tail = page[fn_start..];

@@ -6,7 +6,7 @@
 //! S-expression reader as everything else:
 //!
 //! ```lisp
-//! (kicad-pcb "barracuda"  "/mnt/nas/kicad/barracuda/barracuda.kicad_pcb")
+//! (kicad-pcb "board-a"  "/mnt/nas/kicad/board-a/board-a.kicad_pcb")
 //! (kicad-pcb "rds3"       "/mnt/nas/kicad/rds3/rds3.kicad_pcb")
 //! ```
 //!
@@ -73,7 +73,7 @@ const parser = @import("../sexpr/parser.zig");
 test "project board map resolves a design name" {
     const a = testing.allocator;
     const src =
-        \\(kicad-pcb "barracuda" "/boards/barracuda/barracuda.kicad_pcb")
+        \\(kicad-pcb "board-a" "/boards/board-a/board-a.kicad_pcb")
         \\(kicad-pcb "rds3" "/boards/rds3/rds3.kicad_pcb")
     ;
     const nodes = try parser.parse(a, src);
@@ -88,11 +88,11 @@ test "project board map ignores malformed entries" {
     const a = testing.allocator;
     const src =
         \\(kicad-pcb "only-one-arg")
-        \\(something-else "barracuda" "/x.kicad_pcb")
-        \\(kicad-pcb barracuda "/unquoted-name.kicad_pcb")
-        \\(kicad-pcb "barracuda" "/boards/barracuda.kicad_pcb")
+        \\(something-else "board-a" "/x.kicad_pcb")
+        \\(kicad-pcb board-a "/unquoted-name.kicad_pcb")
+        \\(kicad-pcb "board-a" "/boards/board-a.kicad_pcb")
     ;
     const nodes = try parser.parse(a, src);
     defer parser.freeNodes(a, nodes);
-    try testing.expectEqualStrings("/boards/barracuda.kicad_pcb", lookup(nodes, "barracuda").?);
+    try testing.expectEqualStrings("/boards/board-a.kicad_pcb", lookup(nodes, "board-a").?);
 }

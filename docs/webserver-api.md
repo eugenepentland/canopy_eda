@@ -1,6 +1,11 @@
 # Web Server
 
-> Moved verbatim from CLAUDE.md (2026-08-19); linked from its Reference Docs section.
+**What this is:** the canonical reference for every HTTP route `netlisp serve`
+answers and every structured tool `netlisp tool` exposes, with request and
+response shapes. Read it if you are calling netlisp over HTTP, driving it from
+a script or an agent, or changing a server endpoint.
+[`agents.md`](agents.md) is the friendlier entry point for the tool surface;
+[`auth.md`](auth.md) covers who is allowed to call what.
 
 `netlisp serve` binds **`127.0.0.1:7050`** by default — netlisp is a local
 tool, and a loopback request is an admin (see [auth.md](auth.md)). A deployment
@@ -402,7 +407,7 @@ Auth in full: [auth.md](auth.md).
   written>}`. Caps: body > 256 KiB → 413, more than 200 events → 400, non-JSON
   or no `events` array → 400. Same auth as every other `/api` route
   (`src/serve/request_log.zig`).
-- **Whole-file source editing**: `GET /api/source/:name[?file=design|checks|layout|diagram]` → `{"source":…,"sourceRevision":…,"file":…,"files":[…]}` — the raw text of one of the design's files. `file` defaults to `design` (the `.sexp`); the other values name the autoloaded sidecars (`docs/sexpr-language.md`, "Sidecar files"), and `files` lists only the ones this design actually has, which is what the schematic editor's file picker renders. `POST /api/source/:name` with `{"source":…,"file":…,"sourceRevision":…}` replaces that whole file: syntax is checked before the bytes hit disk, the write is snapshotted into history (design **and** sidecars, above), the **whole design** is re-evaluated afterwards and a failure answers `400 rebuild failed` — a sidecar save is gated by exactly the checks a design save is. `sourceRevision` is the optimistic-concurrency hash **of the file being written**, so two editors on the same board's different sidecars do not collide and neither can clobber the other's file unseen. Only an already-authored sidecar is writable (`404`); creating one is `split-design`'s job.
+- **Whole-file source editing**: `GET /api/source/:name[?file=design|checks|layout|diagram]` → `{"source":…,"sourceRevision":…,"file":…,"files":[…]}` — the raw text of one of the design's files. `file` defaults to `design` (the `.sexp`); the other values name the autoloaded sidecars (`docs/sexp-language.md`, "Sidecar files"), and `files` lists only the ones this design actually has, which is what the schematic editor's file picker renders. `POST /api/source/:name` with `{"source":…,"file":…,"sourceRevision":…}` replaces that whole file: syntax is checked before the bytes hit disk, the write is snapshotted into history (design **and** sidecars, above), the **whole design** is re-evaluated afterwards and a failure answers `400 rebuild failed` — a sidecar save is gated by exactly the checks a design save is. `sourceRevision` is the optimistic-concurrency hash **of the file being written**, so two editors on the same board's different sidecars do not collide and neither can clobber the other's file unseen. Only an already-authored sidecar is writable (`404`); creating one is `split-design`'s job.
 - **Value editing**: `POST /api/edit-value/:name` — edit component value in .sexp file
 - **PCB Design Settings**: `POST /api/design-rules/:name` `{"rules":{…}}` patches
   the board-level numeric rules inside `(design-rules …)`;
@@ -413,7 +418,7 @@ Auth in full: [auth.md](auth.md).
   physical construction and every form the GUI does not know survive byte for
   byte, and a board that relied on defaults gets the form authored for it.
   Both are **sidecar-aware**. `design-rules` and `stackup` may live in the
-  design's `<name>.layout.sexp` (`docs/sexpr-language.md` → "Sidecar files"),
+  design's `<name>.layout.sexp` (`docs/sexp-language.md` → "Sidecar files"),
   so each save is applied to whichever file declares the form, at THAT file's
   byte spans, leaving the other file untouched; a form that exists nowhere yet
   is authored into the layout sidecar when the design has one, else into the
@@ -516,7 +521,7 @@ Auth in full: [auth.md](auth.md).
 
 #### Assembly variants over HTTP
 
-A design that declares `(variant "NAME" …)` forms (docs/sexpr-language.md →
+A design that declares `(variant "NAME" …)` forms (docs/sexp-language.md →
 “Assembly variants”) is served as ONE of them. Every surface defaults to the
 design's `(default)` variant, and failing that the base (implicit) one.
 
@@ -554,7 +559,7 @@ assembly than the caller asked for.
   draft, dossier, attestation and release — reads the contract from
   `src/systems/<name>/system.sexp` when it exists and falls back to
   `system.json` otherwise (see
-  [docs/sexpr-language.md § System contracts](sexpr-language.md)), so a
+  [docs/sexp-language.md § System contracts](sexp-language.md)), so a
   workspace that has migrated is served identically to one that has not.
   `GET /api/systems/:name` always answers with canonical
   `netlisp-system-review-v1` JSON in `manifest`, rendered from the contract
@@ -586,7 +591,7 @@ assembly than the caller asked for.
   joint are never reported — the manifest's canonical/alias layer exists
   precisely so `V_12V` and `V_12V_RF` are one conductor. The per-finding
   meanings are tabulated in
-  [docs/sexpr-language.md § `interface_mismatch` findings](sexpr-language.md).
+  [docs/sexp-language.md § `interface_mismatch` findings](sexp-language.md).
 - **System dossier**: `GET /systems/:name/dossier` — the draft package's
   self-contained HTML dossier as a readable page, byte-identical to the
   `review/<base>.html` member of the same system's `draft.zip` (one composer,
@@ -849,7 +854,7 @@ Tools include:
   must be under `lib/modules/` or `src/`. Returns
   `{ok,file,rewritten,written,netlist_equivalent,parts_without_pinout,
   positional_parts,skipped[{ref,pad,reason}],skipped_omitted,diff}`. Full rules
-  in `docs/sexpr-language.md`.
+  in `docs/sexp-language.md`.
 - **Hand-off exporters (read-only)**: `export_pinmap` `{name, format?, refs?}`
   and `export_spice` `{name}`. Both return the exported file **text itself**
   rather than a JSON envelope — so `netlisp tool export_pinmap … --output
@@ -885,7 +890,7 @@ Tools include:
   evaluated design-scope form set. Default `write:false` returns the three
   unified diffs without touching a file. Returns
   `{ok,design,moved,written,equivalent,files[{path,forms,lines,diff}]}`. Full
-  rules in `docs/sexpr-language.md` → "Sidecar files".
+  rules in `docs/sexp-language.md` → "Sidecar files".
 - **VFS file ops**: `read_file`, `list_dir`, `glob` (read-only);
   `write_file`, `edit_file`, `delete_file`, `move_file` (mutation).
 - **Build / state**: `build`, `regenerate_pinout`, `restore_version`.

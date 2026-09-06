@@ -276,7 +276,7 @@ test "a malformed board keepout stops the build instead of degrading" {
     };
     for (cases) |src| try testing.expectError(EvalError.InvalidForm, boardOf(a, src));
 
-    // The exactly edge-flush rectangle the barracuda plate needs is legal.
+    // The exactly edge-flush rectangle the board-a plate needs is legal.
     const flush = try boardOf(a,
         \\(design-block "t" (board (size 80 55) (keepout "k" (rect 0 0 80 55) (side both))))
     );

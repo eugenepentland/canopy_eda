@@ -13,7 +13,7 @@ function model(power, temperatures) {
 
 const boards = [
   {
-    name: "barracuda", width: 81, depth: 24.8,
+    name: "board-a", width: 81, depth: 24.8,
     thermal: model(4.27874, { natural: 82, airflow_1ms: 63, airflow_2ms: 54, heatsink: 55, fan_heatsink: 42 }),
     cooling: {
       heatsink: { w: 56.6, d: 26.1, shape: "stepped", lower_w: 250, lower_d: 250 },
@@ -21,17 +21,17 @@ const boards = [
     }
   },
   {
-    name: "black-canyon", width: 66.9, depth: 18.5,
+    name: "board-e", width: 66.9, depth: 18.5,
     thermal: model(1.61656833, { natural: 70, airflow_1ms: 55, airflow_2ms: 48 }),
     cooling: { heatsink: null, fan: null }
   }
 ];
 
 const centers = [-77, -55, -33, -11, 11, 33, 55, 77];
-const instances = [{ id: "barracuda", board: "barracuda", x: 0, y: 0, z: 18.5, rot: 0, on: true }];
+const instances = [{ id: "board-a", board: "board-a", x: 0, y: 0, z: 18.5, rot: 0, on: true }];
 for (const side of ["left", "right"]) {
   const x = side === "left" ? -73.95 : 73.95;
-  centers.forEach((y, index) => instances.push({ id: `black-canyon-${side}-${index + 1}`, board: "black-canyon", x, y, z: 18.5, rot: 0, on: true }));
+  centers.forEach((y, index) => instances.push({ id: `board-e-${side}-${index + 1}`, board: "board-e", x, y, z: 18.5, rot: 0, on: true }));
 }
 
 for (let i = 1; i < centers.length; i += 1) assert.equal(centers[i] - centers[i - 1], 22);
@@ -44,27 +44,27 @@ const result = thermal.solveSystem(boards, instances, 25);
 assert.equal(result.instances.length, 17);
 assert.ok(Math.abs(result.total_watts - 30.14383328) < 1e-9);
 assert.ok(result.outlet_rise_c > 1.6 && result.outlet_rise_c < 1.8);
-assert.equal(result.hottest.board, "black-canyon");
-const barracuda = result.instances.find((row) => row.id === "barracuda");
-assert.ok(barracuda.coverage > 0.98 && barracuda.coverage < 1);
-assert.ok(barracuda.velocity > 2);
-assert.ok(barracuda.temperature_c < result.hottest.temperature_c);
-assert.equal(barracuda.field_scenario, "fan_heatsink");
+assert.equal(result.hottest.board, "board-e");
+const board_a = result.instances.find((row) => row.id === "board-a");
+assert.ok(board_a.coverage > 0.98 && board_a.coverage < 1);
+assert.ok(board_a.velocity > 2);
+assert.ok(board_a.temperature_c < result.hottest.temperature_c);
+assert.equal(board_a.field_scenario, "fan_heatsink");
 assert.equal(result.hottest.field_scenario, "natural");
 
 const importedFans = thermal.attachedFans(boards, instances);
 assert.equal(importedFans.length, 1);
-assert.equal(importedFans[0].id, "barracuda-fan");
+assert.equal(importedFans[0].id, "board-a-fan");
 assert.equal(importedFans[0].direction, "down");
 const removed = thermal.solveSystem(boards, instances, 25, []);
 assert.equal(removed.total_flow_m3_s, 0);
 assert.equal(removed.outlet_rise_c, null);
-assert.equal(removed.instances.find((row) => row.id === "barracuda").coverage, 0);
-assert.equal(removed.instances.find((row) => row.id === "barracuda").field_scenario, "heatsink");
+assert.equal(removed.instances.find((row) => row.id === "board-a").coverage, 0);
+assert.equal(removed.instances.find((row) => row.id === "board-a").field_scenario, "heatsink");
 const movedFan = { ...importedFans[0], id: "fan-left", x: -73.95, y: -77 };
 const moved = thermal.solveSystem(boards, instances, 25, [movedFan]);
-assert.ok(moved.instances.find((row) => row.id === "black-canyon-left-1").coverage > 0.99);
-assert.equal(moved.instances.find((row) => row.id === "black-canyon-right-8").coverage, 0);
+assert.ok(moved.instances.find((row) => row.id === "board-e-left-1").coverage > 0.99);
+assert.equal(moved.instances.find((row) => row.id === "board-e-right-8").coverage, 0);
 const wrongWay = { ...movedFan, direction: "up" };
 assert.equal(thermal.fanInfluence(wrongWay, boards[1], instances[1]), null);
 

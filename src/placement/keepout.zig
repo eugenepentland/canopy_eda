@@ -23,16 +23,16 @@
 //!      on a `(net-class …)`, and that class's members are by definition one
 //!      signal family — the chain through a filter, the two halves of a
 //!      differential pair, an oscillator's two legs. They run adjacent because
-//!      the circuit says so: barracuda's `OSCINP`/`OSCINM` must, and its
+//!      the circuit says so: board-a's `OSCINP`/`OSCINM` must, and its
 //!      0402 filter chain (`RF1_VCO`↔`RF1_DCBLK`, …) sits at 0.19–0.25 mm pad
 //!      gaps, far inside any useful halo. Applied to them the halo starves the
-//!      copper it exists to protect — measured 2026-08-03 on barracuda, a
+//!      copper it exists to protect — measured 2026-08-03 on board-a, a
 //!      `(keepout 0.5)` on the `rf` class cost 8 of 86 routed nets, most of them
 //!      rf-class members blocked by each OTHER, and DRC'd 65 warnings whose
 //!      majority were same-class pairs. With the exemption the same declaration
-//!      costs NOTHING: re-measured the same day on the same harness, barracuda's
+//!      costs NOTHING: re-measured the same day on the same harness, board-a's
 //!      `rf` class at `(keepout 0.5)` closes to the baseline's own fixed point
-//!      net for net with zero keepout warnings, and barracuda now declares it.
+//!      net for net with zero keepout warnings, and board-a now declares it.
 //!      Intra-class spacing is governed by the class's own `(clearance …)`, which
 //!      this exemption never relaxes. Two DIFFERENT classes still hold each other
 //!      off — the warnings that survive on that board are exactly those, a rail
@@ -333,7 +333,7 @@ pub fn buildZones(
 /// probes measure their own geometry and so have to ask here, or they refuse
 /// copper the board's own DRC accepts: the neighbour pin escaping past an RF
 /// pad, which is the one case the escape radius exists for. Measured on
-/// barracuda — the REF_LMX LVDS pair's hop between its own two pad terminals
+/// board-a — the REF_LMX LVDS pair's hop between its own two pad terminals
 /// runs 0.64 mm from the RF-side track of the AC-coupling cap it lands on,
 /// inside that cap's own escape zone, and the 0.78 mm halo refused it, so the
 /// coupled construction never got a candidate out of its own pad field.
@@ -381,7 +381,7 @@ pub inline fn bandClaims(zones: Zones, band: Band, dsq: f64, full_sq: f64, at: [
 /// COUPLED diff pair is the exception: it routes its envelope as the P net and
 /// then probes each leg as its OWN net, so the gate has to move with it. Judged
 /// through its twin's gate a leg is refused inside an escape zone its own pad
-/// sits in — measured on barracuda, where the N leg's hop between its two pad
+/// sits in — measured on board-a, where the N leg's hop between its two pad
 /// terminals is 0.64 mm from the RF pad of the cap it lands on while its twin's
 /// nearest pad is 1.02 mm away, two hundredths outside the 1 mm escape radius.
 pub fn aimAt(zones: Zones, pads: []const PadPt, cur: *i32, net: i32) void {

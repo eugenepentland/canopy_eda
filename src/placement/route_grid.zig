@@ -16,7 +16,7 @@
 //! Historically one pitch served the whole board and it was sized to the
 //! WIDEST net class (`maxRouteParams`), so two adjacent occupied grid lines
 //! satisfy clearance even between the fattest pair of classes. That is safe,
-//! but it is also the reason a 0.127 mm control net on barracuda rasters at
+//! but it is also the reason a 0.127 mm control net on board-a rasters at
 //! the 0.3124 mm RF class's 0.4394 mm pitch — 1.73x coarser than it needs,
 //! on a board where most nets are control nets.
 //!
@@ -335,7 +335,7 @@ pub fn effectiveGridScale(selected_nets: []const bool, requested: f64) f64 {
 /// `buildRouteCtx` overflowed, and the run degenerated to routing NOTHING —
 /// on a board whose whole-board grid routes fine. The fallback goes straight
 /// to the base pitch, not to the next finer rung that fits: search cost is
-/// nodes × expansion budget, and on barracuda the half-pitch rung that still
+/// nodes × expansion budget, and on board-a the half-pitch rung that still
 /// fits takes ~140 s where the base grid routes the same two nets in under a
 /// second — the windowed fine rescues supply sub-pitch resolution for
 /// residual failures at bounded cost. An EXPLICIT `requested` scale is
@@ -462,7 +462,7 @@ fn bothModes(w: f64, h: f64, net_rules: []const optimizer.NetRule) BothModes {
     };
 }
 
-/// The RF/control spread that motivates the whole mode: barracuda's 0.3124 mm
+/// The RF/control spread that motivates the whole mode: board-a's 0.3124 mm
 /// RF class (pitch 0.4394) beside the 0.127 mm board default (pitch 0.254).
 const mixed_class_rules = [_]optimizer.NetRule{
     .{ .width = 0.3124, .clearance = 0.127 },

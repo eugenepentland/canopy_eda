@@ -5,7 +5,7 @@
 //! Strategy (first match wins): an explicit `SectionPort.signal_type` of
 //! `.power`/`.clock` is authoritative (those are unambiguous and rarely left
 //! to default); everything else falls to name heuristics grounded in the real
-//! Cyclops Analog and STM32N6 net-naming conventions. The default `.signal`
+//! Board B Analog and Board C net-naming conventions. The default `.signal`
 //! signal-type is deliberately *not* treated as authoritative — that would
 //! shadow the RF name match for any port that simply didn't set a type.
 
@@ -182,7 +182,7 @@ fn emptyBlock(name: []const u8) DesignBlock {
 }
 
 // spec: diagram/classify - Classifies power, ground, clock, control, and RF nets by name
-test "netClass classifies real Cyclops net names" {
+test "netClass classifies real Board B net names" {
     var pm: PortClassMap = .empty;
     defer pm.deinit(testing.allocator);
     try testing.expectEqual(types.class_power, netClass("V_RF_3P3", &pm));

@@ -8,7 +8,7 @@
 //! Every one of those handlers begins with a FRESH `Evaluator.evalFile` of the
 //! design, and on this project's largest board that evaluation alone is about
 //! four seconds. Measured against an already-warm server, two identical
-//! back-to-back requests for `barracuda` cost 3.7 s and 4.0 s (`/api/erc`),
+//! back-to-back requests for `board-a` cost 3.7 s and 4.0 s (`/api/erc`),
 //! 3.9 s and 4.4 s (`/api/thermal`), 4.2 s and 4.4 s (`/api/schematic-pdf`),
 //! 4.6 s and 4.3 s (`/api/kicad-sch`) — the repeat paid the first's work over
 //! again, byte for byte. The per-analysis caches that already exist underneath

@@ -1,6 +1,11 @@
 # Testing
 
-> Moved verbatim from CLAUDE.md (2026-08-19); linked from its Reference Docs section.
+**What this is:** the full testing reference for people working on netlisp —
+test filters, the sharded test binary, `test-compile`, `test-affected`, the
+mutation tiers, and the browser and latency gates. Read it when a focused run
+is not enough, when you are adding a test-bearing module, or when a gate fails
+and you need to know what it measured. [`../CONTRIBUTING.md`](../CONTRIBUTING.md)
+§ 4 is the short version.
 
 ```bash
 # Unit tests (Debug by default; also runs Guardian checks)

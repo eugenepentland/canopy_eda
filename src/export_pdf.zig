@@ -1,5 +1,5 @@
 //! Review-document PDF composer — the WP-C half of the schematic PDF export
-//! (`docs/pdf-export-plan.md`). It is the *only* place `pdf.zig` (the byte
+//! (`docs/archive/pdf-export-plan.md`). It is the *only* place `pdf.zig` (the byte
 //! writer) and `svg2pdf.zig` (the SVG-subset translator) meet: the translator
 //! hands back a flat `DrawOp` display list, and `drawOp` below maps each one
 //! onto a page helper. That decoupling is deliberate — neither half knows the
@@ -814,7 +814,7 @@ fn moduleDrawsRef(e: Entry, ref: []const u8) bool {
 ///
 /// A module note repeating a SECTION note's visible text is dropped. Boards
 /// routinely copy a module's rationale into the section that wraps it (every
-/// cyclops-kband RF section does), and before unified sheets the two lived pages
+/// board-b-kband RF section does), and before unified sheets the two lived pages
 /// apart so the duplication was invisible; on one sheet it would read twice.
 /// Two scoping rules, both review findings: the comparison is against the
 /// section's own notes ONLY (module rows never join the seen-set — a sibling

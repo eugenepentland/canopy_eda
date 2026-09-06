@@ -1,6 +1,40 @@
 # Netlisp
 
-CLI-driven electronic design automation for schematic capture using S-expression syntax.
+CLI-driven electronic design automation using S-expression syntax.
+
+**What this file is:** the behaviour ledger the Guardian gate enforces. Every
+`- ` bullet below states one behaviour of the tool in a single line, and every
+bullet is expected to be proved by a test carrying a `// spec:` comment that
+repeats its text exactly. Guardian checks that mapping on every `zig build` and
+`zig build test`, and refuses to let the unmapped set grow. It is a ledger, not
+a design document: it says what the tool does, never how, and it is written to
+be diffed rather than read end to end.
+
+**How a bullet is structured.** `## ` headings are subsystem sections
+(`sexpr/tokenizer`, `eval/forms`, `placement/router`, …) and a bullet lives
+under the section its test names. A `completeness-waiver:` bullet records that
+a named failure mode was considered and deliberately does not apply, so the
+absence of a test for it is a decision rather than a gap.
+
+**To add one:** append a one-line bullet under the right `## ` heading, and in
+the *same* change tag the test that proves it with
+`// spec: <section> - <bullet text>`. Neither half lands alone. The tag text
+must match the bullet character for character, and the section in the tag must
+match the heading the bullet lives under. `guardian-check spec-sync .` prints
+dry-run suggestions for bullets that have no test yet. A worked example and the
+full contract are in [CONTRIBUTING.md](CONTRIBUTING.md) § 4.
+
+## CLI global flags
+
+- the process-wide directory flags are consumed before dispatch so a command never reads one of their values as a positional
+- completeness-waiver: empty inputs (a flag with no value drops the flag alone; an empty argv is returned unchanged)
+- completeness-waiver: large inputs (argv is bounded by the operating system's own limit and each entry is only borrowed)
+- completeness-waiver: unauthorized access (the flags name directories the invoking user already has authority over)
+- completeness-waiver: i/o failure (the filter touches no filesystem; the directories it installs are opened by their readers)
+- completeness-waiver: concurrent access (both roots are installed once, before any command or thread dispatches)
+- completeness-waiver: malformed encoding (argv entries are compared as bytes and never decoded)
+- completeness-waiver: integer overflow (a single forward pass over argv with no arithmetic on its length)
+- completeness-waiver: panic-free (an allocation failure returns the unfiltered argv rather than failing the run)
 
 ## CLI allocation lifetime
 
@@ -574,7 +608,7 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - a fine rescue window bounds the escape direct-synthesis probe sweep it forces on, while a whole-board route keeps the unbounded sweep an author-declared escape net is allowed
 - collapses a collinear multi-pad net to one straight through-line
 - snaps a terminal via onto its pad centre and drops the sliver tail
-- a terminal-via snap reuses the earlier same-net barrel when recentering would create the barracuda TXDATA via-spacing error
+- a terminal-via snap reuses the earlier same-net barrel when recentering would create the board-a TXDATA via-spacing error
 - drops sub-micron degenerate track segments from the finished copper
 - bridges a same-net copper gap so a routed net is connected by construction
 - a trace that only grazes a pad is welded from its centreline to the exact pad centre
@@ -719,7 +753,7 @@ Public functions: geomeanCompletion, benchOne, corpus, writeTable, writeJson, cm
 The whole-corpus routing benchmark that makes "the router got better" checkable.
 Every router change so far was judged on ONE board, and at least two changes that
 looked reasonable were net-negative on the same board they were designed against
-(`docs/autorouter-plan.md` §4). `netlisp bench-route --project-dir <dir>
+(`docs/archive/autorouter-plan.md` §4). `netlisp bench-route --project-dir <dir>
 [--route-space lattice|field] [--json] [<design> ...]` routes every design at
 its starred placement through the shared
 `route_plan` seam — so `routed`/`total` are the connectivity oracle's answer, not
@@ -730,7 +764,7 @@ completion. Under `--json` each board row additionally NAMES its still-open nets
 runs diff net by net instead of only by a count. Read-only: no layout sidecar is
 written, so it is safe against a served project dir.
 
-`--baseline <file>` (added with the round-two audit, `docs/autorouter-audit-round-two.md` §3a)
+`--baseline <file>` (added with the round-two audit, `docs/archive/autorouter-audit-round-two.md` §3a)
 is the durable regression gate: it compares each scorable board against a
 committed `--json` baseline and exits non-zero when any board loses more than
 one net, or when the geomean over the shared board set drops. Record a baseline
@@ -1912,7 +1946,7 @@ armed kill criterion: negotiated congestion is the last of three families of
 global steering measured on this corpus (topology corridors at three doses,
 escape guides, now this) and none has paid. Arming it is a one-line A/B against
 the same binary, the shape `placement/joint-rescue` established. The measured
-trace lives in the commit message and `docs/autorouter-audit-2026-08.md`.
+trace lives in the commit message and `docs/archive/autorouter-audit-2026-08.md`.
 
 - the negotiated-congestion tier ships disarmed, so a route that never raises its iteration cap is bit-for-bit the route it always was
 - foreign copper is a hard wall for every route outside the sandbox and passable-at-a-price only for a net the sandbox can itself re-route
@@ -3782,7 +3816,7 @@ actual/ideal ratio on their closed-form baseline.
 - propagation uses the same grounded coplanar effective permittivity as impedance synthesis
 - a widening CPWG trace grows its side-ground slot only until the declared cap
 - grounded coplanar analysis refuses a non-positive or copper-closed slot
-- an offset L3 coupled stripline solves the Barracuda 100 ohm LVDS geometry and round-trips
+- an offset L3 coupled stripline solves the Board A 100 ohm LVDS geometry and round-trips
 - an outer differential pair uses coupled microstrip odd mode and round-trips through synthesis
 - vacuum capacitance and dielectric capacitance produce the quasi-TEM impedance and effective permittivity of a layered microstrip
 - odd mode drives two conductors oppositely and differential impedance is exactly twice the resulting odd-mode impedance
@@ -4672,6 +4706,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - The generated reference has a Requirement checks section rendered from the checker's check_docs table
 - Every document the generated reference links to exists in docs/
 - The section-classifier reference states that an explicit (category …) is the source of truth
+- The assert form's registry summary states that build and export-kicad fail on a failed assertion
 - Every isForm head atom under src/eval is reachable from a form registry or listed as a deliberate exception
 - The generated reference renders one sub-form section per compound-form registry
 
@@ -4685,6 +4720,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - Formats mixed specifiers in a single format string
 - The directives table and format()'s dispatch recognise exactly the same specifier characters
 - Lowercase ~a displays scalar values without adding engineering-unit suffixes
+- assert-range bounds are rendered at full precision instead of one decimal place
 
 ## eval/instance
 
@@ -4698,6 +4734,9 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - a (near …) missing its ref or pin warns and binds nothing rather than half a target
 - an instance sub-form within two edits of a real one is an error naming the spelling meant
 - an unknown sub-form head that is not a near-miss still becomes an inline property
+- a bare SI-suffixed pin token that also names one of the part's pin functions is rejected as ambiguous
+- a quoted pin name and a bare pad number are both unambiguous spellings and neither warns
+- an SI-suffixed pin token naming nothing on the part binds the numeric pad and warns about both readings
 - a pad token outside the part's known pad set is an error carrying the pad count
 - strap-ok, nc-ok and a (near …) own pad are held to the same pad set as (pin …)
 - a part with neither a pinout nor a footprint has an unknown pad set and every pad token passes
@@ -5004,8 +5043,10 @@ against its own file rather than the design's.
 - Evaluates let bindings that define named values in scope
 - Evaluates if conditionals selecting a branch by predicate
 - Evaluates fmt expressions producing formatted strings
+- A failing fmt directive records a located diagnostic naming the directive
 - Evaluates assert-range that passes when value is in bounds
 - Evaluates assert-range that fails when value is out of bounds
+- A recorded assertion carries the span of the form that raised it
 - evalFile auto-imports the standard passives prelude before user nodes run
 - Module files loaded via resolveImport get the same passives prelude before their body evaluates
 - componentPrefix maps passive families to their ref-des letters
@@ -6422,7 +6463,7 @@ Public functions: evalCapRating, evalMaxDistance, evalSequence, resolveDistanceR
 
 ## req_derived_checks
 
-- feedback-divider and SET-current checks reject the mismatched values used by straps
+- feedback-divider and SET-current checks reject the mismatched values used by board-d
 - rail-name fallback decodes common voltage conventions used by flat designs
 - a second resistor on one feedback leg is reported instead of silently replacing it
 - rail-name fallback decodes the imported underscore decimal and signed negative spellings
@@ -7323,7 +7364,11 @@ Public functions: read, fetch
 - CLI virtual-file mutations refuse .layouts.json sidecars and direct callers to protected PCB layout tools
 - restore_layout_snapshot restores protected PCB layout history after snapshotting the current sidecar and bumping its revision
 - stitch_ground_pads applies the autorouter's final ground-reference pass transactionally to a saved layout
+- repair_land_transit keeps a net's rewrite only when that net's dangling_copper count does not grow, so one land-transit warning is never traded for redundant copper
+- repair_land_transit names every net whose rewrite the dangling-copper clause refused, with that net's before/after dangling reading
+- repair_land_transit persists a re-anchoring that removes the net's land transit without adding dangling copper
 - attach_datasheet links a stored PDF into the library component, refuses a filename absent from lib/datasheets, and reports an already-linked stem instead of duplicating it
+- The pose tools describe x/y as the footprint origin, the point the placement transform actually adds pad offsets to
 
 Public functions: isMutationTool, call, listFreePins, listDesignNames, listDesignSummaries, renderSceneGraph, requireString, optionalString, optionalU64, optionalBool, missingArg
 
@@ -7592,6 +7637,8 @@ is what makes the predicate exact rather than approximately right.
 - The board PNG query turns ?thermal=1 into a heat-zone request carrying its scenario and ambient, and an unknown scenario word falls back to still air rather than refusing the image
 - export-schematic-png parses native image focus, view, theme, width, and output options
 - Native schematic export paints the SVG display list into a valid PNG without a browser
+- Test points, mounting holes and fiducials do not spend the unfocused schematic PNG's hub budget
+- An unfocused schematic PNG renders a board whose hub count is only over the cap because of its test points and mounting holes
 - Schematic image view parsing accepts the UI's Sequential and Functional names and defaults to Functional
 - The schematic display-list translator applies the renderer's rotate group transform to vertical passives
 - The src basename index resolves a design sibling without re-walking the tree, and rebuilds when a directory it walked changes mtime
@@ -7878,6 +7925,7 @@ is what makes the predicate exact rather than approximately right.
 - A source snapshot captures the design file and every sidecar beside it, so restoring one undoes an edit that landed in a sidecar
 - A history entry written before sidecars were snapshotted still restores its design file and leaves today's sidecars alone
 - The layout sidecar is snapshotted into history and listed newest-first
+- An installed runtime-state root moves history/ off the project, leaving its sources and sidecars in place
 - Layout snapshots are pruned to the newest retention cap
 - Source-snapshot listing skips the reserved layouts subdir
 - The layout sidecar carries an optimistic-concurrency rev, emitted only when non-zero
@@ -7923,7 +7971,7 @@ is what makes the predicate exact rather than approximately right.
 - Front-only and Back-only PCB views exclude opposite-face footprints from hover, direct and exact-pad clicks, marquee and select-all selection, and every part/group transform
 - WebGPU pan and zoom frames replay a cached render bundle until geometry, layer order, or visible-pour membership changes
 - Swept variable-width RF paths remain on WebGPU as exact triangulated stencil unions, while their hidden centreline tracks are omitted from the GPU copper stream and a hidden copper layer cannot leak its taper through a visible layer's stencil cover
-- The deterministic PCB-editor zoom gate measures fit-to-8×-to-fit paints in both directions, covers the DPR-2 Canvas fallback, asserts an RF-heavy Barracuda workload stays on WebGPU, and is required metadata on every deployable release candidate
+- The deterministic PCB-editor zoom gate measures fit-to-8×-to-fit paints in both directions, covers the DPR-2 Canvas fallback, asserts an RF-heavy Board A workload stays on WebGPU, and is required metadata on every deployable release candidate
 - The deterministic PCB-editor benchmark never schedules a saved-layout migration or autosave while measuring read-only frame performance
 - Release preparation waits for a stable quiet-host window before PCB-editor timing, retries timing-budget misses after contention clears, and never retries renderer or infrastructure failures
 - The WebGPU renderer drops a track whose layer the board does not have instead of repainting it on F.Cu
@@ -8819,7 +8867,7 @@ export never invents them.
 - each declaration publishes a typed report whose plans concatenate back into assertion order, one verdict per screen matching that assertion's pass/warn/fail, and (sideband either) publishes both sidebands high side first
 - evaluating one declaration twice produces byte-identical assertions and structurally identical reports, so the analysis is a pure function of what was declared
 - the parser requires a title, mode, output band, LO and mixer sense, bounds the enumeration order at nine, and refuses sum mixing rather than approximating it
-- the authored Barracuda declaration round-trips through the parser into the same plan the fixture screens, with SI-suffixed frequencies and signed dBm resolved
+- the authored Board A declaration round-trips through the parser into the same plan the fixture screens, with SI-suffixed frequencies and signed dBm resolved
 - a low-side plan under an LO below the commanded band is refused as unrealizable rather than screened against a negative RF window
 - completeness-waiver: empty inputs (the parser rejects a declaration without a title, a mode, an output band, an LO frequency, and a mixer sense before evaluation; a source range that does not contain its own delivered passband is refused with them)
 - completeness-waiver: large inputs (one declaration enumerates at most the ninth-order square plus two leakage rows — 83 products — over a single required RF interval, admits at most 64 spur-table rows, and plans at most two sidebands)

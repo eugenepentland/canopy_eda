@@ -517,7 +517,7 @@ fn finishLoweredResidual(
             // it before either starts spending (see `unblockReserveNs`).
             const head_options = headOptions(options, unblockReserveNs(alloc, placement, options, first) catch 0);
             // Gates BEFORE the guided corridors. The ladder is the phase that
-            // closes nets on a timed board — every logged barracuda run has it
+            // closes nets on a timed board — every logged board-a run has it
             // gaining and the guided retries reporting "slice expired" for all
             // four targets — and running it second meant its last pass was the
             // one the reserve boundary cut off, mid-rail. Ordered this way the
@@ -562,7 +562,7 @@ fn finishLoweredResidual(
 /// cancels mid-flight, one whose error path hands back a partly-finished board,
 /// and a gate whose DRC ratchet drops a net a previous phase closed all return
 /// a legal board that is simply worse than one the pipeline was holding an hour
-/// of CPU ago. Measured on barracuda (ReleaseSafe, v93): a gate pass reported
+/// of CPU ago. Measured on board-a (ReleaseSafe, v93): a gate pass reported
 /// `10 -> 5 failed` mid-run and the route shipped ten open nets.
 ///
 /// So the pipeline carries its best board forward and hands the next phase THAT
@@ -605,7 +605,7 @@ fn phaseMs(t0: i128) i64 {
 const lattice_gate_passes: usize = 8;
 /// Widened from 15 s once the unblock phase existed (at 15 s the per-target
 /// transactions each got a ~1 s slice and reported "no candidate"), then pulled
-/// back from 45 s: across every logged barracuda run the unblock phase reported
+/// back from 45 s: across every logged board-a run the unblock phase reported
 /// "no candidate within its slice" for every target while the gate ladder — the
 /// phase that was actually closing rails — was cut off mid-pass by this reserve.
 const lattice_gate_tail_reserve_ns: i128 = 15 * clock.ns_per_s;
@@ -688,7 +688,7 @@ fn guidedSealed(
 /// residual timeline as the tail it hands the phase behind it.
 ///
 /// The guided retries are the residual's middle phase and the one measured to
-/// close nothing: across four consecutive ReleaseSafe barracuda runs (v94-v97)
+/// close nothing: across four consecutive ReleaseSafe board-a runs (v94-v97)
 /// it gained ZERO nets while spending ~26-28 s, and its remaining targets were
 /// all walls for the per-target unblock transactions behind it. That is not an
 /// argument for deleting the phase — the corridor hints are load-bearing at the
@@ -921,7 +921,7 @@ fn guidedWeigh(
 /// A pass that runs into the ladder's reserve boundary comes back flagged
 /// cancelled, and the ladder used to answer by returning the PREVIOUS board —
 /// throwing away every hop the expired pass had already landed and judged
-/// (barracuda lost two accepted `GND` island merges that way, in the one pass
+/// (board-a lost two accepted `GND` island merges that way, in the one pass
 /// that ever reached `GND`). The gate is additive and each hop is committed
 /// only after the connectivity oracle and the geometry DRC weigh it, so an
 /// expired pass's board is exactly as sound as a complete pass's — it is simply
@@ -974,7 +974,7 @@ fn residualTargetHopMm(
 /// reason and one level up: a maze asked for a cross-board join spends the whole
 /// 4 s slice and returns cancelled, and `retryLatticeGuided` reaches its gate —
 /// where the gridless shape tier lives — only when the route DID finish. So on
-/// barracuda `LOCK_DET` logged `route slice expired` on every pass and its gate
+/// board-a `LOCK_DET` logged `route slice expired` on every pass and its gate
 /// was never asked, in the one pass formed for nothing but that net.
 const guided_gate_first_hop_mm: f64 = 40.0;
 
@@ -1366,7 +1366,7 @@ fn fieldClusterSeedMovable(
 /// The whole-net rule minus its POUR exclusion, and that one difference is the
 /// point. A whole-net target is rewritten, which is meaningless for a rail
 /// whose connectivity its zone underwrites and whose traces the transaction
-/// would strip — so `fieldClusterSeedMovable` refuses it, and barracuda's
+/// would strip — so `fieldClusterSeedMovable` refuses it, and board-a's
 /// `V_3V3A` (eight islands over a retained In3 zone) is exactly that shape. A
 /// per-gap transaction never touches the target's copper: it draws ONE
 /// additive join in a channel it freed, and the verdict
@@ -1379,7 +1379,7 @@ fn fieldClusterSeedMovable(
 /// one channel and draws one join, so the 246 pads it is not aiming at keep
 /// their copper byte-for-byte. The old blanket refusal said such a net's islands
 /// are closed by STITCHING instead, which is true right up to the island that
-/// has no legal stitch site: barracuda's `J1` pad 40 is a 1.0 x 0.35 mm B.Cu
+/// has no legal stitch site: board-a's `J1` pad 40 is a 1.0 x 0.35 mm B.Cu
 /// finger on a 0.4 mm via board, and once the drill-containment tier finally
 /// produced sites for it (nine there, seven at `lmx2595/U17` pad 34) every one
 /// was refused by a neighbour's escape track drawn 0.39 mm away. No stitch can
@@ -1444,7 +1444,7 @@ fn fieldClusterNetFacts(
 // ── Per-target unblock ──────────────────────────────────────────────────────
 //
 // The cluster above forms ONE transaction out of several open seeds and the
-// blockers they share. Measured on barracuda's 102/109 residual it was safe and
+// blockers they share. Measured on board-a's 102/109 residual it was safe and
 // bought nothing: those seeds' corridors are not one corridor — `LOCK_DET`
 // crosses the board 55 mm while `EN_BUCK6V` needs 16 mm into a different pocket
 // — so freeing their union frees nobody's, and the all-or-nothing gate then has
@@ -1470,7 +1470,7 @@ const unblock_ns_per_element: i128 = 350 * clock.ns_per_ms;
 ///
 /// The flat 10 s cap is what a transaction gets for forming at all; the rate
 /// above is what it earns for the restore it turns out to have to prove
-/// (`target_unblock.restoreSlice`). Measured on barracuda (Debug, v91): `GND`'s
+/// (`target_unblock.restoreSlice`). Measured on board-a (Debug, v91): `GND`'s
 /// per-gap ladder rips 7, then 10, then 12 elements, and the flat cap cut the
 /// third off at 8.6 s of a re-route that takes 13.0 s — reporting the CLOCK
 /// where the board's real answer was that the freed corridor still carries no
@@ -1553,7 +1553,7 @@ fn wideUnblockAffordable(now: i128, board_deadline: i128, targets_left: usize) b
 ///
 /// The alternate is not the wide tier: it rips the same classes under the same
 /// `lim`, so `wideUnblockAffordable`'s 20 s-per-remaining-target gate priced it
-/// at a tier it does not run. Measured on barracuda (ReleaseSafe, v93): the one
+/// at a tier it does not run. Measured on board-a (ReleaseSafe, v93): the one
 /// transaction that produced the victim-loss refusal this retry exists for
 /// finished ~179 s into the phase, the spare-per-target test then answered NO,
 /// and "retrying with <victim> held" was never printed on any logged run.
@@ -1605,7 +1605,7 @@ const unblock_reserve_share_den: i128 = 20;
 /// therefore both terms, each read off the constant the round is itself bounded
 /// by rather than off a stopwatch.
 ///
-/// Pricing it at the slice alone priced half a probe. Measured on barracuda
+/// Pricing it at the slice alone priced half a probe. Measured on board-a
 /// (ReleaseSafe, v103/v104): probes ran 16-30 s against a 10 s price, so round 1
 /// overran its priced share of the reserve and round 2 reported "funding 0 deep
 /// ladders" run after run — the depth term was in the arithmetic and never in
@@ -1619,7 +1619,7 @@ const unblock_breadth_probe_ns: i128 = target_unblock_limits.slice.max_ns + gate
 /// arithmetic (`unblockFundedLadders`) already divides whatever the breadth round
 /// leaves by `unblock_ladder_price_ns` and floors the answer at one, so the
 /// question this constant answers is not "how many ladders may run" but "how many
-/// is the head phase asked to leave room for". Measured on barracuda under the
+/// is the head phase asked to leave room for". Measured on board-a under the
 /// 2026-08-18 layer contract (ReleaseSafe, v103 and v104): round 1 spent the
 /// whole reserve and round 2 funded ZERO ladders on both runs, with `V_3V3A` and
 /// `SPI_LMX_CSN` sitting on `deepenable` verdicts that only a ladder can escalate.
@@ -1661,7 +1661,7 @@ const UnblockReserve = struct {
 /// funds deep ladders out of what the probes leave, so the tail owes a bill with
 /// two terms in it and the old number covered only part of the first.
 ///
-/// Measured on barracuda under the 2026-08-18 layer contract (ReleaseSafe, v103
+/// Measured on board-a under the 2026-08-18 layer contract (ReleaseSafe, v103
 /// and v104): the flat 89 s reserve covered round 1's six probes and nothing
 /// else, so round 2 reported "funding 0 deep ladders" on both runs while the head
 /// phases spent every second of two successive budget raises (240 -> 270 -> 283)
@@ -1702,7 +1702,7 @@ fn unblockReservePlan(targets: usize, nets: usize, widest_mm: f64, remaining_ns:
 /// The ladder already holds back a flat tail (`lattice_gate_tail_reserve_ns`),
 /// and that tail bounds the LADDER alone: the guided corridor phase behind it
 /// runs against the board's own deadline and is free to spend every second the
-/// ladder saved. Measured on barracuda (Debug, v90): the ladder converged and
+/// ladder saved. Measured on board-a (Debug, v90): the ladder converged and
 /// stopped on its own at +129 s, the guided phase then ran to +163 s — past the
 /// board deadline — and the unblock phase was entered with 1.7 s, under its own
 /// `slice.min_ns` floor, so `sliceDeadline` returned null and NOT ONE target was
@@ -1869,7 +1869,7 @@ fn retryTargetUnblock(
                 // A net that has already earned an accept is a different case:
                 // its ladder is known to close on this board, so one hop the
                 // board will not take is evidence about THAT HOP, not about the
-                // net. Measured on barracuda, `GND` earns two accepts and is
+                // net. Measured on board-a, `GND` earns two accepts and is
                 // then abandoned on its 1.27 mm pocket — a hop whose honest
                 // verdict (given 36 s instead of 8.6) is that the freed corridor
                 // carries no legal path at all, while four 1.50 mm pockets and a
@@ -1892,7 +1892,7 @@ fn retryTargetUnblock(
             // this one left, rather than handing the slice to a target that has
             // proved nothing. A rail arriving in eight islands is a LADDER of
             // seven merges, and one merge per visit through the planned list
-            // is one merge per route: measured on barracuda, `GND` closed its
+            // is one merge per route: measured on board-a, `GND` closed its
             // 1.00 mm pocket and then waited behind two cross-board targets
             // that spent the rest of the tail failing.
             //
@@ -2054,7 +2054,7 @@ fn unblockNetSeen(earlier: []const target_unblock.Target, net_i: usize) bool {
 ///
 /// `plane_corridor` is on because this round is TIMED BY CONSTRUCTION and the
 /// whole-net charge is what it cannot afford. A pour-carried rail lying across a
-/// corridor is nominated at its whole copper — measured on barracuda,
+/// corridor is nominated at its whole copper — measured on board-a,
 /// `V_3V3_LMX` at 66 elements against ~8 of it in the corridor — so the probe's
 /// restore, and the gate that has to prove it, are sized by copper the join
 /// never needed moved: the `LOCK_DET` and `SPI_LMX_CSN` probes each spent 20-30 s
@@ -2112,7 +2112,7 @@ const UnblockPromise = enum {
     /// diagnoses the candidate board its transaction produced, so a target that
     /// produced no board cannot enter one however reachable its refusals were.
     ///
-    /// Measured on barracuda (Debug, v100): all five open nets earned the flat
+    /// Measured on board-a (Debug, v100): all five open nets earned the flat
     /// `depth_reachable` below, K=1 funded `SPI_DSA_CSN` on plan order alone,
     /// and its ladder had nothing to climb — the narrow transaction repeated its
     /// round-1 verdict ("no legal path across the freed corridor"), the wide
@@ -2214,7 +2214,7 @@ fn unblockDepthClass(why: vacate_policy.Refusal) bool {
 /// so budgeting the sum funds ZERO ladders on every board the phase runs on and
 /// round 2 stops existing. The NARROW tier alone (10 s) is what the previous
 /// estimate quoted, and it is the degeneracy this constant replaces: measured on
-/// barracuda (ReleaseSafe, v99), round 2 "funded 4 deep ladders" out of ten
+/// board-a (ReleaseSafe, v99), round 2 "funded 4 deep ladders" out of ten
 /// admitted targets, priced every wide retry against ten remaining targets at
 /// `unblock_wide_gate_ns` each, and so ran four narrow transactions with SMALLER
 /// slices than round 1's — the same question, asked worse.
@@ -2263,7 +2263,7 @@ fn unblockFundedLadders(run: *UnblockRun, nets: usize, lim: target_unblock.Limit
 /// slots are that ladder's rungs — but `unblockByPromise` ranks NETS, so all of
 /// one net's rungs share a rank and land adjacent, and a net with several of them
 /// takes a full ladder per rung before the next funded net gets its first.
-/// Measured on barracuda (ReleaseSafe, v100 and v101): `V_3V3A` absorbed the one
+/// Measured on board-a (ReleaseSafe, v100 and v101): `V_3V3A` absorbed the one
 /// funded ladder of each run, its deepening freeing a blocker only to reveal
 /// another (1 → 3 → 4), while `LOCK_DET` — whose deepening terminal
 /// `V_24V_CLEAN` has been rank-negotiable since the round existed — has never had
@@ -2368,7 +2368,7 @@ fn promisedRip(verdict: UnblockPromise, ripped: usize) usize {
 /// deepening round re-sweeps, re-rips and re-routes everything the first
 /// transaction took plus whatever it adds, so the transaction that reached its
 /// verdict on less copper is the one the same remainder buys more rounds of.
-/// Measured on barracuda (Debug, v101): `SPI_LMX_CSN` won the bucket on plan
+/// Measured on board-a (Debug, v101): `SPI_LMX_CSN` won the bucket on plan
 /// order with a 71-element rip (a 66-element pour among them) and a 10.6 s gate
 /// that overran its slice, leaving its deepening round nothing to run in, while
 /// `V_3V3A` had rolled a board back on a single 4-element stub.
@@ -2419,7 +2419,7 @@ fn unblockByPromise(
 /// are now the same census at two scales. Round 2 funds LADDERS
 /// (`unblockFundedPlan`), and a funded net's several planned slots are that one
 /// ladder's rungs — so quoting each slot its own share divides a ladder's budget
-/// by its own length. Measured on barracuda (Debug, v101): the funded ladder
+/// by its own length. Measured on board-a (Debug, v101): the funded ladder
 /// reached its deepening round and found the window priced against slots it had
 /// not spent. A net's own re-entries were never extra live targets either; this
 /// only makes the planned slots agree with them.
@@ -2448,7 +2448,7 @@ fn unblockLiveTargets(
 ///
 /// A ladder is re-entry, and re-entry is the one thing in this pass that can take
 /// a turn nobody planned. Both re-entry paths are otherwise unbounded in the
-/// tail: measured on barracuda, `GND` earns two accepts, then retires two refused
+/// tail: measured on board-a, `GND` earns two accepts, then retires two refused
 /// hops and takes two more rungs, and the two whole-net targets behind it — the
 /// board's ONLY single-gap open nets, and so the only two a single accepted
 /// transaction could close outright — got no attempt at all. That is the monopoly
@@ -2551,7 +2551,7 @@ fn unblockAttempt(
     // The WIDE transaction can lose a victim exactly as the narrow one can, and
     // it is the tier that reaches the expensive classes — a declared pair, a
     // corridor-lifted rail — so it is the tier whose rip is MOST likely to be
-    // the reason a closed target is rolled back. Measured on barracuda
+    // the reason a closed target is rolled back. Measured on board-a
     // (ReleaseSafe, v95 and Debug): `SPI_DSA_CSN`'s narrow attempt refused on
     // geometry, the wide retry then closed the target and was rolled back
     // because `REF_LMX_N` did not come back — and the alternate nomination was
@@ -2569,7 +2569,7 @@ fn unblockAttempt(
 /// That verdict says nothing against the corridor: it was freed, the target
 /// crossed it, and the price turned out to be a victim the restore could not
 /// re-home even with the shape channel behind it (`unblockRehome`). Measured on
-/// barracuda (ReleaseSafe, v92), it is the board's nearest close — `GND` finished
+/// board-a (ReleaseSafe, v92), it is the board's nearest close — `GND` finished
 /// as one 1.27 mm hop and was rolled back because `V_3V3_ID` did not come back —
 /// and neither existing retry answers it: a wider rip takes MORE copper out,
 /// including the copper that was already too dear to replace, and the ladder's
@@ -2622,7 +2622,7 @@ fn unblockAlternate(
 /// plane- or pour-carried net it will lift corridor-only), which is a different
 /// corridor rather than a bigger one.
 ///
-/// Measured on barracuda (Debug, v91): `V_3V3A`'s per-gap narrow transaction
+/// Measured on board-a (Debug, v91): `V_3V3A`'s per-gap narrow transaction
 /// verdicted "rolled back — re-routed and still open (1 blockers)", and the wide
 /// retry then ripped the same one blocker plus generic growth to 130 elements,
 /// burned ~45 s of a 74 s phase tail, and returned the identical verdict — while
@@ -2706,7 +2706,7 @@ fn unblockAlreadyPicked(picked: []const vacate_policy.Nomination, net_i: usize) 
 /// The twin half is not a nicety. A pair is ripped, re-laid and judged as one
 /// thing (`unblockPairsHeld`), so holding one leg out while the sweep nominates
 /// the other re-forms the identical transaction under the other leg's name.
-/// Measured on barracuda (Debug, this increment): the alternate held `REF_LMX_N`
+/// Measured on board-a (Debug, this increment): the alternate held `REF_LMX_N`
 /// and the very next sweep picked `REF_LMX_P` (pair_recouple, 38 elements, with
 /// its twin) — the same 38 elements of the same pair, and the same refusal.
 fn unblockHeldOut(run: *UnblockRun, net_i: usize) bool {
@@ -2799,7 +2799,7 @@ fn unblockTargets(
     //
     // The bound decides HOW MANY the tail can pay for; the ORDER decides WHICH.
     // Testing each candidate as the oracle happened to name it made admission a
-    // function of arrival, which is how barracuda's cheapest target was lost:
+    // function of arrival, which is how board-a's cheapest target was lost:
     // with three whole-net targets found and 65 s of spare tail, `GND` — whose
     // shortest island gap is 1.00 mm, the most closable hop on the board — was
     // turned away at the door while 42-55 mm cross-board joins were kept, and
@@ -2837,7 +2837,7 @@ fn unblockTargets(
 /// any more: every admitted target now gets one bounded breadth probe first
 /// (`UnblockLadder`), and only the verdicts that earn it are funded a ladder.
 /// Quoting the door at the wide tier's price under that schedule turns targets
-/// away from the ROUND THEY COULD AFFORD. Measured on barracuda (Debug, this
+/// away from the ROUND THEY COULD AFFORD. Measured on board-a (Debug, this
 /// increment): with 81 s reserved for six planned targets, three were admitted
 /// and `SPI_SCK` and `V_3V3A` — the two the campaign has never had a
 /// transaction verdict for — were refused entry, so the breadth round they
@@ -2951,7 +2951,7 @@ const UnblockPinch = enum { ignore, nominate };
 /// The phase used to be ONE pass that gave each target its whole ladder in turn,
 /// and on a timed board that is a queue, not a schedule: a full ladder costs
 /// 45-60 s, the phase affords two, and the targets behind them are never asked
-/// anything at all. Measured on barracuda (ReleaseSafe, v98): `SPI_DSA_CSN` and
+/// anything at all. Measured on board-a (ReleaseSafe, v98): `SPI_DSA_CSN` and
 /// `SPI_LMX_CSN` spent the whole 180 s tail between them and `LOCK_DET`,
 /// `SPI_SCK` and `V_3V3A` produced no transaction verdict on any logged run —
 /// the campaign had five open nets and facts about two of them.
@@ -3315,7 +3315,7 @@ const unblock_max_deepen: usize = 2;
 /// that test is what actually bounds the ladder — this is the backstop that
 /// keeps a mis-measured price, or a pocket that keeps peeling one blocker at a
 /// time, from turning a search into a loop. Six because it is comfortably past
-/// what any measured barracuda pocket has taken and still a number a reader can
+/// what any measured board-a pocket has taken and still a number a reader can
 /// hold: `V_3V3A`'s blocker set grew 1 → 3 across the two rounds it was allowed,
 /// so its pocket is a handful of rounds deep, not dozens.
 const unblock_max_deepen_funded: usize = 6;
@@ -3369,7 +3369,7 @@ fn deepenDeadline(now: i128, budget: DeepenBudget) i128 {
 /// spends its share on one verdict per net rather than on one net's ladder.
 ///
 /// A TIMED ladder gets the backstop instead, because for it the count was never
-/// the real bound: measured on barracuda (ReleaseSafe, v100), the phase's one
+/// the real bound: measured on board-a (ReleaseSafe, v100), the phase's one
 /// funded ladder exhausted its two rounds at +187 s of a 240 s budget with its
 /// blocker set still growing (1 → 3 across those two) and its funded plan empty
 /// behind it, so the pass returned with **53 s of the board's own budget
@@ -3420,7 +3420,7 @@ fn deepenAffordsRound(run: *const UnblockRun, share: UnblockShare, now: i128, pr
 /// transaction had just paid a whole slice to produce — a BOARD on which the
 /// target's remaining blockers are directly diagnosable, by the same nomination
 /// machinery that seeded the transaction in the first place. Measured on
-/// barracuda (ReleaseSafe, v96), `SPI_LMX_CSN` and `LOCK_DET` both ended there,
+/// board-a (ReleaseSafe, v96), `SPI_LMX_CSN` and `LOCK_DET` both ended there,
 /// each after ripping 60-80 elements and re-routing them, each reporting "3
 /// blockers" it had already put back.
 ///
@@ -3438,7 +3438,7 @@ fn deepenAffordsRound(run: *const UnblockRun, share: UnblockShare, now: i128, pr
 /// copper, and a round only reaches it after this target's rip has already
 /// freed, re-routed and restored every negotiable occupant of its corridor and
 /// the board has said the channel is still sealed — which is exactly the
-/// evidence that the remaining occupant is the wall. Measured on barracuda
+/// evidence that the remaining occupant is the wall. Measured on board-a
 /// (ReleaseSafe, v97): `LOCK_DET` ended there with `V_24V_CLEAN` excluded as
 /// `outranks_seed` and nothing else left to ask.
 ///
@@ -3451,7 +3451,7 @@ fn deepenAffordsRound(run: *const UnblockRun, share: UnblockShare, now: i128, pr
 /// every bench and corpus route stays byte-identical.
 ///
 /// It runs under whichever tier formed the transaction, the NARROW one included,
-/// and that is deliberate: both measured cases on barracuda (`SPI_LMX_CSN`,
+/// and that is deliberate: both measured cases on board-a (`SPI_LMX_CSN`,
 /// `LOCK_DET`) are narrow rollbacks whose wide retry that board never affords, so
 /// a rule that waited for the wide tier would never reach either of them. The
 /// cost is that a deepened narrow refusal delays that tier's own retry, which is
@@ -4123,7 +4123,7 @@ fn unblockLifted(run: *UnblockRun, pick: vacate_policy.Nomination) bool {
 /// The window ONE transaction's GATE may reconcile in, past the slice its own
 /// scoped re-route has already spent.
 ///
-/// Measured on barracuda (Debug, this increment): the wide `SPI_DSA_CSN`
+/// Measured on board-a (Debug, this increment): the wide `SPI_DSA_CSN`
 /// transaction's gate reconciled for **14.8 s** and `SPI_LMX_CSN`'s for
 /// **17.3 s**, both landing real island hops and both ending with the honest
 /// verdict "a net this transaction named is still open". Twenty seconds covers
@@ -4161,7 +4161,7 @@ fn unblockGateOptions(run: *UnblockRun, options: route_policy.Options) route_pol
 /// `route_close.reconcile` sets `cancelled` whenever the stop it was handed has
 /// elapsed by the time it returns — a statement about ONE transaction's slice,
 /// not about the route. Reading it as "no candidate" cost this tier every
-/// mechanism behind the verdict: measured on barracuda (Debug, this increment)
+/// mechanism behind the verdict: measured on board-a (Debug, this increment)
 /// the wide `SPI_DSA_CSN` transaction reconciled for 14.8 s, reached the real
 /// answer ("a net this transaction named is still open"), and was reported as
 /// "the scoped re-route ran out of its slice" — so the rollback line, the lost
@@ -4359,7 +4359,7 @@ const unblock_rehome_max_hops: usize = 4;
 /// transaction's own scope — one tier, one lattice. The target's own join has had
 /// the mesh behind it since the shape router landed (`router.closeGaps` runs the
 /// maze and then the CDT channel), and the victim never did: measured on
-/// barracuda (ReleaseSafe, v92), `GND` closed as one 1.27 mm hop and the whole
+/// board-a (ReleaseSafe, v92), `GND` closed as one 1.27 mm hop and the whole
 /// transaction was rolled back because `V_3V3_ID` — 12 elements of short stub —
 /// could not be re-laid around the copper that had just taken its channel. So the
 /// same fallback is wired here, asking the MESH ALONE
@@ -4396,7 +4396,7 @@ fn unblockRehome(
         const victim = unblockRehomable(run, pick, board) orelse continue;
         const window = unblockRehomeWindow(run, deadline_ns, pick.kind == .pair_recouple);
         // Every lost victim from here on gets a NAMED verdict. A silent skip is
-        // what made this whole tier unfalsifiable: measured on barracuda
+        // what made this whole tier unfalsifiable: measured on board-a
         // (ReleaseSafe, v95), `REF_LMX_N` was lost, the pair class was declined
         // one line before the first log statement, and the run printed neither
         // "re-homed" nor "found no channel" — indistinguishable from a tier that
@@ -4426,7 +4426,7 @@ const rehome_window_ns: i128 = 4 * clock.ns_per_s;
 /// Larger than the shape channel's, because it is a different KIND of work: a
 /// hop draws over a mesh that already exists, while `unblockPairHome` calls the
 /// router, which builds this board's whole routing lattice before it lays the
-/// first segment. Measured on barracuda (Debug, this increment): handed the
+/// first segment. Measured on board-a (Debug, this increment): handed the
 /// 4 s hop window, the `REF_LMX_P`/`REF_LMX_N` re-home verdicted "ran out of its
 /// window" on every attempt — the mechanism engaged, was priced as a hop, and
 /// could not finish.
@@ -4445,7 +4445,7 @@ const pair_rehome_window_ns: i128 = 20 * clock.ns_per_s;
 /// (`stop.deadline_ns = deadline_ns`), and the gate behind it then reconciles
 /// for tens of seconds MORE — so by the time a candidate exists, `now` is past
 /// `deadline_ns` on every timed board and the re-home loop breaks before it asks
-/// its first question. Measured on barracuda (ReleaseSafe, v92 and v93): two
+/// its first question. Measured on board-a (ReleaseSafe, v92 and v93): two
 /// transactions rolled back with "closed, but <victim> did not come back", the
 /// exact refusal this tier was built for, and not one re-home verdict line was
 /// ever printed. The mechanism was live in its unit tests and inert on the
@@ -4610,7 +4610,7 @@ fn unblockShapeHop(
 /// the target's new copper in place, and with a window of its own rather than
 /// the tail of a slice the restore has already spent.
 ///
-/// Measured on barracuda (ReleaseSafe, v95): the wide `SPI_DSA_CSN` transaction
+/// Measured on board-a (ReleaseSafe, v95): the wide `SPI_DSA_CSN` transaction
 /// closed its target and was rolled back because `REF_LMX_N` — 38 elements of
 /// declared pair — did not come back, and the re-home declined it silently one
 /// line before its first log statement.
@@ -4636,7 +4636,7 @@ fn unblockPairHome(
     };
     const legs = unblockPairLegs(run, pair_i);
     // THE escalation for this tier's one remaining verdict, tried first.
-    // Measured on barracuda (ReleaseSafe, v96): the wide `SPI_DSA_CSN`
+    // Measured on board-a (ReleaseSafe, v96): the wide `SPI_DSA_CSN`
     // transaction closed its target, was rolled back because `REF_LMX_N` did not
     // come back, and this re-home then answered "found no coupled channel" —
     // which is the maze's word for "not on the lattice", the exact refusal the
@@ -5501,7 +5501,7 @@ fn traceLength(tracks: []const router.Track) f64 {
 /// may spend a little more than the interactive one-shot ceiling before the
 /// residual decision. These are still deterministic count/distance bounds;
 /// every accepted hop remains non-ripping and DRC-ratcheted by `gate`.
-/// The wide ceiling is deliberate: barracuda's V_1V8A closes ONLY through its
+/// The wide ceiling is deliberate: board-a's V_1V8A closes ONLY through its
 /// 37 mm whole-net gate join (capping this at 12 mm lost the net, v47), while
 /// the treadmill of hopeless 40-50 mm mazes (SPI_SCK, TXDATA, SPI_LMX_CSN) is
 /// bounded by the per-pass slice and sorted LAST by the millimetre-ordered hop
@@ -5540,7 +5540,7 @@ const GateConfig = struct {
     /// Is `raw` already a gate's own output? Then a pass that lands no hop
     /// hands back byte-identical copper, and canonicalization, the topology
     /// prune and the DRC ratchet would re-derive verdicts an earlier pass
-    /// already reached — measured at 23 s of a 240 s barracuda route, on the
+    /// already reached — measured at 23 s of a 240 s board-a route, on the
     /// pass that by definition changed nothing.
     already_gated: bool = false,
     /// Is this gate the tail of a SCOPED transaction — one net (plus the
@@ -5550,7 +5550,7 @@ const GateConfig = struct {
     /// itself runs at `one_shot`. The short ceiling exists to stop a broad
     /// one-shot gate spending a corridor maze per net across the whole open
     /// set; a scoped pass has exactly one net to spend it on and a corridor
-    /// that was freed for it. Measured on barracuda: the target's own join is
+    /// that was freed for it. Measured on board-a: the target's own join is
     /// 42-55 mm on every one of these transactions, so under the 4 mm default
     /// `route_close.planHops` dropped the target's whole net before a hop was
     /// ever planned — the scoped gate could not attempt the join the
@@ -5562,7 +5562,7 @@ const GateConfig = struct {
     /// `standard_gate_max_hop_mm`, so every existing caller is unchanged.
     ///
     /// A scoped gate's ceiling has to cover the join its transaction was formed
-    /// to make, and the unattended ceiling covers barracuda's 42.5 mm
+    /// to make, and the unattended ceiling covers board-a's 42.5 mm
     /// `SPI_LMX_CSN` and 49.6 mm `TXDATA_ADF` while stopping just short of its
     /// 55.3 mm `LOCK_DET` — whose hop `route_close.planHops` therefore dropped
     /// before the maze OR the shape tier was ever asked about it, in the one
@@ -5582,7 +5582,7 @@ const GateConfig = struct {
     ///
     /// The SEMANTICS are untouched: the same commit rule decides, reading the
     /// same oracle. What changes is that a refusal stops costing a whole-board
-    /// topology scan. Measured on barracuda: the two cross-board targets spent
+    /// topology scan. Measured on board-a: the two cross-board targets spent
     /// 11.7 s apiece pruning a board they then discarded, which is also what
     /// carried their gate past its own slice and turned a real geometry verdict
     /// into "ran out of its slice".
@@ -5596,7 +5596,7 @@ const GateConfig = struct {
 
 /// Hard ceiling on what a scoped gate's own target may lift `max_hop_mm` to.
 ///
-/// A hop longer than this is not a join, it is the board: barracuda's outline is
+/// A hop longer than this is not a join, it is the board: board-a's outline is
 /// 62.7 x 26.8 mm, so its longest possible pad-to-pad line is about 68 mm and
 /// this admits every real join on it while still refusing to hand the gate an
 /// unbounded corridor maze on a board nobody has measured.
@@ -5615,10 +5615,10 @@ fn gateHopCeiling(options: route_policy.Options, cfg: GateConfig) f64 {
 /// Whether this route's topology prune has ever been ADOPTED. A rejected prune
 /// returns the copper it was handed, so running it again over a board that
 /// gained a couple of hops buys a whole-board topology scan (17.7 s of a timed
-/// barracuda route, per pass) for a result already known to be discarded.
+/// board-a route, per pass) for a result already known to be discarded.
 /// One reconcile pass's share of a timed board. The gate runs several times
 /// per route (broad, per-retry, repeated tail passes), so a single call must
-/// never own the board deadline: barracuda's broad gate once spent 108 s of a
+/// never own the board deadline: board-a's broad gate once spent 108 s of a
 /// 240 s budget closing islands and starved the deferred repairs, the repeat
 /// gates, and the unblock phase behind it. The bound is a SLICE, not a
 /// shortened board deadline — a first attempt at this shrank stop.deadline_ns
@@ -5699,7 +5699,7 @@ fn gateConfigured(
     // anchors and stubs a later pass's closer would have used were gone — and
     // put the DRC ratchet immediately behind it, so a removal that tripped any
     // error-severity rule cost that net ALL of its generated copper. Measured
-    // on barracuda: the first gate went `17 -> 8 failed` with the prune
+    // on board-a: the first gate went `17 -> 8 failed` with the prune
     // rejected and `17 -> 26 failed` with it active, and the board finished at
     // 583 tracks instead of 963. Cleanup is cosmetic and belongs after
     // functional convergence — see `finishLoweredCandidate`.
@@ -5961,7 +5961,7 @@ const SalvageReport = struct { first: []const u8 = "?", opened: usize = 0, froze
 /// bypass leg from a cap's rail land to the IC land it decouples, a ground
 /// pad's distance to its nearest return barrel, an endpoint left on nothing,
 /// and the fabricated net-open reading that credits fill the topology scan
-/// cannot see. Measured on barracuda, a prune judged on topology alone logged
+/// cannot see. Measured on board-a, a prune judged on topology alone logged
 /// `kept (topo 0->0)` every round while driving bypass_open 2 -> 30,
 /// ground_via_distance 1 -> 21 and net_open 15 -> 126: every removal was
 /// connectivity-safe and the board was still ruined.
@@ -6071,7 +6071,7 @@ fn pruneGateTopologyOutcome(
     const prune_t0 = clock.nanoTimestamp();
     // Round zero's board IS the board this scan just judged, so the loop opens
     // with these findings rather than re-deriving them: one whole-board
-    // topology scan on a routed barracuda is seconds of a timed route's budget,
+    // topology scan on a routed board-a is seconds of a timed route's budget,
     // and the gate pays this per pass.
     const topology_before = drc_rules.checkTopologyFilled(alloc, .{
         .placement = placement,
@@ -6111,7 +6111,7 @@ fn pruneGateTopologyOutcome(
         // Pruning only ever REMOVES copper, so connectivity is monotone across
         // the rounds and a net a round has cost cannot be redeemed by a later
         // one. Asking NOW is therefore the same verdict for a fraction of the
-        // scans — barracuda's damage lands in the FIRST round's removals.
+        // scans — board-a's damage lands in the FIRST round's removals.
         //
         // The verdict is per NET, not per board. Redundancy proposes and the
         // fabrication oracle disposes, and they disagree about a handful of
@@ -6120,7 +6120,7 @@ fn pruneGateTopologyOutcome(
         // joined by nothing but a via reads as two dead components, while the
         // fab graph joins them at the barrel and loses the net when they go.
         // Discarding the whole board's cleanup for that is a bad trade —
-        // barracuda kept ~124 warnings to protect one net — so the damaged
+        // board-a kept ~124 warnings to protect one net — so the damaged
         // nets get their copper back and are frozen for the remaining rounds,
         // and everything the oracle agreed about still comes off.
         if (tally_before == null) tally_before = try fab_readiness.routableTally(alloc, placement, .{
@@ -6298,7 +6298,7 @@ fn fillSensitive(kind: drc.Kind) bool {
 /// fill, but only when a fill could change the answer.
 ///
 /// Crediting the fill costs a pour raster per net per carrying layer: measured
-/// on barracuda (Debug), 3-11 s on top of a 2.5 s check, per gate pass, which
+/// on board-a (Debug), 3-11 s on top of a 2.5 s check, per gate pass, which
 /// on a timed board is a whole ladder pass — and the ladder is the phase that
 /// closes rails. So the zone-blind read comes first (it is the cheaper half of
 /// the same rules), and the fill is bought only when that read produced a
@@ -7185,7 +7185,7 @@ test "a scoped gate's ceiling covers its target's join, bounded" {
     // so every caller predating the field is unchanged.
     const scoped = GateConfig{ .scoped_target = true };
     try testing.expectApproxEqAbs(standard_gate_max_hop_mm, gateHopCeiling(one_shot, scoped), 1e-12);
-    // Barracuda's three cross-board control targets. The first two already fit
+    // Board A's three cross-board control targets. The first two already fit
     // the unattended ceiling; LOCK_DET at 55.3 mm did not, so its hop was
     // dropped before the maze or the shape tier was ever asked about it.
     for ([_]f64{ 42.5, 49.6 }) |fits| {
@@ -7465,7 +7465,7 @@ test "the tail's affordability sets a count, not which targets fill it" {
     // Inside the additive close's reserve nothing is admitted at all.
     try testing.expect(!unblockAdmissible(now, lim.slice.reserve_ns, 1, lim));
 
-    // The ORDER decides which of them: barracuda's `GND` is named fifth by the
+    // The ORDER decides which of them: board-a's `GND` is named fifth by the
     // oracle and carries the board's cheapest hop, and testing candidates where
     // they arrive turned it away while 42-55 mm joins were kept.
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -7482,7 +7482,7 @@ test "the tail's affordability sets a count, not which targets fill it" {
 
 // spec: serve/route-plan - an unblock ladder takes another rung only while the remainder still covers a floor slice for every net behind it that has not yet had its first attempt, so re-entry can never spend a planned target's only turn
 test "an unblock ladder yields once the targets behind it are owed their first try" {
-    // barracuda's tail: the rail's per-gap target, then the two whole-net joins
+    // board-a's tail: the rail's per-gap target, then the two whole-net joins
     // that are the board's only single-gap open nets.
     const targets = [_]target_unblock.Target{
         .{ .net_i = 3, .gap_mm = 1.00, .kind = .one_gap },
@@ -7518,7 +7518,7 @@ test "an unblock ladder yields once the targets behind it are owed their first t
 // spec: serve/route-plan - the remaining route budget is divided among the unblock LADDERS still live, so a planned target whose net an earlier refusal abandoned stops taking a share, and one net's several planned slots take a single share between them
 test "an abandoned net's planned targets stop taking a share of the tail" {
     // A rail whose per-gap targets fill three of five slots, plus two two-terminal
-    // nets behind them — barracuda's shape.
+    // nets behind them — board-a's shape.
     const targets = [_]target_unblock.Target{
         .{ .net_i = 3, .gap_mm = 1.00, .kind = .one_gap },
         .{ .net_i = 7, .gap_mm = 6.42, .kind = .one_gap },
@@ -7549,7 +7549,7 @@ test "an abandoned net's planned targets stop taking a share of the tail" {
 
 // spec: serve/route-plan - a net that has earned an unblock accept this phase retires a refused hop and continues its ladder at the next-smallest, each hop offered at most once per phase, while a net that has proved nothing is still abandoned on its first refusal
 test "a retired unblock hop is never offered to its net again" {
-    // barracuda's `GND` after two accepts: a 1.27 mm pocket its transaction
+    // board-a's `GND` after two accepts: a 1.27 mm pocket its transaction
     // cannot cross, and five wider pockets nobody had asked about.
     const pads = [_]fab_readiness.OpenPad{
         .{ .ref = "U1", .pad = "9", .x = 0, .y = 0, .side = .top, .thru = false, .island = 0 },
@@ -7707,7 +7707,7 @@ test "a geometry refusal is retried wider only for authority the narrow rip lack
     };
     try testing.expect(!unblockRolledBackOnGeometry("V_3V3A", blocker_open));
 
-    // barracuda's v91 `V_3V3A`: the narrow transaction ripped one blocker, and
+    // board-a's v91 `V_3V3A`: the narrow transaction ripped one blocker, and
     // the wide nomination came back with that same net plus generic growth.
     // Nothing there is a class the narrow tier could not reach, so its 45 s
     // slice would re-ask a question the board has already answered.
@@ -7894,7 +7894,7 @@ test "a lost pair victim is re-homed coupled rather than declined" {
     const pick = vacate_policy.Nomination{ .net_i = 1, .kind = .pair_recouple, .elements = 8, .dist = 0.4 };
     const legs = unblockPairLegs(&run, 0);
     // It is priced as the scoped ROUTE it is, not as the hop the shape channel
-    // draws: measured on barracuda (Debug), the 4 s hop window was not enough to
+    // draws: measured on board-a (Debug), the 4 s hop window was not enough to
     // build the board's lattice and the re-home verdicted "ran out of its
     // window" on every attempt.
     try testing.expect(pair_rehome_window_ns > rehome_window_ns);
@@ -7995,7 +7995,7 @@ test "a lost victim earns one alternate nomination from either tier" {
 
     // A victim loss earns exactly one — and it is priced and nominated under the
     // limits of the TIER THAT FORMED IT, which is the wide tier as readily as the
-    // narrow one. Measured on barracuda (ReleaseSafe, v95): the wide transaction
+    // narrow one. Measured on board-a (ReleaseSafe, v95): the wide transaction
     // lost `REF_LMX_N`, and the tail read `accepted` off its outcome and threw
     // the victim away, so this retry was never once offered on a real board.
     const wide_lim = target_unblock.corridorSlice(unblock_wide_limits, targets[0].gap_mm);
@@ -8017,7 +8017,7 @@ test "a lost victim earns one alternate nomination from either tier" {
     // Holding one leg of a declared pair holds its TWIN with it. A pair is
     // ripped, re-laid and judged as one thing, so offering the other leg
     // re-forms the identical transaction under the other leg's name — measured
-    // on barracuda (Debug, this increment): the alternate held `REF_LMX_N` and
+    // on board-a (Debug, this increment): the alternate held `REF_LMX_N` and
     // the very next sweep picked `REF_LMX_P`, the same 38 elements of the same
     // pair, for the same refusal.
     run.placement = try pairWalledUnblockPlacement(arena);
@@ -8306,7 +8306,7 @@ test "a ladder deepens past two rounds only while its own price fits the remaind
     try testing.expect(unblock_max_deepen_funded > unblock_max_deepen);
 
     // The price of one more round is the ladder's OWN measured one, not the
-    // window it may claim: barracuda's rounds run 12-18 s against a 30 s window,
+    // window it may claim: board-a's rounds run 12-18 s against a 30 s window,
     // so a remainder that covers the measurement admits a round the window alone
     // would refuse.
     const measured = 15 * second;
@@ -8676,7 +8676,7 @@ test "the gate passes carry no topology prune and the finish spends exactly one"
     // wrong on a large board: the reconcile ladder re-planned against copper
     // the prune had just rewritten, and `drcSafeResult` — which sits directly
     // behind the prune in a gate — turned any rule a removal tripped into the
-    // whole net's copper being dropped. Measured on barracuda: `17 -> 8
+    // whole net's copper being dropped. Measured on board-a: `17 -> 8
     // failed` with the prune inert versus `17 -> 26 failed` with it live.
     const source = @embedFile("route_plan.zig");
     const gate_body_start = std.mem.indexOf(u8, source, "fn gateConfigured(").?;
@@ -8698,7 +8698,7 @@ test "a prune is judged on requirement damage, not connectivity alone" {
     const placement = fixturePlacement(&parts, &nets);
     // The families a removal can break while every net stays one piece. The
     // topology scan reports none of them, which is why a prune judged on
-    // `topo 0->0` drove barracuda's bypass_open 2 -> 30 and gvtf 1 -> 21.
+    // `topo 0->0` drove board-a's bypass_open 2 -> 30 and gvtf 1 -> 21.
     try testing.expect(removalDamageKind(.net_open));
     try testing.expect(removalDamageKind(.bypass_open));
     try testing.expect(removalDamageKind(.ground_via_distance));
@@ -8872,26 +8872,26 @@ test "the unblock reserve is priced from the census the phase is entered with" {
     );
     try testing.expect(unblock_breadth_probe_ns > target_unblock_limits.slice.max_ns);
 
-    // barracuda's own entry census under the 2026-08-18 layer contract: eight
+    // board-a's own entry census under the 2026-08-18 layer contract: eight
     // planned targets over six distinct open nets.
-    const barracuda = unblockReservePlan(8, 6, 55.27, uncapped_residual_ns);
-    try testing.expectEqual(@as(usize, 6), barracuda.probes);
-    try testing.expectEqual(unblock_reserve_ladders, barracuda.ladders);
-    try testing.expectEqual(6 * unblock_breadth_probe_ns, barracuda.breadthNs());
+    const board_a = unblockReservePlan(8, 6, 55.27, uncapped_residual_ns);
+    try testing.expectEqual(@as(usize, 6), board_a.probes);
+    try testing.expectEqual(unblock_reserve_ladders, board_a.ladders);
+    try testing.expectEqual(6 * unblock_breadth_probe_ns, board_a.breadthNs());
     // 6 x 30 s of breadth beside 2 x 45 s of depth: the reserve now holds a
     // WHOLE probe for each open net, so round 1 spending its share is no longer
     // the same event as round 2 losing its ladders.
-    try testing.expectEqual(180 * clock.ns_per_s, barracuda.breadthNs());
-    try testing.expectEqual(90 * clock.ns_per_s, barracuda.depthNs());
-    try testing.expectEqual(2 * unblock_ladder_price_ns, barracuda.depthNs());
-    try testing.expectEqual(barracuda.breadthNs() + barracuda.depthNs(), barracuda.reserve_ns);
+    try testing.expectEqual(180 * clock.ns_per_s, board_a.breadthNs());
+    try testing.expectEqual(90 * clock.ns_per_s, board_a.depthNs());
+    try testing.expectEqual(2 * unblock_ladder_price_ns, board_a.depthNs());
+    try testing.expectEqual(board_a.breadthNs() + board_a.depthNs(), board_a.reserve_ns);
 
     // Fewer open nets is a smaller bill, term by term — the price tracks the
     // census rather than being the same number on every board.
     const fewer = unblockReservePlan(3, 2, 55.27, uncapped_residual_ns);
     try testing.expectEqual(@as(usize, 2), fewer.probes);
-    try testing.expect(fewer.breadthNs() < barracuda.breadthNs());
-    try testing.expect(fewer.reserve_ns < barracuda.reserve_ns);
+    try testing.expect(fewer.breadthNs() < board_a.breadthNs());
+    try testing.expect(fewer.reserve_ns < board_a.reserve_ns);
 
     // A single target never reaches the breadth round at all, so it is never
     // charged for one; it is still owed the ladder it will actually run.
@@ -8962,7 +8962,7 @@ test "a gate call's reconcile is sliced without cancelling the board" {
 
     // An already-expired slice stops hop work yet the result is NOT cancelled —
     // the first attempt shrank the board deadline instead, and reconcile's
-    // expiry aborted the whole residual pipeline at 99 s on barracuda.
+    // expiry aborted the whole residual pipeline at 99 s on board-a.
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -9447,7 +9447,7 @@ fn walledUnblockPlacement(arena: std.mem.Allocator) std.mem.Allocator.Error!opti
 /// unpoured, un-paired, carry no RF discipline and no fence, and are short
 /// enough to be ordinary `short_stub` picks — so every refusal but the rank
 /// guard is out of the picture, and what a tier nominates here is exactly what
-/// it will and will not negotiate about rank. Barracuda's `LOCK_DET` /
+/// it will and will not negotiate about rank. Board A's `LOCK_DET` /
 /// `V_24V_CLEAN` in miniature.
 fn rankWalledUnblockPlacement(arena: std.mem.Allocator) std.mem.Allocator.Error!optimizer.Placement {
     var placement = try walledUnblockPlacement(arena);
@@ -9617,7 +9617,7 @@ test "a corridor lift takes the channel copper and leaves the stitch field" {
     const placement = try openTargetPlacement(arena);
     // One vertical corridor, and a plane-carried net (index 1) with copper on
     // both sides of it: two hookups and two barrels, one of each in the
-    // channel. This is barracuda's `GND` in miniature — hundreds of elements
+    // channel. This is board-a's `GND` in miniature — hundreds of elements
     // board-wide, a handful of them actually in the way.
     const hops = [_]blocker_nomination.Hop{.{ .ax = 4, .ay = -2, .bx = 4, .by = 6 }};
     const board = router.RouteResult{
@@ -10418,7 +10418,7 @@ test "a breadth probe lifts a poured blocker's corridor instead of ripping the n
     try testing.expect(!lim.negotiate.plane_corridor);
     try testing.expect(!lim.negotiate.pairs);
 
-    // What the switch BUYS, on barracuda's own numbers: `V_3V3_LMX` crossing a
+    // What the switch BUYS, on board-a's own numbers: `V_3V3_LMX` crossing a
     // probe's corridor is 66 elements of pour and ~8 of them in the way. Whole,
     // it is refused for its size — and the probe pays a 20-30 s restore for the
     // 66 whenever the budget does admit it; lifted, it is the same pour-carried
@@ -10500,7 +10500,7 @@ test "a breadth refusal with a board to diagnose outranks one without" {
     try testing.expect(@backingInt(UnblockPromise.victim_lost) < @backingInt(UnblockPromise.deepenable));
     try testing.expect(@backingInt(UnblockPromise.deepenable) < @backingInt(UnblockPromise.depth_reachable));
 
-    // barracuda's five open nets (Debug, v100), all with an outranking net in
+    // board-a's five open nets (Debug, v100), all with an outranking net in
     // their sweep's refusals. Two rolled a re-routed board back — the verdict
     // `unblockDeepen` is entered on — and three produced no board at all.
     const reachable = [_]vacate_policy.Refused{.{ .net_i = 7, .why = .outranks_seed }};
@@ -10545,7 +10545,7 @@ test "the cheaper rollback is funded first" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // barracuda's top bucket (Debug, v101): net 2 is `SPI_LMX_CSN`, first in plan
+    // board-a's top bucket (Debug, v101): net 2 is `SPI_LMX_CSN`, first in plan
     // order with a 3-net rip; net 0 is `V_3V3A`, last, on a single stub. Both
     // rolled a board back, so plan order alone funded the expensive one.
     const promise = [_]UnblockPromise{ .deepenable, .sealed, .deepenable };
@@ -10618,7 +10618,7 @@ test "round 2 funds the deep ladders its remainder can pay for" {
     try testing.expectEqual(@as(usize, 3), unblockFundedLadders(&run, 3, lim));
     try testing.expectEqual(@as(usize, 0), unblockFundedLadders(&run, 0, lim));
 
-    // barracuda's v99 numbers: ~49 s of tail behind the breadth round funds ONE
+    // board-a's v99 numbers: ~49 s of tail behind the breadth round funds ONE
     // ladder, not the four the count promised.
     const now = clock.nanoTimestamp();
     run.options = .{ .stop = .{ .deadline_ns = now + 49 * second + lim.slice.reserve_ns } };
@@ -10630,7 +10630,7 @@ test "round 2 funds the deep ladders its remainder can pay for" {
     try testing.expectEqual(@as(usize, 2), unblockFundedLadders(&run, 5, lim));
 
     // The count TRACKS the remainder rather than a tier of its own, which is
-    // what a raised board budget buys. barracuda's v100 tail measured 89 s at
+    // what a raised board budget buys. board-a's v100 tail measured 89 s at
     // this point and funded one ladder — one second short of two — while the
     // same phase behind a 270 s budget measures 119 s and funds the second, which
     // is `LOCK_DET`'s ladder and its rank negotiation.
@@ -10748,7 +10748,7 @@ test "a funded hydra's later rungs queue behind every fresh ladder" {
         .measured = .{},
     };
 
-    // barracuda's shape: the best-promised net is a HYDRA with three planned
+    // board-a's shape: the best-promised net is a HYDRA with three planned
     // rungs, and two fresh targets sit behind it with one each. Grouped by net —
     // which is what the promise sort alone produces — FAR takes three whole
     // ladders before NEAR is asked anything.
@@ -11058,7 +11058,7 @@ test "the net-scoped bond fold folds a doubled leg and leaves an unfoldable grou
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    // Barracuda's measured doubled-trunk shape, moved to the fixture origin: a
+    // Board A's measured doubled-trunk shape, moved to the fixture origin: a
     // trunk from one land plus a second land's leg running beside it.
     const a = [2]f64{ 2.20000000000005, 2.12000000000002 };
     const b = [2]f64{ 3.9032613427087, 0.40840018177056 };

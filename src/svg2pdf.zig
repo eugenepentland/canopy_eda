@@ -1,6 +1,6 @@
 //! Strict translator from the schematic renderer's closed SVG subset to a flat
 //! display list of resolved `DrawOp`s — the WP-B half of the PDF export
-//! (`docs/pdf-export-plan.md`). It deliberately does NOT depend on `pdf.zig`:
+//! (`docs/archive/pdf-export-plan.md`). It deliberately does NOT depend on `pdf.zig`:
 //! the output is pure data, so the writer and the translator stay independently
 //! testable and the composer (WP-C) is the only place that maps one onto the
 //! other.

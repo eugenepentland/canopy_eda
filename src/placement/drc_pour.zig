@@ -74,7 +74,7 @@ const Surface = struct {
     /// One box per hole, measured with `box` when the surface was built.
     ///
     /// Every question asked of a surface is asked once per copper feature on
-    /// the board — a barracuda-class pour is judged against fifteen hundred
+    /// the board — a board-a-class pour is judged against fifteen hundred
     /// lands and nine hundred traces — and each of those used to re-measure the
     /// ring it was rejecting. The boxes only PRUNE: a probe outside a ring's
     /// bounds cannot meet the ring, so the pair it drops is one the exact test
@@ -225,7 +225,7 @@ const Audit = struct {
     ///
     /// `cached` is the per-contour verdict a PREVIOUS audit of this exact fill
     /// reached. Ring validation is the expensive half of this module — nearly a
-    /// second of a barracuda-class board — and a raster the memo handed back
+    /// second of a board-a-class board — and a raster the memo handed back
     /// unchanged has, by construction, the same rings and therefore the same
     /// verdict. When it is supplied the verdicts are replayed rather than
     /// recomputed, and the findings themselves are NOT re-emitted: the caller

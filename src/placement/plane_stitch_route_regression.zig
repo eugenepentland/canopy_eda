@@ -104,7 +104,7 @@ const cap_pads = [_]geometry.Pad{
     .{ .number = "2", .x = 0, .y = 0.5, .w = 0.54, .h = 0.6 },
 };
 /// The same 0402 turned broadside to the package. Its rail land is offset from
-/// the QFN pin in both axes, matching straps-synth-lmx2595's C_VCCDIG → U1.7
+/// the QFN pin in both axes, matching board-d-synth-lmx2595's C_VCCDIG → U1.7
 /// geometry that the compact land-aware hookup declines.
 const side_cap_pads = [_]geometry.Pad{
     .{ .number = "1", .x = 0.5, .y = 0, .w = 0.6, .h = 0.54 },

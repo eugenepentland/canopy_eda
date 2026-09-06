@@ -308,12 +308,12 @@ const pcbToolstripControls = {
 // present in its owning source and mapped to a real PCB scenario.
 const pcbPrimaryControls = {
   "pcb-find-input": { source: "src/serve/assets/pcb_find_header.html", scenarios: ["find"] },
-  "pcb-lay-select": { source: "src/serve/pcb_layout_page.zig", scenarios: ["layout_load"] },
-  "pcb-update": { source: "src/serve/pcb_layout_page.zig", scenarios: ["layout_save"] },
+  "pcb-lay-select": { source: "src/serve/pcb_layout_chrome.zig", scenarios: ["layout_load"] },
+  "pcb-update": { source: "src/serve/pcb_layout_chrome.zig", scenarios: ["layout_save"] },
   "drc-prev": { source: "src/serve/assets/pcb_drc_pane.html", scenarios: ["drc_navigation"] },
   "drc-next": { source: "src/serve/assets/pcb_drc_pane.html", scenarios: ["drc_navigation"] },
-  "pcb-pour": { source: "src/serve/pcb_layout_page.zig", scenarios: ["pour_refill"] },
-  "pcb-undo": { source: "src/serve/pcb_layout_page.zig", scenarios: ["part_drag_undo", "via_place_undo"] },
+  "pcb-pour": { source: "src/serve/pcb_layout_chrome.zig", scenarios: ["pour_refill"] },
+  "pcb-undo": { source: "src/serve/pcb_layout_chrome.zig", scenarios: ["part_drag_undo", "via_place_undo"] },
 };
 
 module.exports = { routes, surfaces, responseScenarios, pcbToolstripControls, pcbPrimaryControls };

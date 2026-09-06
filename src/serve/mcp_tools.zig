@@ -2628,7 +2628,7 @@ test "read tools reuse build's stable refdes assignments after insertion" {
 
 test "fuzzyScore returns 0 for a non-match" {
     // spec: serve/mcp_tools - fuzzyScore returns 0 when the needle does not match the haystack as a substring or subsequence
-    try std.testing.expectEqual(@as(u32, 0), fuzzyScore("xyz", "stm32n6"));
+    try std.testing.expectEqual(@as(u32, 0), fuzzyScore("xyz", "board-c"));
     // 'q' and 'z' never appear, so not even a subsequence.
     try std.testing.expectEqual(@as(u32, 0), fuzzyScore("qz", "buck"));
 }
@@ -2796,6 +2796,37 @@ fn jsonMatchesToolTable(alloc: std.mem.Allocator) !bool {
 // spec: serve/mcp_tools - The tools registration table and the embedded tools_list_result.json declare exactly the same tool names
 test "tools table matches tools_list_result.json" {
     try std.testing.expect(try jsonMatchesToolTable(std.testing.allocator));
+}
+
+/// The declared description of `name` in the embedded tool list, or null when
+/// the list carries no such tool. (test helper)
+fn toolDescription(a: std.mem.Allocator, name: []const u8) !?[]const u8 {
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, tools_list_result, .{});
+    for (parsed.object.get("tools").?.array.items) |t| {
+        if (!std.mem.eql(u8, t.object.get("name").?.string, name)) continue;
+        return t.object.get("description").?.string;
+    }
+    return null;
+}
+
+// spec: serve/mcp_tools - The pose tools describe x/y as the footprint origin, the point the placement transform actually adds pad offsets to
+test "the pose tools name the footprint origin, not a part centre" {
+    var arena_inst = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    // `optimizer.worldPadCenter` adds a pad's FOOTPRINT-LOCAL offset to the
+    // pose (pinned by placement/pad_world's world-pad test), so the pose is the
+    // land pattern's own (0,0). Calling it the part centre is wrong for every
+    // footprint whose pads are not centred on that origin — a 0.1 in pin
+    // header's origin is pad 1, a whole half-strip away from its middle.
+    const set = try toolDescription(arena, "set_part_poses") orelse return error.TestExpectedTool;
+    const describe = try toolDescription(arena, "describe_pcb_layout") orelse return error.TestExpectedTool;
+    for ([_][]const u8{ set, describe }) |text| {
+        try std.testing.expect(std.mem.indexOf(u8, text, "FOOTPRINT ORIGIN") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "part CENTRE") == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "part centre") == null);
+    }
 }
 
 /// The declared input schema of `name` in the embedded tool list, or null when

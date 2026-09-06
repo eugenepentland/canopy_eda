@@ -1,5 +1,5 @@
 //! `GET /api/schematic-pdf/:name` — the review-document PDF (WP-D of
-//! `docs/pdf-export-plan.md`). The HTTP twin of `netlisp export-pdf`: it
+//! `docs/archive/pdf-export-plan.md`). The HTTP twin of `netlisp export-pdf`: it
 //! assembles the exact same triple the CLI does — the evaluated block, the
 //! `review.ReviewDoc`, and an `export_pdf.Options` — so the downloaded file and
 //! the CLI's output are the same document. The one deliberate difference is the
@@ -12,7 +12,7 @@
 //!
 //! Composed bytes ARE retained (`serve/read_cache.zig`), keyed by design and
 //! `?theme=`. The old rationale here — "a compose is well under a second" —
-//! was measured before the largest board in this project existed: `barracuda`
+//! was measured before the largest board in this project existed: `board-a`
 //! costs 4.2 s cold and 4.4 s on the identical repeat, essentially all of it
 //! the fresh design evaluation this handler opens with. The invalidation
 //! signal it claimed not to have is the ordinary one every other read surface

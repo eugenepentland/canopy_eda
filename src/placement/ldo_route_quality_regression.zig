@@ -1,4 +1,4 @@
-//! Whole-board routing-QUALITY ratchet, built from the real `bcuda-lt3045-ldo`
+//! Whole-board routing-QUALITY ratchet, built from the real `board-a-lt3045-ldo`
 //! board rather than from a shape invented to suit one pass.
 //!
 //! The audit that produced the fixes ahead of this file measured itself

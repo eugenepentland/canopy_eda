@@ -2,7 +2,7 @@
 //!
 //! A pad's anchor is its centre, and on a pad larger than the copper leaving it
 //! that is an arbitrary choice the geometry may not support. Two measured cases
-//! on barracuda, each of which cost the board a net:
+//! on board-a, each of which cost the board a net:
 //!
 //!   * `buck_6v/U22.3`, a 1.32 x 1.72 mm GND thermal pad. Its centre sits
 //!     0.063 mm from the neighbouring FB pad against a 0.127 mm clearance, so
@@ -62,7 +62,7 @@ pub fn padHoles(arena: std.mem.Allocator, placement: optimizer.Placement) std.me
 /// drills of the vias already routed. The vias used to be left out, and the
 /// via-ban mask is all the maze consults before dropping a barrel, so a hop
 /// could land one fine-grid node from an existing via and come back rejected
-/// by DRC — measured on barracuda's `SPI_SCK` as two drills 0.2008 mm apart
+/// by DRC — measured on board-a's `SPI_SCK` as two drills 0.2008 mm apart
 /// against a 0.2 mm wall, which was the whole reason a clean route was lost.
 pub fn boardHoles(
     arena: std.mem.Allocator,

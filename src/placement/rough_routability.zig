@@ -38,7 +38,7 @@
 //!     parts crossing that cut into two depth ranks, so no cross-section is
 //!     blocked by all of them; SPREAD keeps one rank and re-spaces them along
 //!     the corridor so every neighbouring pair leaves free lane between them.
-//!     A stagger is what the hand reference does — `straps-synth-lmx2595`'s
+//!     A stagger is what the hand reference does — `board-d-synth-lmx2595`'s
 //!     starred layout spreads its east ring over three depths and offers 20
 //!     lanes where the flush rough column offers 4 — but a net whose ideal
 //!     crossing point is mid-corridor needs a lane THERE, which is the spread.
@@ -146,10 +146,10 @@ const cut_halo_mm: f64 = 0.2;
 ///
 /// 3 % sits in a measured gap, not a guessed one. Priced over the 36-module
 /// corpus (2026-08-10) the accepted soft rounds cost, per net seated:
-/// `straps-mixer` 0.6 %, `bcuda-synth-lmx2595` 1.2 %, `bcuda-lt3045-ldo` 2.8 %,
-/// `straps-synth-lmx2595` 4.5 %, `bcuda-pll-adf4159` 5.3 %, `cyclops-xband-lo`
+/// `board-d-mixer` 0.6 %, `board-a-synth-lmx2595` 1.2 %, `board-a-lt3045-ldo` 2.8 %,
+/// `board-d-synth-lmx2595` 4.5 %, `board-a-pll-adf4159` 5.3 %, `board-b-xband-lo`
 /// 8.8 %. The first three also moved the layout TOWARD the hand reference (or
-/// left it alone) — `bcuda-lt3045-ldo` gained 7.2 style and 14.3 area points —
+/// left it alone) — `board-a-lt3045-ldo` gained 7.2 style and 14.3 area points —
 /// while the last three all moved it away, costing 2.2, 1.7 and 6.0 style
 /// points. The break is between 2.8 and 4.5, and this constant is the middle of
 /// it.
@@ -1042,8 +1042,8 @@ test "the tally counts sealed, tight corridors and contended fans" {
 
 // spec: placement/rough_routability - an escape relief may spend objective only in proportion to the nets it seats
 test "a soft round's objective budget scales with the nets it seats" {
-    // One seated net buys 3 %, two buy 6 % — `straps-synth-lmx2595`'s measured
-    // round wanted 8.9 % for two seats and is refused; `bcuda-lt3045-ldo`'s
+    // One seated net buys 3 %, two buy 6 % — `board-d-synth-lmx2595`'s measured
+    // round wanted 8.9 % for two seats and is refused; `board-a-lt3045-ldo`'s
     // wanted 5.6 % for two and is kept.
     try testing.expect(withinObjectiveBudget(100, 102.9, 1));
     try testing.expect(!withinObjectiveBudget(100, 103.1, 1));

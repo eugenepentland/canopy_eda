@@ -34,8 +34,8 @@ The three lines at the top are the design's own assertions:
 
 ```text
 PASS: LDO input-to-output headroom must exceed the regulator's dropout voltage
-PASS: LED current (mA) = 4.8148 (range 2.0-10.0)
-PASS: Blink rate (Hz) = 2.6596 (range 0.5-5.0)
+PASS: LED current (mA) = 4.8148 (range 2-10)
+PASS: Blink rate (Hz) = 2.6596 (range 0.5-5)
 ```
 
 The build also **writes two things back into `src/`**:
@@ -103,6 +103,21 @@ for how `NETLISP_STDLIB_DIR` replaces the bundle wholesale.
 BL. `(stackup 2 (pour bottom "GND"))` says two copper layers with a ground
 pour on the bottom, which is why almost no ground is routed as traces later.
 
+### Telling the layout engine what a net is
+
+```scheme
+(module-policy
+  (placement-class "VIN_5V" input_rail))
+```
+
+`(placement-class "NET" class)` pins how critical a net is to the placer and to
+the order the router works in — one of `ground`, `power`, `input_rail`,
+`switch_node`, `clock`, `rf`, `feedback`, `analog`, `control`, `signal`.
+Without it the engine classifies by net *name* and reports the guess as a
+`layout_class_inferred` info. The child is spelled `placement-class` because
+the top-level `(net-class …)` form is a different thing entirely — routing
+geometry, widths and clearances.
+
 ### Design maths
 
 ```scheme
@@ -144,30 +159,49 @@ These bindings are then used as values:
 
 Assertions never interrupt *evaluation*: the design is evaluated to the end
 and every assertion is recorded, so one run tells you about all of them rather
-than stopping at the first. They then surface in `netlisp build`, in `netlisp
-check` and in the review PDF — and a failing one makes those commands exit
-non-zero, so nothing quietly ships a board whose own arithmetic disagrees with
-it. Change `r-led` to `27R` and rebuild:
+than stopping at the first. What happens next is decided per command, by what
+it hands you (`netlisp help` states the same rule):
+
+* **`build` and `export-kicad` hand off the board.** A failed assertion is
+  fatal there: every assertion prints, the failing ones at `file:line:col`,
+  and *nothing* is written — no resolved netlist, no `.bom`, no KiCad project.
+  Exit 1.
+* **`check` reports.** The failure is one error-severity finding beside the
+  ERC and requirement findings, the whole report still prints, exit 1.
+* **`export-pdf`, the served pages and `review-audit` review.** The failure
+  lands in the validation table and the document is still produced: a review
+  of a board that fails its own arithmetic is exactly what you want to read.
+
+Change `r-led` to `27R` and rebuild:
 
 ```text
 PASS: LDO input-to-output headroom must exceed the regulator's dropout voltage
-FAIL: LED current (mA) = 48.1481 (range 2.0-10.0)
-PASS: Blink rate (Hz) = 2.6596 (range 0.5-5.0)
-Build failed: assertion violations
+FAIL: examples/blinky-breakout/src/blinky-breakout.sexp:77:17: LED current (mA) = 48.1481 (range 2-10)
+PASS: Blink rate (Hz) = 2.6596 (range 0.5-5)
+Build failed: the design's own assertions do not hold — nothing was emitted.
+  Evaluation never stops at an assertion, so every one above was checked; a
+  command that EMITS refuses to write a netlist, BOM or export the design's
+  own arithmetic contradicts. `netlisp check` reports the same failures as
+  findings beside ERC, prints its whole report, and exits 1.
 ```
 
 ### The board boundary
 
 ```scheme
-(port "VIN" "VIN_5V" in   power 5.0 (rated 4.5 5.5) (current 0.02 0.15))
+(port "VIN" "VIN_5V" in   power (nominal v-in)   (rated 4.5 5.5) (current 0.02 0.15))
 (port "GND"           bidi power)
-(port "3V3" "+3V3"    out  power 3.3 (rated 3.2 3.4))
+(port "3V3" "+3V3"    out  power (nominal v-rail) (rated 3.2 3.4))
 ```
 
 A port is a signal crossing the block boundary: a display name, optionally the
-net it maps to, a direction, and modifiers. `(rated …)` is the voltage window
-the checks hold the net to; `(current …)` says how much this board draws, which
-is what lets the power-budget check compare source against load.
+net it maps to, a direction, and modifiers. `(nominal …)` is the voltage the
+net normally sits at; its argument is *evaluated*, so these two read the same
+`let` bindings the parts and the assertions do rather than repeating the
+numbers. `(rated …)` is the absolute voltage window the checks hold the net to;
+`(current …)` says how much this board draws, which is what lets the
+power-budget check compare source against load. A bare trailing number
+(`… power 5.0 …`) is the retired spelling of `(nominal 5.0)` — still accepted,
+and reported as a `deprecated_form` info.
 
 ### Sections
 
@@ -177,15 +211,20 @@ walks:
 
 ```scheme
 (section "3V3 LDO Regulator" "Generic SOT-23-5 LDO, 5 V in, 3.3 V out"
-  (row 0) (col 1)
+  (row 0) (col 1) (category power)
   (description "Makes the 3.3 V rail the logic runs from, …")
   (instance "U1" ldo-3v3-sot23-5 …))
 ```
 
-The name is matched against a keyword table to colour the block diagram
-(`LDO`, `Regulator`, `Oscillator`, `Header`, `Mounting` all match something) —
-so name sections after what they do. The subtitle and `(description …)` are
-prose; keep the description under 100 characters or the build says so.
+`(category …)` says which column and colour the system overview draws this
+section in: `mcu`, `power`, `memory`, `peripheral`, `connector`, `clock`,
+`comms`, `sensor`, `analog` or `protection`. Leave it off and the category is
+guessed from a keyword in the section *name* (`LDO`, `Regulator`, `Oscillator`,
+`Header`, `Mounting` all match something) and `check` reports the guess as a
+`section_category_inferred` info — the guess is right until somebody renames
+the section and the diagram silently moves. Every section here states its own,
+so a rename stays a rename. The subtitle and `(description …)` are prose; keep
+the description under 100 characters or the build says so.
 
 `(diagram hidden)` drops a section from the block diagram without hiding it
 anywhere else — used here for the test points and the mounting holes.
@@ -251,11 +290,19 @@ section's pins — while the netlist has one part.
 ### Test points
 
 ```scheme
-(test-point "TP1" "+3V3" (purpose "Regulated 3.3 V rail — check this first."))
+(instance "TP1" testpoint (pin 1 "+3V3")
+  (note "Regulated 3.3 V rail — check this first."))
 ```
 
-One line places a real pad from the standard library, wires it, attaches the
-purpose as a note, and records the point in the design's bring-up list.
+A probe pad is an ordinary part: `testpoint` from the standard library, one
+pad, wired the way everything else is — by naming a net. The note is what the
+review's bring-up table and the schematic sidebar print, and the ERC rule that
+wants every power rail probed reads the pad, not a separate declaration.
+
+The one-line `(test-point "TP1" "+3V3" (purpose …))` form places exactly this
+and still works; it is reported as a `deprecated_form` info pointing at the
+instance spelling. Keep it for `(test-point "TP5" "NET" (virtual))` — a
+schematic-only marker with no pad, which has no other spelling.
 
 ## 3. Check it
 
@@ -269,9 +316,11 @@ bindings), the executable component requirements, and the datasheet-review
 gate. The default `authoring` profile reports three findings and exits 0:
 
 ```text
-info      power_budget      [+3V3] — Rail "+3V3" has 0.018A typ load but no regulator declares (current …) on its output
-warning   datasheet_review  U1 — active component has no (datasheet-review ...) record
-warning   datasheet_review  U2 — active component has no (datasheet-review ...) record
+info      power_budget               [+3V3] — Rail "+3V3" has 0.018A typ load but no regulator declares (current …) on its output
+warning   datasheet_review           U1 — active component has no (datasheet-review ...) record
+warning   datasheet_review           U2 — active component has no (datasheet-review ...) record
+
+3 violation(s)
 ```
 
 `--profile preflight` turns the open ones into errors and exits 1:
@@ -294,6 +343,17 @@ zig build run -- check --project-dir examples/blinky-breakout --profile prefligh
   the regulator can *supply* — only ports carry a `(current …)` capacity, and
   U1 is an instance rather than a sub-block with ports. Wrap the regulator in
   a `(defmodule …)` with an output port and the rail gets a source.
+
+Two other finding kinds are worth knowing, because this design is written so
+that neither appears. Both are `info`, and no profile ever escalates them:
+
+* `deprecated_form` — a superseded spelling, reported at `file:line:col`
+  together with the one that replaces it. Every retired spelling keeps working,
+  permanently; the finding exists so you can find the ones you are still
+  typing. Write `(placement-class …)`, `(nominal V)` and `(instance "TP1"
+  testpoint …)` and this board reports none.
+* `section_category_inferred` — a section whose system-overview category was
+  guessed from a keyword in its name. `(category …)` pins the decision.
 
 Everything else the profile demands is already closed, and the *how* is worth
 copying. The component files in `lib/components/` carry executable
@@ -328,9 +388,33 @@ local request as an admin, so there is nothing to configure. Useful pages:
 The browser is a viewer and a review surface, not a capture tool: the `.sexp`
 file is the design, and the page re-renders when it changes.
 
+The schematic also renders without one:
+
+```bash
+zig build run -- export-schematic-png --project-dir examples/blinky-breakout \
+    blinky-breakout --output schematic.png
+```
+
+That draws the whole board on a single sheet. An unfocused render is refused
+above eight hubs so a contact sheet stays legible, and fixtures — test points,
+mounting holes, fiducials — do not count against that budget, so this board's
+four real blocks render with no further arguments. `--ref U2` focuses one hub,
+`--sub <slug>` one sub-block, and `--view`, `--theme` and `--width` set the
+rest.
+
 Serving or laying out a project makes the tool write runtime state beside it —
 `logs/` for the interaction log, `history/` for layout snapshots. Both are
-git-ignored here; the tracked example is `src/` and `lib/` only.
+git-ignored here; the tracked example is `src/` and `lib/` only. To keep it out
+of the project entirely, put that output somewhere else:
+
+```bash
+zig build run -- serve --project-dir examples/blinky-breakout \
+    --state-dir ~/.cache/netlisp/blinky-state
+```
+
+`--state-dir <d>` (or `NETLISP_STATE_DIR`) works on every command and moves
+only what the tool writes while running; sources, sidecars and exports stay
+where they are.
 
 ## 5. Lay it out and route it
 
@@ -352,10 +436,21 @@ zig build run -- tool set_board_outline $P \
 
 # 2. Place parts, in board millimetres with y growing DOWN. The coordinate is
 #    the footprint's own origin: for a symmetric chip land that is its centre,
-#    for a pin header it is pad 1.
-zig build run -- tool set_part_poses $P \
-  --args '{"name":"blinky-breakout","poses":[{"ref":"U2","x_mm":25.0,"y_mm":17.0},
-                                             {"ref":"C3","x_mm":31.0,"y_mm":13.2}]}'
+#    for a pin header it is pad 1. One call carries the whole board — a part
+#    left unplaced keeps whatever pose it had, and an empty layout starts every
+#    part on a default grid, not on the outline. These are the twenty poses the
+#    committed layout holds, so steps 2-5 reproduce its copper exactly.
+zig build run -- tool set_part_poses $P --args '{"name":"blinky-breakout","poses":[
+  {"ref":"J1", "x_mm":2.5, "y_mm":13.73}, {"ref":"U1", "x_mm":7.5, "y_mm":15.5},
+  {"ref":"C1", "x_mm":7.0, "y_mm":11.0},  {"ref":"C2", "x_mm":12.5,"y_mm":15.5},
+  {"ref":"R1", "x_mm":7.0, "y_mm":20.0},  {"ref":"U2", "x_mm":25.0,"y_mm":17.0},
+  {"ref":"R2", "x_mm":18.5,"y_mm":13.0},  {"ref":"C4", "x_mm":18.0,"y_mm":9.5},
+  {"ref":"C3", "x_mm":31.0,"y_mm":13.2},  {"ref":"R3", "x_mm":18.0,"y_mm":20.0},
+  {"ref":"D1", "x_mm":13.0,"y_mm":20.0},  {"ref":"J2", "x_mm":39.6,"y_mm":9.92},
+  {"ref":"TP1","x_mm":12.5,"y_mm":11.0},  {"ref":"TP2","x_mm":18.0,"y_mm":16.5},
+  {"ref":"TP3","x_mm":18.0,"y_mm":24.5},  {"ref":"TP4","x_mm":2.5, "y_mm":10.0},
+  {"ref":"H1", "x_mm":4.0, "y_mm":4.0},   {"ref":"H2", "x_mm":42.0,"y_mm":4.0},
+  {"ref":"H3", "x_mm":42.0,"y_mm":26.0},  {"ref":"H4", "x_mm":4.0, "y_mm":26.0}]}'
 
 # 3. Autoroute everything at the design's resolved rules.
 zig build run -- tool route_pcb $P --args '{"name":"blinky-breakout"}'
@@ -372,8 +467,14 @@ zig build run -- tool save_pcb_layout $P \
 
 ```json
 {"routed":16,"total":16,"drc_errors":0,"drc_warnings":6,
- "tracks":120,"vias":25,"trace_mm":235.4,"unrouted":[]}
+ "tracks":120,"vias":25,"trace_mm":235.385,"unrouted":[]}
 ```
+
+`normalize_junctions` then folds one implicit crossing into a real junction,
+which is the 121st track segment the committed layout carries. The router is
+deterministic over a fixed placement, so running the five calls above against
+the committed poses reproduces `src/blinky-breakout.layouts.json` byte for
+byte — which is what makes the example safe to re-derive.
 
 To see the result without a browser, ask for the picture or the facts:
 
@@ -522,7 +623,7 @@ Small changes with visible consequences:
 
 Where to read next:
 
-* [docs/sexpr-language.md](../docs/sexpr-language.md) — the language, form by form
+* [docs/sexp-language.md](../docs/sexp-language.md) — the language, form by form
 * [docs/language-forms.md](../docs/language-forms.md) — the generated grammar reference
 * [docs/standard-library.md](../docs/standard-library.md) — what is bundled and how overrides resolve
 * [docs/webserver-api.md](../docs/webserver-api.md) — every HTTP route and structured tool

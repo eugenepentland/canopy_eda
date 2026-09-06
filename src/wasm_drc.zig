@@ -382,7 +382,7 @@ test "the bridge adopts the marshalled copper stack" {
     try testing.expect(std.mem.indexOf(u8, marshal, "out.layer_table = PCB.layer_table.map(") != null);
 }
 
-/// Barracuda's 3.3 V rails are not dedicated stackup planes: they are poured
+/// Board A's 3.3 V rails are not dedicated stackup planes: they are poured
 /// on routable In3.Cu. The fast client check therefore needs the fabricated
 /// fill contours as well as the physical layer table.
 const power_zone_via_board_json =
@@ -575,7 +575,7 @@ test "bridge defaults missing optional fields to an empty clean board" {
 /// A DECLARED four-layer board whose In2 is a V_3V3D plane, with that rail's
 /// net class opting into current-aware branch sizing (`power_branch_width`) —
 /// the exact shape that makes the SERVER's geometry pass raster every plane and
-/// pour (barracuda-base). Everything the marshal can say about power is here;
+/// pour (board-a-base). Everything the marshal can say about power is here;
 /// what is missing is the one thing it never sends, the rail's current demand.
 const power_branch_board_json =
     \\{"clearance":0.127,
@@ -608,7 +608,7 @@ test "the bridge builds a rail-less placement, so no plane raster is reachable" 
     // marshal (`drc_marshal.js buildDrcInput`) has no key for one — it sends
     // geometry, rules, net classes and the layer table, never `(i-typ …)`.
     // With rails empty that predicate is false on every board, so `buildSurfaces`
-    // — 7.5 s of barracuda-base's 8.2 s server geometry pass — is unreachable
+    // — 7.5 s of board-a-base's 8.2 s server geometry pass — is unreachable
     // from the client engine, whose worker budget is ~50 ms per edit. Marshalling
     // rail currents to the client would silently reinstate that raster in the
     // worker; land the wasm-side skip FIRST if this assertion ever has to move.

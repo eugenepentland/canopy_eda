@@ -4498,7 +4498,7 @@ test "pickByUuidOrRef falls back to by_ref when canopy_uuid is missing and the f
 
 test "pickByUuidOrRef refuses a by_ref match whose fp is reserved by another instance's canopy_uuid" {
     // spec: serve/sync - pickByUuidOrRef refuses a by_ref match whose fp is reserved by another instance's canopy_uuid
-    // The Cyclops Digital scenario: one physical board fp carries
+    // The Board B Digital scenario: one physical board fp carries
     // Reference="charger/C157" but canopy_uuid pointing at C156's
     // identity. Without the reservation guard, design instance C156
     // would claim it via by_uuid AND design instance C157 would also
@@ -4565,7 +4565,7 @@ test "pickByUuidOrRef returns null when neither tier matches" {
 
 test "pickByKicadUuid adopts an orphan whose KiCad uuid equals the instance canopy_uuid" {
     // spec: serve/sync - pickByKicadUuid adopts an orphan whose KiCad uuid equals the instance's canopy_uuid
-    // The Cyclops buck scenario: a swap stripped U17's canopy_uuid property
+    // The Board B buck scenario: a swap stripped U17's canopy_uuid property
     // and left its Reference empty, so by_uuid and by_ref both miss. The
     // footprint's KiCad (uuid …) field still equals the design's canopy_uuid
     // because the add path stamped it there. Adopt in place, not duplicate.

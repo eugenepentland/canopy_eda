@@ -2,7 +2,7 @@
 //!
 //! `projects/designs/src/` may be flat (`src/<name>.sexp`) or grouped
 //! into project subdirectories (`src/<group>/<name>.sexp`). Callers
-//! pass bare basenames (`stm32n6`, `cyclops-analog`) and this module
+//! pass bare basenames (`board-c`, `board-b-analog`) and this module
 //! walks `src/` to locate the file. Per-design artifacts (`.bom`,
 //! `.layout`, `.ids`, `.kicad.json`) and the autoloaded sidecars
 //! (`.checks.sexp`, `.layout.sexp`, `.diagram.sexp` — see
@@ -235,6 +235,37 @@ const SrcFingerprint = struct {
     }
 };
 
+// ── Process-wide runtime-state root ───────────────────────────────────
+//
+// Set once from `main.zig` (`--state-dir`, then `NETLISP_STATE_DIR`) and read
+// by the two writers of runtime state: the interaction log's `logs/` and the
+// version history's `history/`. Unset means "beside the project", which is
+// what every existing deployment expects — and what dirties a TRACKED project
+// (the examples) the moment it is served or laid out.
+
+/// The override root, scoped inside a non-pub container rather than left as a
+/// module-level `var` for the same reason `SrcIndex` is: the readers are plain
+/// path helpers with no store to thread through. Empty means unset.
+const StateRoot = struct {
+    var dir: []const u8 = "";
+};
+
+/// Point the runtime state the tool WRITES — `logs/`, `history/` — at `dir`
+/// instead of at the project directory. Design sources, their sidecars, the
+/// library and every export are unaffected: this relocates only output that
+/// accumulates while the tool runs, which is what keeps a tracked example
+/// project clean while it is served or laid out. Null or empty restores the
+/// default. Called once from `main.zig` before any command dispatches.
+pub fn setStateRoot(dir: ?[]const u8) void {
+    StateRoot.dir = dir orelse "";
+}
+
+/// Where `project_dir`'s runtime state lives: the installed override, else
+/// `project_dir` itself.
+pub fn stateDir(project_dir: []const u8) []const u8 {
+    return if (StateRoot.dir.len > 0) StateRoot.dir else project_dir;
+}
+
 /// The index's state. Scoped inside this non-pub struct rather than left as
 /// module-level `var`s because `findUniqueInSrc` is reached from plain path
 /// helpers with no server handle to thread a store through — the same reason
@@ -390,17 +421,17 @@ fn freeSrcIndex() void {
 // spec: paths - Resolves <name>.sexp via designSourcePath, falling back to flat layout when missing
 test "designSourcePath flat fallback" {
     const allocator = std.testing.allocator;
-    const path = try designSourcePath(allocator, "/tmp/no-such-project", "stm32n6");
+    const path = try designSourcePath(allocator, "/tmp/no-such-project", "board-c");
     defer allocator.free(path);
-    try std.testing.expectEqualStrings("/tmp/no-such-project/src/stm32n6.sexp", path);
+    try std.testing.expectEqualStrings("/tmp/no-such-project/src/board-c.sexp", path);
 }
 
 // spec: paths - Resolves sibling artifacts via designSiblingPath using the supplied extension
 test "designSiblingPath flat fallback" {
     const allocator = std.testing.allocator;
-    const path = try designSiblingPath(allocator, "/tmp/no-such-project", "stm32n6", ".bom");
+    const path = try designSiblingPath(allocator, "/tmp/no-such-project", "board-c", ".bom");
     defer allocator.free(path);
-    try std.testing.expectEqualStrings("/tmp/no-such-project/src/stm32n6.bom", path);
+    try std.testing.expectEqualStrings("/tmp/no-such-project/src/board-c.bom", path);
 }
 
 // spec: paths - Rejects design names that are not bare basenames (traversal defense)
@@ -415,9 +446,9 @@ test "designSiblingPath rejects non-basename names" {
     try std.testing.expectError(error.InvalidName, designSiblingPath(allocator, "/p", "", ".bom"));
     try std.testing.expectError(error.InvalidName, designSourcePath(allocator, "/p", "../../etc/passwd"));
     // A legitimate bare basename still resolves.
-    const ok = try designSourcePath(allocator, "/tmp/no-such-project", "stm32n6");
+    const ok = try designSourcePath(allocator, "/tmp/no-such-project", "board-c");
     defer allocator.free(ok);
-    try std.testing.expectEqualStrings("/tmp/no-such-project/src/stm32n6.sexp", ok);
+    try std.testing.expectEqualStrings("/tmp/no-such-project/src/board-c.sexp", ok);
 }
 
 // spec: Web Server - The src basename index resolves a design sibling without re-walking the tree, and rebuilds when a directory it walked changes mtime

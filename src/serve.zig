@@ -668,9 +668,9 @@ test "parseBindAddress accepts an ip literal and refuses anything else" {
 
 // spec: Web Server - the retired /pcb-route-lab page 302-redirects to the /pcb-layout page for the same design
 test "retired Route Lab path redirects to the PCB layout page" {
-    const loc = try routeLabLocation(std.testing.allocator, "barracuda");
+    const loc = try routeLabLocation(std.testing.allocator, "board-a");
     defer std.testing.allocator.free(loc);
-    try std.testing.expectEqualStrings("/pcb-layout/barracuda", loc);
+    try std.testing.expectEqualStrings("/pcb-layout/board-a", loc);
 }
 
 // spec: Web Server - the live scene graph is answered only for the design it was pushed for
@@ -957,10 +957,12 @@ pub fn serve(
         // board's worth of pour borrows per session, so it takes the server's
         // long-lived allocator for the same reason the page caches do.
         .drc_sessions = .{ .allocator = allocator },
-        // Naming the project directory is what turns the interaction log on —
-        // it writes into `<project_dir>/logs/`, which production keeps
-        // gitignored under `/projects/`.
-        .request_log = .{ .project_dir = project_dir },
+        // Naming a directory is what turns the interaction log on — it writes
+        // into `<that>/logs/`, which production keeps gitignored under
+        // `/projects/`. `paths.stateDir` is the project directory unless
+        // `--state-dir` / `NETLISP_STATE_DIR` relocated runtime output, which
+        // is how a TRACKED project can be served without being dirtied.
+        .request_log = .{ .project_dir = paths.stateDir(project_dir) },
         // Only a real server composes dossiers in the background: the detached
         // thread outlives the request that started it, which a handler test's
         // stack-owned `ServerState` could not survive.

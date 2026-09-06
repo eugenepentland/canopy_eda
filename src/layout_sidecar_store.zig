@@ -296,7 +296,7 @@ test "selected sidecar typed parsing is proven one-to-one with raw manufacturing
 test "reading a sidecar heals a board whose copper carries drag crumbs" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
-    // The barracuda crumb: a segment dragged onto its own end, sitting on a
+    // The board-a crumb: a segment dragged onto its own end, sitting on a
     // through via. Reading it back must not put that island on the board.
     const source =
         "{\"default\":\"release\",\"layouts\":[{\"name\":\"release\",\"kind\":\"manual\"," ++

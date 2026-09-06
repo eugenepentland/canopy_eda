@@ -263,8 +263,8 @@ test "PCB edit metadata resolves root and nested module sources without flatteni
         .groups = &.{},
         .sub_blocks = &subs,
     };
-    const json = buildEditSources(a, &root, .{ .name = "black-canyon" });
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"R1\":{\"src\":19,\"srcName\":\"black-canyon\",\"srcRef\":\"R_BIAS\"}") != null);
+    const json = buildEditSources(a, &root, .{ .name = "board-e" });
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"R1\":{\"src\":19,\"srcName\":\"board-e\",\"srcRef\":\"R_BIAS\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"filter/C7\":{\"src\":73,\"srcName\":\"rf-filter\",\"srcRef\":\"C_FILTER\"}") != null);
     try std.testing.expectEqualStrings("", editableSourceName("custom/rf-filter.sexp"));
 }
@@ -431,7 +431,7 @@ test "PCB edit-source provenance escapes a closing script tag in ref-des and lab
         .groups = &.{},
         .sub_blocks = &.{},
     };
-    const json = buildEditSources(a, &root, .{ .name = "black-canyon" });
+    const json = buildEditSources(a, &root, .{ .name = "board-e" });
     try std.testing.expect(std.mem.indexOf(u8, json, "</script>") == null);
     try std.testing.expect(std.mem.indexOfScalar(u8, json, '<') == null);
 
@@ -439,5 +439,5 @@ test "PCB edit-source provenance escapes a closing script tag in ref-des and lab
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, json, .{});
     const entry = parsed.object.get(evil).?.object;
     try std.testing.expectEqualStrings(evil, entry.get("srcRef").?.string);
-    try std.testing.expectEqualStrings("black-canyon", entry.get("srcName").?.string);
+    try std.testing.expectEqualStrings("board-e", entry.get("srcName").?.string);
 }

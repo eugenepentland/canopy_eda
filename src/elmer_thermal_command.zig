@@ -442,9 +442,9 @@ test "Elmer export arguments default to still air and accept airflow and a saved
 
 // spec: placement/thermal_field - the thermal kernel benchmark accepts a board, saved layout and positive repetition count while keeping project resolution outside its timed solve loop
 test "thermal benchmark arguments name one resolved board and repetition count" {
-    const args = parseBenchArgs(&.{ "--project-dir", "fixtures", "--layout", "Best2", "--reps", "7", "barracuda" });
+    const args = parseBenchArgs(&.{ "--project-dir", "fixtures", "--layout", "Best2", "--reps", "7", "board-a" });
     try std.testing.expectEqualStrings("fixtures", args.project_dir);
     try std.testing.expectEqualStrings("Best2", args.layout.?);
     try std.testing.expectEqual(@as(usize, 7), args.reps);
-    try std.testing.expectEqualStrings("barracuda", args.design);
+    try std.testing.expectEqualStrings("board-a", args.design);
 }

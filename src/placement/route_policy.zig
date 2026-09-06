@@ -228,7 +228,7 @@ pub const ProgressSink = struct {
 ///
 /// The retry machinery — the escalate/rip-up interleave, the last-resort
 /// expansion tier, the windowed fine rescue — was built to squeeze the last
-/// nets out of a board unattended. Measured on barracuda it does not earn that
+/// nets out of a board unattended. Measured on board-a it does not earn that
 /// cost: universal rip-up eligibility bought ZERO nets, the multi-net rip tier
 /// and repair cascade were net-NEGATIVE (disabling them closed `TXDATA_ADF`),
 /// and failed hops spend seconds to minutes proving a path impossible. Under an

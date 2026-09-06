@@ -539,6 +539,50 @@ fn warnPinoutlessMultiPad(
         "to validate them)", .{ inst.ref_des, inst.component, hint });
 }
 
+/// Reject (or warn about) a pin token the tokenizer read as a NUMBER because
+/// it ends in an SI scale/unit letter — `1A` is the number 1 carrying the unit
+/// letter `A`, not the pin function named "1A".
+///
+/// Only `.si_val` tokens reach here with a `literal`, so a plain `(pin 1 …)`
+/// and a quoted `(pin "1A" …)` both pass through untouched. When the part's
+/// own library records carry a pin function or a pad literally named after the
+/// token's source text, the two readings genuinely collide and the build
+/// STOPS: silently wiring the numeric reading is the miswire this check
+/// exists to prevent, and no author writing `1A` on a part that has a `1A`
+/// meant pad 1. When nothing on the part answers to the text, the numeric
+/// reading is the only one available, so it stands with a warning that names
+/// both readings — a token like `3n` is far more likely to be a mis-quoted
+/// pin name than a deliberate 3e-9.
+pub fn checkSuffixedPinToken(
+    self: *Evaluator,
+    node: Node,
+    ref_des: []const u8,
+    form: []const u8,
+    pads: PartPads,
+) EvalError!void {
+    const text = node.literal orelse return;
+    const numeric_pad = ids.pinId(self, node) orelse return;
+    const function_pad: ?[]const u8 = if (pads.pinout) |pm| blk: {
+        const m = matchPinName(pm, text) orelse break :blk null;
+        break :blk m.pad;
+    } else null;
+    const footprint_pad = if (footprint_pads.get(self, pads.footprint)) |fp| fp.contains(text) else false;
+    if (function_pad == null and !footprint_pad) {
+        self.warnFmt(node.span, "({s} {s} …) on \"{s}\" — `{s}` is a NUMBER here (the SI unit/scale letter " ++
+            "closes the literal), so it binds pad {s}. Quote a pin name that starts with a digit: ({s} \"{s}\" …)", .{ form, text, ref_des, text, numeric_pad, form, text });
+        return;
+    }
+    const named = function_pad orelse text;
+    self.setError(node.span, std.fmt.allocPrint(
+        self.allocator,
+        "({s} {s} …) on \"{s}\" — `{s}` is ambiguous: unquoted it is a NUMBER (the SI unit/scale letter closes " ++
+            "the literal) and binds pad {s}, but this part also has a {s} named \"{s}\" (pad {s}). Write ({s} \"{s}\" …) " ++
+            "for the pin name, or ({s} {s} …) for the pad.",
+        .{ form, text, ref_des, text, numeric_pad, if (function_pad != null) "pin function" else "pad", text, named, form, text, form, numeric_pad },
+    ) catch "ambiguous pin token: quote a pin name that starts with a digit");
+    return EvalError.InvalidForm;
+}
+
 /// Error when `pad` is not a pad this part has.
 ///
 /// A `(pin 99 "X")` on an 11-pad part used to produce nothing but a
@@ -858,6 +902,7 @@ pub fn parsePinForm(
     var first_pin = true;
     for (pin_children[1 .. tail - 1]) |pin_node| {
         if (pin_node.isForm("as")) continue;
+        try checkSuffixedPinToken(self, pin_node, ref_des, "pin", pads);
         const raw = ids.pinId(self, pin_node) orelse continue;
         // Resolve: try as function name first (via pinout), fall back to physical pin ID
         const pn = if (pads.pinout) |pm| (resolvePinName(self, pm, raw, pin_node.span) orelse raw) else raw;
@@ -1816,4 +1861,74 @@ test "footprint pads check a pinout-less part" {
     _ = try hardeningFixture(alloc, &eval, &env, comp, "(instance \"R1\" (res-0402 \"10k\") (pin 1 \"A\") (pin 2 \"B\"))");
     try testing.expectError(EvalError.InvalidForm, hardeningFixture(alloc, &eval, &env, comp, "(instance \"R2\" (res-0402 \"10k\") (pin 1 \"A\") (pin 3 \"B\"))"));
     try testing.expect(std.mem.indexOf(u8, eval.last_error.?.message, "no pad 3 (2 pads)") != null);
+}
+
+/// A four-pad slice of the industry-standard hex-inverter pinout: enough to
+/// carry the `1A`/`1Y` gate names that collide with an SI-suffixed number.
+fn hexInverterComponent(alloc: std.mem.Allocator, eval: *Evaluator, sym: []const u8) !evaluator_mod.Evaluator.ComponentData {
+    var pins: std.StringHashMapUnmanaged([]const u8) = .empty;
+    const rows = [_][2][]const u8{ .{ "1", "1A" }, .{ "2", "1Y" }, .{ "7", "GND" }, .{ "14", "VCC" } };
+    for (rows) |row| try pins.put(alloc, row[0], row[1]);
+    try eval.symbol_pin_cache.put(alloc, sym, pins);
+    return .{ .name = "hex-inv", .symbol_name = sym, .footprint_name = "", .is_family = false, .param_type = "" };
+}
+
+// spec: eval/instance - a bare SI-suffixed pin token that also names one of the part's pin functions is rejected as ambiguous
+test "an SI-suffixed pin token colliding with a pin function is rejected" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    const comp = try hexInverterComponent(alloc, &eval, "hex-inv-pins-a");
+
+    // `1A` lexes as the number 1 carrying the SI unit letter `A`, so it used to
+    // bind pad 1 in silence while the author had named the gate-1 input.
+    try testing.expectError(EvalError.InvalidForm, hardeningFixture(alloc, &eval, &env, comp, "(instance \"U2\" hex-inv (pin 1A \"RC\"))"));
+    const msg = eval.last_error.?.message;
+    try testing.expect(std.mem.indexOf(u8, msg, "ambiguous") != null);
+    // Both readings are named, and so is the quoting that disambiguates them.
+    try testing.expect(std.mem.indexOf(u8, msg, "binds pad 1") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "pin function named \"1A\"") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "(pin \"1A\" …)") != null);
+}
+
+// spec: eval/instance - a quoted pin name and a bare pad number are both unambiguous spellings and neither warns
+test "the quoted pin name and the bare pad number both resolve silently" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    const comp = try hexInverterComponent(alloc, &eval, "hex-inv-pins-b");
+
+    // Quoted: the pin FUNCTION, resolved through the pinout to its pad.
+    // Bare number: the pad itself. The two agree here, which is the point —
+    // the author, not the lexer, chose which reading applies.
+    const res = try hardeningFixture(alloc, &eval, &env, comp, "(instance \"U2\" hex-inv (pin \"1A\" \"RC\") (pin 1 \"RC\") (pin 14 \"VCC\"))");
+    try testing.expectEqual(@as(usize, 3), res.pin_nets.len);
+    try testing.expectEqualStrings("1", res.pin_nets[0].pin);
+    try testing.expectEqualStrings("1", res.pin_nets[1].pin);
+    try testing.expectEqualStrings("14", res.pin_nets[2].pin);
+    try testing.expectEqual(@as(usize, 0), eval.warnings.items.len);
+}
+
+// spec: eval/instance - an SI-suffixed pin token naming nothing on the part binds the numeric pad and warns about both readings
+test "an SI-suffixed pin token with no matching pin name warns" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = Env.init(alloc, null);
+    defer env.deinit();
+    const comp = try hexInverterComponent(alloc, &eval, "hex-inv-pins-c");
+
+    // Nothing on this part answers to "2V", so the numeric reading is the only
+    // one available — it stands, but never in silence.
+    const res = try hardeningFixture(alloc, &eval, &env, comp, "(instance \"U2\" hex-inv (pin 2V \"GND\"))");
+    try testing.expectEqual(@as(usize, 1), res.pin_nets.len);
+    try testing.expectEqualStrings("2", res.pin_nets[0].pin);
+    try testing.expectEqual(@as(usize, 1), eval.warnings.items.len);
+    const msg = eval.warnings.items[0].message;
+    try testing.expect(std.mem.indexOf(u8, msg, "binds pad 2") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "(pin \"2V\" …)") != null);
 }

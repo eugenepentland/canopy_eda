@@ -10,7 +10,7 @@
 //! the trace reads as running *alongside* the pad rather than into it, and it
 //! says nothing about which point of the pad the route actually serves, which
 //! is the one thing a reader wants from a terminal. Measured on
-//! straps-synth-lmx2595's rough route (2026-08-10): 98 of 127 pad entries
+//! board-d-synth-lmx2595's rough route (2026-08-10): 98 of 127 pad entries
 //! carried more than 0.12 mm of copper inside their own pad, the median 0.25 mm
 //! and the worst 0.49 mm — the full half-length of a QFN land.
 //!

@@ -1628,7 +1628,7 @@ test "truncate never splits a multi-byte UTF-8 character" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // Real repro: the stm32n6 USB subtitle, whose em-dash (3 bytes,
+    // Real repro: the board-c USB subtitle, whose em-dash (3 bytes,
     // 0xE2 0x80 0x94) starts at byte 21 and straddles the cut for max=23.
     const sub = "USB 2.0 HS via USB-C \u{2014} chip details sealed in usb-c-hs module";
     const t = try truncate(a, sub, 23);

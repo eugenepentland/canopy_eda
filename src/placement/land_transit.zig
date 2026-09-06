@@ -43,7 +43,7 @@
 //!
 //! The measurement is on SWEPT copper (centreline ± half width), because the
 //! corridor cares where the copper's EDGE is, not where its middle is: pin 18
-//! on straps-synth-lmx2595 ran its centreline exactly along the land's own
+//! on board-d-synth-lmx2595 ran its centreline exactly along the land's own
 //! boundary, so a centreline test scores it zero overlap while a fab sees a
 //! full half-width of metal beside the pad.
 //!
@@ -82,7 +82,7 @@ pub const anchor_tol_mm: f64 = 0.02;
 /// 1.5 mm square is larger than any discrete land in this corpus — an 0805's is
 /// 1.0 × 1.45 and a 0.5 mm-pitch QFN's is 0.3 × 0.9, so every land a connection
 /// actually escapes from stays in scope — and comfortably smaller than the
-/// exposed paddle of the parts that have one (straps-synth-lmx2595's LMX2595
+/// exposed paddle of the parts that have one (board-d-synth-lmx2595's LMX2595
 /// presents a 4.6 mm square). Past it a land stops being something a ray leaves
 /// and becomes a plane a via drops into: nothing anchors on its centre, so the
 /// ray rule has nothing to say about it.
@@ -339,7 +339,7 @@ fn runMiss(land: Land, pts: []const [2]f64, r: Run) ?f64 {
 /// not already put there. This is what a hand-drawn entry that misses the
 /// centre by a few hundredths looks like, and what a connection to a long
 /// connector finger (too narrow to be a `paddle`, far too long for its centre
-/// to be the anchor) looks like. The 2026-08 barracuda/barracuda-base audit
+/// to be the anchor) looks like. The 2026-08 board-a/board-a-base audit
 /// measured hand-routed entries missing the ray by 0.03–0.4 mm while staying
 /// wholly inside their land's column — half the boards' own-land findings —
 /// with zero of them putting copper in a corridor. A fly-through that crosses
@@ -492,7 +492,7 @@ test "the board owner's pin 18: a 45 degree ray that turns at the land's edge" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
-    // straps-synth-lmx2595's LMX_RFOUTBM, U1 pad 18 translated onto the origin:
+    // board-d-synth-lmx2595's LMX_RFOUTBM, U1 pad 18 translated onto the origin:
     // the escape leaves at 45 degrees, reaches the land's own corner-ward edge
     // after 0.212 mm, and turns north there — so 0.3 mm of the vertical leg
     // rides the land's flank, half a trace width of it in the 0.2 mm corridor
@@ -559,7 +559,7 @@ test "a paddle is not judged by the ray rule" {
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
-    // straps-synth-lmx2595's U1 pad 41: a 4.6 mm square exposed pad. Ground
+    // board-d-synth-lmx2595's U1 pad 41: a 4.6 mm square exposed pad. Ground
     // copper clipping its corner on the way past is not a lap on a lead land.
     const paddle = Land{ .x0 = -2.3, .y0 = -2.3, .x1 = 2.3, .y1 = 2.3 };
     try testing.expect(paddle.paddle());

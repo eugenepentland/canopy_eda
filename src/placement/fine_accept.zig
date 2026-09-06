@@ -3,7 +3,7 @@
 //! A `(net-class … (resolution MM))` window over a board-spanning net has to be
 //! allowed past the automatic cell cap to exist at all (`fine_window
 //! .max_declared_window_cells`). Raising that cap on its own was measured
-//! NET-NEGATIVE: barracuda went 83/90 -> 81/90 while the ROUTER's own claim ROSE
+//! NET-NEGATIVE: board-a went 83/90 -> 81/90 while the ROUTER's own claim ROSE
 //! to 87 — it closed `TXDATA_ADF` and broke `GND`, `loop_amp/LF_OUT` and
 //! `boost22/BOOST22_SW`.
 //!

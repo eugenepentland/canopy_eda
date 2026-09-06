@@ -1,5 +1,9 @@
 # Assembly rework guides
 
+**What this is:** how to write bench rework and deviation notes that show up on
+a design's assembly page. Read it if you are documenting a blue wire, a
+depopulated part or a hand-fitted component for whoever builds the board.
+
 An assembly page can show bench rework or deviation guides stored beside its
 design source. A design may keep as many as it needs — the legacy
 `<design>.rework.md` plus any `<design>-<slug>.rework.md` companion:

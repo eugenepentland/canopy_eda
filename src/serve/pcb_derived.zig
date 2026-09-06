@@ -19,7 +19,7 @@
 //! solved view and returns the deferred JSON (`warmPage`, below).
 //!
 //! And `spawn` starts that warm from the page handler itself. Measured on
-//! barracuda (2026-08-26, Debug), the prefix a second render repeats is ~0.4 s
+//! board-a (2026-08-26, Debug), the prefix a second render repeats is ~0.4 s
 //! of a ~16 s response: real, but small beside the analyses, which is why
 //! moving the whole deferred render off the critical path matters more than
 //! the saving. It begins when the page render finishes rather than when the

@@ -9,12 +9,12 @@
 //! Both used to look for it in the same place — OUTSIDE the pad. The site they
 //! try first is the pad's anchor snapped to the ROUTING grid, and every
 //! candidate after that is a whole grid pitch further out (~0.44 mm on
-//! barracuda), joined back with a stub. That is the right answer for a chip
+//! board-a), joined back with a stub. That is the right answer for a chip
 //! pad, which is smaller than the grid anyway, and the wrong one for a big pad:
 //! a buck's exposed thermal pad is millimetres across, so a site a couple of
 //! tenths off its centre is still deep inside its own copper — clear of the
 //! neighbour that refused the centre, needing no stub, and invisible to a
-//! search that only ever steps by the grid. Measured on barracuda's
+//! search that only ever steps by the grid. Measured on board-a's
 //! `buck_6v/U22.3` (1.32 × 1.72 mm): the anchor sits 0.063 mm from the `FB` pad
 //! and needs 0.327, while a site 0.275 mm below it clears everything — inside
 //! the same pad.
@@ -38,7 +38,7 @@
 //! `inLandBarrelFits` is the form a caller uses when it does not yet know
 //! whether the site is on a land at all (`landAt` answers that), and the ring
 //! walk, the thermal array and the router's pad-centre sites all measure the
-//! same geometry. Measured on `bcuda-lt3045-ldo`: the router's first candidate
+//! same geometry. Measured on `board-a-lt3045-ldo`: the router's first candidate
 //! is the pad anchor snapped to the routing grid, and on U1's 0.80 x 0.30 mm
 //! DFN ground land that put a 0.4 mm barrel dead on the land with the ring
 //! ~0.05 mm past the 0.30 mm edge on each side — legal by every clearance rule
@@ -67,7 +67,7 @@ pub const ThermalAxis = struct {
 
 /// Choose one centred array axis. Use the preferred pitch when it naturally
 /// gives at least three sites; otherwise tighten only when the DRC minimum can
-/// support a 3-site row. This makes Barracuda's 1.95-mm HMC451 paddle a 3-site
+/// support a 3-site row. This makes Board A's 1.95-mm HMC451 paddle a 3-site
 /// axis while its 2.5-mm and 4.6-mm paddles remain at about 0.9-mm pitch.
 pub fn thermalAxis(span: f64, via_dia: f64, min_pitch: f64) ThermalAxis {
     if (span < via_dia or min_pitch <= 0) return .{ .count = 0, .pitch = 0 };
@@ -176,7 +176,7 @@ pub fn inLandBarrelFits(land: ?pad_shape.Shape, point: [2]f64, via_dia: f64) boo
 
 /// In-pad scan step as a fraction of the via's copper DIAMETER. A quarter of a
 /// 0.4 mm via is 0.1 mm — fine enough to find the legal band beside a crowding
-/// neighbour (the barracuda thermal pad's is 0.275 mm off centre) without
+/// neighbour (the board-a thermal pad's is 0.275 mm off centre) without
 /// turning a 1.7 mm pad into thousands of probes.
 const step_frac: f64 = 0.25;
 /// Floor on that step (mm), so a hairline via diameter cannot make the scan
@@ -186,7 +186,7 @@ const min_step_mm: f64 = 0.05;
 /// huge pour-like land cannot turn one stitch into an unbounded probe. Sixteen
 /// rings reach 1.6 mm from the anchor at the default step — past any pad this
 /// exists for, and measured as the right value rather than guessed: cutting it
-/// to six lost black-canyon five routed nets and straps three, while saving only
+/// to six lost board-e five routed nets and board-d three, while saving only
 /// 2% of the corpus wall clock, because the cost is the ROUTE the moved vias
 /// produce and not the probes themselves.
 const max_ring: usize = 16;
@@ -240,14 +240,14 @@ pub const InPad = struct {
     /// inside the pad's copper and only the annular RING may hang over its edge.
     ///
     /// For the pad this exists for, the strict scan above is not merely empty —
-    /// it cannot be anything else. Barracuda's `J1` is a 1.27 mm-pitch
+    /// it cannot be anything else. Board A's `J1` is a 1.27 mm-pitch
     /// board-to-board connector whose B.Cu fingers are 1.0 x **0.35 mm**, and
     /// the board's via is 0.4 mm: no point of that pad can hold the barrel,
     /// because the pad is narrower than the barrel is wide. Its GND finger
     /// (pad 40) therefore reads as having no in-pad site, while every ring of
     /// the fan outside it is walled by the neighbours 0.635 mm away — so the
     /// pad ships as its own one-pad copper island, which is exactly what
-    /// barracuda's last open GND gap was. The board the design is checked
+    /// board-a's last open GND gap was. The board the design is checked
     /// against solves it the way a hand layout does: one via at the finger's own
     /// centre, ring overhanging, hole in the pad.
     ///
@@ -547,7 +547,7 @@ test "in-pad scan yields nothing on a pad narrower than the via" {
 
 // spec: placement/plane-via - a via-in-pad site may hang its annular ring over the pad edge while its drilled hole stays on the pad's own copper, so a finger narrower than the barrel still offers one
 test "the drill-contained scan lands a via on a finger narrower than its barrel" {
-    // barracuda's `J1` GND finger and the board's 0.4/0.2 via: 1.00 x 0.35 mm,
+    // board-a's `J1` GND finger and the board's 0.4/0.2 via: 1.00 x 0.35 mm,
     // so the pad is narrower than the barrel and the strict scan has nothing.
     const finger = pad_shape.Shape{ .x0 = 184.475, .y0 = 110.295, .x1 = 185.475, .y1 = 110.645 };
     const anchor = [2]f64{ 184.975, 110.47 };
@@ -630,7 +630,7 @@ test "in-pad scan replays the identical site sequence" {
     try testing.expect(n > 8);
 }
 
-/// `bcuda-lt3045-ldo` U1's GND_1 land, as the router measures it: 0.80 x 0.30
+/// `board-a-lt3045-ldo` U1's GND_1 land, as the router measures it: 0.80 x 0.30
 /// mm, and the board's via is 0.4 mm — so no point of it can hold the barrel.
 const dfn_land = pad_shape.Shape{ .x0 = 1.1, .y0 = -0.15, .x1 = 1.9, .y1 = 0.15 };
 /// An 0603 ground land off the same board: 0.90 x 0.95 mm, which holds the same
@@ -710,7 +710,7 @@ test "landAt finds only the routing net's own pad on the via's layer" {
 /// centre below is exactly ON a lattice node: the pad-centre candidate lands on
 /// the land itself, which is what makes containment — and not the snap — the
 /// only thing that can move a via here.
-///   * `U1.1` is `bcuda-lt3045-ldo`'s DFN land, 0.80 x 0.30: too shallow to hold
+///   * `U1.1` is `board-a-lt3045-ldo`'s DFN land, 0.80 x 0.30: too shallow to hold
 ///     the 0.4 mm barrel anywhere, so the in-pad walk is empty and only the
 ///     outward fan is left.
 ///   * `R1.1` is an 0603 land, 0.90 x 0.95: it holds the barrel at its centre.
@@ -750,7 +750,7 @@ const land_fixture = struct {
 
 /// The lattice the `land_fixture` numbers are chosen against: 0.2 mm track and
 /// 0.2 mm clearance put the routing grid at 0.4 mm, and the 0.4/0.2 via is the
-/// board via `bcuda-lt3045-ldo` carries.
+/// board via `board-a-lt3045-ldo` carries.
 const land_params = router.RouteParams{
     .track_width = 0.2,
     .clearance = 0.2,

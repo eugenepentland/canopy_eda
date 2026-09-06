@@ -186,7 +186,7 @@ test "leak: membership.computeSubBlockAttachments frees its scratch maps" {
         .{ .a = "usb/DP", .b = "USB_DP" },
     };
 
-    var block = emptyBlock("cyclops-analog");
+    var block = emptyBlock("board-b-analog");
     block.sections = &sections;
     block.sub_blocks = &sub_blocks;
     block.net_ties = &net_ties;

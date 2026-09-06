@@ -3,8 +3,8 @@
 //!
 //! This is the endpoint an AI agent uses to *see* a board, and it was the last
 //! expensive read surface with no retention at all: measured on this project's
-//! boards, a plain request cost **25.1 s cold and 23.7 s hot** for `barracuda`
-//! and **26.9 s / 28.3 s** for `barracuda-base` against an already-warm server —
+//! boards, a plain request cost **25.1 s cold and 23.7 s hot** for `board-a`
+//! and **26.9 s / 28.3 s** for `board-a-base` against an already-warm server —
 //! every repeat paid the whole pipeline over again, byte for byte, while the
 //! page tiers beside it answered the same board in 14 ms. Each call runs
 //! `pcb_layout_page.solveForRequest` (design evaluation + a multi-megabyte
@@ -78,7 +78,7 @@ pub fn captureRenderDeps(
 /// The entry cap is a handful of designs times those framing variants, so a
 /// burst of crops cannot grow the store without bound. The byte budget is its
 /// own figure, measured rather than guessed: a default-width board image is
-/// 69 KB (`Cyclops-Flex`) to 449 KB (`barracuda`), so 32 entries of real
+/// 69 KB (`Board-B-Flex`) to 449 KB (`board-a`), so 32 entries of real
 /// traffic occupy well under half of it and the entry cap is what actually
 /// binds. The headroom exists for the wide framing requests — `?width=4000`, a
 /// `?sheet=1` contact sheet — that a review loop asks for a few of. It is an

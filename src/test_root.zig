@@ -360,6 +360,11 @@ test {
     _ = @import("placement/route_timing.zig");
     _ = @import("placement/routed_copper.zig");
     _ = @import("placement/router.zig");
+    _ = @import("placement/router_ctx.zig");
+    _ = @import("placement/router_direct.zig");
+    _ = @import("placement/router_gap_close.zig");
+    _ = @import("placement/router_maze.zig");
+    _ = @import("placement/router_rescue.zig");
     _ = @import("placement/router_via_rules.zig");
     _ = @import("placement/router_vision_regression.zig");
     _ = @import("placement/router_waypoint_regression.zig");
@@ -507,6 +512,11 @@ test {
     _ = @import("serve/pcb_keepout_json.zig");
     _ = @import("serve/pcb_layout_import.zig");
     _ = @import("serve/pcb_derived.zig");
+    _ = @import("serve/pcb_layout_blob.zig");
+    _ = @import("serve/pcb_layout_fab.zig");
+    _ = @import("serve/pcb_layout_seeds.zig");
+    _ = @import("serve/pcb_layout_chrome.zig");
+    _ = @import("serve/pcb_layout_mcp.zig");
     _ = @import("serve/pcb_layout_page.zig");
     _ = @import("serve/pose_identity.zig");
     _ = @import("serve/pcb_subseeds.zig");

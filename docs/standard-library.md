@@ -1,5 +1,9 @@
 # The bundled standard library
 
+**What this is:** what a netlisp project gets for free, and how your own `lib/`
+takes precedence over it. Read it when you are starting a project, adding a
+part, or wondering why an `(import …)` resolved to something you did not write.
+
 `netlisp` ships a small component library compiled into the binary. A project
 directory with no `lib/` of its own still evaluates, checks and exports: the
 sixteen passive families the evaluator auto-imports, the land patterns those
@@ -74,7 +78,7 @@ And the five interface bundles — the named-lane bus vocabularies
 `(port-group … (role controller))` mirrors every direction, so one definition
 serves both ends of a link. These resolve through the same order as everything
 else: a project's own `lib/interfaces/spi.sexp` shadows the bundled `spi` by
-name. See [docs/sexpr-language.md § Interface bundles](sexpr-language.md).
+name. See [docs/sexp-language.md § Interface bundles](sexp-language.md).
 
 No modules and no parts tables are bundled. `lib/modules/` and `lib/parts/`
 resolve through the same order, so a shared `--lib-dir` or a project's own

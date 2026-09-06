@@ -13,7 +13,7 @@
 //!
 //!   eval        Evaluator.init + evalFile — the design evaluation alone.
 //!   sidecar     read + std.json parse of `<design>.layouts.json` — the cost
-//!               that scales with saved-copper size (7 MB on barracuda).
+//!               that scales with saved-copper size (7 MB on board-a).
 //!   solve       pcb_layout_page.solveForRequest — eval + sidecar + placement
 //!               (verbatim ★ restore for a blessed board) + copper restore.
 //!   drc_report  drc_rules.checkFilteredZones on the restored copper — the
@@ -251,7 +251,7 @@ const RepSample = struct {
 };
 
 /// Run every phase once for one board. `alloc` should be a per-rep arena: a
-/// cold barracuda render holds hundreds of megabytes, and the corpus must peak
+/// cold board-a render holds hundreds of megabytes, and the corpus must peak
 /// at one rep's worth, not the whole run's.
 fn benchRep(alloc: std.mem.Allocator, project_dir: []const u8, name: []const u8) RepSample {
     var out = RepSample{};
@@ -1031,7 +1031,7 @@ fn sampleResult(name: []const u8) BoardResult {
 
 fn sampleBaselineJson(arena: std.mem.Allocator) ![]const u8 {
     var aw: std.Io.Writer.Allocating = .init(arena);
-    const results = [_]BoardResult{sampleResult("barracuda")};
+    const results = [_]BoardResult{sampleResult("board-a")};
     try writeResultsJson(&aw.writer, &results, null);
     return aw.written();
 }
@@ -1041,12 +1041,12 @@ test "bench-page CLI parses flags and positionals" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const parsed = try parseArgs(arena, &.{ "--project-dir", "p", "--reps", "5", "--json", "--baseline", "b.json", "barracuda" });
+    const parsed = try parseArgs(arena, &.{ "--project-dir", "p", "--reps", "5", "--json", "--baseline", "b.json", "board-a" });
     try testing.expectEqualStrings("p", parsed.cli.project_dir);
     try testing.expectEqual(@as(usize, 5), parsed.reps);
     try testing.expect(parsed.cli.json);
     try testing.expectEqualStrings("b.json", parsed.cli.baseline.?);
-    try testing.expectEqualStrings("barracuda", parsed.cli.named.items[0]);
+    try testing.expectEqualStrings("board-a", parsed.cli.named.items[0]);
     const defaults = try parseArgs(arena, &.{});
     try testing.expectEqual(@as(usize, 3), defaults.reps);
     try testing.expect(!defaults.cli.json and defaults.cli.baseline == null);
@@ -1068,7 +1068,7 @@ test "baseline JSON round-trips the recorded run" {
     const arena = arena_state.allocator();
     const json = try sampleBaselineJson(arena);
     const base = try parseBaseline(arena, json);
-    const b = base.board("barracuda").?;
+    const b = base.board("board-a").?;
     try testing.expectEqual(@as(f64, 900), b.phases.pages.pcb);
     try testing.expectEqual(@as(f64, 120), b.phases.pages.assembly);
     try testing.expectEqual(@as(f64, 450), b.phases.pages.thermal);
@@ -1088,7 +1088,7 @@ test "baseline gate passes an unchanged run" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const base = try parseBaseline(arena, try sampleBaselineJson(arena));
-    const results = [_]BoardResult{sampleResult("barracuda")};
+    const results = [_]BoardResult{sampleResult("board-a")};
     const report = try checkBaseline(arena, &results, &base);
     try testing.expect(report.pass);
     try testing.expectEqual(@as(usize, 0), report.breaches.len);
@@ -1100,12 +1100,12 @@ test "baseline gate fails a real phase regression" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const base = try parseBaseline(arena, try sampleBaselineJson(arena));
-    var slower = sampleResult("barracuda");
+    var slower = sampleResult("board-a");
     slower.phases.pages.pcb = 1400; // baseline 900: past 900×1.30=1170 and 900+25
     const report = try checkBaseline(arena, &.{slower}, &base);
     try testing.expect(!report.pass);
     try testing.expectEqual(@as(usize, 1), report.breaches.len);
-    try testing.expectEqualStrings("barracuda", report.breaches[0].board);
+    try testing.expectEqualStrings("board-a", report.breaches[0].board);
     try testing.expectEqualStrings("page_ms", report.breaches[0].phase);
 }
 
@@ -1115,7 +1115,7 @@ test "baseline gate tolerates small-board jitter under the absolute floor" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const base = try parseBaseline(arena, try sampleBaselineJson(arena));
-    var jitter = sampleResult("barracuda");
+    var jitter = sampleResult("board-a");
     jitter.phases.drc_geom_ms = 60; // baseline 40: 1.5× but only +20ms, under the 25ms floor
     const report = try checkBaseline(arena, &.{jitter}, &base);
     try testing.expect(report.pass);
@@ -1146,7 +1146,7 @@ test "baseline gate enforces hand-set absolute budgets" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var aw: std.Io.Writer.Allocating = .init(arena);
-    const recorded = [_]BoardResult{sampleResult("barracuda")};
+    const recorded = [_]BoardResult{sampleResult("board-a")};
     try writeResultsJson(&aw.writer, &recorded, null);
     // Splice a budgets object in, as a human editing the committed file would.
     const with_budget = try std.mem.concat(arena, u8, &.{
@@ -1154,7 +1154,7 @@ test "baseline gate enforces hand-set absolute budgets" {
         ",\"budgets\":{\"page_ms\":800}}",
     });
     const base = try parseBaseline(arena, with_budget);
-    const results = [_]BoardResult{sampleResult("barracuda")}; // page 900 > cap 800
+    const results = [_]BoardResult{sampleResult("board-a")}; // page 900 > cap 800
     const report = try checkBaseline(arena, &results, &base);
     try testing.expect(!report.pass);
     try testing.expectEqual(@as(usize, 1), report.breaches.len);
@@ -1210,7 +1210,7 @@ test "baseline gate refuses to compare unlike work" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const base = try parseBaseline(arena, try sampleBaselineJson(arena));
-    var changed = sampleResult("barracuda");
+    var changed = sampleResult("board-a");
     changed.drc.total = 13;
     changed.phases.pages.pcb = 1; // even a huge speedup is not comparable
     const report = try checkBaseline(arena, &.{changed}, &base);
@@ -1225,7 +1225,7 @@ test "baseline gate fails a board that stopped being cacheable" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const base = try parseBaseline(arena, try sampleBaselineJson(arena));
-    var uncached = sampleResult("barracuda");
+    var uncached = sampleResult("board-a");
     uncached.facts.cached = false;
     const report = try checkBaseline(arena, &.{uncached}, &base);
     try testing.expect(!report.pass);
@@ -1314,7 +1314,7 @@ test "load model flags persisting and arriving workloads" {
 
 // spec: bench-page - a contended run is labelled in the table and JSON so it cannot be recorded as a clean baseline silently
 test "contended runs are labelled in table and JSON" {
-    var flagged = sampleResult("barracuda");
+    var flagged = sampleResult("board-a");
     flagged.load_contended = true;
     const noisy = LoadReport{ .start_1m = 0.2, .end_1m = 4.6, .max_excess_1m = 3.6, .contended = true };
     var buf: [4096]u8 = undefined;
@@ -1334,14 +1334,14 @@ test "contended runs are labelled in table and JSON" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const base = try parseBaseline(arena, jw.buffered());
-    try testing.expect(base.board("barracuda") != null);
+    try testing.expect(base.board("board-a") != null);
 
     // A clean run carries no per-board label and says contended:false, the
     // fact perf_gate.sh --record checks before installing a recording.
     const clean = LoadReport{ .start_1m = 0.2, .end_1m = 1.1, .max_excess_1m = 0.1, .contended = false };
     var cbuf: [4096]u8 = undefined;
     var cw = std.Io.Writer.fixed(&cbuf);
-    try writeResultsJson(&cw, &.{sampleResult("barracuda")}, clean);
+    try writeResultsJson(&cw, &.{sampleResult("board-a")}, clean);
     try testing.expect(std.mem.indexOf(u8, cw.buffered(), "load_contended") == null);
     try testing.expect(std.mem.indexOf(u8, cw.buffered(), "\"contended\":false") != null);
 }

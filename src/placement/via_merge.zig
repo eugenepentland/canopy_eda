@@ -3,7 +3,7 @@
 //! A finishing pass that needs to change layer picks its via site off its own
 //! search lattice, which nothing obliges to land on the via a previous pass
 //! already dropped for the same net a few hundred microns away. The result is
-//! two barrels where one would do: measured on barracuda's from-zero board,
+//! two barrels where one would do: measured on board-a's from-zero board,
 //! five same-net pairs with copper gaps of 0.002 … 0.038 mm — near-stacked, but
 //! invisible to every rule the board had, because copper clearance exempts a
 //! same-net pair (electrically they ARE one node) and the drill rule is
@@ -86,7 +86,7 @@ test "plan folds a near-stacked same-net via onto the one that was there first" 
     var arena_inst = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
-    // barracuda's measured shape: two 0.4 mm vias 0.402 mm apart — a copper gap
+    // board-a's measured shape: two 0.4 mm vias 0.402 mm apart — a copper gap
     // of 0.002 mm, well inside the net's own 0.127 mm clearance.
     const near = [_]ViaPt{
         .{ .x = 0, .y = 0, .r = 0.2, .net = "V_5VA", .rule = 0.127 },

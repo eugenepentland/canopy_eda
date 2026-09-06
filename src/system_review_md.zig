@@ -1196,7 +1196,7 @@ const testing = std.testing;
 // spec: system_review_md - parses the complete bounded authoring profile into a public AST and renders stable Markdown and inert HTML
 test "bounded profile parses and renders deterministically" {
     const source =
-        \\# Barracuda review
+        \\# Board A review
         \\
         \\Engineering paragraph with `RSET`, a [local note](notes/rf.md#loop), and ![overview](assets/system.svg).
         \\

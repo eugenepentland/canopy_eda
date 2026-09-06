@@ -212,7 +212,7 @@ pub fn padPart(placement: optimizer.Placement, src: u32) ?usize {
 /// pairs at its two EXTREMES, which is where the centreline the router
 /// constructs from actually starts and stops.
 ///
-/// A leg is rarely two bare pads. barracuda's `REF_LMX_P` is three — the
+/// A leg is rarely two bare pads. board-a's `REF_LMX_P` is three — the
 /// connector contact, a 100 Ω termination and an AC-coupling cap — and reading
 /// "exactly two pads" as the precondition made the campaign's own keystone pair
 /// vanish from the probe silently. What defines the envelope is the leg's SPAN,

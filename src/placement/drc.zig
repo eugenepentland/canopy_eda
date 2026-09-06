@@ -283,7 +283,7 @@ pub fn defaultSeverity(k: Kind) Severity {
 ///     escape stub that leaves a sealed pad and lands on fresh copper raises the
 ///     open-net count by one until the run is finished, so a geometrically
 ///     perfect, DRC-silent polyline was undone and the draw/measure/adjust loop
-///     could never start. Measured on barracuda: the LMX2595 escape stub added
+///     could never start. Measured on board-a: the LMX2595 escape stub added
 ///     zero clearance findings and was rolled back anyway.
 ///   • `route_score` inverted its own objective. Completion is meant to
 ///     dominate (`route_score.zig`: 1000·completion vs 50·drc_errors), but one
@@ -499,7 +499,7 @@ pub fn check(
 /// Geometry DRC looks like a pure clearance sweep and mostly is, but the
 /// power-width rule needs to know whether a declared rail's local branch is fed
 /// by a plane, and `routedTrackRequiredWidths` answers that by rastering every
-/// declared plane and pour of the board — 7.5 s of barracuda-base's 8.2 s
+/// declared plane and pour of the board — 7.5 s of board-a-base's 8.2 s
 /// geometry pass. Only a placement CARRYING rail demands
 /// (`rules.physical.rails`) reaches it; `needs_surfaces` is false without them,
 /// which is why `wasm_drc.zig` — marshalling none — never pours at all.
@@ -1382,7 +1382,7 @@ fn checkLandTransit(
     // it. The reader's unit is the pad ("this land has off-centre copper"),
     // not the segment: an RF path's tessellation chords used to be the only
     // copper grouped this way, while a hand-drawn chain crossing a land in
-    // four pieces was reported four times over — the 2026-08 barracuda audit
+    // four pieces was reported four times over — the 2026-08 board-a audit
     // found single pads carrying up to seven findings for one shape. The
     // repair (`repair_land_transit`) walks every same-net segment on the land
     // regardless of how many findings named it, so collapsing to the worst
@@ -1801,7 +1801,7 @@ fn checkPadEdge(
 /// mezzanine interface mounts — the overhang is the part's construction, not a
 /// crowding accident, and warning that its corner is "less than 0.2 mm from
 /// the edge" reads as noise to the person who put it there (every one of
-/// barracuda-base's 14 component-edge findings in the 2026-08 audit was such a
+/// board-a-base's 14 component-edge findings in the 2026-08 audit was such a
 /// deliberate overhang, at up to 14.6 mm past the edge). The margin therefore
 /// polices only parts wholly on the board but crowding its rim. A part nudged
 /// over the edge by MISTAKE is not silently lost: its lands follow the body,
@@ -2860,7 +2860,7 @@ test "exact RF taper does not grow a capsule behind a short launch pad" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    // Barracuda F4 pads 1/2 in the launch direction: the RF land is 0.55 mm
+    // Board A F4 pads 1/2 in the launch direction: the RF land is 0.55 mm
     // across but only 0.25 mm long, followed 0.25 mm behind by a GND land.
     // A 0.55 mm round-ended probe reaches 0.275 mm behind the RF pad centre and
     // reports a false 0.100 mm gap. The fabricated taper has a butt end at the
@@ -3596,7 +3596,7 @@ test "check finds the saved LO1_DRIVE hard junction when RouteResult bend metada
         .generated = true,
         .rules = .{ .net = &net_rules },
     };
-    // The first three persisted segments from Barracuda's rf-rounding-v1
+    // The first three persisted segments from Board A's rf-rounding-v1
     // LO1_DRIVE run. The first junction turns about 82 degrees with no tangent
     // arc; the following short chord begins the visible rounded section.
     const tracks = [_]router.Track{
@@ -5283,7 +5283,7 @@ test "same-net vias crowding each other flag via_spacing, not via_via" {
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    // barracuda's measured duplicate: two 0.4 mm barrels of ONE net 0.402 mm
+    // board-a's measured duplicate: two 0.4 mm barrels of ONE net 0.402 mm
     // apart — a copper gap of 0.002 mm. It clears the board's declared 0.2 mm
     // hole-to-hole (drills 0.2 ⇒ wall 0.202), and `via_via` exempts a same-net
     // pair outright, so before `via_spacing` nothing on the board saw it.

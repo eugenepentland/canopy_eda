@@ -131,7 +131,7 @@ fn collectExternalSources(
 /// they leave on.
 ///
 /// `analyze` only ever runs on the design being built, so on a STANDALONE
-/// MODULE PAGE — `bcuda-lt3045-ldo` routed by itself rather than instantiated —
+/// MODULE PAGE — `board-a-lt3045-ldo` routed by itself rather than instantiated —
 /// the module IS the board, and `(port "VOUT" out power (current 0.5 0.5))` is
 /// the only statement anywhere on that page about how much current its output
 /// copper carries. Without this pass the page has no rail at all for VOUT, so
@@ -212,7 +212,7 @@ fn creditExportedRails(
         // same current: `(pin 7 "V_5V75A" (i-typ 0.145) (i-max 0.180))` on J1
         // IS this port's export, and it has a physical pad the current solve
         // can place. Crediting the port as well counted the rail's exit twice
-        // — barracuda's V_5V75A demanded 0.641 A typical where the board draws
+        // — board-a's V_5V75A demanded 0.641 A typical where the board draws
         // 0.496 A — and the phantom half had no pad of its own.
         if (passThroughLoadOn(tally, root)) continue;
         const path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ export_terminal_prefix, port.name });

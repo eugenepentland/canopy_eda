@@ -95,7 +95,7 @@ const max_reported_failures: usize = 24;
 /// not pay for itself is rolled back byte for byte.
 ///
 /// It is nonetheless disabled, because on the board it was written for it has
-/// never once paid: measured on barracuda at both pour priorities it closed
+/// never once paid: measured on board-a at both pour priorities it closed
 /// NOTHING that depth zero did not, while a cascading repair costs a maze sweep
 /// plus two connectivity oracle passes per victim — together with the multi-net
 /// rip rung (`router.rip_tiers`) it took the pass from 345 s to 530 s (+54 %).
@@ -113,7 +113,7 @@ const max_repair_rip_depth: usize = 0;
 /// and rip every net walling the corridor at once. It is the right answer for a
 /// hop that three nets contend over, and `RipBreadth` implements it — but it is
 /// also a whole extra maze sweep on every hop the singles already failed, and on
-/// barracuda it has never changed a verdict at either pour priority. Together
+/// board-a it has never changed a verdict at either pour priority. Together
 /// with the repair cascade (`max_repair_rip_depth`) it cost +54 % wall clock for
 /// nothing. Set it back to `router.rip_tiers` to re-arm the rung; the singles-
 /// then-union breadth on rungs 1–3 still tries the union, so this only drops the
@@ -134,7 +134,7 @@ const max_rip_tier: usize = router.rip_tiers - 1;
 /// than a new threshold: one rule, read in two ladders.
 ///
 /// **It is nonetheless OFF, because it was measured and it does not pay.**
-/// barracuda's `close_open_nets` ladder from the from-zero `t3-seed` placement,
+/// board-a's `close_open_nets` ladder from the from-zero `t3-seed` placement,
 /// run to a fixed point on the same machine, ReleaseSafe, both arms in parallel
 /// (2026-08-06):
 ///
@@ -150,7 +150,7 @@ const max_rip_tier: usize = router.rip_tiers - 1;
 /// is here, wired and disarmed, exactly like the two constants above.
 ///
 /// Flip to `true` to arm it on a board with genuine multi-net congestion in its
-/// residual — that is the case the rungs were built for and the one barracuda's
+/// residual — that is the case the rungs were built for and the one board-a's
 /// six remaining nets are not (they are a plane rail, three supply pours, and
 /// two escapes with no free lane, none of which a wider rip can reach).
 const adopt_last_k: bool = false;
@@ -208,7 +208,7 @@ const max_vacate_seeds: usize = 6;
 /// walled in — one or two hops away. A net in a dozen pieces is a different
 /// problem (a plane net whose pads rejoin by stitching), its transaction has to
 /// re-ask every one of those hops on a board it just emptied, and it can only
-/// be kept if ALL of them land. On barracuda that is `GND`: seventeen islands,
+/// be kept if ALL of them land. On board-a that is `GND`: seventeen islands,
 /// nine minutes of maze, and a rollback at the end of it.
 const max_vacate_seed_islands: usize = 4;
 /// Most island-joining corridors of one seed that nominate blockers. A net in
@@ -219,7 +219,7 @@ const max_vacate_corridors: usize = 8;
 /// Halving the divisor-2 gap pitch is what makes two minimum-width escapes
 /// representable when they legally need 0.254 mm centre-to-centre and the
 /// divisor-2 lattice's adjacent lane falls just short — the next lane out
-/// doubles the spacing and misses the corridor. Measured on barracuda's J1
+/// doubles the spacing and misses the corridor. Measured on board-a's J1
 /// fine-pitch row: the two contending escapes run 0.265 mm apart on the
 /// reference board, which this raster can hold and the standard one provably
 /// cannot.
@@ -265,7 +265,7 @@ const vacate_rounds: usize = 2;
 /// 50 minutes on a two-net request without returning, because each rung costs
 /// the square of the divisor over the whole placement. Bounded to one hop's
 /// corridor the same rung is affordable, which matters because the residue it
-/// targets is specifically a lattice problem — barracuda's `SPI_SCK` has a legal
+/// targets is specifically a lattice problem — board-a's `SPI_SCK` has a legal
 /// ~35 mm way round whose tightest points clear by 0.07-0.20 mm, and the
 /// divisor-4 pitch (~0.11 mm) cannot put a centreline on them.
 const fine_divisors = [_]f64{ vacate_fine_divisor, vacate_fine_divisor * 2 };
@@ -279,7 +279,7 @@ const fine_corridor_margin_mm: f64 = 3.5;
 
 /// Whole-board fine search is an endgame move, not another default retry. It
 /// exists for long bridges whose legal route leaves the terminal rectangle
-/// altogether (Barracuda's control bus runs around the top board edge), and is
+/// altogether (Board A's control bus runs around the top board edge), and is
 /// bounded both by residual width and by per-call spend.
 const global_detour_last_nets: usize = 6;
 const global_detour_spenders: usize = 2;
@@ -785,7 +785,7 @@ const Work = struct {
     /// The finishing pass used to ignore the plan entirely, so a constraint an
     /// author writes reached only half the pipeline: the whole-board router
     /// honours the waves, then this pass earns the last nets in span order,
-    /// blind to the intent. On barracuda that is 11 of 87 nets — most of the
+    /// blind to the intent. On board-a that is 11 of 87 nets — most of the
     /// margin between a fresh route and the finished board — ordered against
     /// what the design says it wants.
     plan_rank: []const usize = &.{},
@@ -840,7 +840,7 @@ const Work = struct {
     /// Absent — the default — the gate is exactly the monotone one, so nothing
     /// about an existing call changes and the extra copper is opt-in per call.
     ///
-    /// **On barracuda it does not pay, and the numbers are worth keeping.** The
+    /// **On board-a it does not pay, and the numbers are worth keeping.** The
     /// hypothesis was that `GND`'s 1.4–2.0 mm island gaps each cost exactly one
     /// `track↔pad` error, so one error of headroom would close the net. Measured
     /// on the finished board (both pour priorities, geometry sitting at six
@@ -1023,7 +1023,7 @@ const Work = struct {
         // to it. Without this, plan order means nothing once the board is full:
         // the pass can only take copper from nets nobody prioritised, so a
         // high-priority net arriving late finds its corridor held by a lower
-        // one and has no way to claim it — measured on barracuda, `SPI_SCK`
+        // one and has no way to claim it — measured on board-a, `SPI_SCK`
         // loses 40 overlaps to `SPI_MOSI` copper it outranks in the plan.
         // Declared intent REPLACES a heuristic here: the engine stops guessing
         // who should yield and reads the answer out of the design.
@@ -1263,7 +1263,7 @@ const Work = struct {
     /// pour-carried net. A pad the dead-end memo has ruled out does not seal
     /// its whole island either: the island's next pad is asked instead (an
     /// island's first pad can sit in foreign congestion no via site survives
-    /// while a later pad has a legal barrel at its own centre — barracuda's
+    /// while a later pad has a legal barrel at its own centre — board-a's
     /// `V_3V3_LMX` {U17.37, C93.1}).
     fn addStitches(
         self: *Work,
@@ -1450,7 +1450,7 @@ const Work = struct {
     ///
     /// A hop that keeps failing as `broke_victim` / `drc` is not asking for a
     /// bigger rip — it is asking for a route that does not need one, and the
-    /// standard raster cannot see it. Measured on barracuda's `SPI_SCK`: the
+    /// standard raster cannot see it. Measured on board-a's `SPI_SCK`: the
     /// divisor-2 lattice offers only a ~24 mm line that has to tear
     /// `adf4159/SPI_ADF_SDI_1V8` out and cannot put it back, while a legal
     /// ~35 mm way round exists and costs nothing to anyone. Rip is off on
@@ -1727,7 +1727,7 @@ const Work = struct {
     /// and still come back at two islands — same count, different board. The
     /// pass then hands the corridor the victim was one hop from using to
     /// somebody else, and the victim never closes. (Measured: letting hops rip
-    /// the still-open `SPI_MOSI` and `V_12V` cost barracuda two closed nets,
+    /// the still-open `SPI_MOSI` and `V_12V` cost board-a two closed nets,
     /// 85/90 → 83/90, with every per-net island count "not worse".)
     ///
     /// So a rip may only take copper from a net that is currently WHOLE. An
@@ -1817,7 +1817,7 @@ const Work = struct {
             var chosen = maybe;
             if (chosen == null) {
                 // Collateral repairs get the same bounded local fine rung as a
-                // top-level endgame hop. Barracuda's pour island is a 1.868 mm
+                // top-level endgame hop. Board A's pour island is a 1.868 mm
                 // lattice miss: standard repair exhausts, divisor 4 closes it
                 // in its own corridor without rip or board-wide search.
                 const fine_live = (try self.liveCopper()) orelse continue;
@@ -2135,7 +2135,7 @@ const Work = struct {
     ///
     /// The finer rung is also the one allowed to run BARE — no displaceable
     /// blockers at all, subset = the seed alone — because the failure it exists
-    /// for is a lattice with no legal lane, not copper in the way: barracuda's
+    /// for is a lattice with no legal lane, not copper in the way: board-a's
     /// J1 escapes contend for a corridor that stays unroutable at divisor 2
     /// with every competing net stripped off the board. At the standard rung a
     /// blocker-less seed is still a bail-out: nothing about the board would
@@ -2238,7 +2238,7 @@ const Work = struct {
     // ANY sequence of single-seed vacates. Whichever of them goes first takes
     // the channel, the rest are put back exactly where they were, and the next
     // transaction re-asks the identical question against the identical board.
-    // That is the shape of barracuda's residual: six SPI lines wanting one J1
+    // That is the shape of board-a's residual: six SPI lines wanting one J1
     // escape corridor, and a sealed LDO pocket whose rails and `GND` island want
     // the same bottom-layer channel.
     //
@@ -2261,7 +2261,7 @@ const Work = struct {
     // cluster, blockers per transaction, copper per transaction, clusters per
     // call, and one whole-pass attempt cap over all of it.
     //
-    // MEASURED on barracuda (2026-08-06, ReleaseSafe, from-zero `route_pcb` at
+    // MEASURED on board-a (2026-08-06, ReleaseSafe, from-zero `route_pcb` at
     // the starred poses — 80/91 — then `close_open_nets` to a fixed point, A/B
     // against main with this tier absent):
     //
@@ -2857,7 +2857,7 @@ const Work = struct {
                 // quietly breaking. A pour-carried net rejoins by dropping a via
                 // into its own pour; asking for a surface trace across the
                 // pocket in the same breath spends a channel the stitch never
-                // needed. Measured on barracuda: restoring `V_6VA` by bridge
+                // needed. Measured on board-a: restoring `V_6VA` by bridge
                 // lays copper straight back across the `B.Cu` GND pour it had
                 // just been lifted off, re-severing the very pour whose
                 // continuity closes the `GND` seed — the transaction put its own
@@ -3908,7 +3908,7 @@ test "close_open_nets gate spends a declared DRC error budget but not an undecla
     // SIG's two pads sit either side of a foreign track parked 0.05 mm off the
     // straight line between them — far under the 0.127 mm rule. Any bridge that
     // closes SIG therefore costs exactly one clearance error, which is the trade
-    // a budget exists to authorise (on barracuda it is `GND`'s 1.4–2.0 mm island
+    // a budget exists to authorise (on board-a it is `GND`'s 1.4–2.0 mm island
     // gaps against a `track↔pad` rule).
     var parts = [_]optimizer.Part{
         .{ .ref_des = "R1", .kind = .passive, .hw = 0.3, .hh = 0.3, .fallback = false, .x = 2, .y = 5, .pads = &.{.{ .number = "1", .x = 0, .y = 0, .w = 0.6, .h = 0.6 }} },
@@ -4912,7 +4912,7 @@ test "the last rung asks for a finer raster and no rip at all" {
     const opts = Work.fineDirectOptions(gap, vacate_fine_divisor);
     // A hop that keeps failing as broke_victim/drc is not asking for a BIGGER
     // rip — it is asking for a route that needs none, and the standard raster
-    // cannot see it. Measured on barracuda's SPI_SCK: the divisor-2 lattice
+    // cannot see it. Measured on board-a's SPI_SCK: the divisor-2 lattice
     // offers only a ~24 mm line that tears adf4159/SPI_ADF_SDI_1V8 out and
     // cannot put it back, while a legal way round exists that costs no one.
     try std.testing.expect(!opts.ripup);
@@ -4950,7 +4950,7 @@ test "close_open_nets splits its round failures from the wholesale phase's" {
         .tracks = .empty,
         .vias = .empty,
     };
-    // What the barracuda call produced: the caller asked about GND, the round
+    // What the board-a call produced: the caller asked about GND, the round
     // loop failed on GND, and a rolled-back vacate transaction failed on two
     // nets the caller never named and that are not even open.
     try work.failures.append(arena, .{
@@ -5120,7 +5120,7 @@ test "close_open_nets bridges a plane net in round 0 when it can plan no stitch"
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    // barracuda's `GND` in miniature: a plane-carried net in two islands, and
+    // board-a's `GND` in miniature: a plane-carried net in two islands, and
     // BOTH of them already touch plane copper — separate pieces of metal that
     // each reach a plane the other does not. `addStitches` refuses every one of
     // them (a via there could only land in copper its island is already part
@@ -5246,7 +5246,7 @@ test "close_open_nets folds a redundant same-net via and leaves the rest alone" 
         .vias = .empty,
     };
     // A run that changes layer at (5,5), where a SECOND barrel of the same net
-    // was planted 0.402 mm along — the measured barracuda shape. Every track end
+    // was planted 0.402 mm along — the measured board-a shape. Every track end
     // on the duplicate must come back to the barrel that was there first.
     try work.vias.append(arena, .{ .x = 5, .y = 5, .d = 0.4, .drill = 0.2, .net = "SIG" });
     try work.vias.append(arena, .{ .x = 5.402, .y = 5, .d = 0.4, .drill = 0.2, .net = "SIG" });

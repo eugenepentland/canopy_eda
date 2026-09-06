@@ -11,8 +11,8 @@
 //! reconcile paid it several times per edit.
 //!
 //! Measured with `netlisp bench-page --reps 3` (2026-08-26, Debug, same
-//! machine and same boards, memo forced off vs on): barracuda's reporting DRC
-//! 3480 ms → 758 ms, barracuda-base 8140 ms → 542 ms, cyclops-interposer
+//! machine and same boards, memo forced off vs on): board-a's reporting DRC
+//! 3480 ms → 758 ms, board-a-base 8140 ms → 542 ms, board-b-interposer
 //! 750 ms → 6 ms, with byte-identical DRC counts on every board in the corpus.
 //! What is left is rule EVALUATION over the fill (`drc.checkWithZones` and the
 //! return-path rule), which this does not touch.
@@ -22,7 +22,7 @@
 //! The whole-board key below is a 128-bit fingerprint of the placement, the
 //! routed copper and the user zones. It is exact, and it is all-or-nothing: any
 //! copper edit mints a new board key, and the next reporting DRC re-poured every
-//! fill on the board — 2.5–3 s of a barracuda-class board for moving one track.
+//! fill on the board — 2.5–3 s of a board-a-class board for moving one track.
 //! An editor session is a sequence of edits, so that was the common case, not
 //! the rare one.
 //!
@@ -48,7 +48,7 @@
 //! ## …and a third table, for the fills an edit DID reach
 //!
 //! A fill whose key moved was still poured from nothing, which on a
-//! barracuda-class board is most of a via edit's cost (a via is layer-blind, so
+//! board-a-class board is most of a via edit's cost (a via is layer-blind, so
 //! it lands in every unclipped fill). So a PATCH BASE is retained per fill
 //! IDENTITY (`pour.fillIdentity`) alongside the content-keyed fills: the margin
 //! field that fill's last generation produced, and the obstacle set that
@@ -123,14 +123,14 @@ pub const Fills = struct {
 const max_boards: usize = 4;
 /// Byte ceiling over every retained fill together. One fill's label grid is
 /// capped at `pour`'s three million cells (12 MB) and a dense board pours a
-/// few dozen of them, so a barracuda-class board's fills are a few hundred
+/// few dozen of them, so a board-a-class board's fills are a few hundred
 /// megabytes — which is exactly why generations SHARE their unchanged fills
 /// rather than each holding a copy.
 const max_fill_bytes: usize = 384 * 1024 * 1024;
 /// Byte ceiling over the retained PATCH BASES — the margin fields a changed
 /// fill is updated from. Unlike the fills, these do not accumulate per board
 /// generation: one base per fill IDENTITY, replaced when that fill is next
-/// built. A barracuda-class board's twenty-odd fills are ~2 MB of margin field
+/// built. A board-a-class board's twenty-odd fills are ~2 MB of margin field
 /// each, so this holds several boards' worth of bases at once.
 const max_base_bytes: usize = 128 * 1024 * 1024;
 
@@ -177,7 +177,7 @@ const BaseNode = struct {
 ///
 /// Opt-in, and deliberately not the default, because publishing a base is not
 /// free: it deep-copies a margin field and an obstacle record per fill, which on
-/// a barracuda-class board is ~80 MB of allocation and memcpy in one burst. That
+/// a board-a-class board is ~80 MB of allocation and memcpy in one burst. That
 /// burst is invisible in a DRC number and very visible in a frame: the editor
 /// zoom gate measured 200-400 ms of jank on the CPU-rendered canvas when the
 /// background derived warm did it behind a cold page load.

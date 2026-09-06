@@ -84,7 +84,7 @@
 //! (`lastEmittingWave`).
 //!
 //! That is a correction, not a tuning choice. Relaxing every remaining net every
-//! frame made the cost `Σ_waves (nets_left × frames × cells)`, so barracuda's 16
+//! frame made the cost `Σ_waves (nets_left × frames × cells)`, so board-a's 16
 //! waves spent 87–98% of every frame on nets the wave could not emit and ONE
 //! flagged wave cost exactly as much as sixteen — 561 s of wave time, against
 //! 15 s for the same board now. The other half of that came from the lattice
@@ -94,7 +94,7 @@
 //!
 //! ## Resolution is per wave, capacity is not (v2)
 //!
-//! v1 had ONE lattice at `max(2·g_route, 0.5)` — 0.93 mm on barracuda — and a
+//! v1 had ONE lattice at `max(2·g_route, 0.5)` — 0.93 mm on board-a — and a
 //! cell offered `pitch × (open area fraction)`. That conflated two different
 //! quantities, and the measurement showed exactly what it cost: 16 of 93 nets
 //! came back `no_path`, including three of the eight J1 control escapes, because
@@ -118,7 +118,7 @@
 //!     whatever lattice the next pass uses, so a refined wave still sees what
 //!     earlier waves took.
 //!
-//! Measured on barracuda (16 waves, 93 nets, arm-2 all-waves flagged):
+//! Measured on board-a (16 waves, 93 nets, arm-2 all-waves flagged):
 //! `no_path` 16 → 2, guides emitted 12 → 22, control-escape 3 no-path → 0 of 8,
 //! planner wall 20.5 s → 27.1 s. Two of that census moved by resolution and the
 //! rest by the two capacity corrections the finer lattice exposed — a stamp
@@ -178,7 +178,7 @@ pub const Params = struct {
         ///
         /// It is 1.0 because the measurement says a looser value would not be
         /// tolerating jitter, it would be calling two DIFFERENT corridors the
-        /// same. On barracuda the early-out already fires on 13 of 16 waves; the
+        /// same. On board-a the early-out already fires on 13 of 16 waves; the
         /// three that spend the full budget are not wandering by a cell — their
         /// per-check overlap swings 0.08–1.00 (wave 4, eight nets) and 0.13–1.00
         /// (wave 1, two nets), i.e. the extraction keeps swapping whole
@@ -219,7 +219,7 @@ pub const Params = struct {
         /// like a lateral one (`pitch / (|Q| + eps)`), and the plain Tero update
         /// erases the `via_conductance` bias within a few frames by driving
         /// every conductance toward its own flux. A net whose flow spreads over
-        /// two layers then flaps between them for free: measured on barracuda,
+        /// two layers then flaps between them for free: measured on board-a,
         /// `SPI_LMX_CSN` came out of a 102-cell backbone with FOURTEEN layer
         /// changes, and `V_3V3_LMX` with forty.
         via_cost_mult: f64 = 4,
@@ -388,7 +388,7 @@ pub fn plan(
 /// Index of the last wave whose nets may receive guides, or null when none may.
 /// Everything after it is planned for nobody: its capacity stamps are read only
 /// by LATER waves and its guides are filtered out, so the relaxation frames it
-/// would cost buy nothing. Measured on barracuda (16 waves, one flagged at index
+/// would cost buy nothing. Measured on board-a (16 waves, one flagged at index
 /// 4): the eleven waves past it were 74% of the planner's wall clock.
 fn lastEmittingWave(waves: []const Wave) ?usize {
     var last: ?usize = null;
@@ -1420,7 +1420,7 @@ fn solveNet(sim: *Sim, slot_i: usize, ai: usize, params: Params) void {
 ///
 /// A later wave is context, not a commodity: this wave has to see where that
 /// work will want to go, but re-solving all of it every frame is what made
-/// planning quadratic in wave count. Measured on barracuda (16 waves, 93 nets):
+/// planning quadratic in wave count. Measured on board-a (16 waves, 93 nets):
 /// 87–98% of every frame went to nets the wave could not emit, and one flagged
 /// wave cost exactly as much as sixteen. So the whole participating set relaxes
 /// for a short warm-up, the later waves' demand is read off ONCE, and the main
@@ -2063,7 +2063,7 @@ fn recordStuck(allocator: Allocator, run: *Run, slot_i: usize, pitch: f64) Alloc
 ///
 /// Half is the Nyquist reading of the rule that actually fails on the reference
 /// lattice — a cell CENTRE has to be able to land inside the gap between two
-/// adjacent pads. On barracuda the reference channel is 0.93 mm, and the eight
+/// adjacent pads. On board-a the reference channel is 0.93 mm, and the eight
 /// J1 control escapes are exactly the geometry that hides under it.
 ///
 /// A stuck net whose pads are all on passives has no pin pitch to read, and
@@ -2136,7 +2136,7 @@ fn recordNet(
         // under-width, no edge out of it is live, every alternative reads
         // UNREACHABLE, and the gate scores 1.0 for every net — which is exactly
         // the "make every net look unique" failure `corridorMask` keeps
-        // terminal breathing room to avoid. Measured on barracuda: 4 of the 5
+        // terminal breathing room to avoid. Measured on board-a: 4 of the 5
         // guides the control-escape wave emitted scored a flat 1.0.
         loadNet(ctx.sim, slot_i);
         diag.confidence = try confidenceOf(allocator, s, bone, ctx.radius);
@@ -2586,7 +2586,7 @@ test "a two-layer backbone changes layer twice, not fourteen times" {
     try testing.expectEqual(@as(u8, 1), maxLayer(p, 0));
     // Down and back up. Without an explicit per-layer-change price in the
     // extraction, flow spread over both layers makes flapping free — measured on
-    // barracuda as fourteen changes on one control net's 102-cell backbone.
+    // board-a as fourteen changes on one control net's 102-cell backbone.
     try testing.expectEqual(@as(usize, 2), countVias(p, 0));
 }
 
