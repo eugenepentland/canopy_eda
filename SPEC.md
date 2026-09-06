@@ -8910,6 +8910,7 @@ function; unresolved selector names become warnings, never errors.
 - a sub-blocks selector claims every part under the sub-block slug prefix
 - a classes selector claims every net of the named module-policy class
 - a net-classes selector inherits all nets of the authored net-class it names
+- net-class waves and group scopes use resolved hierarchical membership and preserve winning-class overrides
 - a nets selector claims nets by name
 - relative route guides lower from current part and pin geometry into deterministic waypoints
 - an authored branch tree lowers into per-net guide branches in authored limb order, and a limb count that cannot cover a member net warns

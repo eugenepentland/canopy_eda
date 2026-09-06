@@ -1214,3 +1214,25 @@ The existing poured-power surface-join regression exercises the shared snapshot
 with real pour connectivity. Real-board evidence is retained under
 `/tmp/autorouter-base-finishing-20260906`; measurements below distinguish route
 attempts and connected-net changes from reduced preparation overhead.
+
+## Inherited routing-class selectors — 2026-09-06
+
+`pcb-plan` net-class waves and native routing group scopes now read the resolved
+per-net class identities used for width/impedance rules. Root-only membership
+lists omitted module-private nets and could also reintroduce a net whose winning
+class was overridden. The unresolved-placement fallback still reads authored
+root declarations, and declared empty classes remain valid selectors.
+
+The regression covers inherited private nets, a bridged board net, case-insensitive
+selection, a same-leaf net in another module, a winning-class override, a module-only
+class, and propagation of F.Cu/zero-via constraints. All 67 focused tests pass,
+including the complete named-test shard inventory.
+
+On the published Barracuda Base MCU-escape candidate, the physical saved-copper
+report is unchanged: 115/183 connected. The differential wave now contains 16
+nets instead of eight. It correctly exposes existing zero-via-policy violations
+on the internal USB P leg (two vias), Ethernet RX N (one), and Ethernet TX N
+(three), reducing policy-complete routing progress from 115 to 112. Those are
+newly detected incomplete requirements, not removed connections. The design
+library separately declares the missing differential classes and records the
+26 existing width errors exposed by those declarations.

@@ -1015,14 +1015,22 @@ fn matchClass(ctx: Context, name: []const u8, out: *std.ArrayList(usize), arena:
     return true;
 }
 
-/// Route `net_classes`: inherit ALL nets listed in the authored `(net-class …)`
-/// of that name — a wave never has to repeat the class's nets.
+/// Route `net_classes` through the same resolved membership used for geometry.
+/// Module-private nets and bridged ports retain their winning class here too.
+/// Authored root lists are a fallback only before net rules have been resolved.
 fn matchNetClass(ctx: Context, name: []const u8, out: *std.ArrayList(usize), arena: Allocator) Allocator.Error!bool {
     out.clearRetainingCapacity();
     var found = false;
+    const rules = ctx.placement.rules.net;
+    for (rules, 0..) |rule, ni| {
+        if (ni >= ctx.placement.nets.len or !eqUpper(rule.class.name, name)) continue;
+        found = true;
+        try out.append(arena, ni);
+    }
     for (ctx.net_class_specs) |spec| {
         if (!eqUpper(spec.name, name)) continue;
         found = true;
+        if (rules.len != 0) continue;
         for (spec.nets) |nn| {
             if (netIndexOf(ctx, nn)) |ni| try out.append(arena, ni);
         }
@@ -2265,6 +2273,61 @@ test "net-classes selector inherits the authored class's nets" {
     const fast = routeWaveNamed(plan, "fast") orelse return error.TestExpectedWave;
     try testing.expect(hasMember(fast, 0) and hasMember(fast, 1));
     try testing.expect(!hasMember(fast, 2)); // GND is not in the class
+}
+
+// spec: placement/plan-resolve - net-class waves and group scopes use resolved hierarchical membership and preserve winning-class overrides
+test "net-class waves and scopes honor resolved module membership" {
+    var arena_i = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_i.deinit();
+    const arena = arena_i.allocator();
+    const nets = [_]optimizer.FlatNet{
+        .{ .name = "mcu/D_P", .pins = &.{} },
+        .{ .name = "mcu/D_N", .pins = &.{} },
+        .{ .name = "USB_P", .pins = &.{} },
+        .{ .name = "other/D_P", .pins = &.{} },
+        .{ .name = "OVERRIDDEN", .pins = &.{} },
+        .{ .name = "mcu/LOCAL", .pins = &.{} },
+    };
+    // The root declaration supplies geometry and one port membership. The
+    // flattened rule table has already resolved module ownership, bridges and
+    // a higher-precedence class overriding an authored root-list membership.
+    const specs = [_]env.NetClassSpec{
+        .{ .name = "usb", .nets = &.{ "USB_P", "OVERRIDDEN" } },
+        .{ .name = "empty", .nets = &.{} },
+    };
+    const rules = [_]optimizer.NetRule{
+        .{ .class = .{ .name = "usb", .source = "mcu" } },
+        .{ .class = .{ .name = "usb", .source = "mcu" } },
+        .{ .class = .{ .name = "usb" } },
+        .{},
+        .{ .class = .{ .name = "other" } },
+        .{ .class = .{ .name = "local", .source = "mcu" } },
+    };
+    var parts = [_]optimizer.Part{hub("mcu/U1")};
+    var p = fixturePlacement(&parts, &.{}, &nets);
+    p.rules.net = &rules;
+    const ctx = Context{ .placement = p, .net_class_specs = &specs };
+    const waves = [_]env.PlanWave{.{
+        .name = "differential",
+        .net_classes = &.{"USB"},
+        .allowed_layers = &.{"F.Cu"},
+        .max_vias = 0,
+    }};
+    const plan = try resolve(arena, .{ .route = &waves }, ctx);
+    const wave = routeWaveNamed(plan, "differential") orelse return error.TestExpectedWave;
+    try testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, wave.members);
+    const policies = try routePolicies(arena, plan, p, true);
+    for (wave.members) |ni| {
+        try testing.expectEqual(@as(u64, 1), policies[ni].allowed_layers);
+        try testing.expectEqual(@as(?u16, 0), policies[ni].max_vias);
+    }
+    const scope = try resolveNetScope(arena, .{ .groups = &.{"USB"} }, ctx);
+    try testing.expectEqualSlices(bool, &.{ true, true, true, false, false, false }, scope.mask);
+    // A class declared only inside a module is still a known selector. A
+    // declared empty root class also remains known without inventing members.
+    const local = try resolveNetScope(arena, .{ .groups = &.{ "local", "empty" } }, ctx);
+    try testing.expectEqualSlices(bool, &.{ false, false, false, false, false, true }, local.mask);
+    try testing.expectEqual(@as(usize, 0), local.unknown.len);
 }
 
 // spec: placement/plan-resolve - a nets selector claims nets by name
