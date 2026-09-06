@@ -2254,6 +2254,9 @@ src/placement/copper_topology.zig::redundantSections | fn redundantSections( are
 src/placement/copper_topology.zig::repairableJoins | fn repairableJoins( arena: std.mem.Allocator, tracks: []const Track, ) std.mem.Allocator.Error![]const ImplicitJoin
 src/placement/copper_topology.zig::viaUseCount | fn viaUseCount( terminals: []const Terminal, tracks: []const Track, via: Via, pour_layers: u64, plane_contacts: u8, ) usize
 src/placement/copper_topology.zig::viaUseCounts | fn viaUseCounts( arena: std.mem.Allocator, terminals: []const Terminal, tracks: []const Track, vias: []const Via, pour_layers: []const u64, plane_contacts: []const u8, ) std.mem.Allocator.Error![]const usize
+src/placement/copper_window.zig::Result struct_
+src/placement/copper_window.zig::Window struct_
+src/placement/copper_window.zig::remove | fn remove( alloc: std.mem.Allocator, saved: sidecar.SavedRoutes, nets: *const std.StringHashMapUnmanaged(void), window: Window, ) (std.mem.Allocator.Error || error{ProtectedRf})!Result
 src/placement/courtyard_close.zig::Rect struct_
 src/placement/courtyard_close.zig::Settings struct_
 src/placement/courtyard_close.zig::close | fn close( comptime Part: type, parts: []Part, settings: Settings, comptime courtyardFn: *const fn (*const Part) Rect, comptime overlapsFn: *const fn ([]const Part, *const Part) bool, ) void
@@ -4316,6 +4319,7 @@ src/render_svg/context.zig::LonePinRole enum_
 src/render_svg/context.zig::MergeAwareSplit struct_
 src/render_svg/context.zig::PinGroup struct_
 src/render_svg/context.zig::RenderCtx struct_
+src/render_svg/context.zig::RenderedRowSpan struct_
 src/render_svg/context.zig::Side enum_
 src/render_svg/context.zig::adjAppend | fn adjAppend(self: *RenderCtx, ref_des: []const u8, entry: AdjEntry) std.mem.Allocator.Error!void
 src/render_svg/context.zig::buildAdjacency | fn buildAdjacency(self: *RenderCtx) std.mem.Allocator.Error!void

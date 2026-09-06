@@ -12,7 +12,7 @@ The best generated-copper candidates currently stand at:
 | Board | Connected nets | Geometry errors | Remaining acceptance work |
 | --- | --- | --- | --- |
 | Black Canyon RF | 59/59 | 0 | No missing authored surface bonds after local capacitor moves and automatic repair; DRC warnings and release review |
-| Barracuda RF | 129/130 | 0 | LOCK_DET and full constraint review; authored bypass bonds repaired |
+| Barracuda RF | 130/130 | 0 | Local fanout trial connects LOCK_DET; total via-budget mismatch and warning review remain; no missing authored bypass bonds |
 | Barracuda Base | 99/183 | 1 | Open nets, 26 missing authored bypass bonds, and a hairline gap |
 
 Allocation-safe finishing (`e5981dfe`) preserves Black Canyon's connected result
@@ -1005,3 +1005,58 @@ review copy remains available. Evidence: `rf-bypass-review.json` and its source
 project, followed by a live independent description. The completed default
 (equal-budget) fresh run was 117/130, zero geometry errors, in 218.42 seconds;
 it does not replace the better finished review candidate.
+
+
+## RF local fanout repair — 2026-09-06
+
+The local-clear trial advances the preserved RF candidate from **129/130 to
+130/130**, with **zero error-severity DRC findings and zero missing authored
+bypass bonds**. This is a connected review candidate, not hard-constraint
+acceptance: SPI_SCK has 15 total vias against the DSL's stated per-net cap of 10.
+The starting layout already had 12. `close_open_nets` currently subtracts only
+vias added during that invocation, so another invocation resets the allowance.
+Its regression fixture explicitly enforces that narrower contract, while the
+language reference calls `(max-vias N)` a hard per-net budget. Resolving this
+mismatch and the remaining warnings is required before claiming completion.
+
+The obstruction was retained copper in the west-side U13 fanout. Via-only
+removal left attached stubs; whole-net removal discarded useful remote trunks.
+`clear_routes` now supports `include_tracks:true` with a circular coordinate and
+net/group scope. It removes whole intersecting track/arc records plus local via
+centres, preserves other records and all layout metadata, and refuses partial
+swept-RF clearing. Arc selection follows actual copper, not a chord or bounding
+box. Existing via-only calls keep their semantics. Tests cover both arc directions,
+foreign/distant copper, swept-RF refusal, invalid requests and metadata persistence.
+
+Frozen evidence is `/tmp/autorouter-fanout-20260906`: `inputs.json` identifies
+1,027 copied inputs, `project/` contains the board/library source, and the JSON
+and log files record each native operation. Library `.sexp` and Barracuda source
+inputs still matched the live library byte-for-byte when reviewed. The native
+router executable is the verified ReleaseSafe candidate for tool commit
+`517cc58b4afce0f7ff82fb2aa247b3d1f0053a3e`. Only the new clear operation needed
+the feature executable; no hand-authored track was added.
+
+The exact sequence on a native saved copy of
+`autorouter-review-20260906-repaired`, named `fanout-window-1`, was:
+
+1. Clear SPI_SCK, SPI_MOSI, SPI_ADF_CSN and V_3V3A in a 1.65 mm radius at
+   (135.3, 105.35), with `include_tracks:true`: 13 tracks and four vias removed.
+2. `close_open_nets` for LOCK_DET, rounds 1, 90,000 ms, no vacate or bypass
+   repair: LOCK_DET closes; four deliberately displaced nets remain open.
+3. Finish SPI_SCK, SPI_MOSI and SPI_ADF_CSN, rounds 2, 120,000 ms, no vacate
+   or bypass repair: all three restored, only V_3V3A open.
+4. Finish V_3V3A, rounds 2, 120,000 ms, no vacate, bypass repair enabled:
+   130/130 and all authored bonds restored.
+5. `clean_route_topology` scoped to those five nets, first dry-run then apply:
+   eight tracks and one via removed, with all 130 connections preserved.
+
+Independent `describe_pcb_layout` after cleanup reports **999 physical tracks,
+966 saved tracks, 446 vias, 0 errors and 462 warnings**. The baseline has 941
+physical tracks, 908 saved tracks, 432 vias and 410 warnings plus its open-net
+error. Dangling-copper warnings increase from 140 to 185; the topology cleaner
+conservatively excludes unsafe trace-removal candidates on SPI_SCK, V_3V3A and
+SPI_ADF_CSN. This is a connectivity improvement, not a copper-quality pass.
+All 225 component poses, outlines, texts, pours and saved RF paths are unchanged.
+The repair is still an agent-selected local window and ordered native finishing
+sequence; a single DSL-driven automatic replay remains unfinished. Barracuda Base
+remains at 99/183 with one hairline gap and 26 missing bypass bonds.

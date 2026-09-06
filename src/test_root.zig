@@ -503,6 +503,7 @@ test {
     _ = @import("route_cleanup_gate.zig");
     _ = @import("serve/mcp_connector_pinout.zig");
     _ = @import("serve/mcp_escape_assign.zig");
+    _ = @import("placement/copper_window.zig");
     _ = @import("serve/mcp_flatten.zig");
     _ = @import("serve/mcp_import_tools.zig");
     _ = @import("serve/mcp_kicad_sch.zig");

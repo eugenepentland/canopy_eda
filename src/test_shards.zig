@@ -325,6 +325,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.footprint_editor.test.",
         "serve.layout_layers.test.",
         "serve.mcp_escape_assign.test.",
+        "placement.copper_window.test.",
         "serve.mcp_parts_tools.test.",
         "serve.mcp_read_opts.test.",
         "serve.mcp_route_experiment.test.",

@@ -133,11 +133,13 @@ pub fn renderHubAllPins(
     ctx.render_scratch.functional_left_pin_y.clearRetainingCapacity();
     ctx.render_scratch.functional_right_pin_y.clearRetainingCapacity();
     ctx.render_scratch.functional_inline_nets.clearRetainingCapacity();
+    ctx.render_scratch.rendered_row_spans.clearRetainingCapacity();
     defer {
         ctx.render_scratch.functional_layout = previous_functional_layout;
         ctx.render_scratch.functional_left_pin_y.clearRetainingCapacity();
         ctx.render_scratch.functional_right_pin_y.clearRetainingCapacity();
         ctx.render_scratch.functional_inline_nets.clearRetainingCapacity();
+        ctx.render_scratch.rendered_row_spans.clearRetainingCapacity();
     }
 
     const split = try hub_mod.splitGroupsByHeight(ctx, groups, hub.ref_des);
@@ -276,11 +278,15 @@ fn rememberFunctionalPinRows(ctx: *RenderCtx, layout: FunctionalRowLayout) !void
                 };
                 const stubs = @as(f64, @floatFromInt(@max(group.stub_labels.len, 1) - 1));
                 const half_span = stubs / half_divisor * per_conn_spacing;
+                // `groupHeights`: base 40 plus one `per_conn_spacing` per extra row.
+                const row_half_span = @max(layout.heights[i] - hub_vpad, 0) / half_divisor;
                 try rows.put(ctx.allocator, baseNetName(net), .{
                     .cy = cy,
                     .first_stub_y = cy - half_span,
                     .last_stub_y = cy + half_span,
                     .stub_x = layout.stub_x,
+                    .first_row_y = cy - row_half_span,
+                    .last_row_y = cy + row_half_span,
                     .produces_rail = hub_mod.groupProducesRail(group),
                 });
             }
@@ -429,7 +435,7 @@ test "long passive chain expands side padding beyond the fixed minimum" {
     try testing.expect(pad > default_side_pad);
 }
 
-// spec: render_svg - Pull-ups between neighbouring pin groups turn vertical on the pin-stub column and land on the destination group's nearest stub
+// spec: render_svg - Pull-ups between neighbouring pin groups turn vertical on the bus column and run straight into the destination group's bus
 test "functional pull-ups to a neighbouring group turn onto its pin stubs" {
     const testing = std.testing;
     // A sub-block's attenuator: C16 pulled up to the module-local filtered
@@ -497,18 +503,21 @@ test "functional pull-ups to a neighbouring group turn onto its pin stubs" {
     try renderHubAllPins(&ctx, &got.writer, ctx.inst_map.get("U1").?, groups, true);
     const svg = got.written();
 
-    // Pin 1 (y=80) is its own group; R1 hangs off its stub end on the
-    // pin-stub column (x=312) and the lane runs straight down to VDD's first
-    // stub, pin 6 at y=176 — no jog onto the group's bus at x=302.
-    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 312.0 100.0)\"") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "points=\"312.0,120.0 312.0,120.0 312.0,176.0 312.0,176.0\"") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"312.0\" y1=\"176.0\" x2=\"352.0\"") != null);
+    // Pin 1 (y=80) is its own group: a short step from its stub end (312)
+    // onto the bus column (302), R1 down that column, and a straight lane on
+    // into the top of VDD's connection bus (its first row, y=156).
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"312.0\" y1=\"80.0\" x2=\"302.0\" y2=\"80.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 302.0 100.0)\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "points=\"302.0,120.0 302.0,120.0 302.0,156.0 302.0,156.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"302.0\" y1=\"156.0\" x2=\"302.0\" y2=\"236.0\"") != null);
     // The rail's rows: bypass, bead to the shared V_3V3 (labelled), and the
     // pull-up to the parallel bus LAST, nearest the bus's group below. R2
-    // steps from the bus (302) back onto the column and turns down to pin 15.
-    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"302.0\" y1=\"236.0\" x2=\"312.0\" y2=\"236.0\"") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 312.0 256.0)\"") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "points=\"312.0,276.0 312.0,276.0 312.0,312.0 312.0,312.0\"") != null);
+    // continues the bus straight down; the parallel-bus group drew no row of
+    // its own, so the lane meets its first pin stub with the same short step.
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"302.0\" y1=\"236.0\" x2=\"312.0\" y2=\"236.0\"") == null);
+    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 302.0 256.0)\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "points=\"302.0,276.0 302.0,276.0 302.0,312.0 302.0,312.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"302.0\" y1=\"312.0\" x2=\"312.0\" y2=\"312.0\"") != null);
     try testing.expect(std.mem.indexOf(u8, svg, "x1=\"312.0\" y1=\"312.0\" x2=\"352.0\"") != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, svg, ">V_3V3</text>"));
     // Neither hub-private net earns a label, and nothing runs on the outside
@@ -589,9 +598,14 @@ test "functional pull-ups to the hub's own output rail turn onto its pin stubs" 
     // PG (y=80) is the row above the OUTS/OUT group, so R1 stands on the
     // pin-stub column (x=312) and the lane runs from its far end straight down
     // to OUTS, the output group's first stub at y=136.
-    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 312.0 100.0)\"") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "points=\"312.0,120.0 312.0,120.0 312.0,136.0 312.0,136.0\"") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"312.0\" y1=\"136.0\" x2=\"352.0\"") != null);
+    // PG steps onto the bus column, R1 runs down it, and the lane continues
+    // straight into the top of the OUT group's bus: its own V_5V row, which
+    // is what names the rail — with a wire out to the label, not bare text.
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"312.0\" y1=\"80.0\" x2=\"302.0\" y2=\"80.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 302.0 100.0)\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "points=\"302.0,120.0 302.0,120.0 302.0,136.0 302.0,136.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"302.0\" y1=\"136.0\" x2=\"212.0\" y2=\"136.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "x=\"194.0\" y=\"140.0\" text-anchor=\"end\"") != null);
     // The rail is shared with U2, so it is named — once, beside the turned
     // part — and nothing runs on the outside lane at term_x - 24 any more.
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, svg, ">V_5V</text>"));
@@ -672,9 +686,12 @@ test "functional feedback dividers turn their upper leg onto the output stubs" {
     // a return heading below sits on the bottom edge, so R2 is the one that
     // turns, onto the column at x=312, and its lane lands on VOUT's stub.
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, svg, "transform=\"rotate(90"));
-    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 312.0 140.0)\"") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "points=\"312.0,160.0 312.0,160.0 312.0,196.0 312.0,196.0\"") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"312.0\" y1=\"196.0\" x2=\"352.0\"") != null);
+    // R2 continues the FB bus straight down the bus column into the top of
+    // the VOUT group's bus — its own labelled V_OUT row, wired out to the text.
+    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 302.0 140.0)\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "points=\"302.0,160.0 302.0,160.0 302.0,176.0 302.0,176.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"302.0\" y1=\"176.0\" x2=\"212.0\" y2=\"176.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "x=\"194.0\" y=\"180.0\" text-anchor=\"end\"") != null);
     // One name for the shared rail, and no outside feedback-loop lane.
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, svg, ">V_OUT</text>"));
     try testing.expect(std.mem.indexOf(u8, svg, "points=\"188.0,") == null);

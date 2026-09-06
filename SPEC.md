@@ -429,6 +429,8 @@ Public functions: solve
 - a part bound only to a supply rail follows its private chain to the pad that anchors it
 - a series part across two package edges takes its signal end, and the busier node when both are signals
 - an authored group's unbindable members join the edge its bound members hold, and a bypass bank is untouched
+- rough chains prefer local signal connections over sparse supplies and obey authored net classes
+- a precise signal pad outranks a sparse supply target while authored adjacency remains authoritative
 - a chain child hangs off a ring-bound entry on its chain's home edge, spreading over the entries there
 - a 2-pad part with a precise partner on each leg turns its pad axis to face them
 - authored rough groups map to a per-part grouping, first membership winning
@@ -5924,13 +5926,13 @@ Public functions: renderSchematic
 - A parallel passive island reserves one grouped hub entry so its outer bus stops at the last visible branch
 - A Functional turned series return shares the destination rail's x-coordinate so VTUNE closes straight down without an outside detour
 - A sub-block's path-qualified supply rail is still a supply, not a signal return
-- Pull-ups between neighbouring pin groups turn vertical on the pin-stub column and land on the destination group's nearest stub
+- Pull-ups between neighbouring pin groups turn vertical on the bus column and run straight into the destination group's bus
 - A return to a shared rail turns onto the pin group where this hub produces that rail
 - A feedback divider's upper leg turns onto the regulator's own output stub instead of an outside lane
-- Two returns turning onto one output row name the shared rail once
+- Two turned returns land on the rail's first and last rows and neither writes the rail's name
 - An outside direct-return lane is pushed past any net label drawn on a row it spans
 - Group heights follow render order: a spoke shared with an earlier group is counted there, and the own net's row is reserved once an earlier group draws a spoke on it
-- A turned return lands on its rail's stub tie and the rail's own labelled row, whether absorbed into the column or left above the stubs, names the net exactly once
+- A turned return runs down the bus column into the rail's own row, which alone names the net at the end of its wire
 - A pin named OUT / OUTS / VOUT marks its hub as the producer of the rail on it
 - A pin group produces its rail when any of its pins is an output pin
 - A pull-up onto a rail the hub produces is functionally linked to the producing group, so the column split cannot separate the two
@@ -7856,6 +7858,11 @@ is what makes the predicate exact rather than approximately right.
 - completeness-waiver: panic-free (every path returns `null` or a value; the `@intFromFloat` is reached only after the range test that makes it defined)
 
 ## Web Server
+
+- coordinate-scoped clear_routes can remove intersecting selected tracks and vias while preserving distant copper and foreign nets
+- clear_routes preserves complete layout metadata and rejects malformed track-window requests without persistence
+- coordinate-scoped track clearing refuses selected swept RF paths without partial deletion
+- coordinate-scoped track clearing tests actual arc copper rather than its chord or a bounding box
 
 - GET /api/part-review/:name answers one chip per placed part and /:ref answers that part's sheet or 404
 - GET /api/review-card/:name answers the composed Board Review Card and 404s an unknown design

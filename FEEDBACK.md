@@ -945,6 +945,22 @@ New from the wave:
 - **friction:** Focused `zig build test -Dtest-filter='voltage budget'` iterations still ran the deployment-script simulations, Ward-auth smoke test and example export when compilation or a single assertion failed. Those independent gates repeatedly dominated the sub-second electrical tests.
 - **idea:** Add a documented compile-first, focused-test target for the inner loop; retain the complete external checks in `prepare-release.sh`.
 - **status:** observed; no verification gates bypassed or relaxed.
+## 2026-09-06 · codex · rough placement intent release
+- **blocker:** After rebasing onto `1c8892eb`, the full release gate rejected `SystemSpec` at 12 fields against a stale nine-field type-size baseline. Its source was unchanged from `f73fa1ea`, where the same struct already had a reviewed 12-field baseline. Intervening review-stack merges regressed that one metadata row and stopped release preparation before tests/build.
+- **idea:** During merge verification, flag baseline rows that decrease while their measured source is unchanged, so a stale feature baseline cannot silently undo accepted metadata and block the next task.
+- **workaround:** Restore only `src/system_review.zig|SystemSpec` to the value already recorded in `f73fa1ea`; rerun the full gate.
+- **status:** mitigated
+
+## 2026-09-06 · codex · rough placement intent — release follow-up
+- **blocker:** The corrected branch passed the full 88-check Guardian gate, all 5,221 tests, and its ReleaseSafe build, but all three automatic Barracuda browser zoom attempts failed Canvas timing thresholds. The final attempt measured zoom-in p95/max at 86 ms against 45/55 ms, and zoom-out p95 at 52.9 ms against 45 ms. The approximately 14-minute browser retry phase left the engine fix unmerged despite measured LMX routing improving from 26/27 to 27/27 nets.
+- **friction:** My first comparison watcher launched the staging executable as soon as `build.status` passed, before `prepare-release.sh` stripped it. That caused `strip` to fail with Text file busy and required another release run. This was a comparison-setup error; copying the executable to a task-owned path avoids holding the packaging target open.
+- **idea:** Document that staging candidates remain mutable until `verified` exists; functional comparison tools should use an independent executable copy, while deployment must still require the completed release gate.
+- **status:** open
+
+
+## 2026-09-06 · codex · RF fanout review counts and release evidence
+- **friction:** The review prose manually summed `describe_pcb_layout.routed.drc_list` categories as 461 warnings; the native result contains 462. Independent live/frozen equality exposed the typo after a 595-second release verification (including one automatic browser timing retry), requiring a corrected commit and its release gate.
+- **idea:** Add a native review-table export with explicit error/warning counts, saved versus physical copper counts, and the source-layout identity. Generate review tables directly from that witness so manually maintained totals cannot trigger extra verification cycles or disagree with the viewer.
 
 ## 2026-09-06 · claude · six-hour tooling and review-correctness sprint
 - **friction:** `-Dtest-filter` matches the TEST NAME, not the `// spec:` tag. Filtering on a spec-tag phrase selects zero named tests and Guardian correctly fails the run; the fix is the module prefix (`serve_args.test`), but nothing in the failure says the filter was being matched against a different string than the one you copied.
