@@ -935,3 +935,8 @@ New from the wave:
 - **friction:** `/tmp` rejected installs and fixture writes with DiskQuota despite reporting 3 GiB free. Archiving this task's old measurement binaries onto the disk filesystem, retaining symlinks at their recorded paths, released about 4 GiB and restored fixture runs.
 - **idea:** Report subcircuit seed-validation time separately from search time: the Base trial spent 199 seconds repeating unrelated current solves inside the DRC seed gate, exhausting the global deadline after apparently timely local passes.
 - **status:** mitigated
+
+## 2026-09-06 · codex · RF pad-direction routing
+- **friction:** The final release had passed its tests and build, then waited several minutes for a globally quiet host while unrelated worktrees compiled. The owner expanded the routing task during that wait, requiring the pending gate to stop. A resumable exact-commit browser stage would avoid repeating completed tests when only the performance window was unavailable.
+- **idea:** Keep the existing browser budgets unchanged, but expose the already supported `NETLISP_PERF_HOST_WAIT=0` option in the release workflow documentation so an agent can attempt real measurements under contention instead of repeatedly reporting a quiet-host wait.
+- **status:** observed; no release thresholds changed

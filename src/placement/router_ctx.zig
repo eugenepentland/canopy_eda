@@ -824,6 +824,7 @@ pub const padInPour = plane_stitch.padInPour;
 pub fn setNetParams(ctx: *Ctx, placement: optimizer.Placement, net_i: usize) void {
     var p = ctx.base;
     ctx.rf.escape_mm = 0;
+    ctx.rf.escape_automatic = false;
     ctx.rf.escape_pts = &.{}; // repopulated by setNetRoutePolicy for maze nets
     ctx.keep.halo = 0;
     ctx.manhattan = manhattan_route.stateFor(placement, net_i); // clears `active` with it
@@ -837,6 +838,7 @@ pub fn setNetParams(ctx: *Ctx, placement: optimizer.Placement, net_i: usize) voi
         if (r.via_dia > 0) p.via_dia = r.via_dia;
         if (r.via_drill > 0) p.via_drill = r.via_drill;
         ctx.rf.escape_mm = r.rf.escape_mm;
+        ctx.rf.escape_automatic = r.rf.escape_automatic;
         ctx.keep.halo = r.rf.keepout_mm;
     }
     if (net_i < placement.nets.len) {
@@ -1971,6 +1973,7 @@ pub const NetSmooth = struct { arcs: []const Arc, sharp: []const SharpBend };
 /// copper on rip-up and snapshot/restored with the rest of the routing state.
 const RfState = struct {
     escape_mm: f64 = 0,
+    escape_automatic: bool = false,
     escape_pts: []const NetPt = &.{},
     net_smooth: std.AutoHashMapUnmanaged(i32, NetSmooth) = .empty,
     port_outcomes: std.AutoHashMapUnmanaged(i32, rf_port_report.Outcome) = .empty,

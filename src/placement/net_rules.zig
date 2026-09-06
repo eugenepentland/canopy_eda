@@ -123,11 +123,15 @@ pub const Rf = struct {
     /// out of the reserve. Undeclared on a max-freq class defaults to
     /// `default_rf_escape_mm`.
     escape_mm: f64 = 0,
+    /// The one-millimetre maze preference was inferred, not authored. Analytic
+    /// RF joins may use a half-width launch instead of forcing a short hop to
+    /// detour solely to spend that heuristic distance. Explicit escape is hard.
+    escape_automatic: bool = false,
     /// Resolved `(min-bend-radius N)` bend-radius floor, as a multiple of the
     /// effective trace width (0 = undeclared → `bend_smooth.radius_width_ratio`,
     /// the 3× default). Only acts on a max-freq net; raising it flags more
-    /// corners under-radius (and lifts the smoother's aim above the 5× cap when
-    /// N exceeds it), lowering it accepts tighter sweeps.
+    /// corners under-radius, lowering it accepts tighter sweeps. Available
+    /// tangent room and clearance determine how far above the floor arcs grow.
     min_bend_ratio: f64 = 0,
     /// Resolved `(fence …)` ground-via fencing for this net (see `FenceRule`);
     /// `declared = false` when no winning class asked for a fence.
@@ -425,7 +429,10 @@ fn profileRule(profiles: []const ClassProfileDecl, win: WinningClass, conflict: 
         }
     }
     if (out.rf.max_freq_hz > 0 and out.rf.electrical.band_start_hz <= 0) out.rf.electrical.band_start_hz = out.rf.max_freq_hz / 100;
-    if (!escape_declared and out.rf.max_freq_hz > 0) out.rf.escape_mm = default_rf_escape_mm;
+    if (!escape_declared and out.rf.max_freq_hz > 0) {
+        out.rf.escape_mm = default_rf_escape_mm;
+        out.rf.escape_automatic = true;
+    }
     // A declared keepout with no authored escape radius inherits this net's
     // resolved pad escape (itself possibly the max-freq default just applied),
     // so the resolved rule never carries the spec's −1 "undeclared" sentinel.
@@ -629,6 +636,7 @@ test "escape resolves from max-freq default, explicit value, and explicit zero" 
     const rules = try resolvedNetRules(arena, &root, flat.items);
     try std.testing.expectEqual(@as(usize, 3), rules.len);
     for (flat.items, rules) |net, rule| {
+        try std.testing.expectEqual(std.mem.eql(u8, net.name, "LO"), rule.rf.escape_automatic);
         if (std.mem.eql(u8, net.name, "LO"))
             try std.testing.expectEqual(default_rf_escape_mm, rule.rf.escape_mm)
         else if (std.mem.eql(u8, net.name, "IF"))

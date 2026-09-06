@@ -520,6 +520,8 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - routes corners as 45° diagonals rather than 90° bends
 - straightEscapePair accepts an axis-aligned pad pair that faces along the hop, rejecting a diagonal, a perpendicular-facing, a coincident, or a cross-layer pair
 - facing cross-layer RF pads use two collinear segments and one via before the escape maze
+- RF launch rays construct a straight, a forward elbow, a rotated elbow or one offset bridge without raster jogs
+- RF passive launch direction follows its two pads through rotation and mirroring, independent of footprint origin
 - the straight one-via quality probe refuses obstacles, forbidden transitions and non-collinear terminals
 - LoopRouter measures a real per-leg trace length that detours foreign pads
 - counts signal vias lacking a nearby ground stitching via as return-path discontinuities

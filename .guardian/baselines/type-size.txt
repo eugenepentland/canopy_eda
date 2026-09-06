@@ -70,6 +70,7 @@
 16 src/placement/optimizer.zig|Params
 17 src/placement/optimizer.zig|Part
 23 src/placement/optimizer.zig|Placement
+8 src/placement/pad_exit.zig|NetPt
 8 src/placement/pad_grid.zig|PadObs
 18 src/placement/pdn_impedance.zig|Capacitor
 15 src/placement/pdn_impedance.zig|Rail
@@ -126,5 +127,5 @@
 8 src/system_review.zig|Brief
 9 src/system_review.zig|DocumentSpec
 8 src/system_review.zig|GoalSpec
-12 src/system_review.zig|SystemSpec
+9 src/system_review.zig|SystemSpec
 8 src/thermal_scenarios.zig|Row

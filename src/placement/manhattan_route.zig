@@ -65,6 +65,7 @@ const diff_pairs = @import("diff_pairs.zig");
 const route_policy = @import("route_policy.zig");
 const router = @import("router.zig");
 const router_direct = @import("router_direct.zig");
+const rf_pad_route = @import("rf_pad_route.zig");
 
 /// What one corner costs the axis-only search, as a multiple of the grid pitch.
 ///
@@ -409,6 +410,7 @@ fn directTier(run: router.DirectRun, pts: []const router.NetPt) std.mem.Allocato
     const layer = pts[0].layer;
     if (!router.layerInMask(ctx.allowed_layers, layer)) return false;
     if (!router.layerInMask(ctx.preferred_layers, layer)) return false;
+    if (try rf_pad_route.attempt(run, pts)) return true;
     const seam = DirectSeam{ .path = run.path(layer), .tracks = run.tracks };
     return directPair(seam, pts[0], pts[1], ctx.rf.escape_mm, ctx.params.track_width);
 }
