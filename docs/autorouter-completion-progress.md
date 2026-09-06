@@ -12,7 +12,7 @@ The best generated-copper candidates currently stand at:
 | Board | Connected nets | Geometry errors | Remaining acceptance work |
 | --- | --- | --- | --- |
 | Black Canyon RF | 59/59 | 0 | No missing authored surface bonds after local capacitor moves and automatic repair; DRC warnings and release review |
-| Barracuda RF | 129/130 | 0 | LOCK_DET, 12 missing authored bypass bonds, and full constraint review |
+| Barracuda RF | 129/130 | 0 | LOCK_DET and full constraint review; authored bypass bonds repaired |
 | Barracuda Base | 99/183 | 1 | Open nets, 26 missing authored bypass bonds, and a hairline gap |
 
 Allocation-safe finishing (`e5981dfe`) preserves Black Canyon's connected result
@@ -994,3 +994,14 @@ keeps the previous equal-share scheduler. `(module-signals guided)` is independe
 opt-in. Neither experimental choice is enabled in the live board DSL or review
 copies. Optimized seed validation, exact bypass repairs, local movement, and
 candidate publishing are available regardless of those choices.
+
+
+The final RF repair on the preserved 129/130 candidate repaired **11 distinct
+bonds**, clearing all **12 bypass-open warnings**. It retained 129/130, zero
+geometry errors, 908 saved tracks, and 432 vias, with zero missing authored
+bypass bonds. The additive repair took 79.73 seconds, including validation.
+The improved live layout is `autorouter-review-20260906-repaired`; the earlier
+review copy remains available. Evidence: `rf-bypass-review.json` and its source
+project, followed by a live independent description. The completed default
+(equal-budget) fresh run was 117/130, zero geometry errors, in 218.42 seconds;
+it does not replace the better finished review candidate.

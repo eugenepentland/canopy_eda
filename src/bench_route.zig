@@ -1192,17 +1192,17 @@ test "json output names the open nets in sorted order" {
         .nets = .{ .routed = 88, .total = 91, .open = sortedOpen(testing.allocator, &open) },
     }};
     defer testing.allocator.free(results[0].nets.open);
-    var buf: [4096]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    try writeJson(&w, &results);
-    const s = w.buffered();
+    var w = std.Io.Writer.Allocating.init(testing.allocator);
+    defer w.deinit();
+    try writeJson(&w.writer, &results);
+    const s = w.written();
     try testing.expect(std.mem.indexOf(u8, s, "\"open\":[\"EN_BUCK6V\",\"SPI_SCK\",\"V_3V3A\"]") != null);
     // A board with nothing open still carries the field, as an empty array.
     const clean = [_]BoardResult{.{ .name = "tiny", .ok = true, .placed = true, .nets = .{ .routed = 3, .total = 3 } }};
-    var buf2: [1024]u8 = undefined;
-    var w2 = std.Io.Writer.fixed(&buf2);
-    try writeJson(&w2, &clean);
-    try testing.expect(std.mem.indexOf(u8, w2.buffered(), "\"open\":[]") != null);
+    var w2 = std.Io.Writer.Allocating.init(testing.allocator);
+    defer w2.deinit();
+    try writeJson(&w2.writer, &clean);
+    try testing.expect(std.mem.indexOf(u8, w2.written(), "\"open\":[]") != null);
 }
 
 fn baselineSample() Baseline {
