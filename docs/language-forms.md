@@ -620,3 +620,246 @@ error). A component binds its class with `(class <key>)` — one of
 `rf-attenuator-switch`, `rf-passive`, `rf-detector`, `op-amp`, `sensor`,
 `connectors`, `power-path-passives` — else the class is inferred from
 its pin function names. Required review categories are: `supply`, `decoupling`, `pin-straps`, `sequencing`, `thermal`, `layout`. Each must use `(category KEY)` or a `(category-na KEY "rationale")`.
+
+## Review checks
+
+Every check the toolchain can run, with the stable id a finding
+cites it by. The engines keep their own vocabularies — electrical-rule
+violation kinds, design-rule check kinds, fabrication finding ids,
+preflight findings and class-profile item codes, requirement-check and
+net-rule keywords, rail, thermal, loop and interface verdicts — and
+`src/review_registry.zig` maps each of them onto one row below.
+
+A row's **scope** is what one finding is about; **closes with** is the
+form or action that makes it pass; **policy** is how hard it blocks
+(`blocking` stops a release, `waivable` stops one until a waiver record
+is linked, `advisory` never does). Results use the seven-word verdict
+vocabulary: `pass`, `fail`, `unproven` (the engine ran and names the
+missing input), `waived`, `not-applicable`, `not-declared` (the board
+never gave the engine an input) and `manual`.
+
+### Identity and sources
+
+| Check | Layer | Scope | Asserts | Closes with | Policy |
+| --- | --- | --- | --- | --- | --- |
+| `refdes-unique` | unit | board | No two placed parts share a ref-des anywhere in the flattened design. | rename one placement, or let eval/ids.zig mint the ref-des | blocking |
+| `instance-value-present` | unit | part | Every placed part carries a value. | give the instance a value at its call site | waivable |
+| `instance-footprint-present` | unit | part | Every placed part resolves to a footprint. | (footprint <name>) on the library component | blocking |
+| `concept-resolved` | unit | board | No concept placeholder survives into a design being reviewed. | replace the (concept …) placeholder with a real part or module | blocking |
+| `no-deprecated-forms` | unit | board | The design uses no form the language has deprecated. | rewrite the form as the replacement the warning names | waivable |
+| `blocks-grouped` | unit | board | Every diagram block of a board with five or more blocks sits inside a group. | (group "NAME" …) around the ungrouped blocks | advisory |
+| `section-category-declared` | unit | board | Every section states its category instead of relying on name-keyword inference. | (category <key>) in the section body | advisory |
+| `module-reuse-preferred` | unit | board | A block a canonical module already implements instantiates that module. | instantiate the canonical module, or (module-bypass "reason") | advisory |
+| `module-metadata-complete` | library | part | Every reusable module declares the metadata its library record needs. | fill the module's metadata fields in lib/modules/<name>.sexp | advisory |
+| `revision-missing` | unit | board | The design declares the revision the release is cut at. | (revision "…") on the design block | blocking |
+| `missing-identity` | unit | part | Every placement carries a persisted stable id. | run netlisp build so ids are pinned back into the source | blocking |
+| `duplicate-identity` | unit | part | No two placements share a stable id. | delete the copied (id "…") so a fresh one is minted | blocking |
+| `duplicate-source-identity` | unit | part | No stable id appears twice in the design sources. | remove the duplicated (id "…") from the source file | blocking |
+| `fabrication-identity-incomplete` | unit | board | The fabrication gate can bind the release to one complete identity record. | resolve the identity findings the gate lists, then re-run the gate | blocking |
+| `schematic-check-failed` | unit | board | Strict schematic preflight resolves the design the release is cut from. | make netlisp check --profile release pass on the design | blocking |
+| `reviewed-input-evidence-incomplete` | unit | board | The release names the reviewed inputs it was cut from. | attach the reviewed-input evidence the release lock asks for | blocking |
+| `cache-layout` | unit | board | The cached layout the release reads matches the design it was saved from. | re-save the layout so the cached poses match the design | blocking |
+| `build-warning-free` | unit | board | Evaluating the design emits no warning. | fix the evaluator warning at the source span it names | blocking |
+| `system-identity-complete` | system | system | The system declares title, part number and revision. | (title …) (part-number …) (revision …) in src/systems/<name>/system.sexp | blocking |
+| `system-board-reviews` | system | system | Every board the system claims has a current board review. | run and record the board review for each (board …) | blocking |
+| `system-fabrication-ready` | system | system | Every board the system claims passes its own fabrication gate. | clear each board's blocking fabrication findings | blocking |
+| `system-checklists-complete` | system | system | Every authored release-checklist item is dispositioned. | disposition the remaining checklist rows in the review package | blocking |
+| `system-attested` | system | system | A named reviewer has attested the release package. | sign the attestation in the system review package | blocking |
+| `system-manifest-single-source` | system | system | A system is described by system.sexp or system.json, never both. | delete the inert system.json beside the system.sexp | advisory |
+
+### Connectivity
+
+| Check | Layer | Scope | Asserts | Closes with | Policy |
+| --- | --- | --- | --- | --- | --- |
+| `net-not-floating` | unit | net | Every net reaches at least two pins or is declared a block port. | wire the net, or declare it with (port …) | blocking |
+| `pin-connected` | unit | pin | Every pad of every placed part is wired or explicitly dispositioned. | wire the pad, or mark it with (nc …) | blocking |
+| `no-connect-dispositioned` | unit | pin | Every deliberately unconnected pad carries a reason. | (nc "PIN" "reason") on the instance | waivable |
+| `pin-single-net` | unit | pin | No pad is wired to more than one net. | remove the duplicate wiring of the pad | blocking |
+| `pin-function-known` | unit | pin | Every pin name a design wires exists in the part's library pinout. | use a pin function the pinout declares, or extend the pinout | blocking |
+| `pin-function-required` | unit | pin | Every pin function the part requires is wired. | wire the required pin function on the instance | blocking |
+| `strap-dispositioned` | unit | pin | Every configuration strap tied straight to a rail is reviewed and justified. | (strap-ok "PIN" "reason") citing the datasheet | waivable |
+| `test-point-present` | unit | net | Every net the design marks for bring-up carries a test point. | place a test point on the net | advisory |
+| `diff-pair-both-halves` | unit | net | Both halves of every differential pair are wired. | wire the missing half of the pair | blocking |
+| `interface-fully-wired` | unit | net | Every signal a bound interface declares reaches both endpoints. | wire the interface signals the finding names | blocking |
+| `interface-naming-consistent` | unit | net | An interface signal's net is named as the interface declares it. | rename the net to the interface's signal name | advisory |
+| `unresolvable-pin` | unit | pin | Every netlist pin resolves to a pad on the placed footprint. | fix the pin name or the footprint's pad table | blocking |
+| `net-rule-max-fanout` | unit | net | A net a design rule matches lands on no more pins than the rule allows. | (net-rule "text" (nets GLOB…) (max-fanout N)) | blocking |
+| `system-interface-endpoints` | system | system | Every system interface names two board endpoints that exist. | (interface "NAME" …) naming both boards in system.sexp | blocking |
+| `system-interface-contract` | system | system | Every declared board-to-board contract checks clean end to end. | resolve the interface mismatches the system check lists | blocking |
+| `interface-contact-connected` | system | net | Every contract contact reaches a real net on both sides of the connector. | wire the contact on the board the finding names | blocking |
+| `interface-contact-pin-known` | system | pin | Every contact a contract names exists in the connector's pinout. | correct the contact name, or extend the connector pinout | blocking |
+| `interface-contact-count` | system | system | A contract claims no more contacts than the connector has pads. | drop the surplus contacts, or pick a larger connector | blocking |
+| `interface-contacts-covered` | system | system | Every pad the connector carries is covered by the contract. | add the uncovered contacts to the interface contract | advisory |
+| `interface-contact-unique` | system | pin | No two contract signals claim the same physical contact. | give each signal its own contact in the contract | blocking |
+| `interface-pinout-available` | system | system | Both connector pinouts are readable, so the contact checks can run. | add the connector's pinout file to the library | blocking |
+| `check-connected` | library | pin | Both named pins of the placement resolve to the same net. | (requirement "…" (check (connected (pin "A") (pin "B")))) | blocking |
+| `check-tied-to-net` | library | pin | The named pin resolves to the exact net the datasheet rule names. | (requirement "…" (check (tied-to-net (pin "P") (net "N")))) | blocking |
+| `check-not-connected` | library | pin | The named pin is left unconnected, as the datasheet demands. | (requirement "…" (check (not-connected (pin "P")))) | blocking |
+| `check-pin-not-floating` | library | pin | The named pin is tied to a defined level rather than left floating. | (requirement "…" (check (pin-not-floating (pin "P")))) | blocking |
+| `check-pins-on-same-net` | library | pin | Every listed pin function of the placement resolves to one net. | (requirement "…" (check (pins-on-same-net (pins "A" "B" …)))) | blocking |
+
+### Supply voltages
+
+| Check | Layer | Scope | Asserts | Closes with | Policy |
+| --- | --- | --- | --- | --- | --- |
+| `rail-voltage-consistent` | unit | rail | Every declaration of a rail's voltage agrees with every other. | make the (rail …) and port voltages agree, or split the rail | blocking |
+| `rail-voltage-resolved` | unit | rail | Every supply rail resolves to a known voltage. | (rail "NAME" V) or a port rating that fixes the rail | blocking |
+| `pin-abs-max-respected` | unit | pin | No pin sees a declared voltage above its absolute-maximum rating. | (electrical "PIN" … (max-voltage V)) plus real level shifting | blocking |
+| `supply-pin-voltage-rule` | unit | part | Every supply pin of a classed part carries a voltage-range requirement. | (requirement "…" (check (voltage-range (pin "PIN") (min …) (max …)))) | blocking |
+| `net-rule-declared-envelope` | unit | net | A net a design rule matches carries a DC voltage envelope. | (net-rule "text" (nets GLOB…) (declared-envelope)) plus (net-envelope …) | blocking |
+| `interface-voltage-domain` | system | net | A contract signal joins two board nets of the same declared potential. | align the rails, or declare the translation the contract needs | blocking |
+| `check-voltage-range` | library | pin | The voltage on the named pin's net lies inside the datasheet window. | (requirement "…" (check (voltage-range (pin "V") (min L) (max H)))) | blocking |
+| `check-voltage-not-above` | library | pin | The highest voltage on one pin's net stays within a margin of another's lowest. | (requirement "…" (check (voltage-not-above (pin "A") (pin "B") (margin M)))) | blocking |
+
+### Power budget and copper
+
+| Check | Layer | Scope | Asserts | Closes with | Policy |
+| --- | --- | --- | --- | --- | --- |
+| `rail-budget-margin` | unit | rail | Every rail's annotated load stays inside its source's rating with margin. | (i-typ …) / (i-max …) on the consumer pins, or a bigger source | blocking |
+| `rail-sourced` | unit | rail | Every rail that carries load has a declared source. | (rail "NAME" … (current …)) on the regulator or input port | blocking |
+| `rail-consumers-annotated` | unit | rail | Every sourced rail has at least one annotated consumer to budget against. | (i-typ …) / (i-max …) on the pins the rail feeds | blocking |
+| `rail-source-used` | unit | rail | Every declared supply source feeds something. | wire the source's output, or delete the unused source | advisory |
+| `supply-pin-current-annotated` | unit | part | A classed part's supply pins carry the current annotations the budget needs. | (i-typ A) and (i-max A) on the instance's supply pin forms | blocking |
+| `power-width` | unit | net | Routed power copper meets the IPC-2221 width for the current it was solved to carry. | widen the branch, or correct the (i-max …) model it was solved from | blocking |
+| `power-width-envelope` | unit | net | Power copper whose per-branch solve failed still meets the whole-rail envelope width. | fix the current model the finding names, or widen the copper | waivable |
+| `via-current` | unit | net | Every power via carries no more solved current than its plated barrel can take. | stitch the extra barrels the finding counts | blocking |
+| `via-current-envelope` | unit | net | A via whose net current did not solve still carries the whole-rail envelope. | fix the current model, or add same-net barrels beside it | waivable |
+
+### Decoupling and bulk
+
+| Check | Layer | Scope | Asserts | Closes with | Policy |
+| --- | --- | --- | --- | --- | --- |
+| `supply-pin-decoupled` | unit | pin | Every supply pin has the decoupling its datasheet rule demands. | place the capacitor, and bind it with (decouples "REF" "PIN") | blocking |
+| `decoupling-binding-resolved` | unit | part | Every declared decoupling binding resolves to a placed capacitor and pin. | correct the (decouples …) target, or place the capacitor | blocking |
+| `decoupling-binding-valid` | unit | part | Every decoupling binding is well formed. | rewrite the (decouples …) form as the reference documents it | blocking |
+| `rail-bulk-present` | unit | rail | Every power rail carries bulk capacitance. | place bulk on the rail, or (net-rule … (min-bulk-uf F)) to state the target | waivable |
+| `supply-pin-decoupling-rule` | unit | part | Every supply pin of a classed part carries a decoupling requirement. | (requirement "…" (check (decoupling …))) or a (decoupling-per-pin …) rule | blocking |
+| `drc-bypass-open` | unit | net | A bypass capacitor's rail land reaches its IC supply land on continuous same-face copper. | route the local rail copper between the two lands | blocking |
+| `net-rule-min-bulk-uf` | unit | net | Capacitance to ground on a matched net meets the declared minimum. | (net-rule "text" (nets GLOB…) (min-bulk-uf F)) | blocking |
+| `check-decoupling` | library | pin | A capacitor of the required value bridges the two named pins' nets. | (requirement "…" (check (decoupling (pin "A") (pin "B") (min-uf F)))) | blocking |
+| `check-decoupling-per-pin` | library | pin | At least the required count of the listed pins each have their own bypass capacitor. | (requirement "…" (check (decoupling-per-pin (return-pin "GND") (pins …) (min-uf F) (count N)))) | blocking |
+
+### Sequencing and levels
+
+| Check | Layer | Scope | Asserts | Closes with | Policy |
+| --- | --- | --- | --- | --- | --- |
+| `enable-order-acyclic` | unit | board | The derived enable graph has no cycle, so a power-up order exists. | break the cycle in the (enable …) declarations | blocking |
+| `logic-level-compatible` | unit | net | Every driver's declared output levels reach its receivers' input thresholds. | (electrical "PIN" (type …) (v-ih-min V) (v-il-max V) …) plus a level shifter where needed | blocking |
+| `control-pin-levels-declared` | unit | part | Every control pin of a classed part declares its logic thresholds. | (electrical "PIN" (type input) (v-ih-min V) (v-il-max V) (max-voltage V)) | blocking |
+| `check-sequence` | library | pin | The rail on one pin powers up before the rail on another. | (requirement "…" (check (sequence (pin "A") before (pin "B")))) | blocking |
+
+### Component ratings
+
+| Check | Layer | Scope | Asserts | Closes with | Policy |
+| --- | --- | --- | --- | --- | --- |
+| `component-rating-missing` | unit | part | Every passive whose stress the gate screens declares its rating. | author the rating attribute at the call site or in the parts table | blocking |
+| `component-rating-invalid` | unit | part | Every declared rating parses as a number with a unit the screen understands. | rewrite the rating attribute in the documented spelling | blocking |
+| `component-rating-unproven` | unit | part | The stress applied to a rated part is known, so the rating can be judged. | (net-envelope …) or a port rating that fixes the applied stress | waivable |
+| `component-underrated` | unit | part | No part sees an applied voltage, power or current above its rating. | up-rate the part, or reduce the applied stress | blocking |
+| `component-rating-margin` | unit | part | Every rated part keeps the derating margin the screen asks for. | up-rate the part, or record the accepted margin | waivable |
+| `check-cap-rating` | library | part | Every capacitor bridging the named pins is rated the required multiple of its working voltage. | (requirement "…" (check (cap-rating (pin "A") (pin "B") (min-ratio X)))) | blocking |
+
+### Thermal
+
+| Check | Layer | Scope | Asserts | Closes with | Policy |
+| --- | --- | --- | --- | --- | --- |
+| `thermal-dissipation-known` | unit | part | Every active part's dissipation is declared or derivable. | (power W) on the instance, or annotated supply-pin currents | blocking |
+| `thermal-theta-ja-declared` | library | part | Every active part declares its junction-to-ambient resistance and maximum junction temperature. | (thermal (theta-ja C/W) (tj-max C)) in the component body | blocking |
+| `thermal-junction-margin` | unit | part | Every part's junction temperature stays under its limit at the screened ambient. | cut the dissipation, improve theta-ja, or move up the cooling ladder | blocking |
+| `thermal-board-cooling-scenario` | unit | board | The board's screened cooling scenario is the one the release is built for. | (board (heatsink …)) or the airflow the release assumes | waivable |
+
+### Datasheet compliance
+
+| Check | Layer | Scope | Asserts | Closes with | Policy |
+| --- | --- | --- | --- | --- | --- |
+| `datasheet-declared` | library | part | Every active component declares the datasheet that documents it. | (datasheet "FILE.pdf") in the component body | blocking |
+| `datasheet-review-complete` | library | part | Every active part has a complete datasheet review bound to the exact PDF digest. | (datasheet-review (datasheet …) (sha256 …) (status complete) …) | blocking |
+| `datasheet-review-categories` | library | part | The review answers every category the part's class requires. | (category KEY) or (category-na KEY "rationale") in the review record | blocking |
+| `part-requirements-authored` | library | part | Every active part carries at least one cited datasheet requirement. | (requirement "…" (ref …) (check …)) or (ignore-requirements) for an inert part | blocking |
+| `requirement-check` | library | part | Every requirement on a placed part passes its machine check or is signed off with a citation. | fix the design, or (verifies (req (id …) …) "rationale") in the design's checks file | blocking |
+| `verification-bound` | unit | part | Every authored sign-off names a requirement that still exists. | retarget or delete the orphaned (verifies …) record | blocking |
+| `check-pullup-range` | library | pin | A resistor in the datasheet's range bridges the named pin's net and the target net. | (requirement "…" (check (pullup-range (pin "P") (net "N") (min-ohms L) (max-ohms H)))) | blocking |
+| `check-series-element` | library | pin | An R, L or C of the required value bridges the named pin's net and the target net. | (requirement "…" (check (series-element (kind R) (pin "P") (target-net "N") (min X) (max Y)))) | blocking |
+| `check-feedback-divider` | library | part | The feedback divider computes the output voltage the rail declares. | (requirement "…" (check (feedback-divider (pin "FB") (return-net "GND") (reference-v V) (tolerance-pct P)))) | blocking |
+| `check-set-resistor-output` | library | part | The set resistor computes the output voltage the rail declares. | (requirement "…" (check (set-resistor-output (pin "SET") (return-net "GND") (output-pin "OUT") (current-ua I) (tolerance-pct P)))) | blocking |
+
+### BOM
+
+| Check | Layer | Scope | Asserts | Closes with | Policy |
+| --- | --- | --- | --- | --- | --- |
+| `bom-identity` | unit | part | Every purchasable placement carries a manufacturer part number. | (mpn "…") at the call site or a parts-table row | blocking |
+| `bom-spec-missing` | unit | part | Every placed passive authors the specs its purchasable identity needs. | author voltage, dielectric and tolerance attributes at the call site | blocking |
+| `bom-spec-unmatched` | unit | part | Every authored passive spec matches a row of the design's parts table. | reconcile the call-site attributes with the parts-table row | blocking |
+| `bom-spec-library-missing` | unit | part | The library the passive spec screen reads is present. | add the parts-table or component library the gate names | blocking |
+| `attribute-row-matches-parts-table` | unit | part | A placement's typed attributes agree with the parts-table row it resolves to. | edit the attributes or the parts-table row so they agree | blocking |
+| `centroid-parity` | unit | board | The assembly centroid lists exactly the placements the netlist does. | re-save the layout so every placement has a pose | blocking |
+| `dnp-in-centroid` | unit | board | No do-not-populate part appears in the assembly centroid. | mark the part (dnp), or remove it from the assembly output | blocking |
+
+### Layout
+
+| Check | Layer | Scope | Asserts | Closes with | Policy |
+| --- | --- | --- | --- | --- | --- |
+| `drc-copper-clearance` | unit | board | Every pair of different-net copper features keeps the board's clearance rule. | move the copper, or relax (design-rules (clearance …)) with the fab's blessing | blocking |
+| `drc-via-spacing` | unit | board | Same-net vias keep the drill-to-drill spacing their copper gap needs. | delete the redundant barrel, or space the pair | blocking |
+| `drc-annular-ring` | unit | board | Every drilled feature keeps the fabricator's minimum annular ring. | grow the pad or shrink the drill | blocking |
+| `drc-board-edge-clearance` | unit | board | Copper and components keep clear of the routed board edge. | move the feature inboard, or grow the outline | blocking |
+| `drc-courtyard-overlap` | unit | board | No two component courtyards overlap. | separate the placements | blocking |
+| `drc-hole-spacing` | unit | board | Every pair of holes keeps the fabricator's hole-to-hole wall. | space the drills, or relax (design-rules (hole-to-hole …)) | blocking |
+| `drc-min-drill` | unit | board | Every drill is at least the fabricator's minimum diameter. | enlarge the drill, or pick a fab process that supports it | blocking |
+| `drc-track-width` | unit | board | Every routed track is at least the minimum width the board declares. | widen the track, or lower (design-rules (min-track-width …)) | blocking |
+| `drc-pour-integrity` | unit | board | Every final pour solid is one unambiguous, non-degenerate polygon with legal holes. | redraw the zone outline so its holes stay inside and apart | blocking |
+| `drc-pour-overlap` | unit | board | Different-net pours never touch on the same copper layer. | separate the zones, or give them the same net | blocking |
+| `drc-copper-stub` | unit | net | No trace endpoint lands on nothing of its own net. | finish the route, or delete the artifact copper | blocking |
+| `drc-implicit-junction` | unit | net | Same-net traces that touch record an explicit endpoint junction. | re-route the join, or canonicalize the saved copper | waivable |
+| `drc-hairline-gap` | unit | net | No same-net copper is separated by a gap too small to see and too large to conduct. | close the gap with a real overlap | blocking |
+| `drc-dangling-copper` | unit | net | No stored trace section is electrically redundant. | delete the section, or re-route the net | waivable |
+| `drc-single-layer-via` | unit | net | Every via barrel reaches at least two copper layers. | delete the via, or route the second layer to it | waivable |
+| `drc-redundant-via` | unit | net | Every via is an articulation of its net's copper graph. | delete the redundant barrels the finding names | waivable |
+| `drc-land-transit` | unit | net | Same-net copper on a pad's land is aimed at its centre, not lapping its flank. | re-route the run into the land's centre | waivable |
+| `drc-ground-via-distance` | unit | net | Every SMD ground pad has a same-net through via inside the authored budget. | stitch a via near the pad, or widen (ground-via-max MM) | waivable |
+| `drc-reference-plane-gap` | unit | net | Fast-net copper never crosses a void in its own reference plane. | re-route around the split, or fill the plane | waivable |
+| `drc-reference-transition` | unit | net | Every signal via that changes reference planes has its stitching via or cross-reference capacitor. | stitch the return beside the signal via | waivable |
+| `drc-loop-area` | unit | net | Estimated trace-to-reference loop area stays inside the net class's budget. | (net-class … (return-path (max-loop-area …))) plus a tighter route | waivable |
+| `drc-silk-over-pad` | unit | board | No silkscreen lands on solderable copper. | move or clip the silkscreen | waivable |
+| `drc-diff-pair-coupling` | unit | net | Every differential pair stays coupled along its route. | re-route the pair together | waivable |
+| `drc-diff-pair-skew` | unit | net | Every differential pair's halves stay length-matched within tolerance. | add the matching meander to the short half | waivable |
+| `drc-length-match` | unit | net | Every match group's members stay inside the declared length spread. | (net-class … (match-group "NAME" (tolerance MM))) plus tuning | waivable |
+| `drc-sharp-bend` | unit | net | No routed corner is sharper than the board's bend rule allows. | smooth the corner | waivable |
+| `drc-net-class-keepout` | unit | net | No foreign copper sits inside a net class's declared isolation halo. | (net-class … (keepout MM)) plus moving the intruding copper | waivable |
+| `drc-perimeter-keepout` | unit | board | Nothing sits inside the board's authored perimeter exclusion band. | move the feature out of (board … (perimeter-fence … (keepout …))) | blocking |
+| `drc-board-keepout` | unit | board | Nothing sits inside a named mechanical keepout region. | move the feature out of (board … (keepout "NAME" (rect …))) | blocking |
+| `net-open` | unit | net | Every net's drawn copper forms one connected island. | route the missing link between the islands | blocking |
+| `drc` | unit | board | The release run reports zero DRC errors. | fix the copper the DRC errors name | blocking |
+| `drc-warn` | unit | board | Every DRC warning category is waived with a current count. | fix the copper, or record the category in drc-waivers.md | waivable |
+| `drc-missing` | unit | board | A DRC run exists for the layout the release is cut from. | run the design-rule check on the saved layout | blocking |
+| `drc-incomplete` | unit | board | The DRC run that the release reads covered the whole board. | re-run the design-rule check to completion | blocking |
+| `hairline-gap` | unit | board | The release run finds no hairline gap in the fabricated copper. | close the gap with a real overlap | blocking |
+| `connectivity-coarsened` | unit | board | The connectivity the release judged was measured at full resolution. | re-run the release check without the coarsened raster | waivable |
+| `unrouted-net` | unit | net | Every net of the board is routed. | route the remaining airwires | blocking |
+| `no-outline` | unit | board | The board declares an outline. | (board (outline …)) on the design | blocking |
+| `malformed-outline` | unit | board | The declared board outline is a closed, non-degenerate polygon. | redraw the outline so it closes | blocking |
+| `outline-drift` | unit | board | The saved layout's outline matches the one the design declares. | re-save the layout, or restore the declared outline | blocking |
+| `part-off-board` | unit | part | Every placement sits inside the board outline. | move the placement onto the board | blocking |
+| `via-no-drill` | unit | board | Every via carries a drill diameter the fabricator can build. | give the via a drill, or delete it | blocking |
+| `footprint-geometry-unresolved` | unit | part | Every placement's footprint geometry resolves rather than falling back. | add the footprint to the library, or fix the reference | blocking |
+| `layout-class-declared` | unit | part | Every placement states its layout class instead of relying on inference. | (layout-class <key>) on the instance or module | advisory |
+| `near-binding-valid` | unit | part | Every placement-proximity binding names entities that exist. | correct the (near …) target | blocking |
+| `emi-coupling-valid` | unit | net | Every declared EMI coupling names entities that exist. | correct the coupling declaration's target | blocking |
+| `net-rule-in-net-class` | unit | net | A net a design rule matches is listed by some net class. | (net-class "NAME" (nets …)) covering the net | blocking |
+| `check-max-distance` | library | part | The nearest matching passive sits within the datasheet's distance of the pad. | (requirement "…" (check (max-distance (pin "P") (kind C) (mm D)))) plus moving the part | waivable |
+| `system-waiver-register` | system | system | A board that needs DRC waivers has a register whose counts match the release run. | update drc-waivers.md so each category's count matches | blocking |
+
+### Domain analyses
+
+| Check | Layer | Scope | Asserts | Closes with | Policy |
+| --- | --- | --- | --- | --- | --- |
+| `class-analysis-form-gated` | unit | part | A part whose class demands a design-level analysis has that analysis in gate mode. | (pll-loop … (mode gate)) or (frequency-plan … (mode gate)) on the design | blocking |
+| `pll-loop-binding` | unit | board | The declared loop filter binds to real placed parts with usable values and dielectrics. | pin the loop components in the (pll-loop …) form and author their specs | blocking |
+| `pll-loop-stability` | unit | board | The loop solves a crossover with the phase margin, PFD and amplifier ratios the screens demand. | re-solve the loop values, or widen the declared targets with a rationale | blocking |
+| `pll-loop-operating-range` | unit | board | The loop stays inside its tune, swing and supply limits across the scheduled operating curve. | re-schedule the charge-pump current, or change the op-amp supply | waivable |
+| `pll-loop-ramp-phase-error` | unit | board | Ramp phase error stays inside the declared budget. | widen the loop bandwidth, or slow the ramp | waivable |
+| `frequency-plan-lo-drive` | unit | board | The LO drive delivered to each mixer stays inside its datasheet window. | adjust the gain chain, or restate the window in (frequency-plan …) | blocking |
+| `frequency-plan-band-coverage` | unit | board | The declared sources and filters cover the whole band the plan claims. | extend the source range or the filters, or narrow the claimed band | blocking |
+| `frequency-plan-spurious` | unit | board | Every image and mixing product lands outside the band or under the declared limit. | re-plan the LO, add filtering, or disposition the spur with evidence | waivable |
+| `pdn-impedance-target` | unit | rail | A rail with a declared PDN target meets it across the analysed band. | add bulk or bypass, or restate the rail's impedance target | waivable |
+| `design-assertion` | unit | board | Every design-authored assertion holds when the design is built. | (assert …) / (assert-range …) on the value that must hold | blocking |

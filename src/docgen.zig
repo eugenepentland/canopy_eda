@@ -32,6 +32,7 @@ const authored_rules = @import("eval/authored_rules.zig");
 const thermal = @import("eval/thermal.zig");
 const numeric = @import("numeric.zig");
 const preflight = @import("preflight.zig");
+const review_registry = @import("review_registry.zig");
 
 /// Render the full Markdown reference. The output is deterministic — the
 /// build's docs-check step and the drift test below compare it to the
@@ -315,6 +316,7 @@ fn renderReferenceAppendices(writer: anytype) !void {
     try renderRequirementChecks(writer);
     try renderNetRulePredicates(writer);
     try renderDatasheetReview(writer);
+    try renderReviewChecks(writer);
 }
 
 /// Render the `(instance …)` and `(pins …)` body grammars — the two ways a
@@ -623,6 +625,55 @@ fn renderNetRulePredicates(writer: anytype) !void {
     }
 }
 
+/// Render the "Review checks" section from `review_registry.rows` — the same
+/// static catalogue every review surface cites, grouped by the twelve fixed
+/// review categories in category order.
+fn renderReviewChecks(writer: anytype) !void {
+    try writer.writeAll(
+        \\
+        \\## Review checks
+        \\
+        \\Every check the toolchain can run, with the stable id a finding
+        \\cites it by. The engines keep their own vocabularies — electrical-rule
+        \\violation kinds, design-rule check kinds, fabrication finding ids,
+        \\preflight findings and class-profile item codes, requirement-check and
+        \\net-rule keywords, rail, thermal, loop and interface verdicts — and
+        \\`src/review_registry.zig` maps each of them onto one row below.
+        \\
+        \\A row's **scope** is what one finding is about; **closes with** is the
+        \\form or action that makes it pass; **policy** is how hard it blocks
+        \\(`blocking` stops a release, `waivable` stops one until a waiver record
+        \\is linked, `advisory` never does). Results use the seven-word verdict
+        \\vocabulary: `pass`, `fail`, `unproven` (the engine ran and names the
+        \\missing input), `waived`, `not-applicable`, `not-declared` (the board
+        \\never gave the engine an input) and `manual`.
+        \\
+    );
+    for (std.enums.values(review_registry.Category)) |category| {
+        try writer.print("\n### {s}\n\n", .{category.title()});
+        try writer.writeAll(
+            \\| Check | Layer | Scope | Asserts | Closes with | Policy |
+            \\| --- | --- | --- | --- | --- | --- |
+            \\
+        );
+        try renderReviewCategoryRows(writer, category);
+    }
+}
+
+/// Render one category's rows of the "Review checks" table, in registry order.
+fn renderReviewCategoryRows(writer: anytype, category: review_registry.Category) !void {
+    for (review_registry.rows) |row| {
+        if (row.category != category) continue;
+        try writer.writeAll("| `");
+        try writeCell(writer, row.id);
+        try writer.print("` | {s} | {s} | ", .{ @tagName(row.layer), @tagName(row.scope) });
+        try writeCell(writer, row.asserts);
+        try writer.writeAll(" | ");
+        try writeCell(writer, row.closes_with);
+        try writer.print(" | {s} |\n", .{@tagName(row.policy)});
+    }
+}
+
 fn renderDatasheetReview(writer: anytype) !void {
     try writer.writeAll(
         \\
@@ -887,6 +938,32 @@ test "classifier section names (category …) as authoritative" {
     // the section title is what decides the category.
     try std.testing.expect(std.mem.indexOf(u8, sec, "source of\ntruth") != null);
     try std.testing.expect(std.mem.indexOf(u8, sec, "section_category_inferred") != null);
+}
+
+/// Whether the rendered "Review checks" section carries a heading for every
+/// review category. Hoisted out of its test so the test keeps one loop.
+fn everyCategoryHeadingPresent(section: []const u8) bool {
+    for (std.enums.values(review_registry.Category)) |category| {
+        if (std.mem.indexOf(u8, section, category.title()) == null) return false;
+    }
+    return true;
+}
+
+// spec: docgen - The generated reference has a Review checks section rendered from the review registry
+test "review checks section covers every registered row" {
+    const alloc = std.testing.allocator;
+    const doc = try renderLanguageReference(alloc);
+    defer alloc.free(doc);
+
+    const sec = extractSection(doc, "Review checks").?;
+    try std.testing.expect(std.mem.startsWith(u8, sec, "## Review checks"));
+    // Every category heading and every registered id reaches the table.
+    try std.testing.expect(everyCategoryHeadingPresent(sec));
+    for (review_registry.rows) |row| {
+        try std.testing.expect(std.mem.indexOf(u8, sec, row.id) != null);
+        try std.testing.expect(std.mem.indexOf(u8, sec, row.asserts) != null);
+    }
+    try std.testing.expect(extractSection(doc, "review checks") != null);
 }
 
 // spec: docgen - The generated reference has a Requirement checks section rendered from the checker's check_docs table
