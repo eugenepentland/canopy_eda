@@ -945,3 +945,8 @@ New from the wave:
 - **friction:** Focused `zig build test -Dtest-filter='voltage budget'` iterations still ran the deployment-script simulations, Ward-auth smoke test and example export when compilation or a single assertion failed. Those independent gates repeatedly dominated the sub-second electrical tests.
 - **idea:** Add a documented compile-first, focused-test target for the inner loop; retain the complete external checks in `prepare-release.sh`.
 - **status:** observed; no verification gates bypassed or relaxed.
+## 2026-09-06 · codex · rough placement intent release
+- **blocker:** After rebasing onto `1c8892eb`, the full release gate rejected `SystemSpec` at 12 fields against a stale nine-field type-size baseline. Its source was unchanged from `f73fa1ea`, where the same struct already had a reviewed 12-field baseline. Intervening review-stack merges regressed that one metadata row and stopped release preparation before tests/build.
+- **idea:** During merge verification, flag baseline rows that decrease while their measured source is unchanged, so a stale feature baseline cannot silently undo accepted metadata and block the next task.
+- **workaround:** Restore only `src/system_review.zig|SystemSpec` to the value already recorded in `f73fa1ea`; rerun the full gate.
+- **status:** mitigated
