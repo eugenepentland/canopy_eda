@@ -5407,6 +5407,7 @@ against its own file rather than the design's.
 - Declares the flattened-netlist currency types in a neutral module beneath both the export and placement layers
 - Re-exports the flattened-netlist currency types from the export layer as the same types
 - Escapes the netlist's design name, the one field that is not a tokenizer slice, and copies already-escaped design strings through untouched
+- The exported netlist carries exactly the flattened netlist's membership, with hierarchical names and SI-shaped pad numbers intact
 - Escapes a 3D-model filename in the emitted .kicad_mod so a quote or backslash in the file name cannot break the (model …) path
 - Replaces a source .kicad_mod's (model …) block by scanning parens outside quoted strings, so a parenthesis in the model path cannot mis-splice the file
 

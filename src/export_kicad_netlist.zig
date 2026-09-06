@@ -288,3 +288,115 @@ test "extractPadNames reads bare-int, quoted, and atom pad numbers" {
     try std.testing.expectEqualStrings("2", pads[1]);
     try std.testing.expectEqualStrings("A1", pads[2]);
 }
+
+/// Every `(node (ref …) (pin …))` under every `(net …)`, as `net -> ref.pad`
+/// lines, read back out of a written netlist with the tree's own parser.
+///
+/// Deliberately reconstructed from the PARSED document rather than by matching
+/// text: a pad that reached the file inside a malformed token is exactly the
+/// failure this is looking for, and a regex would find it anyway.
+fn netlistMembership(
+    arena: std.mem.Allocator,
+    document: []const u8,
+    out: *std.ArrayList([]const u8),
+) !void {
+    const nodes = try parser_mod.parse(arena, document);
+    try collectNetNodes(arena, nodes, out);
+    std.mem.sort([]const u8, out.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+}
+
+fn collectNetNodes(
+    arena: std.mem.Allocator,
+    nodes: []const ast_mod.Node,
+    out: *std.ArrayList([]const u8),
+) !void {
+    for (nodes) |n| {
+        const children = n.asList() orelse continue;
+        if (!n.isForm("net")) {
+            try collectNetNodes(arena, children, out);
+            continue;
+        }
+        const name = findFormString(children, "name") orelse "";
+        for (children) |child| {
+            const node_children = child.asList() orelse continue;
+            if (!child.isForm("node")) continue;
+            const ref = findFormString(node_children, "ref") orelse continue;
+            const pad = findFormString(node_children, "pin") orelse continue;
+            // The code-0 bucket is netlisp's "no net"; it carries unconnected
+            // pads and is not part of any net's membership.
+            if (name.len == 0) continue;
+            try out.append(arena, try std.fmt.allocPrint(arena, "{s} {s}.{s}", .{ name, ref, pad }));
+        }
+    }
+}
+
+/// Assert a read-back membership matches `want` line for line, in sorted order.
+///
+/// Hoisted out of the test body because `test-no-conditional` allows one
+/// top-level loop and that one is spent on the comparison itself; sorting the
+/// expectation asserts nothing, so it belongs here.
+fn expectSameMembership(
+    arena: std.mem.Allocator,
+    want: []const []const u8,
+    got: []const []const u8,
+) !void {
+    var expected: std.ArrayList([]const u8) = .empty;
+    try expected.appendSlice(arena, want);
+    std.mem.sort([]const u8, expected.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+    try std.testing.expectEqual(expected.items.len, got.len);
+    for (expected.items, got) |a, b| try std.testing.expectEqualStrings(a, b);
+}
+
+// spec: export_kicad - The exported netlist carries exactly the flattened netlist's membership, with hierarchical names and SI-shaped pad numbers intact
+test "the exported netlist reproduces every net's membership exactly" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The connectivity bridge into KiCad, and the thinnest-covered part of it.
+    // A pad that silently leaves a net here ships a board with an unconnected
+    // pin while every count still agrees — the same failure `netlist-dump`
+    // exists to catch on the netlisp side.
+    const fp_names: std.StringHashMapUnmanaged([]const u8) = .empty;
+    const fp_pads: std.StringHashMapUnmanaged([]const []const u8) = .empty;
+    const instances = [_]FlatInstance{
+        .{ .ref_des = "U1", .component = "ldo", .value = "3v3", .footprint = "sot23-5", .properties = &.{}, .uuid = "" },
+        .{ .ref_des = "buck/C2", .component = "cap", .value = "1uF", .footprint = "c-0402", .properties = &.{}, .uuid = "" },
+    };
+    // `5V` is a pad NUMBER, not a voltage: re-reading it through the SI-suffix
+    // tokenizer turns it into 5 and drops the pad out of its net.
+    const vdd = [_]FlatPin{
+        .{ .ref_des = "U1", .pin = "5V" },
+        .{ .ref_des = "buck/C2", .pin = "1" },
+    };
+    const gnd = [_]FlatPin{
+        .{ .ref_des = "U1", .pin = "2" },
+        .{ .ref_des = "buck/C2", .pin = "2" },
+    };
+    const nets = [_]FlatNet{
+        .{ .name = "V_12V", .pins = &vdd },
+        .{ .name = "buck/GND_A", .pins = &gnd },
+    };
+
+    const out = try writeNetlist(arena, "membership", &instances, &nets, &fp_names, &fp_pads);
+    var got: std.ArrayList([]const u8) = .empty;
+    try netlistMembership(arena, out, &got);
+
+    const want = [_][]const u8{
+        "V_12V U1.5V",
+        "V_12V buck/C2.1",
+        "buck/GND_A U1.2",
+        "buck/GND_A buck/C2.2",
+    };
+    // Length first: zipping two slices stops at the shorter one, so a dropped
+    // final member would otherwise compare equal.
+    try expectSameMembership(arena, &want, got.items);
+}
