@@ -2,6 +2,11 @@
 # Verify one exact commit, running its full tests and ReleaseSafe build in
 # parallel, then publish the build as a hash-addressed deployment candidate.
 set -uo pipefail
+# This script is usually reached from a git hook, which exports GIT_DIR and
+# friends to its children. Every git call here names its repository via -C or
+# runs from $TOP, and the test suite it launches creates throwaway repos whose
+# git commands must not be redirected at this one. Scrub the hook environment.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 
 TOP="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The one toolchain: the official pinned Zig from PATH (or $ZIG), the same
