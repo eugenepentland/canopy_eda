@@ -71,6 +71,7 @@
 //! read first in a diff is the one that is NOT silk.
 
 const std = @import("std");
+const dump_args = @import("dump_args.zig");
 const clock = @import("infra/clock.zig");
 const export_fab = @import("export_fab.zig");
 const export_gerber = @import("export_gerber.zig");
@@ -97,26 +98,26 @@ const Args = struct {
     names: []const []const u8 = &.{},
 };
 
+/// `gerber-dump`'s own two flags, offered each argument before the shared scan.
+fn takeGerberFlag(out: *Args, args: []const []const u8, i: *usize) bool {
+    if (std.mem.eql(u8, args[i.*], "--layout") and i.* + 1 < args.len) {
+        i.* += 1;
+        out.layout = args[i.*];
+        return true;
+    }
+    if (std.mem.eql(u8, args[i.*], "--digest")) {
+        out.digest = true;
+        return true;
+    }
+    return false;
+}
+
 fn parseArgs(arena: std.mem.Allocator, args: []const []const u8) DumpError!Args {
     var out: Args = .{};
-    var names: std.ArrayList([]const u8) = .empty;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const a = args[i];
-        if (std.mem.eql(u8, a, "--project-dir") and i + 1 < args.len) {
-            i += 1;
-            out.project_dir = args[i];
-        } else if (std.mem.eql(u8, a, "--layout") and i + 1 < args.len) {
-            i += 1;
-            out.layout = args[i];
-        } else if (std.mem.eql(u8, a, "--digest")) {
-            out.digest = true;
-        } else if (std.mem.startsWith(u8, a, "--")) {
-            return error.GerberDumpUsage;
-        } else try names.append(arena, a);
-    }
-    if (names.items.len == 0) return error.GerberDumpUsage;
-    out.names = names.items;
+    var common: dump_args.Common = .{};
+    if (!try common.parse(arena, args, &out, takeGerberFlag)) return error.GerberDumpUsage;
+    out.project_dir = common.project_dir;
+    out.names = common.named.items;
     return out;
 }
 

@@ -505,6 +505,9 @@ src/drc_sweep.zig::Verdict struct_
 src/drc_sweep.zig::compare | fn compare( alloc: std.mem.Allocator, ledger: []const drc.Violation, swept: []const drc.Violation, ) Verdict
 src/drc_sweep.zig::install | fn install(store: *drc_reconcile.Store) void
 src/drc_sweep.zig::sweepOnce | fn sweepOnce( store: *drc_reconcile.Store, project_dir: []const u8, name: []const u8, sub: ?[]const u8, ) Outcome
+src/dump_args.zig::Common struct_
+src/dump_args.zig::noExtra | fn noExtra(_: void, _: []const []const u8, _: *usize) bool
+src/dump_args.zig::parse | fn parse( self: *Common, arena: std.mem.Allocator, args: []const []const u8, extra: anytype, comptime takeExtra: anytype, ) std.mem.Allocator.Error!bool
 src/elmer_thermal_command.zig::benchCommand | fn benchCommand(alloc: std.mem.Allocator, argv: []const []const u8) void
 src/elmer_thermal_command.zig::compareCommand | fn compareCommand(alloc: std.mem.Allocator, argv: []const []const u8) void
 src/elmer_thermal_command.zig::exportCommand | fn exportCommand(alloc: std.mem.Allocator, argv: []const []const u8) void

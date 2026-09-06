@@ -953,6 +953,28 @@ layer worth reading first is the one that is not silk.
 - completeness-waiver: integer overflow (no arithmetic on the dump path beyond the writers' own already-audited coordinate quantization)
 - completeness-waiver: panic-free (every failing stage degrades to a comment line and the next board rather than aborting the dump)
 
+## dump command line
+
+Public functions: parse, noExtra
+
+The scan `netlist-dump`, `gerber-dump` and `envelopes` share. One place for the
+strictness these read-only inspection commands need and the `bench-*` harnesses
+deliberately do not: an unrecognised flag and a run naming no design are both
+refused, because a dump exists to be diffed and a dump that silently inspected
+nothing reads exactly like a dump that found no difference.
+
+- the shared scan reads the project dir, collects positional design names, and lets a command take its own flags first
+- an unrecognised flag or a run naming no design is refused rather than inspecting nothing
+
+- completeness-waiver: empty inputs (an empty argv names no design and is refused, which is the behaviour under test)
+- completeness-waiver: large inputs (argv is bounded by the operating system's own limit; only the positional names are appended to a caller-owned list)
+- completeness-waiver: unauthorized access (the scan grants nothing; it records a directory path its caller already has authority over)
+- completeness-waiver: concurrent access (each CLI process scans its own argv once, before any design is opened)
+- completeness-waiver: i/o failure (the scan touches no filesystem; the project directory is opened by the command that received it)
+- completeness-waiver: malformed encoding (arguments are compared as bytes and never decoded)
+- completeness-waiver: integer overflow (a single forward pass over argv with no arithmetic on its length)
+- completeness-waiver: panic-free (the only failure is the caller's allocator, returned as an error; every other path returns a bool)
+
 ## netlist-dump
 
 Public functions: cmdNetlistDump
