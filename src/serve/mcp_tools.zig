@@ -114,6 +114,14 @@ const ToolEntry = struct {
 };
 
 const tools = [_]ToolEntry{
+    .{ .name = "package_templates", .is_mutation = false },
+    .{ .name = "package_init", .is_mutation = false },
+    .{ .name = "package_show", .is_mutation = false },
+    .{ .name = "package_preview", .is_mutation = false },
+    .{ .name = "package_check", .is_mutation = false },
+    .{ .name = "package_save", .is_mutation = true },
+    .{ .name = "package_export", .is_mutation = false },
+
     // Project / library metadata (structured semantic data, not derivable from raw FS).
     .{ .name = "list_designs", .is_mutation = false },
     .{ .name = "list_library", .is_mutation = false },
@@ -387,6 +395,7 @@ fn callInner(
     args_val: ?std.json.Value,
     out: *std.ArrayList(u8),
 ) !bool {
+    if (@import("package_tools.zig").operationFor(tool_name) != null) return @import("package_tools.zig").dispatch(allocator, project_dir, tool_name, args_val, out);
     if (try dispatchVfs(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchProject(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;
     if (try dispatchInfo(allocator, project_dir, tool_name, args_val, out)) |ok| return ok;

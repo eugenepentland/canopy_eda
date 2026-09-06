@@ -1181,12 +1181,28 @@ pub const SignalType = enum {
 pub const PortDirection = enum { in, out, io };
 
 /// A declared interface on a section (in/out/io).
+/// The two bounds of a `(rated LO HI)` voltage window, both already evaluated
+/// and ordered (`min <= max`). Declared here so the port parsers and their
+/// consumers share one shape for "a rated window was declared".
+pub const RatedWindow = struct { min: f64, max: f64 };
+
 pub const SectionPort = struct {
     name: []const u8,
     direction: PortDirection,
     signal_type: SignalType = .signal,
-    /// Voltage level for power signals.
+    /// Voltage level for power signals. Read from `(nominal V)`, whose
+    /// argument is evaluated, so a section inside a parameterized module can
+    /// state it as an expression over that module's arguments.
     voltage: ?f64 = null,
+    /// The `(rated LO HI)` window declared on this section port, both bounds
+    /// evaluated exactly as `Port.rated_min`/`Port.rated_max` are. Carried as
+    /// one optional pair because a lone bound says nothing.
+    ///
+    /// A section port is a diagram/boundary declaration, not a rail source, so
+    /// this records what the author wrote without seeding a derived envelope:
+    /// deriving from it would let a section's restatement of a rail compete
+    /// with the module port that actually publishes it.
+    rated: ?RatedWindow = null,
     /// Additional signals grouped under this port (for buses/diff pairs).
     group: []const []const u8 = &.{},
     /// Role annotation (e.g., "enable", "reset", "interrupt").

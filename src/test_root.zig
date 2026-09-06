@@ -32,6 +32,11 @@ test {
     // analyzes) are bridged here like every other module, so the 23 tests they
     // declare run. No test-bearing module in src/ is skipped any more, which is
     // why nothing below consults an exemption list.
+    _ = @import("footprint_paste.zig");
+    _ = @import("serve/package_store.zig");
+    _ = @import("serve/package_generator.zig");
+    _ = @import("serve/package_tools.zig");
+    _ = @import("serve/package_component.zig");
     _ = @import("bench_route.zig");
     _ = @import("bench_page.zig");
     _ = @import("authored_heatsink.zig");

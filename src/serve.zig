@@ -900,6 +900,8 @@ fn registerPcbRoutes(router: anytype) void {
 
 fn registerLibraryRoutes(router: anytype) void {
     router.get("/library", library.libraryPage, .{});
+    router.get("/library/package", @import("serve/package_builder.zig").page, .{});
+    router.post("/api/packages/:operation", @import("serve/package_builder.zig").api, .{});
     router.get("/api/library-card/:name", library.libraryCardApi, .{});
     router.get("/library/footprint/:name", footprint_editor.editorPage, .{});
     router.get("/library/3d/:footprint", library_3d.viewerPage, .{});

@@ -407,7 +407,7 @@ Auth in full: [auth.md](auth.md).
   written>}`. Caps: body > 256 KiB → 413, more than 200 events → 400, non-JSON
   or no `events` array → 400. Same auth as every other `/api` route
   (`src/serve/request_log.zig`).
-- **Whole-file source editing**: `GET /api/source/:name[?file=design|checks|layout|diagram]` → `{"source":…,"sourceRevision":…,"file":…,"files":[…]}` — the raw text of one of the design's files. `file` defaults to `design` (the `.sexp`); the other values name the autoloaded sidecars (`docs/sexpr-language.md`, "Sidecar files"), and `files` lists only the ones this design actually has, which is what the schematic editor's file picker renders. `POST /api/source/:name` with `{"source":…,"file":…,"sourceRevision":…}` replaces that whole file: syntax is checked before the bytes hit disk, the write is snapshotted into history (design **and** sidecars, above), the **whole design** is re-evaluated afterwards and a failure answers `400 rebuild failed` — a sidecar save is gated by exactly the checks a design save is. `sourceRevision` is the optimistic-concurrency hash **of the file being written**, so two editors on the same board's different sidecars do not collide and neither can clobber the other's file unseen. Only an already-authored sidecar is writable (`404`); creating one is `split-design`'s job.
+- **Whole-file source editing**: `GET /api/source/:name[?file=design|checks|layout|diagram]` → `{"source":…,"sourceRevision":…,"file":…,"files":[…]}` — the raw text of one of the design's files. `file` defaults to `design` (the `.sexp`); the other values name the autoloaded sidecars (`docs/sexp-language.md`, "Sidecar files"), and `files` lists only the ones this design actually has, which is what the schematic editor's file picker renders. `POST /api/source/:name` with `{"source":…,"file":…,"sourceRevision":…}` replaces that whole file: syntax is checked before the bytes hit disk, the write is snapshotted into history (design **and** sidecars, above), the **whole design** is re-evaluated afterwards and a failure answers `400 rebuild failed` — a sidecar save is gated by exactly the checks a design save is. `sourceRevision` is the optimistic-concurrency hash **of the file being written**, so two editors on the same board's different sidecars do not collide and neither can clobber the other's file unseen. Only an already-authored sidecar is writable (`404`); creating one is `split-design`'s job.
 - **Value editing**: `POST /api/edit-value/:name` — edit component value in .sexp file
 - **PCB Design Settings**: `POST /api/design-rules/:name` `{"rules":{…}}` patches
   the board-level numeric rules inside `(design-rules …)`;
@@ -418,7 +418,7 @@ Auth in full: [auth.md](auth.md).
   physical construction and every form the GUI does not know survive byte for
   byte, and a board that relied on defaults gets the form authored for it.
   Both are **sidecar-aware**. `design-rules` and `stackup` may live in the
-  design's `<name>.layout.sexp` (`docs/sexpr-language.md` → "Sidecar files"),
+  design's `<name>.layout.sexp` (`docs/sexp-language.md` → "Sidecar files"),
   so each save is applied to whichever file declares the form, at THAT file's
   byte spans, leaving the other file untouched; a form that exists nowhere yet
   is authored into the layout sidecar when the design has one, else into the
@@ -550,17 +550,31 @@ An undeclared variant name fails the evaluation and renders the diagnostic page
 assembly than the caller asked for.
 - **Library upload**: `GET /library`, `POST /api/upload-symbol`, `POST /api/upload-footprint`
 - **System review workspace**: `GET /systems/:name` — the document editor over
-  `src/systems/<name>/system.json`, with `GET|PUT /api/systems/:name/docs/:doc`,
+  that system's manifest, with `GET|PUT /api/systems/:name/docs/:doc`,
   `POST /api/systems/:name/attest`, `POST /api/systems/:name/assets`,
   `GET /api/systems/:name/readiness`, `GET /api/systems/:name/draft.zip` and
   `POST /api/systems/:name/release` behind it. Session-gated like the rest of
   the browser surface; every mutation needs the `X-Netlisp-Review: 1` header and
-  the writer role. The readiness, draft, dossier and release paths read the
-  system contract from `src/systems/<name>/system.sexp` when it exists and fall
-  back to `system.json` otherwise (see
-  [docs/sexp-language.md § System contracts](sexp-language.md)); the
-  document-editing and attestation endpoints still read and write the JSON
-  form.
+  the writer role. **Every** endpoint here — the listing, the editor, readiness,
+  draft, dossier, attestation and release — reads the contract from
+  `src/systems/<name>/system.sexp` when it exists and falls back to
+  `system.json` otherwise (see
+  [docs/sexp-language.md § System contracts](sexp-language.md)), so a
+  workspace that has migrated is served identically to one that has not.
+  `GET /api/systems/:name` always answers with canonical
+  `netlisp-system-review-v1` JSON in `manifest`, rendered from the contract
+  source when that is the manifest, so the page script sees one object shape.
+
+  **Attestation writes.** `POST /api/systems/:name/attest` stores the approval
+  in the manifest's own spelling: the JSON manifest's top-level `attestation`
+  value is replaced, and a contract source's `(attestation …)` form is replaced
+  at its byte span (appended before the closing paren when it carries none).
+  Nothing else in the file is rewritten — comments, blank lines and authored
+  formatting survive byte for byte — and the two spellings parse to the
+  identical spec. The reverse write, which any document save or asset upload
+  performs, sets the JSON value to `null` and removes the `(attestation …)`
+  form. Both go through the ordinary VFS CAS path, so a manifest that changed
+  under the request is a 409 rather than a clobber.
 - **System interface findings**: `GET /api/systems/:name/readiness` (and the
   identical document `netlisp system-check` prints) carries three fields beyond
   the historical gate: `manifest` — the project-relative contract actually
@@ -1082,3 +1096,12 @@ PCB route guides can bind a stable module-local origin using `scope/@origin`,
 for example `(between-pins "lmx2595/@U1" "22" "lmx2595/@R_RFOUTAM" "2" "F.Cu")`.
 At board root, use `@origin`. Exact reference designators remain supported;
 ambiguous bare aliases produce an unresolved-guide warning.
+
+### IC package builder
+
+`GET /library/package` opens the datasheet-driven SMT package builder;
+`?name=<footprint>` loads a saved recipe. `POST /api/packages/:operation` exposes
+`templates`, `init`, `show`, `preview`, `check`, `save`, and `export` through the
+same service as `netlisp package` and the `package_*` structured tools.
+See [package-builder.md](package-builder.md) for dimensions, recipes, revision
+checks, stencil apertures, component assignment, and CLI examples.

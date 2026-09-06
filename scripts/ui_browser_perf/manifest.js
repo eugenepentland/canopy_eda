@@ -20,6 +20,7 @@ const routes = {
   },
   "/thermal/:name": { coverage: "surface", surface: "thermal" },
   "/review/:name": { coverage: "surface", surface: "board_review" },
+  "/library/package": { coverage: "uncovered", reason: "The dedicated scripts/check_package_builder.cjs functional harness checks initial-preview and edit latency in an isolated project; integration into the shared workload-relative perf runner is not yet implemented." },
   "/library": { coverage: "surface", surface: "library" },
   "/library/footprint/:name": { coverage: "surface", surface: "footprint_editor" },
   "/library/3d/:footprint": { coverage: "surface", surface: "model_alignment_3d" },

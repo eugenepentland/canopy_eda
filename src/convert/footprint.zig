@@ -62,11 +62,13 @@ pub fn convertFootprint(allocator: std.mem.Allocator, source: []const u8) Conver
         try w.writeAll("\")\n");
     }
 
+    try validatePasteOwners(children[2..]);
+
     // Extract pads
     try w.writeByte('\n');
     for (children[2..]) |child| {
         if (child.isForm("pad")) {
-            try emitPad(w, child);
+            if (!pasteOnly(child)) try emitPad(w, child, children[2..]);
         }
     }
 
@@ -107,7 +109,7 @@ fn writePadNum(w: anytype, num: []const u8) !void {
     try w.print("\"{s}\"", .{num});
 }
 
-fn emitPad(w: anytype, node: Node) !void {
+fn emitPad(w: anytype, node: Node, siblings: []const Node) !void {
     const children = node.asList() orelse return;
     if (children.len < 4) return;
 
@@ -227,6 +229,7 @@ fn emitPad(w: anytype, node: Node) !void {
     if (has_rratio and std.mem.eql(u8, out_shape, shape_roundrect)) {
         try w.print(" (roundrect_rratio {d:.3})", .{rratio});
     }
+    try emitPasteWindows(w, siblings, .{ .x = x, .y = y, .rotation = rot_out.angle, .w = out_sx, .h = out_sy }, node);
     try w.writeAll(")\n");
 }
 
@@ -724,14 +727,13 @@ test "convert flattens exact quarter-turn pad at-angle to size swap" {
     const output = try convertFootprint(alloc, input);
     defer alloc.free(output);
     // 90° and −90° (= 270°) swap W×H; the two-number (pos …) shows no angle
-    // token — identical copper, and identical output to every conversion the
-    // committed library was generated under.
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"1\" smd rect (pos -1.0000 0.0000) (size 1.0000 0.5000))") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"2\" smd rect (pos 1.0000 0.0000) (size 1.2000 0.6000))") != null);
+    // token. The copper-only layer list also retains its suppressed paste.
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"1\" smd rect (pos -1.0000 0.0000) (size 1.0000 0.5000) no-paste)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"2\" smd rect (pos 1.0000 0.0000) (size 1.2000 0.6000) no-paste)") != null);
     // 180° is the identity for the 2-fold-symmetric shapes emitted here.
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"3\" smd rect (pos 0.0000 1.0000) (size 0.7000 1.4000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"3\" smd rect (pos 0.0000 1.0000) (size 0.7000 1.4000) no-paste)") != null);
     // Angles reduce mod 360: 450° is the 90° swap.
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"4\" smd rect (pos 0.0000 -1.0000) (size 1.6000 0.8000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"4\" smd rect (pos 0.0000 -1.0000) (size 1.6000 0.8000) no-paste)") != null);
 }
 
 // spec: convert/footprint - Preserves a plain pad's non-quarter-turn at-angle as a netlisp-frame pos rotation token
@@ -752,11 +754,11 @@ test "convert preserves non-quarter pad at-angle in netlisp frame" {
     // The token is netlisp's frame — mod(360 − kicad, 360), the same bridge as
     // serve/sync.zig's netlispRotToKicad — and the size stays the pad's own
     // unrotated W×H, never swapped.
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"1\" smd rect (pos 0.0000 0.0000 45.0000) (size 0.5800 0.5800))") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"2\" smd rect (pos 2.0000 1.0000 330.0000) (size 1.2000 0.6000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"1\" smd rect (pos 0.0000 0.0000 45.0000) (size 0.5800 0.5800) no-paste)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"2\" smd rect (pos 2.0000 1.0000 330.0000) (size 1.2000 0.6000) no-paste)") != null);
     // 100° used to fall in the old near-90° window and flatten to a 90° swap,
     // 10° wrong; it now keeps its real angle.
-    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"3\" smd rect (pos -2.0000 1.0000 260.0000) (size 0.9000 1.8000))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "(pad \"3\" smd rect (pos -2.0000 1.0000 260.0000) (size 0.9000 1.8000) no-paste)") != null);
 }
 
 // spec: convert/footprint - Emits the pad number as a quoted token so an SI-shaped or spaced pad name reads back unchanged
@@ -798,4 +800,112 @@ test "convert quotes pad numbers so SI-shaped names survive a re-parse" {
         seen += 1;
     }
     try std.testing.expectEqual(@as(usize, want.len), seen);
+}
+
+const PasteOwner = struct { x: f64, y: f64, rotation: f64, w: f64, h: f64 };
+fn hasLayer(node: Node, layer: []const u8) bool {
+    const children = node.asList() orelse return false;
+    for (children) |child| if (child.isForm("layers")) {
+        for (child.asList().?[1..]) |v| {
+            const text = v.asString() orelse v.asAtom() orelse continue;
+            if (std.mem.eql(u8, text, layer)) return true;
+        }
+    };
+    return false;
+}
+fn pasteOnly(node: Node) bool {
+    return node.isForm("pad") and hasLayer(node, board_layers.f_paste) and !hasLayer(node, board_layers.f_cu) and !hasLayer(node, "*.Cu");
+}
+fn pasteRect(node: Node, owner: PasteOwner) ?@import("../footprint_paste.zig").Aperture {
+    const items = node.asList() orelse return null;
+    if (items.len < 4 or !std.mem.eql(u8, items[3].asAtom() orelse "", "rect")) return null;
+    var x: f64 = 0;
+    var y: f64 = 0;
+    var rot: f64 = 0;
+    var w: f64 = 0;
+    var h: f64 = 0;
+    for (items) |item| {
+        const v = item.asList() orelse continue;
+        if (item.isForm("at") and v.len >= 3) {
+            x = v[1].asNumber() orelse return null;
+            y = v[2].asNumber() orelse return null;
+            if (v.len >= 4) rot = v[3].asNumber() orelse return null;
+        }
+        if (item.isForm("size") and v.len >= 3) {
+            w = v[1].asNumber() orelse return null;
+            h = v[2].asNumber() orelse return null;
+        }
+    }
+    const angle = owner.rotation * std.math.pi / 180;
+    const dx = x - owner.x;
+    const dy = y - owner.y;
+    const px = dx * @cos(angle) + dy * @sin(angle);
+    const py = -dx * @sin(angle) + dy * @cos(angle);
+    const rel = padRotOut(rot + owner.rotation);
+    if (rel.angle != 0) return null;
+    const pw = if (rel.swap) h else w;
+    const ph = if (rel.swap) w else h;
+    if (pw <= 0 or ph <= 0 or @abs(px) + pw / 2 > owner.w / 2 + 1e-5 or @abs(py) + ph / 2 > owner.h / 2 + 1e-5) return null;
+    return .{ .x = px, .y = py, .w = pw, .h = ph };
+}
+fn emitPasteWindows(w: anytype, siblings: []const Node, owner: PasteOwner, node: Node) !void {
+    var started = false;
+    for (siblings) |candidate| {
+        if (!pasteOnly(candidate)) continue;
+        if (pasteRect(candidate, owner)) |v| {
+            if (!started) {
+                try w.writeAll(" (paste");
+                started = true;
+            }
+            try w.print(" (rect {d:.6} {d:.6} {d:.6} {d:.6})", .{ v.x, v.y, v.w, v.h });
+        }
+    }
+    if (started) try w.writeByte(')') else if (!hasLayer(node, board_layers.f_paste) and hasLayer(node, board_layers.f_cu)) try w.writeAll(" no-paste");
+}
+
+fn pasteOwner(node: Node) ?PasteOwner {
+    if (!node.isForm("pad") or !hasLayer(node, board_layers.f_cu)) return null;
+    const fields = node.asList().?;
+    if (fields.len < 4 or std.mem.eql(u8, fields[3].asAtom() orelse "", "custom")) return null;
+    var p: PasteOwner = .{ .x = 0, .y = 0, .rotation = 0, .w = 0, .h = 0 };
+    for (node.asList().?) |child| {
+        const v = child.asList() orelse continue;
+        if (child.isForm("at") and v.len >= 3) {
+            p.x = v[1].asNumber() orelse return null;
+            p.y = v[2].asNumber() orelse return null;
+            if (v.len >= 4) p.rotation = v[3].asNumber() orelse return null;
+        }
+        if (child.isForm("size") and v.len >= 3) {
+            p.w = v[1].asNumber() orelse return null;
+            p.h = v[2].asNumber() orelse return null;
+        }
+    }
+    const rot = padRotOut(p.rotation);
+    p.rotation = rot.angle;
+    if (rot.swap) std.mem.swap(f64, &p.w, &p.h);
+    return p;
+}
+fn validatePasteOwners(siblings: []const Node) error{InvalidFormat}!void {
+    for (siblings) |candidate| {
+        if (!pasteOnly(candidate)) continue;
+        var owners: usize = 0;
+        for (siblings) |node| {
+            const owner = pasteOwner(node) orelse continue;
+            if (pasteRect(candidate, owner) != null) owners += 1;
+        }
+        // Reject unsupported or ambiguous stencil geometry instead of dropping it.
+        if (owners != 1) return error.InvalidFormat;
+    }
+}
+
+// spec: IC package builder - KiCad import rejects stencil openings without a unique supported copper owner
+test "IC package KiCad unsupported and ambiguous stencil owners" {
+    const opening = "(pad \"\" smd rect (at 0 0) (size 0.4 0.4) (layers \"F.Paste\"))";
+    const copper = "(pad \"1\" smd rect (at 0 0) (size 2 2) (layers \"F.Cu\"))";
+    const sources = .{
+        "(footprint \"x\" " ++ opening ++ ")",
+        "(footprint \"x\" " ++ copper ++ copper ++ opening ++ ")",
+        "(footprint \"x\" (pad \"1\" smd custom (at 0 0) (size 2 2) (layers \"F.Cu\")) " ++ opening ++ ")",
+    };
+    inline for (sources) |source| try std.testing.expectError(error.InvalidFormat, convertFootprint(std.testing.allocator, source));
 }

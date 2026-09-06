@@ -590,7 +590,14 @@ pub const Evaluator = struct {
             .assert_ => special_forms.evalAssert(self, args, env),
             .assert_range => special_forms.evalAssertRange(self, args, env),
             .fmt_ => special_forms.evalFmt(self, args, env),
-            .id_ => .nil,
+            // Identity residue the build writes back into the source: `(id …)`
+            // on a form, `(ids …)` enumerating the children a shorthand emits.
+            // Both are inert VALUES, not just skipped children, so a parser
+            // that walks its own form's items — decouple, series, fanout — can
+            // evaluate the sidecar the previous build appended without
+            // "unknown name 'ids'". Source the tool writes must be source the
+            // tool reads.
+            .id_, .ids_ => .nil,
             // Source metadata consumed by module_metadata.zig. It has no
             // runtime value, but must be evaluable in wrapped module bodies.
             .implements => blk: {

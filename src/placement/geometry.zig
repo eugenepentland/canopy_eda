@@ -38,6 +38,7 @@ pub const Pad = struct {
     h: f64,
     shape: []const u8 = "rect",
     poly: []const [2]f64 = &.{},
+    paste: ?[]const @import("../footprint_paste.zig").Aperture = null,
     /// Through-hole (or NPTH) pad — its copper exists on every layer, so the
     /// router treats it as an obstacle (and a terminal) on both signal layers
     /// regardless of which side its part is placed on.
@@ -386,6 +387,7 @@ fn parsePad(arena: std.mem.Allocator, node: Node) ?Pad {
         .drill = drill,
         .slot_half = slot_half,
         .overrides = .{ .rratio = rratio, .mask_margin = mask_margin, .no_paste = no_paste, .rf_min_size = rf_min_size },
+        .paste = @import("../footprint_paste.zig").parse(arena, node) catch return null,
     };
 }
 

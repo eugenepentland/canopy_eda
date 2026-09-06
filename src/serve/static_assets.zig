@@ -153,6 +153,7 @@ const registry = [_]Asset{
     .{ .name = "pdfjs-worker-4.10.38.min.mjs", .body = pdfjs_worker_js, .content_type = .JS },
     .{ .name = "library.js", .body = library_js, .content_type = .JS },
     .{ .name = "footprint_svg.js", .body = footprint_svg_js, .content_type = .JS },
+    .{ .name = "package_builder.js", .body = @embedFile("assets/package_builder.js"), .content_type = .JS },
     .{ .name = "footprint_editor.js", .body = footprint_editor_js, .content_type = .JS },
     .{ .name = "footprint_editor.css", .body = footprint_editor_css, .content_type = .CSS },
     .{ .name = "pcb_board.js", .body = pcb_board_js, .content_type = .JS },

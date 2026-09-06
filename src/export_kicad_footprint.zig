@@ -331,6 +331,7 @@ fn emitKicadPad(allocator: std.mem.Allocator, w: anytype, node: ast.Node) !void 
     var is_oval_drill = false;
     var mask_margin: ?f64 = null;
     var no_paste = false;
+    const paste = @import("footprint_paste.zig").parse(allocator, node) catch return error.InvalidFormat;
     var poly_node: ?ast.Node = null;
     // rratio defaults match KiCad's library default; override via
     // `(roundrect_rratio R)` on the .sexp pad form. 0.5 turns a square
@@ -384,13 +385,14 @@ fn emitKicadPad(allocator: std.mem.Allocator, w: anytype, node: ast.Node) !void 
     // Resolve the pad name once (atom, string, or numeric).
     var name_buf: [64]u8 = undefined;
     const pad_name = padName(children[1], &name_buf) orelse return;
+    try emitPasteApertures(w, paste, .{ .x = x, .y = y, .rot = rot }, no_paste);
 
     // A `custom` pad carries its real copper outline in `(poly …)`; emit it as
     // a valid KiCad custom pad with `(primitives (gr_poly …))`. A `custom` pad
     // with no polygon would be invalid in KiCad, so fall back to `rect`.
     if (std.mem.eql(u8, pad_shape_internal, "custom")) {
         if (poly_node) |pn| {
-            try emitKicadCustomPad(allocator, w, pad_name, kicad_type, sx, sy, pn, no_paste);
+            try emitKicadCustomPad(allocator, w, pad_name, kicad_type, sx, sy, pn, no_paste or paste != null);
             return;
         }
     }
@@ -427,7 +429,7 @@ fn emitKicadPad(allocator: std.mem.Allocator, w: anytype, node: ast.Node) !void 
 
     // Layers
     if (std.mem.eql(u8, pad_type_internal, "smd")) {
-        if (no_paste) {
+        if (no_paste or paste != null) {
             try w.writeAll(smd_pad_layers);
         } else {
             try w.writeAll(smd_pad_layers_pasted);
@@ -444,6 +446,18 @@ fn emitKicadPad(allocator: std.mem.Allocator, w: anytype, node: ast.Node) !void 
     if (mask_margin) |m| try w.print("    (solder_mask_margin {d:.3})\n", .{m});
 
     try w.writeAll("  )\n");
+}
+
+fn emitPasteApertures(w: anytype, paste: ?[]const @import("footprint_paste.zig").Aperture, pos: PadPos, no_paste: bool) !void {
+    if (no_paste) return;
+    if (paste) |windows| {
+        const angle = pos.rot * std.math.pi / 180;
+        for (windows) |v| {
+            try w.writeAll("  (pad \"\" smd rect\n");
+            try emitPadAt(w, pos.x + v.x * @cos(angle) - v.y * @sin(angle), pos.y + v.x * @sin(angle) + v.y * @cos(angle), pos.rot);
+            try w.print("    (size {d:.6} {d:.6}) (layers \"{s}\"))\n", .{ v.w, v.h, board_layers.f_paste });
+        }
+    }
 }
 
 /// A pad's placement as the `.sexp` states it: centre plus its own rotation

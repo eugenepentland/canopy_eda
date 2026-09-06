@@ -49,6 +49,56 @@ fn formHeadName(node: Node) []const u8 {
     return l[0].asAtom() orelse "?";
 }
 
+/// One side of a port's `(rated LO HI)` window, EVALUATED — so a parameterized
+/// regulator module can publish its own output envelope as arithmetic over its
+/// parameters (`(rated (* vout 0.95) (* vout 1.05))`) instead of every board
+/// restating the two numbers at each instantiation. This is the rule the
+/// sibling `(nominal …)` on the same form and module-scope
+/// `(net-envelope … (rated …))` already follow; a bare literal evaluates to
+/// itself, so nothing that parsed before parses differently now.
+fn ratedBound(self: *Evaluator, node: Node, env: *Env, port_name: []const u8, which: []const u8) EvalError!f64 {
+    const value = try self.evalNode(node, env);
+    return value.asNumber() orelse {
+        // Not a warning-and-drop: a rated window the release rating checks
+        // silently never saw is exactly the failure this form exists to
+        // prevent, so an unevaluable bound must stop the build and say which
+        // port it is on.
+        self.setErrorFmt(
+            node.span,
+            "(port \"{s}\" … (rated LO HI)) {s} bound must evaluate to a number",
+            .{ port_name, which },
+        );
+        return EvalError.TypeError;
+    };
+}
+
+/// Parse and evaluate a `(rated LO HI)` sub-form of a `(port …)` — shared by
+/// the design-block port builder and the section-port parser so both kinds of
+/// port read the form by one rule (and so `(diff-port …)`, `(bus-port …)` and
+/// `(port-group …)`, which replay the modifier nodes through those two
+/// parsers, inherit it for free).
+///
+/// `port_name` only names the port in diagnostics, so a caller that learns the
+/// name positionally may defer the call until after its own scan.
+fn parseRatedWindow(self: *Evaluator, arg: Node, env: *Env, port_name: []const u8) EvalError!?env_mod.RatedWindow {
+    const children = arg.asList() orelse return null;
+    if (children.len < 3) {
+        self.warnFmt(arg.span, "(rated …) in (port \"{s}\" …) needs two bounds — (rated LO HI)", .{port_name});
+        return null;
+    }
+    const lo = try ratedBound(self, children[1], env, port_name, "LO");
+    const hi = try ratedBound(self, children[2], env, port_name, "HI");
+    if (hi < lo) {
+        self.setErrorFmt(
+            arg.span,
+            "(port \"{s}\" … (rated {d} {d})) is inverted — the LO bound must not exceed the HI bound",
+            .{ port_name, lo, hi },
+        );
+        return EvalError.InvalidForm;
+    }
+    return .{ .min = lo, .max = hi };
+}
+
 /// Which `(port …)` metadata sub-form a node is, if any.
 const PortMetadataKey = enum { role, protocol, class };
 
@@ -111,14 +161,35 @@ fn portMetadataAt(self: *Evaluator, args: []const Node, i: *usize) ?PortMetadata
     return .{ .key = key, .value = value };
 }
 
+/// Direction words a section `(port …)` accepts. `bidi` is the documented
+/// synonym for `io`, listed here so section ports read the same vocabulary the
+/// design-block port form does.
+const section_port_directions = std.StaticStringMap(env_mod.PortDirection).initComptime(.{
+    .{ "in", .in },
+    .{ "out", .out },
+    .{ "io", .io },
+    .{ "bidi", .io },
+});
+
+/// Signal-type words a section `(port …)` accepts, for the block diagram's
+/// edge classification.
+const section_port_signal_types = std.StaticStringMap(env_mod.SignalType).initComptime(.{
+    .{ "power", .power },
+    .{ "signal", .signal },
+    .{ "clock", .clock },
+    .{ "data", .data },
+    .{ "differential", .differential },
+    .{ "rf", .rf },
+});
+
 /// Parse (port "NET" in/out/io ...) section port declaration.
 ///
 /// Metadata is written as sub-forms — `(role R)`, `(protocol P)`, `(class C)`,
 /// `(nominal V)`. The original spellings (a bare `role R` keyword pair, a bare
 /// trailing number for the nominal voltage) are permanent aliases that record a
 /// `deprecated_form` info naming the sub-form that replaces them.
-pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod.Env) EvalError!?env_mod.SectionPort {
-    // (port "NET" in/out/io [signal-type] [(nominal V)] [(role R)] [(protocol P)] [(class C)])
+pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, env: *env_mod.Env) EvalError!?env_mod.SectionPort {
+    // (port "NET" in/out/io [signal-type] [(nominal V)] [(rated LO HI)] [(role R)] [(protocol P)] [(class C)])
     if (sf_children.len < 3) return null;
     var port_name: []const u8 = "";
     var direction: env_mod.PortDirection = .in;
@@ -129,6 +200,10 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
     var class_key: []const u8 = "";
     var group_list: std.ArrayList([]const u8) = .empty;
     var is_optional: bool = false;
+    // The `(rated …)` node is held back rather than parsed in place: the port's
+    // name is read positionally by this same loop, and a diagnostic that cannot
+    // name its port is the silent failure over again.
+    var rated_node: ?Node = null;
 
     var elec: ?env_mod.ElectricalDecl = null;
     var si: usize = 1;
@@ -155,52 +230,23 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
         }
         if (arg.isForm("nominal")) {
             const nc = arg.asList().?;
-            if (nc.len >= 2) voltage = nc[1].asNumber() orelse voltage;
+            // Evaluated for the same reason the design-block port form
+            // evaluates it: a section inside a parameterized module states its
+            // voltage as an expression over the module's own arguments.
+            if (nc.len >= 2) voltage = (try self.evalNode(nc[1], env)).asNumber() orelse nc[1].asNumber() orelse voltage;
+            continue;
+        }
+        if (arg.isForm("rated")) {
+            rated_node = arg;
             continue;
         }
         if (arg.asAtom()) |atom| {
-            // Direction keywords
-            if (std.mem.eql(u8, atom, "in")) {
-                direction = .in;
+            if (section_port_directions.get(atom)) |d| {
+                direction = d;
                 continue;
             }
-            if (std.mem.eql(u8, atom, "out")) {
-                direction = .out;
-                continue;
-            }
-            if (std.mem.eql(u8, atom, "io")) {
-                direction = .io;
-                continue;
-            }
-            // `bidi` is the documented synonym for `io` (bidirectional) — accept
-            // it here too so section ports match the design-block port form.
-            if (std.mem.eql(u8, atom, "bidi")) {
-                direction = .io;
-                continue;
-            }
-            // Signal type keywords
-            if (std.mem.eql(u8, atom, "power")) {
-                sig_type = .power;
-                continue;
-            }
-            if (std.mem.eql(u8, atom, "signal")) {
-                sig_type = .signal;
-                continue;
-            }
-            if (std.mem.eql(u8, atom, "clock")) {
-                sig_type = .clock;
-                continue;
-            }
-            if (std.mem.eql(u8, atom, "data")) {
-                sig_type = .data;
-                continue;
-            }
-            if (std.mem.eql(u8, atom, "differential")) {
-                sig_type = .differential;
-                continue;
-            }
-            if (std.mem.eql(u8, atom, "rf")) {
-                sig_type = .rf;
+            if (section_port_signal_types.get(atom)) |t| {
+                sig_type = t;
                 continue;
             }
             if (std.mem.eql(u8, atom, "optional")) {
@@ -235,6 +281,7 @@ pub fn parseSectionPort(self: *Evaluator, sf_children: []const Node, _: *env_mod
         .direction = direction,
         .signal_type = sig_type,
         .voltage = voltage,
+        .rated = if (rated_node) |node| try parseRatedWindow(self, node, env, port_name) else null,
         .group = group_list.toOwnedSlice(self.allocator) catch &.{},
         .role = role,
         .protocol = protocol,
@@ -905,8 +952,9 @@ pub fn emitDecoupleItems(
         c += 1;
 
         // ── Host ref ── an explicit ref, or the per-design default IC. With a
-        // default IC declared, the first post-per-pin token is taken as a pin
-        // unless it equals that ref; with no default the token is always the
+        // default IC declared the first post-per-pin token is genuinely
+        // ambiguous — see `defaultIcTokenRole`, which resolves it in a fixed
+        // order instead of assuming; with no default the token is always the
         // ref (legacy positional form, unchanged for designs that set none).
         // A leading `auto` defers to the decouple-defaults IC — it is not
         // consumed here; the pin-collection loop below expands it.
@@ -920,11 +968,12 @@ pub fn emitDecoupleItems(
         if (first_is_auto) {
             ref_str = try autoHostRef(self, items[c].span, net_name);
         } else if (self.decouple_defaults.ic.len > 0) {
-            if (first_tok != null and std.mem.eql(u8, first_tok.?, self.decouple_defaults.ic)) {
-                ref_str = first_tok.?;
-                c += 1; // explicit ref consumed
-            } else {
-                ref_str = self.decouple_defaults.ic; // token is a pin; ref defaults in
+            switch (try defaultIcTokenRole(self, items[c], first_tok, instances.items, net_name)) {
+                .host => {
+                    ref_str = first_tok.?;
+                    c += 1; // explicit ref consumed
+                },
+                .pin => ref_str = self.decouple_defaults.ic, // ref defaults in
             }
         } else {
             ref_str = first_tok orelse {
@@ -1176,6 +1225,62 @@ pub fn emitBulkDecouples(
     }
 }
 
+/// What the first token after `per-pin` means when a default IC is in force.
+const DefaultIcTokenRole = enum { host, pin };
+
+/// Resolve the one genuinely ambiguous token in the positional decouple
+/// grammar. With `(decouple-defaults (ic "REF"))` set, `(decouple "VDD" (comp)
+/// 1 per-pin X …)` can mean host `X`, or pin `X` of the default IC — and BGA
+/// pad ids are spelled exactly like ref-des (`J14`, `H1`, `C3` are all pads on
+/// the corpus' own parts). Resolved in a fixed order that never depends on
+/// where the parts were declared:
+///
+///   1. the default IC's own ref                  -> host
+///   2. a pad id / pin function of that IC        -> pin
+///   3. a ref-des authored in this block          -> host
+///   4. neither, and that IC has a pinout to check against -> diagnosed
+///
+/// Rule 3 is the fix for a silent misread: a token naming a real part
+/// (`per-pin R1 1`) used to be taken as a *pad* of the default IC, so ONE form
+/// emitted two differently-keyed children and the build pinned an `(ids …)`
+/// sidecar naming both — source the next build then choked on. Rule 2 comes
+/// first because a pad that collides with some part's ref-des is the common
+/// case and must not change meaning when an unrelated part is added above.
+/// Only authored ref-des count for rule 3; an auto-assigned `C7` from an
+/// earlier shorthand is not something anyone wrote as a host.
+fn defaultIcTokenRole(
+    self: *Evaluator,
+    token_node: Node,
+    token: ?[]const u8,
+    inst_items: []const Instance,
+    net_name: []const u8,
+) EvalError!DefaultIcTokenRole {
+    const ic = self.decouple_defaults.ic;
+    // Not a bare token at all (a nested form) — leave the legacy reading, which
+    // stops pin collection immediately and reports the empty pin list.
+    const tok = token orelse return .pin;
+    if (std.mem.eql(u8, tok, ic)) return .host;
+    const pinout = findPinFuncMap(self, inst_items, ic);
+    if (pinout) |pm| {
+        if (pm.contains(tok)) return .pin; // a pad id on the default IC
+        if (instance_mod.matchPinName(pm, tok) != null) return .pin; // a pin function
+    }
+    if (self.authored_refs.contains(tok)) return .host;
+    if (pinout != null) {
+        self.setErrorFmt(
+            token_node.span,
+            "(decouple \"{s}\" … per-pin {s} …): '{s}' is neither a pad or pin function of the " ++
+                "default IC \"{s}\" nor a part declared in this block — spell the host ref before " ++
+                "the pin list, or check the pad name",
+            .{ net_name, tok, tok, ic },
+        );
+        return EvalError.InvalidForm;
+    }
+    // The default IC has no pinout to judge against (a passive, or a part whose
+    // pinout file is missing): keep the legacy reading rather than guess.
+    return .pin;
+}
+
 /// The host ref a bare `auto` per-pin marker resolves to: the
 /// `(decouple-defaults (ic "REF"))` value. Diagnoses a missing default.
 fn autoHostRef(self: *Evaluator, span: ast.Span, net_name: []const u8) EvalError![]const u8 {
@@ -1319,10 +1424,14 @@ pub fn buildPort(self: *Evaluator, args: []const Node, env: *Env) EvalError!Port
             continue;
         }
         if (arg.isForm("rated")) {
-            const rated_children = arg.asList().?;
-            if (rated_children.len >= 3) {
-                rated_min = rated_children[1].asNumber();
-                rated_max = rated_children[2].asNumber();
+            // Both bounds are EVALUATED (see `parseRatedWindow`). Reading them
+            // with `asNumber()` used to drop a computed window on the floor —
+            // a parameterized LDO's `(rated (* vout 0.95) (* vout 1.05))`
+            // published nothing at all, and its rail derived as the single
+            // point `vout`.
+            if (try parseRatedWindow(self, arg, env, name)) |window| {
+                rated_min = window.min;
+                rated_max = window.max;
             }
         } else if (arg.isForm("nominal")) {
             const nom_children = arg.asList().?;
@@ -1988,6 +2097,59 @@ fn pinsOfFixture(alloc: std.mem.Allocator, eval: *Evaluator, all_pin_nets: *std.
     try all_pin_nets.append(alloc, .{ .ref_des = "U1", .pin = "K14", .net = "VDD" });
 }
 
+// spec: eval/design_block - a positional decouple resolves the token after per-pin as a pad of the default IC, then as a part declared in the block, and diagnoses one that is neither
+test "decouple resolves the ambiguous post-per-pin token as pad, then host, then error" {
+    // page_allocator: evaluator-allocated keys/ids are intentionally never freed.
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    eval.hierarchical_ids = true;
+    eval.decouple_defaults.ic = "U1";
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try putTestFamily(&eval, alloc, "cap-0201");
+
+    // U1 carries a BGA-style pinout, so "H1" is a pad AND looks like a ref-des.
+    var pinout: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try pinout.put(alloc, "H1", "VDDA");
+    try pinout.put(alloc, "6", "VCC");
+    try eval.symbol_pin_cache.put(alloc, "bga", pinout);
+
+    var instances: std.ArrayList(Instance) = .empty;
+    try instances.append(alloc, .{ .ref_des = "U1", .component = "", .value = "", .footprint = "", .symbol = "bga" });
+    try instances.append(alloc, .{ .ref_des = "R1", .component = "", .value = "", .footprint = "", .symbol = "" });
+    try ids.noteAuthoredRefDes(&eval, "U1", ast.Span.zero);
+    try ids.noteAuthoredRefDes(&eval, "R1", ast.Span.zero);
+    var nets: std.ArrayList(PinNetDecl) = .empty;
+    var sidecar = ids.ChildIdSidecar{ .map = .empty, .parent_offset = 0 };
+
+    // 1. A pad of the default IC stays a PIN even though it is spelled like a
+    //    ref-des — that reading must not depend on what else is declared.
+    const pad = try parser_mod.parse(alloc, "(cap-0201 \"100nF\") 1 per-pin H1");
+    try emitDecoupleItems(&eval, pad, "VDD", &env, &instances, &nets, "abcd1234", &sidecar);
+    try testing.expectEqual(@as(usize, 3), instances.items.len);
+    try testing.expectEqualStrings("100nF@H1#0", instances.items[2].origin_key);
+    try testing.expectEqualStrings("VDD.U1.H1", nets.items[0].net);
+
+    // 2. A token naming a part declared in this block is the HOST. This used to
+    //    be read as a pad of the default IC, so ONE form emitted two children
+    //    ("100nF@R1#0" and "100nF@1#0") and pinned an (ids …) sidecar naming
+    //    both — source the next build then refused to read back.
+    const host = try parser_mod.parse(alloc, "(cap-0201 \"10nF\") 1 per-pin R1 1");
+    try emitDecoupleItems(&eval, host, "VDD", &env, &instances, &nets, "abcd1234", &sidecar);
+    try testing.expectEqual(@as(usize, 4), instances.items.len);
+    try testing.expectEqualStrings("10nF@1#0", instances.items[3].origin_key);
+    try testing.expectEqualStrings("VDD.R1.1", nets.items[2].net);
+
+    // 3. Neither a pad/function of the default IC nor a declared part: named,
+    //    not guessed at.
+    const bad = try parser_mod.parse(alloc, "(cap-0201 \"1nF\") 1 per-pin U7 6");
+    const r = emitDecoupleItems(&eval, bad, "VDD", &env, &instances, &nets, "abcd1234", &sidecar);
+    try testing.expectError(error.InvalidForm, r);
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "'U7' is neither a pad or pin function") != null);
+}
+
 // spec: eval/design_block - decouple per-pin auto expands the decouple-defaults IC's pins on the decoupled net
 test "decouple per-pin auto expands the defaults ic pins" {
     const alloc = std.heap.page_allocator;
@@ -2211,4 +2373,127 @@ test "diff-port without a direction is an arity error" {
     try testing.expectError(EvalError.ArityError, expandTopLevelDiffPort(&eval, nodes[0].asList().?, &env, &ports));
     const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
     try testing.expect(std.mem.indexOf(u8, diag.message, "(diff-port …)") != null);
+}
+
+// spec: eval/design_block - a design-block port's rated bounds are evaluated so a parameterized module can publish its own window
+test "buildPort evaluates both (rated …) bounds" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    // The shape lib/modules/bcuda-lt3045-ldo.sexp writes: the regulator's own
+    // output window as +/-5 % of the vout its caller configured.
+    try env.put("vout", .{ .number = 5.11 });
+
+    const nodes = try parser_mod.parse(alloc, "(port \"VOUT\" out power (nominal vout) (rated (* vout 0.95) (* vout 1.05)))");
+    const port = try buildPort(&eval, nodes[0].asList().?[1..], &env);
+
+    try testing.expectApproxEqAbs(@as(f64, 5.11), port.nominal.?, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 4.8545), port.rated_min.?, 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 5.3655), port.rated_max.?, 1e-9);
+}
+
+// spec: eval/design_block - literal rated bounds on a port keep parsing exactly as they did
+test "buildPort reads literal (rated …) bounds unchanged" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(alloc, "(port \"VIN\" in (rated 1.8 20.0))");
+    const port = try buildPort(&eval, nodes[0].asList().?[1..], &env);
+    try testing.expectEqual(@as(f64, 1.8), port.rated_min.?);
+    try testing.expectEqual(@as(f64, 20.0), port.rated_max.?);
+}
+
+// spec: eval/design_block - a section port's rated bounds are evaluated and recorded on the section port
+test "parseSectionPort evaluates (rated …) bounds" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try env.put("vbank", .{ .number = 3.3 });
+
+    const nodes = try parser_mod.parse(alloc, "(port \"VDD_BANK_A\" in power (nominal vbank) (rated 1.8 vbank))");
+    const port = (try parseSectionPort(&eval, nodes[0].asList().?, &env)) orelse return error.TestExpectedPort;
+
+    try testing.expectApproxEqAbs(@as(f64, 3.3), port.voltage.?, 1e-9);
+    try testing.expectEqual(@as(f64, 1.8), port.rated.?.min);
+    try testing.expectApproxEqAbs(@as(f64, 3.3), port.rated.?.max, 1e-9);
+    // Recorded, not derived from: a section port restates a boundary, it does
+    // not source the rail.
+    try testing.expectEqual(env_mod.SignalType.power, port.signal_type);
+}
+
+// spec: eval/design_block - a diff-port replays evaluated rated bounds onto both lanes
+test "diff-port replays evaluated (rated …) bounds onto both lanes" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try env.put("fs", .{ .number = 2.5 });
+
+    const nodes = try parser_mod.parse(alloc, "(diff-port \"AINA_EXT\" in (rated (- 0 fs) fs))");
+    var ports: std.ArrayList(Port) = .empty;
+    try expandTopLevelDiffPort(&eval, nodes[0].asList().?, &env, &ports);
+
+    try testing.expectEqual(@as(usize, 2), ports.items.len);
+    for (ports.items) |p| {
+        try testing.expectEqual(@as(f64, -2.5), p.rated_min.?);
+        try testing.expectEqual(@as(f64, 2.5), p.rated_max.?);
+    }
+}
+
+// spec: eval/design_block - a port-group replays evaluated rated bounds onto every expanded lane
+test "port-group replays evaluated (rated …) bounds onto every lane" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+    try env.put("vio", .{ .number = 3.3 });
+
+    const nodes = try parser_mod.parse(alloc, "(bus-port \"D\" 0 1 in (rated 0 (* vio 1.1)))");
+    var ports: std.ArrayList(Port) = .empty;
+    try expandTopLevelBusPort(&eval, nodes[0].asList().?, &env, &ports);
+
+    try testing.expectEqual(@as(usize, 2), ports.items.len);
+    for (ports.items) |p| {
+        try testing.expectEqual(@as(f64, 0), p.rated_min.?);
+        try testing.expectApproxEqAbs(@as(f64, 3.63), p.rated_max.?, 1e-9);
+    }
+}
+
+// spec: eval/design_block - a rated bound that does not evaluate to a number is an error naming the port
+test "a non-numeric (rated …) bound is an error naming the port" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(alloc, "(port \"VOUT\" out (rated 0 \"twenty\"))");
+    try testing.expectError(EvalError.TypeError, buildPort(&eval, nodes[0].asList().?[1..], &env));
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "VOUT") != null);
+    try testing.expect(std.mem.indexOf(u8, diag.message, "HI") != null);
+}
+
+// spec: eval/design_block - an inverted rated window on a port is an error naming the port
+test "an inverted (rated …) window is an error naming the port" {
+    const alloc = std.heap.page_allocator;
+    var eval = Evaluator.init(alloc, ".");
+    defer eval.deinit();
+    var env = env_mod.Env.init(alloc, null);
+    defer env.deinit();
+
+    const nodes = try parser_mod.parse(alloc, "(port \"EN\" in (rated 5.5 0.0))");
+    try testing.expectError(EvalError.InvalidForm, buildPort(&eval, nodes[0].asList().?[1..], &env));
+    const diag = eval.last_error orelse return error.TestExpectedDiagnostic;
+    try testing.expect(std.mem.indexOf(u8, diag.message, "EN") != null);
+    try testing.expect(std.mem.indexOf(u8, diag.message, "inverted") != null);
 }

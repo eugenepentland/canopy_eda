@@ -21,7 +21,7 @@
 16 src/eval/env.zig|Port
 10 src/eval/env.zig|PowerRail
 14 src/eval/env.zig|Section
-10 src/eval/env.zig|SectionPort
+11 src/eval/env.zig|SectionPort
 8 src/eval/env.zig|StackupSpec
 8 src/eval/env.zig|Value
 14 src/eval/evaluator.zig|ComponentData
@@ -54,7 +54,7 @@
 8 src/placement/drc.zig|Parties
 8 src/placement/drc.zig|Violation
 8 src/placement/gap_policy.zig|GapOptions
-13 src/placement/geometry.zig|Pad
+14 src/placement/geometry.zig|Pad
 12 src/placement/net_rules.zig|NetRule
 9 src/placement/net_rules.zig|Rf
 9 src/placement/optimizer.zig|BoardRules
@@ -92,8 +92,13 @@
 14 src/review.zig|Summary
 9 src/serve.zig|ServerState
 10 src/serve/digikey.zig|Product
-12 src/serve/library.zig|LibraryRow
+13 src/serve/library.zig|LibraryRow
 14 src/serve/mcp_tools.zig|DesignSummary
+10 src/serve/package_generator.zig|Exposed
+8 src/serve/package_generator.zig|Lands
+17 src/serve/package_generator.zig|Override
+15 src/serve/package_generator.zig|Pad
+21 src/serve/package_generator.zig|Recipe
 34 src/serve/pcb_layout_blob.zig|PcbDataOpts
 10 src/serve/pcb_layout_blob.zig|RoutedMetrics
 9 src/serve/pcb_layout_chrome.zig|SidebarOpts

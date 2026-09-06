@@ -1295,7 +1295,19 @@ fn writePaste(g: *Gx, placement: optimizer.Placement, side: optimizer.Side) Erro
         if (p.side != side) continue;
         for (p.pads) |pad| {
             if (pad.thru or pad.npth or pad.noPaste()) continue;
-            try flashPad(g, p, pad, 0);
+            if (pad.paste) |windows| {
+                const angle = pad.rot * std.math.pi / 180;
+                for (windows) |v| {
+                    var aperture = pad;
+                    aperture.x = pad.x + v.x * @cos(angle) - v.y * @sin(angle);
+                    aperture.y = pad.y + v.x * @sin(angle) + v.y * @cos(angle);
+                    aperture.w = v.w;
+                    aperture.h = v.h;
+                    aperture.shape = "rect";
+                    aperture.poly = &.{};
+                    try flashPad(g, p, aperture, 0);
+                }
+            } else try flashPad(g, p, pad, 0);
         }
     }
 }
@@ -4510,4 +4522,20 @@ test "sub-lattice arcs degrade to a straight chord" {
     var rg = Gx{ .w = &rw.writer, .aps = &aps, .arena = arena, .frame = .{} };
     try regionArcTo(&rg, .{ .p1 = p1, .pm = pm, .p2 = p2 });
     try testing.expectEqualStrings("X1000Y0D01*\n", rw.written());
+}
+
+// spec: IC package builder - Gerber stencil windows follow rotated and bottom-side placements without changing copper or mask geometry
+test "IC package Gerber stencil windows on rotated bottom part" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const windows = [_]@import("footprint_paste.zig").Aperture{ .{ .x = -0.5, .y = 0, .w = 0.4, .h = 0.8 }, .{ .x = 0.5, .y = 0, .w = 0.4, .h = 0.8 } };
+    const pads = [_]geometry.Pad{.{ .number = "25", .x = 0, .y = 0, .w = 2, .h = 2, .paste = &windows }};
+    var parts = [_]optimizer.Part{.{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &pads, .fallback = false, .x = 10, .y = 5, .rot = 90, .side = .bottom }};
+    const placement = testPlacement(&parts, &.{});
+    var paste: std.Io.Writer.Allocating = .init(a);
+    try writeLayer(&paste.writer, a, placement, .{}, &.{}, export_fab.frameFor(placement), .{ .paste = .bottom }, .{ .function = "Paste,Bot" });
+    try testing.expect(std.mem.indexOf(u8, paste.written(), "R,0.800000X0.400000") != null);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, paste.written(), "D03*"));
+    try testing.expect(std.mem.indexOf(u8, paste.written(), "R,2.000000X2.000000") == null);
 }

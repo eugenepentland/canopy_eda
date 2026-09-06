@@ -50,6 +50,7 @@ pub const LibraryRow = struct {
     description: ?[]const u8 = null,
     footprint: ?[]const u8 = null,
     has_3d_model: bool = false,
+    has_package: bool = false,
     pinout: ?[]const u8 = null,
     manufacturer: ?[]const u8 = null,
     mpn: ?[]const u8 = null,
@@ -195,7 +196,11 @@ fn collectRows(allocator: std.mem.Allocator, project_dir: []const u8) HandlerErr
     std.sort.heap(RowWithMtime, buf.items, {}, RowWithMtime.newerFirst);
 
     var rows: std.ArrayList(LibraryRow) = .empty;
-    for (buf.items) |wm| try rows.append(allocator, wm.row);
+    for (buf.items) |wm| {
+        var row = wm.row;
+        row.has_package = packageExists(allocator, project_dir, row.footprint orelse row.name);
+        try rows.append(allocator, row);
+    }
     return rows.toOwnedSlice(allocator);
 }
 
@@ -283,6 +288,7 @@ fn rowForName(allocator: std.mem.Allocator, project_dir: []const u8, name: []con
             .description = description,
             .footprint = footprint,
             .has_3d_model = if (footprint) |fp| footprintHasModel(allocator, project_dir, model_cfg, fp) else false,
+            .has_package = if (footprint) |fp| packageExists(allocator, project_dir, fp) else false,
             .pinout = pinout,
             .manufacturer = manufacturer,
             .mpn = mpn,
@@ -299,6 +305,7 @@ fn rowForName(allocator: std.mem.Allocator, project_dir: []const u8, name: []con
         .kind = .footprint,
         .search_text = std.fmt.allocPrint(allocator, "{s} footprint", .{name}) catch return null,
         .has_3d_model = footprintHasModel(allocator, project_dir, model_cfg, name),
+        .has_package = packageExists(allocator, project_dir, name),
     };
 }
 
@@ -850,4 +857,12 @@ test "pcb board js opens the library card modal from the footprint button" {
     try std.testing.expect(std.mem.indexOf(u8, viewer_js, "modelAdded: function (fp, transform)") != null);
     try std.testing.expect(std.mem.indexOf(u8, viewer_js, "pose.userData.footprint !== p.fp") != null);
     try std.testing.expect(std.mem.indexOf(u8, board_js, "loadFpCardPreview") != null);
+}
+
+fn packageExists(a: std.mem.Allocator, project: []const u8, name: []const u8) bool {
+    if (!isSafeLibName(name)) return false;
+    const path = std.fmt.allocPrint(a, "{s}/lib/packages/{s}.json", .{ project, name }) catch return false;
+    defer a.free(path);
+    infra_fs.cwd().access(path, .{}) catch return false;
+    return true;
 }

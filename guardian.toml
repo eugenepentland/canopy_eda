@@ -1573,3 +1573,8 @@ validators = ["src/serve/edit_target.zig::resolve"]
 identity = ["identity"]
 revision = ["revision"]
 reason = "Semantic review remains visible: resolve checks the exact SHA256 revision and returns only a unique parsed source label. The edit target stale-offset regression tests cover this contract; lexical presence alone cannot prove it."
+
+[[external]]
+name = "package-builder-js-syntax"
+command = ["node", "--check", "src/serve/assets/package_builder.js"]
+inputs = ["src/serve/assets/package_builder.js"]

@@ -853,3 +853,30 @@ New from the wave:
 - **A `pgrep -f` waiter matches its own command line** and never exits.
 - **The session scratchpad is shared between concurrent agents**; a task's
   helper scripts belong under a task-specific path.
+## 2026-09-05 — evaluated `(rated LO HI)` port bounds
+
+- **`netlisp check` is the wrong instrument for envelope regressions.** The
+  net-envelope coverage contradiction ("… does not cover the L–H V this design
+  already declares") is a failed *assertion*, and `netlisp check` prints ERC +
+  requirements only — barracuda-base's two new contradictions were invisible in
+  a byte-identical `check --severity info` diff at both profiles. They show up
+  in `netlisp tool run_checks` (`assertion_failures`) and in
+  `run_fab_readiness` (`errors`). Any corpus differential that cares about
+  envelopes/assertions must diff `run_checks`, not `check`. Cost here was a
+  full 19-design × 2-profile sweep that "proved" nothing changed.
+- **`netlisp tool …` JSON needs an explicit UTF-8 decode.** Messages carry
+  en-dashes; piping into `python3 -c "json.load(sys.stdin)"` under the default
+  non-UTF-8 locale dies with `UnicodeDecodeError` and, wrapped in a `try`,
+  silently reports every design as unparseable. `PYTHONIOENCODING=utf-8` (or
+  `sys.stdin.buffer.read().decode('utf-8')`) is required.
+- **There is no bulk net-envelope dump.** Answering "which nets' derived
+  envelopes moved" meant 1863 individual `netlisp net <design> <net>` calls per
+  binary (~10 min each) driven off `netlist-dump`. A `netlisp envelopes
+  <design>` (or a `--json` block on `netlist-dump`) would turn a 20-minute
+  sweep into two commands.
+
+## 2026-09-05 · codex · IC package builder CLI exploration
+- **friction:** `netlisp serve --help` started the server instead of printing help, created a worktree interaction log, then hit the existing port and emitted startup allocator-leak traces. Reject unknown serve flags or handle `--help` before opening logs and sockets so CLI discovery is read-only.
+
+## 2026-09-05 · codex · IC package test registration
+- **friction:** New test-bearing modules must be added to both `src/test_root.zig` and `src/test_shards.zig`; importing them through `main.zig` is enough for focused tests but not the sharded release suite. The first package release gate caught five missing module registrations after a 118-second run and cancelled its concurrent build. Document these two registries in the inner-loop instructions, and run the focused shard-manifest/import-bridge checks when adding test files.
