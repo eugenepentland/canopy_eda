@@ -11,6 +11,23 @@ directory so a commit runs the Guardian gate and a push of `main` runs the
 latency gate; it installs no service, starts no timer, and deploys nothing.
 Build and test with `zig build` / `zig build --seed=1 test` as usual.
 
+The `pre-push` gate (`scripts/perf_gate.sh`, four page/browser latency gates
+behind the machine gate lock) measures the workload its baseline was
+**recorded** against, not whatever the designs library holds at push time: a
+recording saves its snapshot under `~/.cache/netlisp/perf-workload`
+(`NETLISP_PERF_WORKLOAD_STORE`, keeping `NETLISP_PERF_WORKLOAD_KEEP`=3), and a
+push made after the boards moved restores that snapshot — or rebuilds it from
+the recorded designs commit when the ignored bundles still hash to the recorded
+values — so the comparison stays apples to apples instead of refusing every
+push made after a board edit. It refuses only when neither is possible, which
+means this machine genuinely cannot reproduce the recording; then re-record
+(`scripts/perf_gate.sh --record`, on a quiet host, and commit the diff).
+`scripts/perf_gate.sh --resolve-workload` reports what a push would measure
+without building anything, and `NETLISP_PERF_SKIP=1 git push` is the loud
+one-push escape. Rules and store layout:
+[docs/benchmarks/pcb-page/README.md](../docs/benchmarks/pcb-page/README.md)
+§ How the workload is pinned.
+
 **Everything else in this directory, and in `systemd/`, is the maintainer's
 production deployment machinery — the owner's single-user box that serves the
 live schematic viewer.** A contributor never runs, edits, or needs any of it,

@@ -1177,8 +1177,14 @@ machine-wide lock): it compares each board's phase medians against a committed
 `--json` recording and exits non-zero on a per-board allowance breach
 (`max(base×1.30, base+25 ms)`), a corpus-wide geomean drift past 1.10, a
 hand-set absolute budget in the baseline's `budgets` object, moved DRC counts
-(unlike work is not comparable), or lost page-cache retention. Full workflow:
-`docs/benchmarks/pcb-page/README.md`.
+(unlike work is not comparable), or lost page-cache retention. What it
+measures is the workload its baseline was RECORDED against, not the live
+design library: `--record` saves that snapshot under a machine-local store, and
+a run whose live designs have drifted restores it — or rebuilds it from the
+recorded designs commit when the ignored model/layout/BOM bundles still hash to
+the recorded values — so a board edit does not read as a latency regression,
+and the gate refuses only when this machine cannot reproduce the recording at
+all. Full workflow: `docs/benchmarks/pcb-page/README.md`.
 
 The gate lock serializes only jobs that take it, so the bench also reads
 `/proc/loadavg`'s 1-minute average around every board and labels the run —

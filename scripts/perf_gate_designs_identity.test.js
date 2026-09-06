@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 // Contract test for scripts/perf_gate_designs_identity.js: the stamp must
-// carry hand-set budgets forward and pin the snapshot identity, and the check
+// carry hand-set budgets forward and pin the snapshot identity; `recorded`
+// must report the pinned identity the gate goes looking for; and the check
 // must pass an identical workload, name drift instead of inventing a latency
-// regression, and refuse an unstamped baseline. Hermetic: runs the script as
-// a subprocess in a temp dir with the identity env explicitly controlled.
+// regression, and refuse an unstamped baseline — judging the workload the
+// caller says it MEASURED, which since the workload store landed is not always
+// the live designs tree. Hermetic: runs the script as a subprocess in a temp
+// dir with the identity env explicitly controlled.
 "use strict";
 const assert = require("assert");
 const { spawnSync } = require("child_process");
@@ -123,6 +126,60 @@ const identityEnv = {
   assert.ok(result.stderr.includes("records no designs workload identity"), result.stderr);
 }
 
+// check: an explicitly measured workload outranks the environment. This is the
+// drift path — the gate restored or rebuilt the RECORDED workload and measured
+// that, so the env (which still describes the snapshot it first assembled) must
+// not be what gets judged.
+{
+  const baseline = file("measured.json", { boards: [], designs: { commit: OTHER_COMMIT, fingerprint: `${OTHER_COMMIT}:model0:layout0:bom0` } });
+  const result = run(["check", baseline,
+    "--measured", `${OTHER_COMMIT}:model0:layout0:bom0`,
+    "--measured-commit", OTHER_COMMIT,
+    "--measured-source", "restored workload snapshot abc123"], identityEnv);
+  assert.strictEqual(result.status, 0, result.stderr);
+  assert.ok(result.stdout.includes(`matches designs ${OTHER_COMMIT.slice(0, 12)}`), result.stdout);
+  assert.ok(result.stdout.includes("(restored workload snapshot abc123)"), result.stdout);
+}
+
+// check: an explicitly measured workload is also what a refusal names, so a
+// gate that failed to reproduce the recording reports what it really has.
+{
+  const baseline = file("measured-drift.json", { boards: [], designs: { commit: OTHER_COMMIT, fingerprint: `${OTHER_COMMIT}:model0:layout0:bom0` } });
+  const result = run(["check", baseline, "--measured", FINGERPRINT, "--measured-commit", COMMIT]);
+  assert.strictEqual(result.status, 3);
+  assert.ok(result.stderr.includes(`recorded against designs ${OTHER_COMMIT.slice(0, 12)}`), result.stderr);
+  assert.ok(result.stderr.includes(`comparing against designs ${COMMIT.slice(0, 12)}`), result.stderr);
+}
+
+// check: a measured fingerprint alone still names its commit — its first field.
+{
+  const baseline = file("measured-fp-only.json", { boards: [], designs: { commit: COMMIT, fingerprint: FINGERPRINT } });
+  assert.strictEqual(run(["check", baseline, "--measured", FINGERPRINT]).status, 0);
+}
+
+// recorded: the identity the gate goes looking for, in both committed shapes —
+// the page baseline's `designs` and the browser baselines' `reference.designs`.
+{
+  const baseline = file("pinned.json", { boards: [], designs: { commit: COMMIT, fingerprint: FINGERPRINT } });
+  const result = run(["recorded", baseline]);
+  assert.strictEqual(result.status, 0, result.stderr);
+  assert.strictEqual(result.stdout, `commit=${COMMIT}\nfingerprint=${FINGERPRINT}\n`);
+  const browser = file("pinned-browser.json", { reference: { designs: { commit: COMMIT, fingerprint: FINGERPRINT } } });
+  assert.strictEqual(run(["recorded", browser]).stdout, `commit=${COMMIT}\nfingerprint=${FINGERPRINT}\n`);
+}
+
+// recorded: a missing, unstamped or unreadable baseline pins nothing, and says
+// so by staying silent — refusing is `check`'s job, in `check`'s words.
+{
+  assert.strictEqual(run(["recorded", path.join(dir, "absent.json")]).stdout, "");
+  assert.strictEqual(run(["recorded", file("unpinned.json", { boards: [] })]).stdout, "");
+  const broken = path.join(dir, "broken.json");
+  fs.writeFileSync(broken, "{not json");
+  const result = run(["recorded", broken]);
+  assert.strictEqual(result.status, 0, result.stderr);
+  assert.strictEqual(result.stdout, "");
+}
+
 // check: without the identity env there is nothing to compare — not a failure.
 {
   const baseline = file("noenv.json", { boards: [], designs: { commit: COMMIT, fingerprint: FINGERPRINT } });
@@ -136,10 +193,16 @@ const identityEnv = {
   assert.strictEqual(result.status, 0, result.stderr);
 }
 
-// usage errors are their own exit code, distinct from drift.
+// usage errors are their own exit code, distinct from drift. An unknown or
+// value-less flag is one: a mistyped --measured must never silently fall back
+// to the environment and judge a workload nobody asked about.
 {
   assert.strictEqual(run(["stamp"]).status, 2);
+  assert.strictEqual(run(["recorded"]).status, 2);
   assert.strictEqual(run(["frobnicate", "x.json"]).status, 2);
+  const baseline = file("flags.json", { boards: [], designs: { commit: COMMIT, fingerprint: FINGERPRINT } });
+  assert.strictEqual(run(["check", baseline, "--measrued", FINGERPRINT], identityEnv).status, 2);
+  assert.strictEqual(run(["check", baseline, "--measured"], identityEnv).status, 2);
 }
 
 console.log("perf_gate_designs_identity: PASS");

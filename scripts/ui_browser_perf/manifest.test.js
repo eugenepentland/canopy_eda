@@ -336,6 +336,17 @@ assert(gate.includes("*.layouts.json") && gate.includes("layouts_fingerprint") &
   "perf_gate.sh must copy and identify ignored layout/model/BOM workload inputs");
 assert((gate.match(/node scripts\/perf_gate_designs_identity\.js/g) || []).length >= 2,
   "perf_gate.sh must stamp the recorded page baseline's workload identity and verify it before enforcing");
+// The designs library moves several times an hour, so a baseline is only
+// enforceable if the gate can go back to the workload it was recorded against:
+// `--record` saves that snapshot, and a drifted enforce run restores or
+// rebuilds it instead of refusing the push (scripts/test_perf_gate_workload_store.sh).
+assert(gate.includes("NETLISP_PERF_WORKLOAD_STORE") && gate.includes("store_workload_snapshot") &&
+  gate.includes("restore_workload_snapshot") && gate.includes("rebuild_workload_snapshot"),
+  "perf_gate.sh must save the recorded workload and measure it again once the live designs library drifts");
+assert(/NETLISP_PERF_WORKLOAD_STORE:-\$HOME/.test(gate),
+  "the workload store must default under $HOME, never the quota'd /tmp tmpfs");
+assert(gate.includes("--measured ") && gate.includes("--measured-commit "),
+  "perf_gate.sh must tell the identity check which workload it actually measured, not assume the live one");
 assert(!gate.includes('ln -s "$source_project_dir/lib/models"'),
   "perf_gate.sh must never expose the live model bundle to benchmark writes");
 // Standalone timing runs corrupted gated ones until the runners queued
