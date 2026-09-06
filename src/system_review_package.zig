@@ -20,6 +20,7 @@ const pll_loop = @import("pll_loop.zig");
 const review = @import("review.zig");
 const system_review = @import("system_review.zig");
 const system_sexp = @import("system_sexp.zig");
+const system_brief = @import("system_brief.zig");
 const interface_check = @import("system_interface_check.zig");
 const env_mod = @import("eval/env.zig");
 const Evaluator = @import("eval/evaluator.zig").Evaluator;
@@ -140,6 +141,10 @@ const Analysis = struct {
     release_token: [64]u8,
     needs_waiver: bool,
     state: GateState,
+    /// One row per declared `(goal …)`, in authored order. Kept beside
+    /// `GateState` rather than inside it: a goal is a stated target with a
+    /// figure and an evidence sentence, not another boolean gate.
+    goals: []const system_brief.Evaluation = &.{},
     interface_diagnostic: system_review.Diagnostic,
     /// Project-relative manifest the contract was read from.
     manifest_relative: []const u8 = "src/systems/unnamed/system.json",
@@ -148,8 +153,13 @@ const Analysis = struct {
     /// readiness gates.
     findings: []const interface_check.Finding = &.{},
 
+    /// Every gate plus the goals. A goal blocks only when its engine (or its
+    /// acceptance record) produced a figure that MISSES the stated bound: an
+    /// `unproven`, `not_declared` or `manual` row names a missing input or an
+    /// untaken measurement, which is not evidence the product fails.
     fn blocked(self: Analysis) bool {
         const state = self.state;
+        if (system_brief.blocks(self.goals)) return true;
         return !state.identity_ok or !state.interface_ok or
             !state.board_review_ok or !state.fab_ok or
             !state.checklists_ok or !state.attested or !state.waivers_ok or
@@ -818,6 +828,7 @@ fn analyze(
         try appendBoardDigests(allocator, &inputs, &seen_inputs, member.role, fab);
     }
 
+    const goal_rows = try evaluateGoals(allocator, parsed.value, boards.items);
     var interface_diagnostic: system_review.Diagnostic = .{};
     const observations = try interfaceObservations(allocator, parsed.value, boards.items);
     const interface_ok = blk: {
@@ -850,6 +861,7 @@ fn analyze(
         .content_lock = content_lock,
         .release_token = release_token,
         .needs_waiver = needs_waiver,
+        .goals = goal_rows,
         .state = .{
             .identity_ok = identity_ok,
             .interface_ok = interface_ok,
@@ -880,6 +892,23 @@ fn analyze(
         preflight_html.len,
     );
     return result;
+}
+
+/// Join the declared goals to the boards' own engineering rollups. The board
+/// reports are the ones the generated sections render, so a goal row and the
+/// section quoting the same engine cannot disagree.
+fn evaluateGoals(
+    allocator: std.mem.Allocator,
+    spec: system_review.SystemSpec,
+    boards: []const BoardEvidence,
+) ![]const system_brief.Evaluation {
+    if (spec.goals.len == 0) return &.{};
+    const reports = try allocator.alloc(system_brief.BoardReports, boards.len);
+    for (boards, reports) |board, *report| report.* = .{
+        .name = board.member.name,
+        .engineering = board.snapshot.analysis,
+    };
+    return system_brief.evaluate(allocator, spec.goals, reports);
 }
 
 fn addBoardEvidenceBytes(
@@ -1484,7 +1513,13 @@ fn renderReadiness(allocator: std.mem.Allocator, analysis: Analysis) ![]const u8
     try json_writer.writeString(w, &analysis.content_lock);
     try w.writeAll(",\"attested\":");
     try w.writeAll(if (analysis.state.attested) "true" else "false");
-    try w.writeAll(",\"checks\":{");
+    try w.writeAll(",\"status\":");
+    try json_writer.writeString(w, @tagName(spec.status));
+    try w.writeAll(",\"brief\":");
+    try writeBriefEcho(w, spec.brief);
+    try w.writeAll(",\"goals\":[");
+    try writeGoalRows(w, analysis.goals);
+    try w.writeAll("],\"checks\":{");
     try writeBoolField(w, "identity", analysis.state.identity_ok, false);
     try writeBoolField(w, "interfaces", analysis.state.interface_ok, true);
     try writeBoolField(w, "board_review", analysis.state.board_review_ok, true);
@@ -1561,6 +1596,50 @@ fn renderReadiness(allocator: std.mem.Allocator, analysis: Analysis) ![]const u8
 fn archivedManifestName(allocator: std.mem.Allocator, analysis: Analysis) ![]const u8 {
     const base = std.fs.path.basename(analysis.manifest_relative);
     return std.fmt.allocPrint(allocator, "review/source/{s}", .{base});
+}
+
+/// The brief, echoed in the manifest's own JSON spelling so a reader of
+/// readiness sees exactly the record the contract declares — not a second,
+/// drifting rendering of it.
+fn writeBriefEcho(w: *std.Io.Writer, brief: ?system_review.Brief) !void {
+    const present = brief orelse {
+        try w.writeAll("null");
+        return;
+    };
+    try std.json.Stringify.value(present, .{ .emit_null_optional_fields = false }, w);
+}
+
+fn writeGoalRows(w: *std.Io.Writer, rows: []const system_brief.Evaluation) !void {
+    for (rows, 0..) |row, index| {
+        if (index > 0) try w.writeByte(',');
+        try w.writeAll("{\"id\":");
+        try json_writer.writeString(w, row.goal.id);
+        try w.writeAll(",\"title\":");
+        try json_writer.writeString(w, row.goal.title);
+        try w.writeAll(",\"unit\":");
+        try json_writer.writeString(w, row.goal.unit);
+        try w.writeAll(",\"min\":");
+        try writeOptionalNumber(w, row.goal.min);
+        try w.writeAll(",\"max\":");
+        try writeOptionalNumber(w, row.goal.max);
+        try w.writeAll(",\"verify_by\":");
+        try json_writer.writeString(w, @tagName(row.goal.verify_by));
+        try w.writeAll(",\"value\":");
+        try writeOptionalNumber(w, row.value);
+        try w.writeAll(",\"verdict\":");
+        try json_writer.writeString(w, @tagName(row.verdict));
+        try w.writeAll(",\"evidence\":");
+        try json_writer.writeString(w, row.evidence);
+        try w.writeByte('}');
+    }
+}
+
+fn writeOptionalNumber(w: *std.Io.Writer, value: ?f64) !void {
+    const present = value orelse {
+        try w.writeAll("null");
+        return;
+    };
+    try w.print("{d}", .{present});
 }
 
 fn writeBoolField(w: *std.Io.Writer, name: []const u8, value: bool, comma: bool) !void {
@@ -2290,6 +2369,8 @@ fn writeGeneratedSection(
         .@"mechanical-summary" => try writeMechanicalSummary(out, analysis, limit),
         .@"open-items" => try writeOpenItems(out, analysis, limit),
         .@"system-diagram" => try writeSystemDiagram(out, analysis, limit),
+        .@"brief-summary" => try writeBriefSummary(out, analysis),
+        .@"goals-status" => try writeGoalsStatus(out, analysis, limit),
     }
     try ensureMarkdownSize(out, limit);
 }
@@ -2299,6 +2380,111 @@ fn writeSystemSummary(out: *std.Io.Writer.Allocating, analysis: Analysis) !void 
     try out.writer.print("| Field | Value |\n| --- | --- |\n| System | {s} |\n| Part number | `{s}` |\n| Revision | `{s}` |\n| Content lock | `{s}` |\n| Release token | `{s}` |\n\n", .{
         spec.name, spec.part_number, spec.revision, &analysis.content_lock, &analysis.release_token,
     });
+}
+
+/// The brief as a read-only field table. The status line is always printed —
+/// a system's lifecycle is a fact even where no brief states an envelope — and
+/// a system without a brief says so instead of showing an empty table.
+fn writeBriefSummary(out: *std.Io.Writer.Allocating, analysis: Analysis) !void {
+    const spec = analysis.parsed.value;
+    const w = &out.writer;
+    try w.print("This system is in `{s}` status.\n\n", .{@tagName(spec.status)});
+    const brief = spec.brief orelse {
+        try w.writeAll("This system declares no `(brief …)`, so no design envelope is stated.\n\n");
+        return;
+    };
+    try w.writeAll("| Field | Value |\n| --- | --- |\n");
+    if (brief.purpose.len > 0) try w.print("| Purpose | {s} |\n", .{brief.purpose});
+    try writeBriefEnvironmentRows(w, brief.environment);
+    try writeBriefPowerRow(w, brief.input_power);
+    if (brief.temperature_grade) |grade| try w.print("| Temperature grade | {s} |\n", .{@tagName(grade)});
+    if (brief.derating) |derating| try w.print("| Derating | {s} |\n", .{derating});
+    if (brief.ipc_class) |class| try w.print("| IPC class | {d} |\n", .{class});
+    if (brief.compliance.esd) |esd| try w.print("| ESD | {s} |\n", .{esd});
+    if (brief.compliance.emc) |emc| try w.print("| EMC | {s} |\n", .{emc});
+    if (brief.compliance.safety) |safety| try w.print("| Safety | {s} |\n", .{safety});
+    for (brief.interfaces) |entry| try writeBriefInterfaceRow(w, entry);
+    try w.writeByte('\n');
+}
+
+fn writeBriefEnvironmentRows(w: *std.Io.Writer, maybe: ?system_review.Environment) !void {
+    const environment = maybe orelse return;
+    try w.print("| Ambient | {d} to {d} °C", .{ environment.ambient_min_c, environment.ambient_max_c });
+    if (environment.cooling) |cooling| try w.print(", {s}", .{@tagName(cooling)});
+    try w.writeAll(" |\n");
+    if (environment.altitude_m) |altitude| try w.print("| Altitude | {d} m |\n", .{altitude});
+    if (environment.ingress) |ingress| try w.print("| Ingress | IP{d} |\n", .{ingress});
+}
+
+fn writeBriefPowerRow(w: *std.Io.Writer, maybe: ?system_review.InputPower) !void {
+    const power = maybe orelse return;
+    try w.print("| Input power | {s}, {d} to {d} V", .{ power.source, power.voltage_min_v, power.voltage_max_v });
+    if (power.transient_v) |transient| try w.print(", {d} V transient", .{transient});
+    if (power.current_max_a) |current| try w.print(", {d} A max", .{current});
+    try w.writeAll(" |\n");
+}
+
+fn writeBriefInterfaceRow(w: *std.Io.Writer, entry: system_review.BriefInterface) !void {
+    try w.print("| Interface {s} |", .{entry.name});
+    var first = true;
+    if (entry.connector) |connector| {
+        try w.print(" {s}", .{connector});
+        first = false;
+    }
+    if (entry.impedance_ohm) |impedance| {
+        try w.print("{s} {d} Ω", .{ if (first) "" else ",", impedance });
+        first = false;
+    }
+    if (entry.power_max_dbm) |power| {
+        try w.print("{s} {d} dBm max", .{ if (first) "" else ",", power });
+        first = false;
+    }
+    if (entry.protocol) |protocol| {
+        try w.print("{s} {s}", .{ if (first) "" else ",", protocol });
+        first = false;
+    }
+    try w.writeAll(if (first) " declared |\n" else " |\n");
+}
+
+/// One row per declared goal, carrying the verdict the readiness gate reads.
+/// Both faces of the package render this from the same rows the JSON carries,
+/// so a document and the gate cannot state different verdicts.
+fn writeGoalsStatus(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
+    const w = &out.writer;
+    if (analysis.goals.len == 0) {
+        try w.writeAll("This system declares no `(goal …)`, so no target is bound to an engine.\n\n");
+        return;
+    }
+    try w.writeAll("| Goal | Target | Verify by | Value | Verdict | Evidence |\n| --- | --- | --- | --- | --- | --- |\n");
+    for (analysis.goals) |row| {
+        try w.print("| `{s}`{s}{s} | ", .{
+            row.goal.id,
+            if (row.goal.title.len > 0) " — " else "",
+            row.goal.title,
+        });
+        try writeGoalTarget(w, row.goal);
+        try w.print(" | {s} | ", .{@tagName(row.goal.verify_by)});
+        if (row.value) |value| try w.print("{d:.4} {s}", .{ value, row.goal.unit }) else try w.writeAll("—");
+        try w.print(" | {s} | {s} |\n", .{ @tagName(row.verdict), row.evidence });
+        try ensureMarkdownSize(out, limit);
+    }
+    try w.writeByte('\n');
+}
+
+fn writeGoalTarget(w: *std.Io.Writer, goal: system_review.GoalSpec) !void {
+    if (goal.min) |min| {
+        if (goal.max) |max| {
+            try w.print("{d} to {d} {s}", .{ min, max, goal.unit });
+            return;
+        }
+        try w.print("≥ {d} {s}", .{ min, goal.unit });
+        return;
+    }
+    if (goal.max) |max| {
+        try w.print("≤ {d} {s}", .{ max, goal.unit });
+        return;
+    }
+    try w.print("reported in {s}", .{goal.unit});
 }
 
 fn writeBoardSummary(out: *std.Io.Writer.Allocating, analysis: Analysis, limit: usize) !void {
@@ -5226,4 +5412,130 @@ test "a broken stored attestation is dropped while a broken contract is refused"
         parseSexpContractImpl(allocator, project, nonsense, .identity_only, &diagnostic),
     );
     try std.testing.expectEqual(system_review.DiagnosticCode.unknown_sexp_form, diagnostic.code);
+}
+
+/// The brief and goal rows the readiness and section tests state against.
+fn fixtureBrief() system_review.Brief {
+    return .{
+        .purpose = "Swept X-band source with a 50-1500 MHz IF output",
+        .environment = .{
+            .ambient_min_c = -10,
+            .ambient_max_c = 60,
+            .cooling = .@"sealed-conduction",
+            .ingress = 40,
+        },
+        .input_power = .{
+            .source = "12 V barrel",
+            .voltage_min_v = 11.4,
+            .voltage_max_v = 12.6,
+            .transient_v = 15,
+        },
+        .temperature_grade = .industrial,
+        .derating = "NASA EEE-INST-002",
+        .ipc_class = 2,
+        .compliance = .{ .esd = "IEC 61000-4-2, 8 kV contact" },
+        .interfaces = &.{.{ .name = "OUT1", .connector = "sma", .impedance_ohm = 50, .power_max_dbm = 10 }},
+    };
+}
+
+const fixture_goals = [_]system_review.GoalSpec{
+    .{ .id = "if-band", .title = "IF output band", .unit = "MHz", .min = 50, .max = 1500, .verify_by = .@"frequency-plan" },
+    .{ .id = "lo-drive", .unit = "dBm", .min = 13, .max = 20, .verify_by = .@"frequency-plan" },
+    .{ .id = "phase-noise-10k", .unit = "dBc/Hz", .max = -95, .verify_by = .measurement, .reference = "bring-up 4.3" },
+};
+
+/// `fixtureAnalysis` with a brief, the three fixture goals and their evaluated
+/// rows attached — the state a system that states targets is actually in.
+fn briefedAnalysis(allocator: std.mem.Allocator) !Analysis {
+    var analysis = try fixtureAnalysis(allocator, try fixtureEngineering(allocator), true);
+    analysis.parsed.value.status = .review;
+    analysis.parsed.value.brief = fixtureBrief();
+    analysis.parsed.value.goals = &fixture_goals;
+    analysis.goals = try evaluateGoals(allocator, analysis.parsed.value, analysis.boards);
+    return analysis;
+}
+
+// spec: system-review - readiness carries the system status, the brief echoed in the manifest's own spelling, and one goal row per declared target, and only a failing goal blocks
+test "readiness carries the status, the brief echo and one row per goal" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var analysis = try briefedAnalysis(allocator);
+
+    const json = try renderReadiness(allocator, analysis);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"status\":\"review\"") != null);
+    // The brief is echoed in the manifest's own field spelling, not a second
+    // rendering of it, so a reader compares like with like.
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"brief\":{\"purpose\":\"Swept X-band") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ambient_min_c\":-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"cooling\":\"sealed-conduction\"") != null);
+    // One row per goal, each carrying its figure, verdict and evidence.
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":\"if-band\",\"title\":\"IF output band\",\"unit\":\"MHz\",\"min\":50,\"max\":1500,\"verify_by\":\"frequency-plan\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"value\":15,\"verdict\":\"pass\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"verdict\":\"manual\",\"evidence\":\"closed by measurement at bring-up 4.3\"") != null);
+    // A manual row is not evidence of a missed target, so it does not block.
+    try std.testing.expect(!analysis.blocked());
+
+    // A goal whose engine figure misses its bound does block, and the CLI's
+    // exit code follows `blocked` unchanged.
+    const missed = [_]system_review.GoalSpec{
+        .{ .id = "lo-drive", .unit = "dBm", .min = 20, .verify_by = .@"frequency-plan" },
+    };
+    analysis.parsed.value.goals = &missed;
+    analysis.goals = try evaluateGoals(allocator, analysis.parsed.value, analysis.boards);
+    try std.testing.expect(analysis.blocked());
+    const blocked_json = try renderReadiness(allocator, analysis);
+    try std.testing.expect(std.mem.indexOf(u8, blocked_json, "\"verdict\":\"fail\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, blocked_json, "\"blocked\":true") != null);
+}
+
+// spec: system-review - the generated brief and goals sections render the declared envelope and every goal's verdict, and say so plainly when the system declares neither
+test "the brief and goals sections render the envelope and every verdict" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    const analysis = try briefedAnalysis(allocator);
+    const brief = try renderSection(allocator, analysis, "brief-summary");
+    try std.testing.expect(std.mem.indexOf(u8, brief, "This system is in `review` status.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, brief, "| Ambient | -10 to 60 °C, sealed-conduction |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, brief, "| Input power | 12 V barrel, 11.4 to 12.6 V, 15 V transient |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, brief, "| Interface OUT1 | sma, 50 Ω, 10 dBm max |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, brief, "| IPC class | 2 |") != null);
+
+    const goals = try renderSection(allocator, analysis, "goals-status");
+    try std.testing.expect(std.mem.indexOf(u8, goals, "| `if-band` — IF output band | 50 to 1500 MHz | frequency-plan |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, goals, "| pass |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, goals, "| `phase-noise-10k` | ≤ -95 dBc/Hz | measurement | — | manual |") != null);
+
+    // Both faces are expanded once, so the HTML dossier carries the same
+    // rows the Markdown does rather than a second rendering of them.
+    var documented = analysis;
+    documented.documents = &.{.{
+        .spec = .{
+            .id = "overview",
+            .title = "System overview",
+            .path = "src/systems/demo/system-overview.md",
+            .classification = .design,
+            .generated_sections = &.{ "brief-summary", "goals-status" },
+        },
+        .source = "# Overview\n\n<!-- netlisp:generated brief-summary -->\n<!-- /netlisp:generated -->\n\n<!-- netlisp:generated goals-status -->\n<!-- /netlisp:generated -->\n",
+        .inspected = .{ .sha256 = @splat('0'), .checklist = .{}, .generated_regions = 2 },
+    }};
+    const bodies = try renderDocumentBodies(allocator, documented);
+    const markdown = try renderSystemMarkdown(allocator, documented, bodies, true);
+    const html = try renderSystemHtml(allocator, documented, bodies, true, false);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "IF output band") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "sealed-conduction") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "IF output band") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "sealed-conduction") != null);
+
+    // A system that states neither says so rather than printing empty tables.
+    const bare = try fixtureAnalysis(allocator, .{}, true);
+    const no_brief = try renderSection(allocator, bare, "brief-summary");
+    try std.testing.expect(std.mem.indexOf(u8, no_brief, "declares no `(brief …)`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, no_brief, "| --- |") == null);
+    const no_goals = try renderSection(allocator, bare, "goals-status");
+    try std.testing.expect(std.mem.indexOf(u8, no_goals, "declares no `(goal …)`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, no_goals, "| --- |") == null);
 }

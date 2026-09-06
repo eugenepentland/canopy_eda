@@ -26,6 +26,8 @@ const max_boards: usize = 64;
 const max_interfaces: usize = 256;
 const max_interface_contacts: usize = 4096;
 const max_documents: usize = 512;
+const max_goals: usize = 128;
+const max_brief_interfaces: usize = 128;
 const max_attested_inputs: usize = 4096;
 
 /// Whether parts marked do-not-populate are omitted or retained in outputs.
@@ -62,6 +64,132 @@ pub const GeneratedSection = enum {
     @"mechanical-summary",
     @"open-items",
     @"system-diagram",
+    @"brief-summary",
+    @"goals-status",
+};
+
+/// Lifecycle state of the whole system contract.
+///
+/// `concept` is the one status that may declare zero boards: a brief and its
+/// goals are authored and reviewed before any board exists. Every other status
+/// keeps the "a system declares at least one board" rule.
+pub const SystemStatus = enum { concept, design, review, released };
+
+/// How the product sheds its heat, in the brief's own words.
+///
+/// Deliberately NOT `placement/thermal_field.Scenario`: the two sets overlap,
+/// but the field solver has no sealed-conduction model and this module owns no
+/// engine. Binding a declared cooling case to a screened scenario belongs to
+/// the unit-check layer that runs the screen.
+pub const Cooling = enum {
+    natural,
+    fan,
+    airflow_1ms,
+    airflow_2ms,
+    heatsink,
+    @"sealed-conduction",
+};
+
+/// Temperature grade every part in the product must meet or exceed.
+pub const TemperatureGrade = enum { commercial, industrial, extended, automotive };
+
+/// Which engine proves a goal, or `measurement` for a bench step no engine can
+/// close.
+pub const VerifyBy = enum {
+    @"frequency-plan",
+    thermal,
+    @"power-budget",
+    @"pll-loop",
+    @"spur-table",
+    measurement,
+};
+
+/// The environment the product is specified to work in.
+pub const Environment = struct {
+    /// Cold end of the specified ambient window (deg C).
+    ambient_min_c: f64,
+    /// Hot end of that window — the ambient a thermal screen is answerable at.
+    ambient_max_c: f64,
+    cooling: ?Cooling = null,
+    /// Maximum operating altitude (m).
+    altitude_m: ?f64 = null,
+    /// IP ingress rating as its two digits, for example 40 or 65.
+    ingress: ?u16 = null,
+};
+
+/// The power the product is fed at its input interface.
+pub const InputPower = struct {
+    /// What supplies it, in the brief's own words ("12 V barrel").
+    source: []const u8,
+    voltage_min_v: f64,
+    voltage_max_v: f64,
+    /// Survivable input transient (V), when the brief states one.
+    transient_v: ?f64 = null,
+    /// Maximum input current the product may draw (A).
+    current_max_a: ?f64 = null,
+};
+
+/// Compliance regimes the product is designed against. Each is free text
+/// naming the standard and its level: the citation is what a reviewer needs,
+/// and no engine reads these yet.
+pub const Compliance = struct {
+    esd: ?[]const u8 = null,
+    emc: ?[]const u8 = null,
+    safety: ?[]const u8 = null,
+};
+
+/// One externally exposed interface of the product. This is the brief's view
+/// of a connector on the outside of the enclosure, not the board-to-board
+/// `InterfaceContract` between two members.
+pub const BriefInterface = struct {
+    /// The brief's own name for it ("OUT1"), never a net name.
+    name: []const u8,
+    /// Connector family as authored (`sma`, `usb-c`, …).
+    connector: ?[]const u8 = null,
+    impedance_ohm: ?f64 = null,
+    /// Maximum power presented at the interface (dBm).
+    power_max_dbm: ?f64 = null,
+    protocol: ?[]const u8 = null,
+};
+
+/// What the product is for and the envelope it has to work in — the design
+/// brief as data an engine can read, rather than prose in a document.
+pub const Brief = struct {
+    purpose: []const u8 = "",
+    environment: ?Environment = null,
+    input_power: ?InputPower = null,
+    temperature_grade: ?TemperatureGrade = null,
+    /// Named derating standard ("NASA EEE-INST-002", "house", …).
+    derating: ?[]const u8 = null,
+    /// IPC-A-610 class, 1 to 3.
+    ipc_class: ?u8 = null,
+    compliance: Compliance = .{},
+    interfaces: []const BriefInterface = &.{},
+};
+
+/// The acceptance record that closes a `measurement` goal.
+pub const GoalMeasurement = struct {
+    value: f64,
+    /// Where the measurement is recorded — a bring-up step, a report section.
+    evidence: []const u8,
+};
+
+/// One stated target and the engine that proves it. A goal carrying neither
+/// `min` nor `max` states a figure to be reported rather than a bound to meet.
+pub const GoalSpec = struct {
+    id: []const u8,
+    title: []const u8 = "",
+    /// The unit the bounds are written in. It also selects WHICH figure the
+    /// named engine publishes for this goal — the table is in
+    /// `src/system_brief.zig`.
+    unit: []const u8,
+    min: ?f64 = null,
+    max: ?f64 = null,
+    verify_by: VerifyBy,
+    /// The bring-up or acceptance step a `measurement` goal is closed by.
+    reference: ?[]const u8 = null,
+    /// The acceptance record, once it exists.
+    measured: ?GoalMeasurement = null,
 };
 
 /// One board participating in a system review.
@@ -182,6 +310,12 @@ pub const SystemSpec = struct {
     part_number: []const u8,
     revision: []const u8,
     boards: []const BoardMember,
+    /// Lifecycle state. Absent from a manifest means `design`.
+    status: SystemStatus = .design,
+    /// The design brief, when the system states one.
+    brief: ?Brief = null,
+    /// Stated targets, each naming how it is verified.
+    goals: []const GoalSpec = &.{},
     interfaces: []const InterfaceContract = &.{},
     documents: []const DocumentSpec = &.{},
     /// Normally absent from the authored manifest and attached to an exported
@@ -230,6 +364,8 @@ pub const DiagnosticCode = enum {
     missing_alias,
     invalid_alias,
     duplicate_document,
+    duplicate_goal,
+    invalid_brief,
     unsupported_document_type,
     unknown_document_board,
     missing_required_checklist,
@@ -351,6 +487,8 @@ pub fn validateSystemSpec(
     try validateBoards(spec, diagnostic);
     try validateInterfaces(allocator, spec, diagnostic);
     try validateDocuments(spec, diagnostic);
+    if (spec.brief) |brief| try validateBrief(brief, diagnostic);
+    try validateGoals(spec, diagnostic);
     if (spec.attestation) |attestation| try validateAttestation(allocator, spec, attestation, diagnostic);
 }
 
@@ -365,14 +503,16 @@ fn validateSystemFields(spec: SystemSpec, diagnostic: *Diagnostic) error{Invalid
         return invalid(diagnostic, .empty_field, "part_number", "system part number must be bounded printable text", spec.part_number);
     if (!isBoundedPlainText(spec.revision))
         return invalid(diagnostic, .empty_field, "revision", "system revision must be bounded printable text", spec.revision);
-    if (spec.boards.len == 0)
-        return invalid(diagnostic, .empty_field, "boards", "a system must declare at least one board", "");
+    if (spec.boards.len == 0 and spec.status != .concept)
+        return invalid(diagnostic, .empty_field, "boards", "only a (status concept) system may declare zero boards", @tagName(spec.status));
     if (spec.boards.len > max_boards)
         return invalid(diagnostic, .collection_too_large, "boards", "system declares more than 64 boards", "");
     if (spec.interfaces.len > max_interfaces)
         return invalid(diagnostic, .collection_too_large, "interfaces", "system declares more than 256 interfaces", "");
     if (spec.documents.len > max_documents)
         return invalid(diagnostic, .collection_too_large, "documents", "system declares more than 512 documents", "");
+    if (spec.goals.len > max_goals)
+        return invalid(diagnostic, .collection_too_large, "goals", "system declares more than 128 goals", "");
 }
 
 fn validateBoards(spec: SystemSpec, diagnostic: *Diagnostic) error{InvalidManifest}!void {
@@ -396,6 +536,116 @@ fn validateBoards(spec: SystemSpec, diagnostic: *Diagnostic) error{InvalidManife
                 return invalid(diagnostic, .duplicate_board_role, "boards[].role", "board roles must be unique archive identities", board.role);
         }
     }
+}
+
+/// A brief states an envelope, so every declared edge has to be a real number
+/// in the right order. Free-text citations are only bounded, because the
+/// standard's name is what a reviewer reads and no engine parses it.
+fn validateBrief(brief: Brief, diagnostic: *Diagnostic) error{InvalidManifest}!void {
+    if (!isBoundedPlainText(brief.purpose) and brief.purpose.len > 0)
+        return invalid(diagnostic, .invalid_brief, "brief.purpose", "brief purpose must be bounded printable text", brief.purpose);
+    if (brief.environment) |environment| try validateBriefEnvironment(environment, diagnostic);
+    if (brief.input_power) |power| try validateBriefInputPower(power, diagnostic);
+    if (brief.derating) |derating| {
+        if (!isBoundedPlainText(derating))
+            return invalid(diagnostic, .invalid_brief, "brief.derating", "derating standard must be bounded printable text", derating);
+    }
+    if (brief.ipc_class) |class| {
+        if (class < 1 or class > 3)
+            return invalid(diagnostic, .invalid_brief, "brief.ipc_class", "IPC class is 1, 2 or 3", "");
+    }
+    try validateBriefInterfaces(brief, diagnostic);
+}
+
+fn validateBriefEnvironment(environment: Environment, diagnostic: *Diagnostic) error{InvalidManifest}!void {
+    if (!isFinite(environment.ambient_min_c) or !isFinite(environment.ambient_max_c))
+        return invalid(diagnostic, .invalid_brief, "brief.environment.ambient", "the ambient window is two finite temperatures", "");
+    if (environment.ambient_min_c > environment.ambient_max_c)
+        return invalid(diagnostic, .invalid_brief, "brief.environment.ambient", "the ambient window's cold edge exceeds its hot edge", "");
+    if (environment.altitude_m) |altitude| {
+        if (!isFinite(altitude) or altitude < 0)
+            return invalid(diagnostic, .invalid_brief, "brief.environment.altitude", "altitude is a non-negative number of metres", "");
+    }
+}
+
+fn validateBriefInputPower(power: InputPower, diagnostic: *Diagnostic) error{InvalidManifest}!void {
+    if (!isBoundedPlainText(power.source))
+        return invalid(diagnostic, .invalid_brief, "brief.input_power.source", "the input source must be bounded printable text", power.source);
+    if (!isFinite(power.voltage_min_v) or !isFinite(power.voltage_max_v))
+        return invalid(diagnostic, .invalid_brief, "brief.input_power.voltage", "the input voltage window is two finite voltages", "");
+    if (power.voltage_min_v > power.voltage_max_v)
+        return invalid(diagnostic, .invalid_brief, "brief.input_power.voltage", "the input voltage window's low edge exceeds its high edge", "");
+    if (power.transient_v) |transient| {
+        if (!isFinite(transient))
+            return invalid(diagnostic, .invalid_brief, "brief.input_power.transient", "the survivable transient is a finite voltage", "");
+    }
+    if (power.current_max_a) |current| {
+        if (!isFinite(current) or current < 0)
+            return invalid(diagnostic, .invalid_brief, "brief.input_power.current_max", "the maximum input current is a non-negative number of amps", "");
+    }
+}
+
+fn validateBriefInterfaces(brief: Brief, diagnostic: *Diagnostic) error{InvalidManifest}!void {
+    if (brief.interfaces.len > max_brief_interfaces)
+        return invalid(diagnostic, .collection_too_large, "brief.interfaces", "brief declares more than 128 interfaces", "");
+    for (brief.interfaces, 0..) |entry, index| {
+        if (!isBoundedPlainText(entry.name))
+            return invalid(diagnostic, .invalid_brief, "brief.interfaces[].name", "an interface name must be bounded printable text", entry.name);
+        if (entry.connector) |connector| {
+            if (!isSimpleId(connector))
+                return invalid(diagnostic, .invalid_brief, "brief.interfaces[].connector", "a connector family must be a portable identifier", connector);
+        }
+        if (entry.protocol) |protocol| {
+            if (!isBoundedPlainText(protocol))
+                return invalid(diagnostic, .invalid_brief, "brief.interfaces[].protocol", "a protocol must be bounded printable text", protocol);
+        }
+        for (brief.interfaces[0..index]) |earlier| {
+            if (std.mem.eql(u8, earlier.name, entry.name))
+                return invalid(diagnostic, .invalid_brief, "brief.interfaces[].name", "brief interface names must be unique", entry.name);
+        }
+    }
+}
+
+/// Goals are addressed by id from documents, the workspace and the readiness
+/// JSON, so ids are unique portable identifiers; a bound that exists must be a
+/// real number and the pair must be an interval a figure can sit inside.
+fn validateGoals(spec: SystemSpec, diagnostic: *Diagnostic) error{InvalidManifest}!void {
+    for (spec.goals, 0..) |goal, index| {
+        if (!isSimpleId(goal.id))
+            return invalid(diagnostic, .invalid_identifier, "goals[].id", "a goal id must be a portable identifier", goal.id);
+        if (!isBoundedPlainText(goal.unit))
+            return invalid(diagnostic, .empty_field, "goals[].unit", "a goal declares the unit its bounds are written in", goal.id);
+        if (goal.title.len > 0 and !isBoundedPlainText(goal.title))
+            return invalid(diagnostic, .empty_field, "goals[].title", "a goal title must be bounded printable text", goal.id);
+        try validateGoalBounds(goal, diagnostic);
+        if (goal.measured) |measured| {
+            if (!isFinite(measured.value) or !isBoundedPlainText(measured.evidence))
+                return invalid(diagnostic, .invalid_sexp_value, "goals[].measured", "a measurement is a finite value and its evidence", goal.id);
+        }
+        for (spec.goals[0..index]) |earlier| {
+            if (std.mem.eql(u8, earlier.id, goal.id))
+                return invalid(diagnostic, .duplicate_goal, "goals[].id", "goal ids must be unique", goal.id);
+        }
+    }
+}
+
+fn validateGoalBounds(goal: GoalSpec, diagnostic: *Diagnostic) error{InvalidManifest}!void {
+    if (goal.min) |min| {
+        if (!isFinite(min))
+            return invalid(diagnostic, .invalid_sexp_value, "goals[].min", "a goal bound is a finite number", goal.id);
+    }
+    if (goal.max) |max| {
+        if (!isFinite(max))
+            return invalid(diagnostic, .invalid_sexp_value, "goals[].max", "a goal bound is a finite number", goal.id);
+    }
+    const min = goal.min orelse return;
+    const max = goal.max orelse return;
+    if (min > max)
+        return invalid(diagnostic, .invalid_sexp_value, "goals[].min", "a goal's minimum exceeds its maximum", goal.id);
+}
+
+fn isFinite(value: f64) bool {
+    return std.math.isFinite(value);
 }
 
 fn validateInterfaces(
@@ -1029,9 +1279,81 @@ fn hashCanonicalSpec(
     hashField(hash, spec.title);
     hashField(hash, spec.part_number);
     hashField(hash, spec.revision);
+    // A contract that declares none of the brief-layer fields hashes exactly
+    // as it did before they existed, so adopting this grammar re-attests only
+    // the systems that actually use it — and any system that DOES declare a
+    // status, a brief or a goal folds all three in, because the brief governs
+    // what a release means.
+    if (spec.status != .design or spec.brief != null or spec.goals.len > 0) {
+        hashField(hash, @tagName(spec.status));
+        hashCanonicalBrief(hash, spec.brief);
+        hashCanonicalGoals(hash, spec.goals);
+    }
     try hashCanonicalBoards(allocator, hash, spec.boards);
     try hashCanonicalInterfaces(allocator, hash, spec.interfaces);
     try hashCanonicalDocuments(allocator, hash, spec.documents);
+}
+
+/// The brief is hashed in authored order because it is one record, not a set:
+/// there is exactly one brief and its interfaces are written in the order a
+/// reader meets them.
+fn hashCanonicalBrief(hash: *Sha256, maybe_brief: ?Brief) void {
+    hashBool(hash, maybe_brief != null);
+    const brief = maybe_brief orelse return;
+    hashField(hash, brief.purpose);
+    hashBool(hash, brief.environment != null);
+    if (brief.environment) |environment| {
+        hashNumber(hash, environment.ambient_min_c);
+        hashNumber(hash, environment.ambient_max_c);
+        hashOptionalField(hash, if (environment.cooling) |cooling| @tagName(cooling) else null);
+        hashOptionalNumber(hash, environment.altitude_m);
+        hashBool(hash, environment.ingress != null);
+        if (environment.ingress) |ingress| hashCount(hash, ingress);
+    }
+    hashBool(hash, brief.input_power != null);
+    if (brief.input_power) |power| {
+        hashField(hash, power.source);
+        hashNumber(hash, power.voltage_min_v);
+        hashNumber(hash, power.voltage_max_v);
+        hashOptionalNumber(hash, power.transient_v);
+        hashOptionalNumber(hash, power.current_max_a);
+    }
+    hashOptionalField(hash, if (brief.temperature_grade) |grade| @tagName(grade) else null);
+    hashOptionalField(hash, brief.derating);
+    hashBool(hash, brief.ipc_class != null);
+    if (brief.ipc_class) |class| hashCount(hash, class);
+    hashOptionalField(hash, brief.compliance.esd);
+    hashOptionalField(hash, brief.compliance.emc);
+    hashOptionalField(hash, brief.compliance.safety);
+    hashCount(hash, brief.interfaces.len);
+    for (brief.interfaces) |entry| {
+        hashField(hash, entry.name);
+        hashOptionalField(hash, entry.connector);
+        hashOptionalNumber(hash, entry.impedance_ohm);
+        hashOptionalNumber(hash, entry.power_max_dbm);
+        hashOptionalField(hash, entry.protocol);
+    }
+}
+
+/// Goals keep their authored order for the same reason the interface contacts
+/// do: the order is the document's, and a goal id already makes each row
+/// addressable.
+fn hashCanonicalGoals(hash: *Sha256, goals: []const GoalSpec) void {
+    hashCount(hash, goals.len);
+    for (goals) |goal| {
+        hashField(hash, goal.id);
+        hashField(hash, goal.title);
+        hashField(hash, goal.unit);
+        hashOptionalNumber(hash, goal.min);
+        hashOptionalNumber(hash, goal.max);
+        hashField(hash, @tagName(goal.verify_by));
+        hashOptionalField(hash, goal.reference);
+        hashBool(hash, goal.measured != null);
+        if (goal.measured) |measured| {
+            hashNumber(hash, measured.value);
+            hashField(hash, measured.evidence);
+        }
+    }
 }
 
 fn hashCanonicalBoards(
@@ -1139,6 +1461,20 @@ fn hashCanonicalDocuments(
 fn hashField(hash: *Sha256, value: []const u8) void {
     hashCount(hash, value.len);
     hash.update(value);
+}
+
+/// Hash a number by its shortest round-trip decimal spelling — the same text
+/// every surface prints — so a digest and a rendered value cannot disagree
+/// about what the manifest said. 64 bytes hold every such spelling of an f64.
+fn hashNumber(hash: *Sha256, value: f64) void {
+    var buffer: [64]u8 = @splat(0);
+    const text = std.fmt.bufPrint(&buffer, "{d}", .{value}) catch buffer[0..0];
+    hashField(hash, text);
+}
+
+fn hashOptionalNumber(hash: *Sha256, value: ?f64) void {
+    hashBool(hash, value != null);
+    if (value) |present| hashNumber(hash, present);
 }
 
 fn hashOptionalField(hash: *Sha256, value: ?[]const u8) void {
@@ -1755,4 +2091,38 @@ test "canonical attestation orders its collections and leaks nothing on failure"
         error.OutOfMemory,
         canonicalAttestation(failing.allocator(), attestation),
     );
+}
+
+// spec: system-review - a contract declaring no status, brief or goal hashes exactly as it did before those forms existed, so adopting them re-attests only the systems that use them
+test "the brief layer enters the canonical digest only where a contract declares it" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const bare: SystemSpec = .{
+        .schema = schema_v1,
+        .name = "demo",
+        .title = "Demo",
+        .part_number = "SYS-1",
+        .revision = "A",
+        .boards = &.{.{ .name = "one", .role = "main", .source = "src/one.sexp", .part_number = "ONE", .revision = "A" }},
+    };
+    var explicit = bare;
+    explicit.status = .design;
+    try std.testing.expectEqualStrings(
+        &try canonicalSpecDigest(allocator, bare),
+        &try canonicalSpecDigest(allocator, explicit),
+    );
+
+    // Declaring any of the three changes what a release means, so all three
+    // fold into the lock together.
+    var concept = bare;
+    concept.status = .concept;
+    var briefed = bare;
+    briefed.brief = .{ .purpose = "a stated envelope" };
+    var goal_bearing = bare;
+    goal_bearing.goals = &.{.{ .id = "max-ambient", .unit = "C", .min = 60, .verify_by = .thermal }};
+    const base = try canonicalSpecDigest(allocator, bare);
+    for ([_]SystemSpec{ concept, briefed, goal_bearing }) |changed| {
+        try std.testing.expect(!std.mem.eql(u8, &base, &try canonicalSpecDigest(allocator, changed)));
+    }
 }

@@ -258,6 +258,7 @@ candidate for deployment.
 - The library-fact envelope rules remain claimed by the shard manifest
 - The saved-pose identity tests remain claimed by the shard manifest
 - Panelization export tests remain claimed by the shard manifest
+- The system brief and goal evaluations remain claimed by the shard manifest
 - The anonymous-wiring tests remain claimed by exactly one shard
 - Bridges every test-bearing module into the shard import graph so filters alone decide a shard's contents
 - Rejects a shard filter that no longer names a test in the tree
@@ -6428,6 +6429,16 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - a system.sexp beside a system.json is the contract the readiness gate reads, and the shadowed JSON is reported rather than silently ignored
 - manifest discovery answers with the contract source when a workspace has one and the JSON manifest otherwise, and a workspace with neither is absent rather than empty
 - a contract source's (attestation …) is replaced, appended or dropped at its byte span, leaving every other byte, comment and blank line as authored
+- a (system …) source parses (status …), a (brief …) and (goal …) rows into the same strict v1 spec the JSON manifest carries, and prints them back unchanged
+- only a (status concept) system may declare zero boards; every other status keeps the at-least-one-board rule
+- an engine goal is evaluated from the boards' own reports and reads not-declared when no board gave that engine an input
+- a measurement goal stays manual until its acceptance record closes it against the goal's own bounds
+- a frequency-plan goal reads the declaration's own output band or LO drive, selected by the unit its bounds are written in
+- readiness carries the system status, the brief echoed in the manifest's own spelling, and one goal row per declared target, and only a failing goal blocks
+- the generated brief and goals sections render the declared envelope and every goal's verdict, and say so plainly when the system declares neither
+- the system workspace page renders the brief panel and the goals table above its document list
+- the brief governing a board is the first system by name that declares it, and a board no system declares has none
+- a contract declaring no status, brief or goal hashes exactly as it did before those forms existed, so adopting them re-attests only the systems that use them
 - an identity-only parse drops an (auto) interface it has no evaluator for instead of refusing the contract, so a listing surface never pays a board evaluation per workspace
 - approving a workspace whose contract is a (system …) source and approving the JSON manifest it converts from leave the identical spec, so an attestation does not depend on which manifest spelling a workspace keeps
 - a contract source whose stored attestation no longer parses still loads as the authored contract, and one whose contract itself is broken is refused with its diagnostic

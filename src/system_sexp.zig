@@ -64,6 +64,13 @@ pub const accepted_forms = [_][]const u8{
     "document",       "classification", "status",      "required",
     "include-in-fab", "generated",      "attestation", "system-lock",
     "attested-by",    "attested-at",    "input",       "checklist",
+    "brief",          "purpose",        "environment", "ambient",
+    "cooling",        "altitude",       "ingress",     "input-power",
+    "voltage",        "transient",      "current-max", "temperature-grade",
+    "derating",       "ipc-class",      "compliance",  "esd",
+    "emc",            "safety",         "connector",   "impedance",
+    "power-max",      "protocol",       "goal",        "unit",
+    "min",            "max",            "verify-by",   "measured",
 };
 
 /// One connector contact as the evaluated board reports it. `net` is empty
@@ -217,7 +224,9 @@ fn parseSystem(
     var boards: std.ArrayList(system_review.BoardMember) = .empty;
     var interfaces: std.ArrayList(InterfaceDraft) = .empty;
     var documents: std.ArrayList(system_review.DocumentSpec) = .empty;
+    var goals: std.ArrayList(system_review.GoalSpec) = .empty;
     var seen_attestation = false;
+    var seen_status = false;
 
     for (children[2..]) |child| {
         const head = formHead(child) orelse
@@ -234,6 +243,19 @@ fn parseSystem(
             try interfaces.append(allocator, try parseInterface(allocator, child, diagnostic));
         } else if (std.mem.eql(u8, head, "document")) {
             try documents.append(allocator, try parseDocument(allocator, child, diagnostic));
+        } else if (std.mem.eql(u8, head, "status")) {
+            if (seen_status)
+                return fail(diagnostic, .duplicate_sexp_field, "system", "a system declares (status …) once", spec.name);
+            seen_status = true;
+            const token = try requiredArgToken(allocator, child, "status", diagnostic);
+            spec.status = std.meta.stringToEnum(system_review.SystemStatus, token) orelse
+                return fail(diagnostic, .invalid_sexp_value, "system.status", "status is concept, design, review or released", token);
+        } else if (std.mem.eql(u8, head, "brief")) {
+            if (spec.brief != null)
+                return fail(diagnostic, .duplicate_sexp_field, "system", "a system declares at most one (brief …)", spec.name);
+            spec.brief = try parseBrief(allocator, child, diagnostic);
+        } else if (std.mem.eql(u8, head, "goal")) {
+            try goals.append(allocator, try parseGoal(allocator, child, diagnostic));
         } else if (std.mem.eql(u8, head, "attestation")) {
             if (seen_attestation)
                 return fail(diagnostic, .duplicate_sexp_field, "system", "a system declares at most one (attestation …)", "");
@@ -250,6 +272,7 @@ fn parseSystem(
 
     spec.boards = boards.items;
     spec.documents = documents.items;
+    spec.goals = goals.items;
     spec.interfaces = try resolveInterfaces(allocator, interfaces.items, options, diagnostic);
     return spec;
 }
@@ -298,6 +321,286 @@ fn parseBoard(
     if (board.revision.len == 0) return fail(diagnostic, .missing_sexp_field, "board", "a board declares (revision \"…\")", board.name);
     if (layout.len > 0) board.layout = layout;
     return board;
+}
+
+// ── `(brief …)` and `(goal …)` ───────────────────────────────────────
+
+fn parseBrief(
+    allocator: std.mem.Allocator,
+    node: Node,
+    diagnostic: *Diagnostic,
+) ParseError!system_review.Brief {
+    var brief: system_review.Brief = .{};
+    var interfaces: std.ArrayList(system_review.BriefInterface) = .empty;
+    for (node.asList().?[1..]) |child| {
+        const head = formHead(child) orelse
+            return fail(diagnostic, .unknown_sexp_form, "brief", "every (brief …) child is a parenthesised form", "");
+        if (std.mem.eql(u8, head, "purpose")) {
+            try setOnce(&brief.purpose, try requiredArgString(allocator, child, "purpose", diagnostic), "purpose", diagnostic);
+        } else if (std.mem.eql(u8, head, "environment")) {
+            if (brief.environment != null)
+                return fail(diagnostic, .duplicate_sexp_field, "brief", "a brief declares (environment …) once", "");
+            brief.environment = try parseEnvironment(allocator, child, diagnostic);
+        } else if (std.mem.eql(u8, head, "input-power")) {
+            if (brief.input_power != null)
+                return fail(diagnostic, .duplicate_sexp_field, "brief", "a brief declares (input-power …) once", "");
+            brief.input_power = try parseInputPower(allocator, child, diagnostic);
+        } else if (std.mem.eql(u8, head, "temperature-grade")) {
+            if (brief.temperature_grade != null)
+                return fail(diagnostic, .duplicate_sexp_field, "brief", "a brief declares (temperature-grade …) once", "");
+            const token = try requiredArgToken(allocator, child, "temperature-grade", diagnostic);
+            brief.temperature_grade = std.meta.stringToEnum(system_review.TemperatureGrade, token) orelse
+                return fail(diagnostic, .invalid_sexp_value, "brief.temperature-grade", "grade is commercial, industrial, extended or automotive", token);
+        } else if (std.mem.eql(u8, head, "derating")) {
+            if (brief.derating != null)
+                return fail(diagnostic, .duplicate_sexp_field, "brief", "a brief declares (derating …) once", "");
+            brief.derating = try requiredArgString(allocator, child, "derating", diagnostic);
+        } else if (std.mem.eql(u8, head, "ipc-class")) {
+            if (brief.ipc_class != null)
+                return fail(diagnostic, .duplicate_sexp_field, "brief", "a brief declares (ipc-class …) once", "");
+            const class = try requiredArgCountNamed(child, "ipc-class", diagnostic);
+            if (class < 1 or class > 3)
+                return fail(diagnostic, .invalid_sexp_value, "brief.ipc-class", "IPC class is 1, 2 or 3", "");
+            brief.ipc_class = std.math.cast(u8, class) orelse
+                return fail(diagnostic, .invalid_sexp_value, "brief.ipc-class", "IPC class is 1, 2 or 3", "");
+        } else if (std.mem.eql(u8, head, "compliance")) {
+            try parseCompliance(allocator, child, &brief.compliance, diagnostic);
+        } else if (std.mem.eql(u8, head, "interface")) {
+            try interfaces.append(allocator, try parseBriefInterface(allocator, child, diagnostic));
+        } else {
+            return fail(diagnostic, .unknown_sexp_form, "brief", "unknown (brief …) child form", head);
+        }
+    }
+    brief.interfaces = interfaces.items;
+    return brief;
+}
+
+fn parseEnvironment(
+    allocator: std.mem.Allocator,
+    node: Node,
+    diagnostic: *Diagnostic,
+) ParseError!system_review.Environment {
+    var environment: system_review.Environment = .{ .ambient_min_c = 0, .ambient_max_c = 0 };
+    var seen_ambient = false;
+    for (node.asList().?[1..]) |child| {
+        const head = formHead(child) orelse
+            return fail(diagnostic, .unknown_sexp_form, "brief.environment", "every (environment …) child is a parenthesised form", "");
+        const args = child.asList().?;
+        if (std.mem.eql(u8, head, "ambient")) {
+            if (seen_ambient)
+                return fail(diagnostic, .duplicate_sexp_field, "brief.environment", "an environment declares (ambient …) once", "");
+            seen_ambient = true;
+            if (args.len != 3)
+                return fail(diagnostic, .invalid_sexp_value, "brief.environment.ambient", "(ambient MIN MAX) names both edges in degrees C", "");
+            environment.ambient_min_c = try numberValue(args[1], "brief.environment.ambient", diagnostic);
+            environment.ambient_max_c = try numberValue(args[2], "brief.environment.ambient", diagnostic);
+        } else if (std.mem.eql(u8, head, "cooling")) {
+            if (environment.cooling != null)
+                return fail(diagnostic, .duplicate_sexp_field, "brief.environment", "an environment declares (cooling …) once", "");
+            const token = try requiredArgToken(allocator, child, "cooling", diagnostic);
+            environment.cooling = std.meta.stringToEnum(system_review.Cooling, token) orelse
+                return fail(diagnostic, .invalid_sexp_value, "brief.environment.cooling", "unsupported cooling case", token);
+        } else if (std.mem.eql(u8, head, "altitude")) {
+            if (environment.altitude_m != null)
+                return fail(diagnostic, .duplicate_sexp_field, "brief.environment", "an environment declares (altitude …) once", "");
+            environment.altitude_m = try requiredArgNumber(child, "brief.environment.altitude", diagnostic);
+        } else if (std.mem.eql(u8, head, "ingress")) {
+            if (environment.ingress != null)
+                return fail(diagnostic, .duplicate_sexp_field, "brief.environment", "an environment declares (ingress …) once", "");
+            const rating = try requiredArgCountNamed(child, "ingress", diagnostic);
+            if (rating > 99)
+                return fail(diagnostic, .invalid_sexp_value, "brief.environment.ingress", "an IP rating is its two digits, for example 65", "");
+            environment.ingress = std.math.cast(u16, rating) orelse
+                return fail(diagnostic, .invalid_sexp_value, "brief.environment.ingress", "an IP rating is its two digits, for example 65", "");
+        } else {
+            return fail(diagnostic, .unknown_sexp_form, "brief.environment", "unknown (environment …) child form", head);
+        }
+    }
+    if (!seen_ambient)
+        return fail(diagnostic, .missing_sexp_field, "brief.environment", "an environment declares (ambient MIN MAX)", "");
+    return environment;
+}
+
+fn parseInputPower(
+    allocator: std.mem.Allocator,
+    node: Node,
+    diagnostic: *Diagnostic,
+) ParseError!system_review.InputPower {
+    var power: system_review.InputPower = .{ .source = "", .voltage_min_v = 0, .voltage_max_v = 0 };
+    var seen_voltage = false;
+    for (node.asList().?[1..]) |child| {
+        const head = formHead(child) orelse
+            return fail(diagnostic, .unknown_sexp_form, "brief.input-power", "every (input-power …) child is a parenthesised form", "");
+        if (std.mem.eql(u8, head, "source")) {
+            try setOnce(&power.source, try requiredArgString(allocator, child, "source", diagnostic), "source", diagnostic);
+        } else if (std.mem.eql(u8, head, "voltage")) {
+            if (seen_voltage)
+                return fail(diagnostic, .duplicate_sexp_field, "brief.input-power", "input power declares (voltage …) once", "");
+            seen_voltage = true;
+            const args = child.asList().?;
+            if (args.len != 3)
+                return fail(diagnostic, .invalid_sexp_value, "brief.input-power.voltage", "(voltage LO HI) names both edges in volts", "");
+            power.voltage_min_v = try numberValue(args[1], "brief.input-power.voltage", diagnostic);
+            power.voltage_max_v = try numberValue(args[2], "brief.input-power.voltage", diagnostic);
+        } else if (std.mem.eql(u8, head, "transient")) {
+            if (power.transient_v != null)
+                return fail(diagnostic, .duplicate_sexp_field, "brief.input-power", "input power declares (transient …) once", "");
+            power.transient_v = try requiredArgNumber(child, "brief.input-power.transient", diagnostic);
+        } else if (std.mem.eql(u8, head, "current-max")) {
+            if (power.current_max_a != null)
+                return fail(diagnostic, .duplicate_sexp_field, "brief.input-power", "input power declares (current-max …) once", "");
+            power.current_max_a = try requiredArgNumber(child, "brief.input-power.current-max", diagnostic);
+        } else {
+            return fail(diagnostic, .unknown_sexp_form, "brief.input-power", "unknown (input-power …) child form", head);
+        }
+    }
+    if (power.source.len == 0)
+        return fail(diagnostic, .missing_sexp_field, "brief.input-power", "input power declares (source \"…\")", "");
+    if (!seen_voltage)
+        return fail(diagnostic, .missing_sexp_field, "brief.input-power", "input power declares (voltage LO HI)", "");
+    return power;
+}
+
+fn parseCompliance(
+    allocator: std.mem.Allocator,
+    node: Node,
+    compliance: *system_review.Compliance,
+    diagnostic: *Diagnostic,
+) ParseError!void {
+    for (node.asList().?[1..]) |child| {
+        const head = formHead(child) orelse
+            return fail(diagnostic, .unknown_sexp_form, "brief.compliance", "every (compliance …) child is a parenthesised form", "");
+        const slot: *?[]const u8 = if (std.mem.eql(u8, head, "esd"))
+            &compliance.esd
+        else if (std.mem.eql(u8, head, "emc"))
+            &compliance.emc
+        else if (std.mem.eql(u8, head, "safety"))
+            &compliance.safety
+        else
+            return fail(diagnostic, .unknown_sexp_form, "brief.compliance", "unknown (compliance …) child form", head);
+        if (slot.* != null)
+            return fail(diagnostic, .duplicate_sexp_field, "brief.compliance", "each compliance regime is declared once", head);
+        slot.* = try requiredArgString(allocator, child, "compliance", diagnostic);
+    }
+}
+
+fn parseBriefInterface(
+    allocator: std.mem.Allocator,
+    node: Node,
+    diagnostic: *Diagnostic,
+) ParseError!system_review.BriefInterface {
+    const children = node.asList().?;
+    var entry: system_review.BriefInterface = .{
+        .name = try requiredHeadString(allocator, children, "interface", diagnostic),
+    };
+    for (children[2..]) |child| {
+        const head = formHead(child) orelse
+            return fail(diagnostic, .unknown_sexp_form, "brief.interface", "every (interface …) child is a parenthesised form", entry.name);
+        if (std.mem.eql(u8, head, "connector")) {
+            if (entry.connector != null)
+                return fail(diagnostic, .duplicate_sexp_field, "brief.interface", "a brief interface declares (connector …) once", entry.name);
+            entry.connector = try requiredArgToken(allocator, child, "connector", diagnostic);
+        } else if (std.mem.eql(u8, head, "impedance")) {
+            if (entry.impedance_ohm != null)
+                return fail(diagnostic, .duplicate_sexp_field, "brief.interface", "a brief interface declares (impedance …) once", entry.name);
+            entry.impedance_ohm = try requiredArgNumber(child, "brief.interface.impedance", diagnostic);
+        } else if (std.mem.eql(u8, head, "power-max")) {
+            if (entry.power_max_dbm != null)
+                return fail(diagnostic, .duplicate_sexp_field, "brief.interface", "a brief interface declares (power-max …) once", entry.name);
+            entry.power_max_dbm = try requiredArgNumber(child, "brief.interface.power-max", diagnostic);
+        } else if (std.mem.eql(u8, head, "protocol")) {
+            if (entry.protocol != null)
+                return fail(diagnostic, .duplicate_sexp_field, "brief.interface", "a brief interface declares (protocol …) once", entry.name);
+            entry.protocol = try requiredArgString(allocator, child, "protocol", diagnostic);
+        } else {
+            return fail(diagnostic, .unknown_sexp_form, "brief.interface", "unknown brief (interface …) child form", head);
+        }
+    }
+    return entry;
+}
+
+fn parseGoal(
+    allocator: std.mem.Allocator,
+    node: Node,
+    diagnostic: *Diagnostic,
+) ParseError!system_review.GoalSpec {
+    const children = node.asList().?;
+    var goal: system_review.GoalSpec = .{
+        .id = try requiredHeadString(allocator, children, "goal", diagnostic),
+        .unit = "",
+        .verify_by = .measurement,
+    };
+    var seen_verify = false;
+    for (children[2..]) |child| {
+        const head = formHead(child) orelse
+            return fail(diagnostic, .unknown_sexp_form, "goal", "every (goal …) child is a parenthesised form", goal.id);
+        if (std.mem.eql(u8, head, "title")) {
+            try setOnce(&goal.title, try requiredArgString(allocator, child, "title", diagnostic), "title", diagnostic);
+        } else if (std.mem.eql(u8, head, "unit")) {
+            try setOnce(&goal.unit, try requiredArgToken(allocator, child, "unit", diagnostic), "unit", diagnostic);
+        } else if (std.mem.eql(u8, head, "min")) {
+            if (goal.min != null)
+                return fail(diagnostic, .duplicate_sexp_field, "goal", "a goal declares (min …) once", goal.id);
+            goal.min = try requiredArgNumber(child, "goal.min", diagnostic);
+        } else if (std.mem.eql(u8, head, "max")) {
+            if (goal.max != null)
+                return fail(diagnostic, .duplicate_sexp_field, "goal", "a goal declares (max …) once", goal.id);
+            goal.max = try requiredArgNumber(child, "goal.max", diagnostic);
+        } else if (std.mem.eql(u8, head, "verify-by")) {
+            if (seen_verify)
+                return fail(diagnostic, .duplicate_sexp_field, "goal", "a goal declares (verify-by …) once", goal.id);
+            seen_verify = true;
+            try parseVerifyBy(allocator, child, &goal, diagnostic);
+        } else if (std.mem.eql(u8, head, "measured")) {
+            if (goal.measured != null)
+                return fail(diagnostic, .duplicate_sexp_field, "goal", "a goal declares (measured …) once", goal.id);
+            goal.measured = try parseMeasured(allocator, child, goal.id, diagnostic);
+        } else {
+            return fail(diagnostic, .unknown_sexp_form, "goal", "unknown (goal …) child form", head);
+        }
+    }
+    if (goal.unit.len == 0)
+        return fail(diagnostic, .missing_sexp_field, "goal", "a goal declares (unit …)", goal.id);
+    if (!seen_verify)
+        return fail(diagnostic, .missing_sexp_field, "goal", "a goal declares (verify-by …)", goal.id);
+    return goal;
+}
+
+/// `(verify-by ENGINE)` names an engine; `(verify-by measurement "ref")` names
+/// the bring-up step instead, and only that spelling carries a reference.
+fn parseVerifyBy(
+    allocator: std.mem.Allocator,
+    node: Node,
+    goal: *system_review.GoalSpec,
+    diagnostic: *Diagnostic,
+) ParseError!void {
+    const args = node.asList().?;
+    if (args.len < 2 or args.len > 3)
+        return fail(diagnostic, .invalid_sexp_value, "goal.verify-by", "(verify-by ENGINE) or (verify-by measurement \"reference\")", goal.id);
+    const token = try tokenText(allocator, args[1], "verify-by", diagnostic);
+    goal.verify_by = std.meta.stringToEnum(system_review.VerifyBy, token) orelse
+        return fail(diagnostic, .invalid_sexp_value, "goal.verify-by", "verify-by names frequency-plan, thermal, power-budget, pll-loop, spur-table or measurement", token);
+    if (args.len == 2) return;
+    if (goal.verify_by != .measurement)
+        return fail(diagnostic, .invalid_sexp_value, "goal.verify-by", "only (verify-by measurement \"reference\") carries a reference", token);
+    goal.reference = try decodeString(allocator, args[2].asString() orelse
+        return fail(diagnostic, .invalid_sexp_value, "goal.verify-by", "a measurement reference is a quoted string", goal.id));
+}
+
+fn parseMeasured(
+    allocator: std.mem.Allocator,
+    node: Node,
+    id: []const u8,
+    diagnostic: *Diagnostic,
+) ParseError!system_review.GoalMeasurement {
+    const args = node.asList().?;
+    if (args.len != 3)
+        return fail(diagnostic, .invalid_sexp_value, "goal.measured", "(measured VALUE \"evidence\")", id);
+    return .{
+        .value = try numberValue(args[1], "goal.measured", diagnostic),
+        .evidence = try decodeString(allocator, args[2].asString() orelse
+            return fail(diagnostic, .invalid_sexp_value, "goal.measured", "a measurement's evidence is a quoted string", id)),
+    };
 }
 
 /// One authored `(signal …)` before `(auto)` derivation fills in whatever it
@@ -767,6 +1070,9 @@ pub fn write(
     try writeField(writer, "title", spec.title);
     try writeField(writer, "part-number", spec.part_number);
     try writeField(writer, "revision", spec.revision);
+    try writer.print("  (status {s})\n", .{@tagName(spec.status)});
+    if (spec.brief) |brief| try writeBrief(writer, brief);
+    for (spec.goals) |goal| try writeGoal(writer, goal);
     for (spec.boards) |board| try writeBoard(writer, board);
     for (spec.interfaces) |interface| try writeInterface(allocator, writer, interface);
     for (spec.documents) |document| try writeDocument(writer, document);
@@ -777,6 +1083,108 @@ pub fn write(
 fn writeField(writer: *std.Io.Writer, name: []const u8, value: []const u8) WriteError!void {
     try writer.print("  ({s} ", .{name});
     try writeQuoted(writer, value);
+    try writer.writeAll(")\n");
+}
+
+/// Print the `(brief …)` form. Optional clauses are printed only when the
+/// brief carries them, so a converted manifest states exactly what it declares
+/// and re-parses to the same record.
+fn writeBrief(writer: *std.Io.Writer, brief: system_review.Brief) WriteError!void {
+    try writer.writeAll("\n  (brief\n");
+    if (brief.purpose.len > 0) {
+        try writer.writeAll("    (purpose ");
+        try writeQuoted(writer, brief.purpose);
+        try writer.writeAll(")\n");
+    }
+    if (brief.environment) |environment| try writeBriefEnvironment(writer, environment);
+    if (brief.input_power) |power| try writeBriefInputPower(writer, power);
+    if (brief.temperature_grade) |grade| try writer.print("    (temperature-grade {s})\n", .{@tagName(grade)});
+    if (brief.derating) |derating| try writeIndented(writer, "derating", derating);
+    if (brief.ipc_class) |class| try writer.print("    (ipc-class {d})\n", .{class});
+    try writeBriefCompliance(writer, brief.compliance);
+    for (brief.interfaces) |entry| try writeBriefInterface(writer, entry);
+    try writer.writeAll("    )\n");
+}
+
+fn writeBriefEnvironment(writer: *std.Io.Writer, environment: system_review.Environment) WriteError!void {
+    try writer.print("    (environment (ambient {d} {d})", .{ environment.ambient_min_c, environment.ambient_max_c });
+    if (environment.cooling) |cooling| try writer.print(" (cooling {s})", .{@tagName(cooling)});
+    if (environment.altitude_m) |altitude| try writer.print(" (altitude {d})", .{altitude});
+    if (environment.ingress) |ingress| try writer.print(" (ingress {d})", .{ingress});
+    try writer.writeAll(")\n");
+}
+
+fn writeBriefInputPower(writer: *std.Io.Writer, power: system_review.InputPower) WriteError!void {
+    try writer.writeAll("    (input-power (source ");
+    try writeQuoted(writer, power.source);
+    try writer.print(") (voltage {d} {d})", .{ power.voltage_min_v, power.voltage_max_v });
+    if (power.transient_v) |transient| try writer.print(" (transient {d})", .{transient});
+    if (power.current_max_a) |current| try writer.print(" (current-max {d})", .{current});
+    try writer.writeAll(")\n");
+}
+
+fn writeBriefCompliance(writer: *std.Io.Writer, compliance: system_review.Compliance) WriteError!void {
+    if (compliance.esd == null and compliance.emc == null and compliance.safety == null) return;
+    try writer.writeAll("    (compliance");
+    const regimes = [_]struct { name: []const u8, value: ?[]const u8 }{
+        .{ .name = "esd", .value = compliance.esd },
+        .{ .name = "emc", .value = compliance.emc },
+        .{ .name = "safety", .value = compliance.safety },
+    };
+    for (regimes) |regime| {
+        const value = regime.value orelse continue;
+        try writer.print(" ({s} ", .{regime.name});
+        try writeQuoted(writer, value);
+        try writer.writeByte(')');
+    }
+    try writer.writeAll(")\n");
+}
+
+fn writeBriefInterface(writer: *std.Io.Writer, entry: system_review.BriefInterface) WriteError!void {
+    try writer.writeAll("    (interface ");
+    try writeQuoted(writer, entry.name);
+    if (entry.connector) |connector| {
+        try writer.writeAll(" (connector ");
+        try writeQuoted(writer, connector);
+        try writer.writeByte(')');
+    }
+    if (entry.impedance_ohm) |impedance| try writer.print(" (impedance {d})", .{impedance});
+    if (entry.power_max_dbm) |power| try writer.print(" (power-max {d})", .{power});
+    if (entry.protocol) |protocol| {
+        try writer.writeAll(" (protocol ");
+        try writeQuoted(writer, protocol);
+        try writer.writeByte(')');
+    }
+    try writer.writeAll(")\n");
+}
+
+/// Print one `(goal …)` row. The unit is quoted rather than bare because a
+/// unit may carry characters (`%`, `dBc/Hz`) the tokenizer would not read back
+/// as one atom; the parser accepts either spelling.
+fn writeGoal(writer: *std.Io.Writer, goal: system_review.GoalSpec) WriteError!void {
+    try writer.writeAll("\n  (goal ");
+    try writeQuoted(writer, goal.id);
+    if (goal.title.len > 0) {
+        try writer.writeAll(" (title ");
+        try writeQuoted(writer, goal.title);
+        try writer.writeByte(')');
+    }
+    try writer.writeAll(" (unit ");
+    try writeQuoted(writer, goal.unit);
+    try writer.writeByte(')');
+    if (goal.min) |min| try writer.print(" (min {d})", .{min});
+    if (goal.max) |max| try writer.print(" (max {d})", .{max});
+    try writer.print(" (verify-by {s}", .{@tagName(goal.verify_by)});
+    if (goal.reference) |reference| {
+        try writer.writeByte(' ');
+        try writeQuoted(writer, reference);
+    }
+    try writer.writeByte(')');
+    if (goal.measured) |measured| {
+        try writer.print(" (measured {d} ", .{measured.value});
+        try writeQuoted(writer, measured.evidence);
+        try writer.writeByte(')');
+    }
     try writer.writeAll(")\n");
 }
 
@@ -1026,6 +1434,28 @@ fn countValue(node: Node, diagnostic: *Diagnostic) ParseError!usize {
         else
             fail(diagnostic, .invalid_sexp_value, "count", "expected a non-negative integer", ""),
         else => fail(diagnostic, .invalid_sexp_value, "count", "expected a non-negative integer", ""),
+    };
+}
+
+fn requiredArgNumber(node: Node, field: []const u8, diagnostic: *Diagnostic) ParseError!f64 {
+    const children = node.asList().?;
+    if (children.len != 2)
+        return fail(diagnostic, .invalid_sexp_value, field, "this form takes exactly one number", field);
+    return numberValue(children[1], field, diagnostic);
+}
+
+fn requiredArgCountNamed(node: Node, field: []const u8, diagnostic: *Diagnostic) ParseError!usize {
+    const children = node.asList().?;
+    if (children.len != 2)
+        return fail(diagnostic, .invalid_sexp_value, field, "this form takes exactly one non-negative integer", field);
+    return countValue(children[1], diagnostic);
+}
+
+fn numberValue(node: Node, field: []const u8, diagnostic: *Diagnostic) ParseError!f64 {
+    return switch (node.tag) {
+        .int => |value| @floatFromInt(value),
+        .float, .unit_val => |value| value,
+        else => fail(diagnostic, .invalid_sexp_value, field, "expected a number", field),
     };
 }
 
@@ -1811,4 +2241,114 @@ test "an identity-only parse omits the interfaces it cannot derive" {
     try testing.expectEqual(@as(usize, 2), spec.boards.len);
     try testing.expectEqual(@as(usize, 1), spec.documents.len);
     try testing.expectEqual(@as(usize, 0), spec.interfaces.len);
+}
+
+const brief_source =
+    \\(system "brief-system"
+    \\  (title "Brief System")
+    \\  (part-number "BRIEF-001")
+    \\  (revision "A1")
+    \\  (status review)
+    \\  (brief
+    \\    (purpose "Swept X-band source with a 50-1500 MHz IF output")
+    \\    (environment (ambient -10 60) (cooling sealed-conduction) (altitude 2000) (ingress 40))
+    \\    (input-power (source "12 V barrel") (voltage 11.4 12.6) (transient 15) (current-max 1.2))
+    \\    (temperature-grade industrial)
+    \\    (derating "NASA EEE-INST-002")
+    \\    (ipc-class 2)
+    \\    (compliance (esd "IEC 61000-4-2, 8 kV contact"))
+    \\    (interface "OUT1" (connector sma) (impedance 50) (power-max 10)))
+    \\  (goal "if-band" (title "IF output band") (unit MHz) (min 50) (max 1500) (verify-by frequency-plan))
+    \\  (goal "max-ambient" (unit C) (min 60) (verify-by thermal))
+    \\  (goal "phase-noise-10k" (unit "dBc/Hz") (max -95) (verify-by measurement "bring-up 4.3")
+    \\    (measured -97.2 "bring-up 4.3, 2026-09-04"))
+    \\  (board "rf"
+    \\    (role rf)
+    \\    (source "src/rf.sexp")
+    \\    (part-number "SYS-RF")
+    \\    (revision "A1"))
+    \\  (document "release-checklist"
+    \\    (title "Release checklist")
+    \\    (path "src/systems/brief-system/release-checklist.md")
+    \\    (classification checklist)))
+;
+
+// spec: system-review - a (system …) source parses (status …), a (brief …) and (goal …) rows into the same strict v1 spec the JSON manifest carries, and prints them back unchanged
+test "a contract source carries its status, brief and goals through a round trip" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var diagnostic: Diagnostic = .{};
+    const spec = try parse(allocator, brief_source, null, &diagnostic);
+    try system_review.validateSystemSpec(allocator, spec, &diagnostic);
+
+    try testing.expectEqual(system_review.SystemStatus.review, spec.status);
+    const brief = spec.brief.?;
+    try testing.expectEqualStrings("Swept X-band source with a 50-1500 MHz IF output", brief.purpose);
+    try testing.expectEqual(@as(f64, -10), brief.environment.?.ambient_min_c);
+    try testing.expectEqual(@as(f64, 60), brief.environment.?.ambient_max_c);
+    try testing.expectEqual(system_review.Cooling.@"sealed-conduction", brief.environment.?.cooling.?);
+    try testing.expectEqual(@as(u16, 40), brief.environment.?.ingress.?);
+    try testing.expectEqualStrings("12 V barrel", brief.input_power.?.source);
+    try testing.expectEqual(@as(f64, 12.6), brief.input_power.?.voltage_max_v);
+    try testing.expectEqual(@as(f64, 15), brief.input_power.?.transient_v.?);
+    try testing.expectEqual(system_review.TemperatureGrade.industrial, brief.temperature_grade.?);
+    try testing.expectEqual(@as(u8, 2), brief.ipc_class.?);
+    try testing.expectEqualStrings("IEC 61000-4-2, 8 kV contact", brief.compliance.esd.?);
+    try testing.expectEqualStrings("OUT1", brief.interfaces[0].name);
+    try testing.expectEqual(@as(f64, 50), brief.interfaces[0].impedance_ohm.?);
+
+    try testing.expectEqual(@as(usize, 3), spec.goals.len);
+    try testing.expectEqualStrings("IF output band", spec.goals[0].title);
+    try testing.expectEqual(system_review.VerifyBy.@"frequency-plan", spec.goals[0].verify_by);
+    try testing.expectEqual(@as(f64, 1500), spec.goals[0].max.?);
+    try testing.expectEqual(system_review.VerifyBy.thermal, spec.goals[1].verify_by);
+    try testing.expect(spec.goals[1].max == null);
+    try testing.expectEqualStrings("bring-up 4.3", spec.goals[2].reference.?);
+    try testing.expectEqual(@as(f64, -97.2), spec.goals[2].measured.?.value);
+
+    // Printing and re-parsing yields the identical canonical spec, so the
+    // converter stays a migration rather than a rewrite.
+    var printed: std.Io.Writer.Allocating = .init(allocator);
+    try write(allocator, &printed.writer, spec);
+    const again = try parse(allocator, printed.written(), null, &diagnostic);
+    try system_review.validateSystemSpec(allocator, again, &diagnostic);
+    const before = try system_review.canonicalSpecDigest(allocator, spec);
+    const after = try system_review.canonicalSpecDigest(allocator, again);
+    try testing.expectEqualStrings(&before, &after);
+
+    // A brief clause the grammar does not know is named rather than ignored.
+    const unknown = try std.fmt.allocPrint(allocator, "{s}", .{
+        "(system \"x\" (title \"X\") (part-number \"P\") (revision \"A\") (status concept) (brief (humidity 95)))",
+    });
+    try testing.expectError(error.InvalidSystemSexp, parse(allocator, unknown, null, &diagnostic));
+    try testing.expectEqual(system_review.DiagnosticCode.unknown_sexp_form, diagnostic.code);
+    try testing.expectEqualStrings("humidity", diagnostic.value);
+}
+
+// spec: system-review - only a (status concept) system may declare zero boards; every other status keeps the at-least-one-board rule
+test "a concept system may declare no boards and every other status may not" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var diagnostic: Diagnostic = .{};
+
+    const concept =
+        \\(system "sketch"
+        \\  (title "Sketch") (part-number "SKETCH-1") (revision "-")
+        \\  (status concept)
+        \\  (brief (purpose "A product that does not exist yet"))
+        \\  (goal "max-ambient" (unit C) (min 55) (verify-by thermal))
+        \\  (document "release-checklist" (title "Release checklist")
+        \\    (path "src/systems/sketch/release-checklist.md") (classification checklist)))
+    ;
+    const boardless = try parse(allocator, concept, null, &diagnostic);
+    try system_review.validateSystemSpec(allocator, boardless, &diagnostic);
+    try testing.expectEqual(@as(usize, 0), boardless.boards.len);
+    try testing.expectEqual(system_review.SystemStatus.concept, boardless.status);
+
+    const designed = try parse(allocator, try std.mem.replaceOwned(u8, allocator, concept, "(status concept)", "(status design)"), null, &diagnostic);
+    try testing.expectError(error.InvalidManifest, system_review.validateSystemSpec(allocator, designed, &diagnostic));
+    try testing.expectEqual(system_review.DiagnosticCode.empty_field, diagnostic.code);
+    try testing.expectEqualStrings("boards", diagnostic.field);
 }

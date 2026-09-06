@@ -1748,7 +1748,7 @@ pub const system_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
     .{
         .name = "title",
         .syntax = "(title \"Board A OC-303-1-01\")",
-        .summary = "Human title of the system, or of the enclosing board or document.",
+        .summary = "Human title of the system, or of the enclosing board, document or goal.",
     },
     .{
         .name = "part-number",
@@ -1759,6 +1759,190 @@ pub const system_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
         .name = "revision",
         .syntax = "(revision \"B3\")",
         .summary = "Revision of the system or board this contract is pinned to.",
+    },
+    .{
+        .name = "status",
+        .syntax = "(status design)",
+        .summary = "At system level the lifecycle: concept, design (default), review or released — a " ++
+            "`concept` system may declare zero boards, every other status declares at least one. Inside " ++
+            "`(document …)`: active (default) or historical, and a historical document never gates a release.",
+    },
+    .{
+        .name = "brief",
+        .syntax = "(brief (purpose …) [(environment …)] [(input-power …)] [(temperature-grade …)] [(derating …)] [(ipc-class N)] [(compliance …)] [(interface …)…])",
+        .summary = "The design brief as data: what the product is for and the envelope it must work in. At " ++
+            "most one per system, and the record `system_brief.briefForBoard` hands to a board's checks.",
+    },
+    .{
+        .name = "purpose",
+        .within = "brief",
+        .syntax = "(purpose \"Swept X-band source with a 50–1500 MHz IF output\")",
+        .summary = "One sentence stating what the product does.",
+    },
+    .{
+        .name = "environment",
+        .within = "brief",
+        .syntax = "(environment (ambient -10 60) [(cooling sealed-conduction)] [(altitude 2000)] [(ingress 40)])",
+        .summary = "The environment the product is specified in. The ambient window is required; the thermal " ++
+            "screen is answerable at its hot edge.",
+    },
+    .{
+        .name = "ambient",
+        .within = "environment",
+        .syntax = "(ambient -10 60)",
+        .summary = "Cold and hot edges of the specified ambient window, in degrees C.",
+    },
+    .{
+        .name = "cooling",
+        .within = "environment",
+        .syntax = "(cooling sealed-conduction)",
+        .summary = "natural, fan, airflow_1ms, airflow_2ms, heatsink or sealed-conduction.",
+    },
+    .{
+        .name = "altitude",
+        .within = "environment",
+        .syntax = "(altitude 2000)",
+        .summary = "Maximum operating altitude in metres.",
+    },
+    .{
+        .name = "ingress",
+        .within = "environment",
+        .syntax = "(ingress 40)",
+        .summary = "IP ingress rating as its two digits.",
+    },
+    .{
+        .name = "input-power",
+        .within = "brief",
+        .syntax = "(input-power (source \"12 V barrel\") (voltage 11.4 12.6) [(transient 15)] [(current-max 1.2)])",
+        .summary = "What feeds the product. Source and voltage window are required; the transient is the " ++
+            "survivable input excursion in volts.",
+    },
+    .{
+        .name = "voltage",
+        .within = "input-power",
+        .syntax = "(voltage 11.4 12.6)",
+        .summary = "Low and high edges of the input voltage window, in volts.",
+    },
+    .{
+        .name = "transient",
+        .within = "input-power",
+        .syntax = "(transient 15)",
+        .summary = "Survivable input transient, in volts.",
+    },
+    .{
+        .name = "current-max",
+        .within = "input-power",
+        .syntax = "(current-max 1.2)",
+        .summary = "Maximum input current the product may draw, in amps.",
+    },
+    .{
+        .name = "temperature-grade",
+        .within = "brief",
+        .syntax = "(temperature-grade industrial)",
+        .summary = "commercial, industrial, extended or automotive — the grade every part must meet.",
+    },
+    .{
+        .name = "derating",
+        .within = "brief",
+        .syntax = "(derating \"NASA EEE-INST-002\")",
+        .summary = "Named derating standard the rating screens work to. Free text: the citation is what a " ++
+            "reviewer reads.",
+    },
+    .{
+        .name = "ipc-class",
+        .within = "brief",
+        .syntax = "(ipc-class 2)",
+        .summary = "IPC-A-610 class, 1 to 3.",
+    },
+    .{
+        .name = "compliance",
+        .within = "brief",
+        .syntax = "(compliance (esd \"IEC 61000-4-2, 8 kV contact\") [(emc …)] [(safety …)])",
+        .summary = "Compliance regimes the product is designed against, each cited as free text.",
+    },
+    .{
+        .name = "esd",
+        .within = "compliance",
+        .syntax = "(esd \"IEC 61000-4-2, 8 kV contact\")",
+        .summary = "The ESD regime and level.",
+    },
+    .{
+        .name = "emc",
+        .within = "compliance",
+        .syntax = "(emc \"EN 55032 class B\")",
+        .summary = "The EMC regime and level.",
+    },
+    .{
+        .name = "safety",
+        .within = "compliance",
+        .syntax = "(safety \"IEC 62368-1\")",
+        .summary = "The safety regime and level.",
+    },
+    .{
+        .name = "connector",
+        .within = "interface",
+        .syntax = "(connector sma)",
+        .summary = "Connector family of a brief interface. Only inside `(brief …)`; a board-to-board " ++
+            "`(interface …)` names its connectors through `(mates …)`.",
+    },
+    .{
+        .name = "impedance",
+        .within = "interface",
+        .syntax = "(impedance 50)",
+        .summary = "Characteristic impedance of a brief interface, in ohms.",
+    },
+    .{
+        .name = "power-max",
+        .within = "interface",
+        .syntax = "(power-max 10)",
+        .summary = "Maximum power presented at a brief interface, in dBm.",
+    },
+    .{
+        .name = "protocol",
+        .within = "interface",
+        .syntax = "(protocol \"1000BASE-T\")",
+        .summary = "What a brief interface speaks.",
+    },
+    .{
+        .name = "goal",
+        .syntax = "(goal \"ID\" [(title …)] (unit U) [(min X)] [(max Y)] (verify-by ENGINE|measurement \"ref\") [(measured V \"evidence\")])",
+        .summary = "One stated target and how it is proven. Engine goals are evaluated from the boards' " ++
+            "reports and reach readiness as pass/fail/unproven/not_declared; a measurement goal stays " ++
+            "manual until `(measured …)` closes it.",
+    },
+    .{
+        .name = "unit",
+        .within = "goal",
+        .syntax = "(unit MHz)",
+        .summary = "The unit the bounds are written in, bare or quoted. It also selects which figure the " ++
+            "engine publishes for this goal — C, %, A, deg, dBm, dBc and the frequency units are the " ++
+            "ones bound today.",
+    },
+    .{
+        .name = "min",
+        .within = "goal",
+        .syntax = "(min 50)",
+        .summary = "Lower bound the engine's figure must meet.",
+    },
+    .{
+        .name = "max",
+        .within = "goal",
+        .syntax = "(max 1500)",
+        .summary = "Upper bound the engine's figure must stay under.",
+    },
+    .{
+        .name = "verify-by",
+        .within = "goal",
+        .syntax = "(verify-by frequency-plan)",
+        .summary = "frequency-plan, thermal, power-budget, pll-loop, spur-table, or " ++
+            "`(verify-by measurement \"bring-up §4.3\")` naming the step that closes it.",
+    },
+    .{
+        .name = "measured",
+        .within = "goal",
+        .syntax = "(measured -97.2 \"bring-up §4.3, 2026-09-04\")",
+        .summary = "The acceptance record that closes a measurement goal: the measured value and where it " ++
+            "is written down.",
     },
     .{
         .name = "board",
@@ -1773,9 +1957,10 @@ pub const system_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
     },
     .{
         .name = "source",
-        .within = "board",
         .syntax = "(source \"src/boards/board-a/board-a.sexp\")",
-        .summary = "Project-relative design source, checked against the path the design resolver selects.",
+        .summary = "Inside `(board …)`: the project-relative design source, checked against the path the " ++
+            "design resolver selects. Inside `(input-power …)`: what supplies the product, in the brief's " ++
+            "own words.",
     },
     .{
         .name = "layout",
@@ -1792,7 +1977,9 @@ pub const system_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
     .{
         .name = "interface",
         .syntax = "(interface \"ID\" (mates …) [(contact-count N)] [(auto)] (signal …)…)",
-        .summary = "One board-to-board connector contract. Checked against both boards' netlists as `interface_mismatch` findings.",
+        .summary = "At system level, one board-to-board connector contract, checked against both boards' " ++
+            "netlists as `interface_mismatch` findings. Inside `(brief …)` it is instead one externally " ++
+            "exposed interface of the product: `(interface \"OUT1\" (connector sma) (impedance 50))`.",
     },
     .{
         .name = "mates",
@@ -1839,12 +2026,6 @@ pub const system_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
         .within = "document",
         .syntax = "(classification review)",
         .summary = "design, review, checklist, bringup, manufacturing or reference.",
-    },
-    .{
-        .name = "status",
-        .within = "document",
-        .syntax = "(status active)",
-        .summary = "active (default) or historical. A historical document never gates a release.",
     },
     .{
         .name = "required",

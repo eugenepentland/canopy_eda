@@ -401,15 +401,44 @@ in their template.
 | Form | Summary |
 | --- | --- |
 | `(system "NAME" (title …) (part-number …) (revision …) (board …)… (interface …)… (document …)…)` | The whole contract, one per file. NAME must match the `src/systems/<name>/` directory. |
-| `(title "Board A OC-303-1-01")` | Human title of the system, or of the enclosing board or document. |
+| `(title "Board A OC-303-1-01")` | Human title of the system, or of the enclosing board, document or goal. |
 | `(part-number "OC-303-1-01")` | Stable assembly identity of the system or board, independent of the human title. |
 | `(revision "B3")` | Revision of the system or board this contract is pinned to. |
+| `(status design)` | At system level the lifecycle: concept, design (default), review or released — a `concept` system may declare zero boards, every other status declares at least one. Inside `(document …)`: active (default) or historical, and a historical document never gates a release. |
+| `(brief (purpose …) [(environment …)] [(input-power …)] [(temperature-grade …)] [(derating …)] [(ipc-class N)] [(compliance …)] [(interface …)…])` | The design brief as data: what the product is for and the envelope it must work in. At most one per system, and the record `system_brief.briefForBoard` hands to a board's checks. |
+| `(purpose "Swept X-band source with a 50–1500 MHz IF output")` | One sentence stating what the product does. |
+| `(environment (ambient -10 60) [(cooling sealed-conduction)] [(altitude 2000)] [(ingress 40)])` | The environment the product is specified in. The ambient window is required; the thermal screen is answerable at its hot edge. |
+| `(ambient -10 60)` | Cold and hot edges of the specified ambient window, in degrees C. |
+| `(cooling sealed-conduction)` | natural, fan, airflow_1ms, airflow_2ms, heatsink or sealed-conduction. |
+| `(altitude 2000)` | Maximum operating altitude in metres. |
+| `(ingress 40)` | IP ingress rating as its two digits. |
+| `(input-power (source "12 V barrel") (voltage 11.4 12.6) [(transient 15)] [(current-max 1.2)])` | What feeds the product. Source and voltage window are required; the transient is the survivable input excursion in volts. |
+| `(voltage 11.4 12.6)` | Low and high edges of the input voltage window, in volts. |
+| `(transient 15)` | Survivable input transient, in volts. |
+| `(current-max 1.2)` | Maximum input current the product may draw, in amps. |
+| `(temperature-grade industrial)` | commercial, industrial, extended or automotive — the grade every part must meet. |
+| `(derating "NASA EEE-INST-002")` | Named derating standard the rating screens work to. Free text: the citation is what a reviewer reads. |
+| `(ipc-class 2)` | IPC-A-610 class, 1 to 3. |
+| `(compliance (esd "IEC 61000-4-2, 8 kV contact") [(emc …)] [(safety …)])` | Compliance regimes the product is designed against, each cited as free text. |
+| `(esd "IEC 61000-4-2, 8 kV contact")` | The ESD regime and level. |
+| `(emc "EN 55032 class B")` | The EMC regime and level. |
+| `(safety "IEC 62368-1")` | The safety regime and level. |
+| `(connector sma)` | Connector family of a brief interface. Only inside `(brief …)`; a board-to-board `(interface …)` names its connectors through `(mates …)`. |
+| `(impedance 50)` | Characteristic impedance of a brief interface, in ohms. |
+| `(power-max 10)` | Maximum power presented at a brief interface, in dBm. |
+| `(protocol "1000BASE-T")` | What a brief interface speaks. |
+| `(goal "ID" [(title …)] (unit U) [(min X)] [(max Y)] (verify-by ENGINE\|measurement "ref") [(measured V "evidence")])` | One stated target and how it is proven. Engine goals are evaluated from the boards' reports and reach readiness as pass/fail/unproven/not_declared; a measurement goal stays manual until `(measured …)` closes it. |
+| `(unit MHz)` | The unit the bounds are written in, bare or quoted. It also selects which figure the engine publishes for this goal — C, %, A, deg, dBm, dBc and the frequency units are the ones bound today. |
+| `(min 50)` | Lower bound the engine's figure must meet. |
+| `(max 1500)` | Upper bound the engine's figure must stay under. |
+| `(verify-by frequency-plan)` | frequency-plan, thermal, power-budget, pll-loop, spur-table, or `(verify-by measurement "bring-up §4.3")` naming the step that closes it. |
+| `(measured -97.2 "bring-up §4.3, 2026-09-04")` | The acceptance record that closes a measurement goal: the measured value and where it is written down. |
 | `(board "NAME" (role rf) (source "src/…") (part-number …) (revision …) [(layout …)] [(dnp …)])` | One board in the product. NAME is the design lookup name; identity and layout must match what the board itself resolves to. |
 | `(role rf)` | Archive identity of this board within the system — unique, and the directory its evidence lands in. |
-| `(source "src/boards/board-a/board-a.sexp")` | Project-relative design source, checked against the path the design resolver selects. |
+| `(source "src/boards/board-a/board-a.sexp")` | Inside `(board …)`: the project-relative design source, checked against the path the design resolver selects. Inside `(input-power …)`: what supplies the product, in the brief's own words. |
 | `(layout "Board A V2")` | Saved layout to release. Defaults to `blessed` — the board's starred default. |
 | `(dnp drop)` | Whether do-not-populate parts are dropped (default) or kept in this board's outputs. |
-| `(interface "ID" (mates …) [(contact-count N)] [(auto)] (signal …)…)` | One board-to-board connector contract. Checked against both boards' netlists as `interface_mismatch` findings. |
+| `(interface "ID" (mates …) [(contact-count N)] [(auto)] (signal …)…)` | At system level, one board-to-board connector contract, checked against both boards' netlists as `interface_mismatch` findings. Inside `(brief …)` it is instead one externally exposed interface of the product: `(interface "OUT1" (connector sma) (impedance 50))`. |
 | `(mates "board-a/J1" "board-a-base/base-interface/J1")` | The two endpoints as `board/CONNECTOR` handles. The connector half may be a sub-block path; the board is the first segment. |
 | `(contact-count 40)` | Physical contact count. Optional, and checked against the records present — declare it to catch a truncated table. |
 | `(auto)` | Derive every contact from the two connectors' pad tables by contact number. Explicit `(signal …)` rows then override single contacts. |
@@ -418,7 +447,6 @@ in their template.
 | `(right 1 "V_12V_RF")` | The same physical contact on the second connector. A net differing from CANONICAL becomes that endpoint's alias. |
 | `(document "ID" (title …) (path "…md") (classification …) [(status …)] [(board …)] [(required …)] [(include-in-fab …)] [(generated …)])` | One authored review document. A system needs at least one active required `checklist`. |
 | `(classification review)` | design, review, checklist, bringup, manufacturing or reference. |
-| `(status active)` | active (default) or historical. A historical document never gates a release. |
 | `(required true)` | Whether the release gate waits on this document. Default true. |
 | `(include-in-fab false)` | Whether the document travels in the fabrication archive. Default true. |
 | `(generated system-summary interface-matrix)` | Generated regions this document carries, each written as `<!-- netlisp:generated ID -->` … `<!-- /netlisp:generated -->`. |

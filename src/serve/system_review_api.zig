@@ -597,6 +597,9 @@ pub const SystemSummary = struct {
     boards: usize,
     documents: usize,
     attested: bool,
+    /// Contract lifecycle, so a concept system reads as one on the home page
+    /// rather than as a design that lost its boards.
+    status: system_review.SystemStatus = .design,
 };
 
 fn lessSystemSummary(_: void, a: SystemSummary, b: SystemSummary) bool {
@@ -654,6 +657,7 @@ fn collectSystemSummariesImpl(
             .boards = spec.boards.len,
             .documents = spec.documents.len,
             .attested = loaded.has_attestation_value and !loaded.recovered_stale_attestation,
+            .status = spec.status,
         });
     }
     std.mem.sort(SystemSummary, summaries.items, {}, lessSystemSummary);
@@ -678,6 +682,8 @@ pub fn listSystemsApi(ctx: *Server, _: *httpz.Request, res: *httpz.Response) Han
         try json_writer.writeString(writer, summary.part_number);
         try writer.writeAll(",\"revision\":");
         try json_writer.writeString(writer, summary.revision);
+        try writer.writeAll(",\"status\":");
+        try json_writer.writeString(writer, @tagName(summary.status));
         try writer.print(",\"boards\":{d},\"documents\":{d},\"attested\":{s}}}", .{
             summary.boards,
             summary.documents,
@@ -1577,6 +1583,16 @@ pub fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
             ".toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;min-height:34px}.toolbar strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" ++
             "#rendered{max-width:850px;margin:auto;color:#dfe6f2}#rendered img{max-width:100%}#rendered table{border-collapse:collapse;width:100%}" ++
             "#rendered td,#rendered th{border:1px solid #39455f;padding:6px}pre{white-space:pre-wrap}.status{padding:10px;border:1px solid #35415b;border-radius:8px;color:#aebbd0}" ++
+            ".panel{border:1px solid #35415b;border-radius:8px;padding:9px 10px;margin-bottom:10px}" ++
+            ".panel h2{font-size:12px;margin:0 0 6px;color:#9eabc2;text-transform:uppercase;letter-spacing:.05em}" ++
+            ".panel dl{display:grid;grid-template-columns:auto 1fr;gap:2px 8px;margin:0;font-size:12px}" ++
+            ".panel dt{color:#9eabc2}.panel dd{margin:0;color:#dfe6f2}.panel .muted{color:#7f8ca4;font-size:12px}" ++
+            ".goal{display:flex;gap:6px;align-items:baseline;font-size:12px;padding:2px 0;border-top:1px solid #202a41}" ++
+            ".goal:first-of-type{border-top:0}.goal .grow{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" ++
+            ".pill{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;border:1px solid #3b4863;border-radius:9px;padding:1px 7px}" ++
+            ".pill.pass{color:#65d38e;border-color:#2f6b46}.pill.fail{color:#ff8a8a;border-color:#7d3540}" ++
+            ".pill.unproven{color:#ffb85c;border-color:#7a5a24}.pill.not_declared{color:#9eabc2;border-color:#3b4863}" ++
+            ".pill.manual{color:#9db8ff;border-color:#38507f}" ++
             ".ok{color:#65d38e}.blocked{color:#ffb85c}#message{position:fixed;right:18px;bottom:18px;max-width:520px;background:#172139;border:1px solid #53617d;border-radius:8px;padding:10px;display:none}" ++
             "@media(max-width:1000px){main{grid-template-columns:220px 1fr}.preview{display:none}}" ++
             "@media(max-width:920px){main{height:calc(100vh - 124px)}}" ++
@@ -1588,7 +1604,9 @@ pub fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
             "<div class=\"grow\"></div><a class=\"button\" id=\"cad\">3D CAD</a><a class=\"button\" id=\"dossier\" target=\"_blank\" rel=\"noopener\">View dossier</a>" ++
             "<a class=\"button\" id=\"draft\">Download draft</a>" ++
             "<label><input id=\"waive\" type=\"checkbox\"> accept waivers</label><button id=\"release\">Final release</button></header>" ++
-            "<main><aside><strong>Documents</strong><div id=\"docs\"></div><div class=\"status\" id=\"readiness\">Computing readiness…</div>" ++
+            "<main><aside><section class=\"panel\" id=\"brief\"><h2>Brief</h2><div class=\"muted\">Loading…</div></section>" ++
+            "<section class=\"panel\" id=\"goals\"><h2>Goals</h2><div class=\"muted\">Loading…</div></section>" ++
+            "<strong>Documents</strong><div id=\"docs\"></div><div class=\"status\" id=\"readiness\">Computing readiness…</div>" ++
             "<hr><label class=\"button\">Upload asset<input id=\"asset\" type=\"file\" accept=\".png,.jpg,.jpeg,.txt\" hidden></label></aside>" ++
             "<section class=\"editor\"><div class=\"toolbar\"><strong class=\"grow\" id=\"doc-title\">Select a document</strong>" ++
             "<button id=\"save\" class=\"primary\">Save</button><button id=\"attest\" disabled>Approve current inputs</button></div><textarea id=\"source\" spellcheck=\"false\" disabled></textarea></section>" ++
@@ -1608,16 +1626,40 @@ pub fn systemPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
             "const {value}=await request(endpoint('/docs/'+encodeURIComponent(spec.id)));state.current=value;$('#doc-title').textContent=value.title+' · '+value.classification;" ++
             "$('#source').value=value.markdown;$('#source').disabled=!value.editable;$('#save').disabled=!value.editable;$('#attest').disabled=!state.permissions.write||!state.ready||!state.ready.checks.checklists;" ++
             "$('#rendered').innerHTML=value.html||'<pre></pre>';if(!value.html)$('#rendered pre').textContent=value.markdown;rewriteAssets()}" ++
+            "function panelBody(id,title){const host=$(id);host.textContent='';const head=document.createElement('h2');head.textContent=title;host.append(head);return host}" ++
+            "function briefRow(list,label,value){if(value===null||value===undefined||value==='')return;const dt=document.createElement('dt');dt.textContent=label;" ++
+            "const dd=document.createElement('dd');dd.textContent=value;list.append(dt,dd)}" ++
+            "function briefLines(b){const out=[];if(b.purpose)out.push(['Purpose',b.purpose]);" ++
+            "if(b.environment){const e=b.environment;out.push(['Ambient',e.ambient_min_c+' to '+e.ambient_max_c+' °C'+(e.cooling?', '+e.cooling:'')]);" ++
+            "if(e.altitude_m!=null)out.push(['Altitude',e.altitude_m+' m']);if(e.ingress!=null)out.push(['Ingress','IP'+e.ingress])}" ++
+            "if(b.input_power){const p=b.input_power;out.push(['Input power',p.source+', '+p.voltage_min_v+' to '+p.voltage_max_v+' V'+(p.transient_v!=null?', '+p.transient_v+' V transient':'')+(p.current_max_a!=null?', '+p.current_max_a+' A max':'')])}" ++
+            "if(b.temperature_grade)out.push(['Grade',b.temperature_grade]);if(b.derating)out.push(['Derating',b.derating]);" ++
+            "if(b.ipc_class!=null)out.push(['IPC class',String(b.ipc_class)]);const c=b.compliance||{};if(c.esd)out.push(['ESD',c.esd]);if(c.emc)out.push(['EMC',c.emc]);if(c.safety)out.push(['Safety',c.safety]);" ++
+            "for(const i of (b.interfaces||[]))out.push([i.name,[i.connector,i.impedance_ohm!=null?i.impedance_ohm+' Ω':null,i.power_max_dbm!=null?i.power_max_dbm+' dBm':null,i.protocol].filter(Boolean).join(', ')||'declared']);" ++
+            "return out}" ++
+            "function renderBrief(){const status=(state.manifest&&state.manifest.status)||(state.ready&&state.ready.status)||'design';const host=panelBody('#brief','Brief · '+status);" ++
+            "const brief=state.manifest&&state.manifest.brief;if(!brief){const none=document.createElement('div');none.className='muted';" ++
+            "none.textContent='No (brief …) declared in system.sexp';host.append(none);return}" ++
+            "const list=document.createElement('dl');for(const [label,value] of briefLines(brief))briefRow(list,label,value);host.append(list)}" ++
+            "function goalTarget(g){if(g.min!=null&&g.max!=null)return g.min+' to '+g.max+' '+g.unit;if(g.min!=null)return '≥ '+g.min+' '+g.unit;" ++
+            "if(g.max!=null)return '≤ '+g.max+' '+g.unit;return 'reported in '+g.unit}" ++
+            "function renderGoals(){const host=panelBody('#goals','Goals');const goals=(state.ready&&state.ready.goals)||[];" ++
+            "if(!goals.length){const none=document.createElement('div');none.className='muted';none.textContent=state.ready?'No (goal …) declared':'Computing…';host.append(none);return}" ++
+            "for(const goal of goals){const row=document.createElement('div');row.className='goal';row.title=goal.evidence||'';" ++
+            "const pill=document.createElement('span');pill.className='pill '+goal.verdict;pill.textContent=goal.verdict.replace('_',' ');" ++
+            "const name=document.createElement('span');name.className='grow';name.textContent=(goal.title||goal.id)+' · '+goalTarget(goal);" ++
+            "const seen=document.createElement('span');seen.textContent=goal.value==null?'—':(goal.value+' '+goal.unit);" ++
+            "row.append(pill,name,seen);host.append(row)}}" ++
             "function dossierAge(s){return s==null?'':(s<90?s+'s':Math.round(s/60)+'m')+' ago'}" ++
             "async function dossierState(){try{const r=await fetch(endpoint('/dossier-status'),{headers:{'accept':'application/json'}});const v=await r.json();const a=$('#dossier');" ++
             "a.textContent=v.composing?(v.ready?'View dossier · regenerating':'View dossier · composing…'):(v.stale?'View dossier · stale '+dossierAge(v.age_seconds):(v.ready?'View dossier · composed '+dossierAge(v.age_seconds):(v.state==='failed'?'View dossier · last compose failed':'View dossier')))}catch(error){}}" ++
             "async function refreshReady(){try{const {value}=await request(endpoint('/readiness'));state.ready=value;const r=$('#readiness');" ++
             "r.className='status '+(value.blocked?'blocked':'ok');r.textContent=(value.blocked?'Blocked':'Ready')+' · checklists '+(value.checks&&value.checks.checklists?'complete':'open')+' · attestation '+(value.attested?'current':'needed');" ++
             "$('#attest').disabled=!state.permissions.write||!value.checks||!value.checks.checklists;" ++
-            "$('#release').disabled=!state.permissions.release||value.blocked}catch(error){$('#readiness').textContent=error.message;$('#readiness').className='status blocked'}}" ++
+            "$('#release').disabled=!state.permissions.release||value.blocked;renderBrief();renderGoals()}catch(error){$('#readiness').textContent=error.message;$('#readiness').className='status blocked'}}" ++
             "async function boot(){try{const {value}=await request(endpoint(''));state.manifest=value.manifest;state.permissions=value.permissions;$('#attest').disabled=!value.permissions.write;" ++
             "$('#title').textContent=value.manifest.title;$('#identity').textContent=value.manifest.part_number+' · revision '+value.manifest.revision+' · '+value.permissions.role;" ++
-            "$('#draft').href=endpoint('/draft.zip');$('#cad').href='/systems/'+encodeURIComponent(SYSTEM)+'/cad';$('#dossier').href='/systems/'+encodeURIComponent(SYSTEM)+'/dossier';const host=$('#docs');let first=null;for(const doc of value.manifest.documents){const button=document.createElement('button');" ++
+            "renderBrief();renderGoals();$('#draft').href=endpoint('/draft.zip');$('#cad').href='/systems/'+encodeURIComponent(SYSTEM)+'/cad';$('#dossier').href='/systems/'+encodeURIComponent(SYSTEM)+'/dossier';const host=$('#docs');let first=null;for(const doc of value.manifest.documents){const button=document.createElement('button');" ++
             "button.type='button';button.append(document.createTextNode(doc.title));const tag=document.createElement('span');tag.className='tag';tag.textContent=doc.classification+' · '+(doc.status||'active');button.append(tag);" ++
             "button.onclick=()=>openDoc(doc,button).catch(e=>note(e.message,true));host.append(button);if(!first&&doc.status!=='historical')first=[doc,button]}if(!first&&value.manifest.documents.length)first=[value.manifest.documents[0],host.firstElementChild];" ++
             "if(first)await openDoc(first[0],first[1]);await refreshReady();dossierState()}catch(error){note(error.message,true)}}" ++
@@ -2493,4 +2535,62 @@ test "the shared system-request loader answers each manifest refusal in its own 
         error.InvalidSystemSexp,
         loadSystem(std.testing.allocator, project, "broken", .full, &diagnostic),
     );
+}
+
+// spec: system-review - the system workspace page renders the brief panel and the goals table above its document list
+test "the system review page carries the brief panel and the goals table" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "project/src/systems/sketch");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "project/src/systems/sketch/system.sexp",
+        .data =
+        \\(system "sketch"
+        \\  (title "Sketch") (part-number "SKETCH-1") (revision "-")
+        \\  (status concept)
+        \\  (brief (purpose "A product with no boards yet")
+        \\    (environment (ambient -10 60)))
+        \\  (goal "max-ambient" (unit C) (min 55) (verify-by thermal))
+        \\  (document "release-checklist" (title "Release checklist")
+        \\    (path "src/systems/sketch/release-checklist.md") (classification checklist)))
+        ,
+    });
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, "project", allocator);
+    defer allocator.free(project);
+
+    var state: serve_root.ServerState = .{};
+    var server = Server{
+        .allocator = allocator,
+        .project_dir = project,
+        .auth_dir = project,
+        .state = &state,
+    };
+    var request = httpz.testing.init(.{});
+    defer request.deinit();
+    server.allocator = request.res.arena;
+    request.param("name", "sketch");
+    try systemPage(&server, request.req, request.res);
+    const body = request.res.body;
+    // Both panels are markup the page ships, ahead of the document list, so a
+    // reader meets the targets before the prose written about them.
+    const brief_at = std.mem.indexOf(u8, body, "<section class=\"panel\" id=\"brief\">") orelse
+        return error.MissingBriefPanel;
+    const goals_at = std.mem.indexOf(u8, body, "<section class=\"panel\" id=\"goals\">") orelse
+        return error.MissingGoalsPanel;
+    const docs_at = std.mem.indexOf(u8, body, "<strong>Documents</strong>") orelse
+        return error.MissingDocumentList;
+    try std.testing.expect(brief_at < goals_at);
+    try std.testing.expect(goals_at < docs_at);
+    // The goals table reads the readiness rows and pills each verdict.
+    try std.testing.expect(std.mem.indexOf(u8, body, "pill.className='pill '+goal.verdict") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "renderBrief();renderGoals()") != null);
+
+    // A concept workspace lists like any other, carrying its status word.
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const summaries = try collectSystemSummaries(arena_state.allocator(), project);
+    try std.testing.expectEqual(@as(usize, 1), summaries.len);
+    try std.testing.expectEqual(system_review.SystemStatus.concept, summaries[0].status);
+    try std.testing.expectEqual(@as(usize, 0), summaries[0].boards);
 }

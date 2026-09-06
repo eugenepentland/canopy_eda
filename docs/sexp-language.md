@@ -1469,6 +1469,89 @@ fabrication archive. It is authored as ordinary netlisp source in
     (generated interface-matrix)))
 ```
 
+#### Status, brief and goals
+
+Above the boards a contract states what the product is, what it must achieve,
+and where in its lifecycle it is:
+
+```lisp
+(system "barracuda"
+  (title "Barracuda OC-303-1-01") (part-number "OC-303-1-01") (revision "B3")
+  (status design)                       ; concept | design | review | released
+  (brief
+    (purpose "Swept X-band signal source with a 50–1500 MHz IF output")
+    (environment (ambient -10 60) (cooling sealed-conduction) (altitude 2000) (ingress 40))
+    (input-power (source "12 V barrel") (voltage 11.4 12.6) (transient 15) (current-max 1.2))
+    (temperature-grade industrial)
+    (derating "NASA EEE-INST-002")
+    (ipc-class 2)
+    (compliance (esd "IEC 61000-4-2, 8 kV contact"))
+    (interface "OUT1" (connector sma) (impedance 50) (power-max 10)))
+  (goal "if-band"         (title "IF output band") (unit MHz) (min 50) (max 1500) (verify-by frequency-plan))
+  (goal "lo-drive"        (unit dBm)    (min 13) (max 20)  (verify-by frequency-plan))
+  (goal "max-ambient"     (unit C)      (min 60)           (verify-by thermal))
+  (goal "spur-floor"      (unit dBc)    (max -60)          (verify-by spur-table))
+  (goal "phase-noise-10k" (unit "dBc/Hz") (max -95)        (verify-by measurement "bring-up §4.3"))
+  …)
+```
+
+- **`(status …)`** defaults to `design`. A `(status concept)` system may declare
+  **zero boards** — a brief and its goals are written and reviewed before any
+  board exists — and every other status keeps the at-least-one-board rule.
+- **`(brief …)`** is the design brief as *data*, so an engine can read it rather
+  than a reviewer ticking prose. At most one per system. `(environment (ambient
+  MIN MAX))` is the window the thermal screen is answerable at; `(interface …)`
+  inside a brief is one externally exposed connector of the product, not the
+  board-to-board contract that shares the head atom.
+- **`(goal "ID" …)`** states one target and how it is proven. `(verify-by …)`
+  names an engine — `frequency-plan`, `thermal`, `power-budget`, `pll-loop`,
+  `spur-table` — or `(verify-by measurement "bring-up §4.3")` for a bench step.
+  A goal with neither `(min …)` nor `(max …)` states a figure to report rather
+  than a bound to meet.
+
+**Which figure a goal reads is selected by its unit**, because a target is
+already written in one:
+
+| `verify-by` | unit | figure the goal is judged on |
+| --- | --- | --- |
+| `thermal` | `C` | limiting maximum ambient across the boards |
+| `power-budget` | `%` | tightest rail margin |
+| `power-budget` | `A` | largest rail load current |
+| `frequency-plan` | `Hz` `kHz` `MHz` `GHz` | the declared output (IF) band |
+| `frequency-plan` | `dBm` | delivered LO drive |
+| `pll-loop` | `deg` | worst-corner phase margin |
+| `pll-loop` | `Hz` `kHz` `MHz` `GHz` | the nominal loop-bandwidth range |
+| `spur-table` | `dBc` | worst claimed level of an in-band product |
+
+Every figure comes from a report the board review already computed, so a goal
+row can never disagree with the generated section that renders the same engine.
+A goal reads the declaration whose **name is the goal id** when a design names
+them alike, and the first declared otherwise; the evidence sentence always says
+which one it read.
+
+Each goal reaches `netlisp system-check`, `GET /api/systems/:name/readiness`,
+the `goals-status` generated section and the workspace page as one row with a
+verdict:
+
+| verdict | meaning |
+| --- | --- |
+| `pass` | the engine's figure meets every declared bound |
+| `fail` | it misses one — **and this alone blocks the system gate** |
+| `unproven` | the engine ran but publishes no figure for this goal's unit, or the design declared no band/window for it to publish |
+| `not_declared` | no board gave that engine an input at all |
+| `manual` | a `measurement` goal with no acceptance record yet |
+
+Only `fail` contributes to `blocked`, so `system-check` exits non-zero for a
+missed target and not for one nobody has measured. `(measured VALUE
+"evidence")` on a `measurement` goal closes it: the row leaves `manual` and is
+judged against its own bounds like any engine figure.
+
+Two generated regions render this: `brief-summary` (the envelope as a field
+table, always led by the status line) and `goals-status` (one row per goal with
+its target, figure, verdict and evidence). Both are written into a review
+document exactly like the other generated ids —
+`<!-- netlisp:generated goals-status -->` … `<!-- /netlisp:generated -->`.
+
 **A system contract is never evaluated.** It is parsed straight into the strict
 `netlisp-system-review-v1` spec, so **none of these forms is valid in a design
 source** — a design writing `(interface "…" (mates …))` gets an unknown-form

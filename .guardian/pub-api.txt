@@ -6031,6 +6031,12 @@ src/svg2pdf.zig::Text struct_
 src/svg2pdf.zig::Theme enum_
 src/svg2pdf.zig::translate | fn translate(gpa: Allocator, svg: []const u8, opts: Options, diag: ?*Diagnostic) Error!Document
 src/svg2pdf.zig::translateAll | fn translateAll(gpa: Allocator, markup: []const u8, opts: Options, diag: ?*Diagnostic) Error![]Document
+src/system_brief.zig::BoardReports struct_
+src/system_brief.zig::Evaluation struct_
+src/system_brief.zig::Verdict enum_
+src/system_brief.zig::blocks | fn blocks(evaluations: []const Evaluation) bool
+src/system_brief.zig::briefForBoard | fn briefForBoard( allocator: std.mem.Allocator, project_dir: []const u8, design_name: []const u8, ) ?system_review.Brief
+src/system_brief.zig::evaluate | fn evaluate( allocator: std.mem.Allocator, goals: []const GoalSpec, boards: []const BoardReports, ) std.mem.Allocator.Error![]const Evaluation
 src/system_interface_check.zig::Endpoint struct_
 src/system_interface_check.zig::Finding struct_
 src/system_interface_check.zig::Kind enum_
@@ -6050,8 +6056,12 @@ src/system_review.zig::AttestInputError value
 src/system_review.zig::Attestation struct_
 src/system_review.zig::AttestationWriteError value
 src/system_review.zig::BoardMember struct_
+src/system_review.zig::Brief struct_
+src/system_review.zig::BriefInterface struct_
 src/system_review.zig::ChecklistSummary struct_
+src/system_review.zig::Compliance struct_
 src/system_review.zig::ContactObservation struct_
+src/system_review.zig::Cooling enum_
 src/system_review.zig::Diagnostic struct_
 src/system_review.zig::DiagnosticCode enum_
 src/system_review.zig::DnpPolicy enum_
@@ -6061,8 +6071,12 @@ src/system_review.zig::DocumentContent struct_
 src/system_review.zig::DocumentError value
 src/system_review.zig::DocumentSpec struct_
 src/system_review.zig::DocumentStatus enum_
+src/system_review.zig::Environment struct_
 src/system_review.zig::GeneratedSection enum_
+src/system_review.zig::GoalMeasurement struct_
+src/system_review.zig::GoalSpec struct_
 src/system_review.zig::InputAttestation struct_
+src/system_review.zig::InputPower struct_
 src/system_review.zig::InterfaceAlias struct_
 src/system_review.zig::InterfaceContract struct_
 src/system_review.zig::InterfaceEndpoint struct_
@@ -6072,7 +6086,10 @@ src/system_review.zig::ParseError value
 src/system_review.zig::ParsedSystemSpec value
 src/system_review.zig::SystemSpec struct_
 src/system_review.zig::SystemSpecWriteError value
+src/system_review.zig::SystemStatus enum_
+src/system_review.zig::TemperatureGrade enum_
 src/system_review.zig::ValidationError value
+src/system_review.zig::VerifyBy enum_
 src/system_review.zig::allComplete | fn allComplete(self: ChecklistSummary) bool
 src/system_review.zig::attestDocument | fn attestDocument( allocator: std.mem.Allocator, spec: DocumentSpec, content: []const u8, diagnostic: *Diagnostic, ) DocumentError!DocumentAttestation
 src/system_review.zig::attestInput | fn attestInput( allocator: std.mem.Allocator, path: []const u8, content: []const u8, diagnostic: *Diagnostic, ) AttestInputError!InputAttestation

@@ -633,6 +633,7 @@ pub const shards: []const []const []const u8 = &.{
         "req_derived_checks.test.",
         "review_md.test.",
         "system_review_assets.test.",
+        "system_brief.test.",
         "system_sexp.test.",
         "system_interface_check.test.",
         "system_review_html.test.",
@@ -725,6 +726,17 @@ test {
     for (shards) |shard| {
         for (shard) |filter| {
             if (std.mem.eql(u8, filter, "serve.pose_identity.test.")) claims += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), claims);
+}
+
+// spec: Development pipeline - The system brief and goal evaluations remain claimed by the shard manifest
+test {
+    var claims: usize = 0;
+    for (shards) |shard| {
+        for (shard) |filter| {
+            if (std.mem.eql(u8, filter, "system_brief.test.")) claims += 1;
         }
     }
     try std.testing.expectEqual(@as(usize, 1), claims);

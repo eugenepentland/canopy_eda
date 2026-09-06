@@ -104,6 +104,7 @@ fn buildSystemCards(
             .boards = summary.boards,
             .documents = summary.documents,
             .attested = summary.attested,
+            .status = @tagName(summary.status),
         };
         card.* = .{ .sys = entry, .search = try systemSearchText(allocator, entry) };
     }
@@ -120,7 +121,7 @@ fn systemSearchText(
     var buf: std.ArrayList(u8) = .empty;
     try buf.appendSlice(allocator, "system ");
     try buf.appendSlice(allocator, entry.name);
-    for ([_][]const u8{ entry.title, entry.part_number, entry.revision }) |part| {
+    for ([_][]const u8{ entry.title, entry.part_number, entry.revision, entry.status }) |part| {
         if (part.len == 0) continue;
         try buf.append(allocator, ' ');
         try buf.appendSlice(allocator, part);
@@ -320,6 +321,7 @@ test "home system cards carry the workspace link, identity and filter kind" {
         .boards = 2,
         .documents = 19,
         .attested = true,
+        .status = "released",
     };
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
@@ -337,6 +339,9 @@ test "home system cards carry the workspace link, identity and filter kind" {
     try std.testing.expect(std.mem.indexOf(u8, html, "2 boards") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "19 documents") != null);
     try std.testing.expect(std.mem.indexOf(u8, html, "attested") != null);
+    // The lifecycle word rides beside the type tag, so a concept system reads
+    // as one rather than as a design that lost its boards.
+    try std.testing.expect(std.mem.indexOf(u8, html, ">released</span>") != null);
     // It rides the shared card class, so the existing search/filter script
     // (which selects `#home-grid .design-card`) picks it up with no JS change.
     try std.testing.expect(std.mem.indexOf(u8, html, "class=\"design-card\"") != null);
@@ -352,6 +357,7 @@ test "home system search text and filter tab make a system findable by name and 
         .boards = 2,
         .documents = 19,
         .attested = true,
+        .status = "released",
     };
     const search = try systemSearchText(std.testing.allocator, entry);
     defer std.testing.allocator.free(search);
@@ -361,6 +367,9 @@ test "home system search text and filter tab make a system findable by name and 
     try std.testing.expect(std.mem.indexOf(u8, search, "OC-303-1-01") != null);
     try std.testing.expect(std.mem.indexOf(u8, search, "B3") != null);
     try std.testing.expect(std.mem.indexOf(u8, search, "attested") != null);
+    // The lifecycle word is searchable too, so "concept" surfaces exactly the
+    // systems that are still only a brief.
+    try std.testing.expect(std.mem.indexOf(u8, search, "released") != null);
 
     // An empty identity field must not leave a double space that a two-term
     // query would then fail to match across.
@@ -371,6 +380,7 @@ test "home system search text and filter tab make a system findable by name and 
         .revision = "",
         .boards = 0,
         .documents = 0,
+        .status = "",
     });
     defer std.testing.allocator.free(bare);
     try std.testing.expectEqualStrings("system spare", bare);

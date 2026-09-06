@@ -108,8 +108,12 @@
 13 src/serve/pcb_layout_page.zig|ShownView
 9 src/serve/pcb_layout_page.zig|SolvedRequest
 8 src/serve/saved_zone.zig|SavedZone
+8 src/serve/system_review_api.zig|SystemSummary
+8 src/serve/templates/pages.zig|SystemHomeEntry
 9 src/shape_sketch.zig|Constraint
 8 src/subcircuit_silkscreen.zig|Annotation
+8 src/system_review.zig|Brief
 9 src/system_review.zig|DocumentSpec
-9 src/system_review.zig|SystemSpec
+8 src/system_review.zig|GoalSpec
+12 src/system_review.zig|SystemSpec
 8 src/thermal_scenarios.zig|Row
