@@ -236,6 +236,39 @@ pub fn runFor(
     };
 }
 
+/// One release-profile run, computed once and shared by the surfaces that
+/// would otherwise each repeat it over the same board.
+///
+/// The Board Review Card composes `review_audit`'s facts BESIDE
+/// `part_review`'s per-part sheet over one evaluation, and both need the same
+/// preflight report — two identical passes over a board the size of Barracuda
+/// were about half the card's cold cost. A caller that hands both surfaces one
+/// cache pays for a single run; a caller that hands none keeps exactly the old
+/// behaviour, because the cache is only ever consulted through an optional.
+pub const Cache = struct {
+    /// Where the shared run reads library and sidecar files from.
+    project_dir: []const u8,
+    /// The strictness profile the shared run is at.
+    profile: Profile,
+    /// The design the block IS, for the brief lookup `runFor` performs.
+    design_name: []const u8,
+    /// The run, once it has happened.
+    report: ?Report = null,
+
+    /// The shared report, performing the run on the first call only.
+    pub fn get(
+        self: *Cache,
+        allocator: std.mem.Allocator,
+        eval: *Evaluator,
+        block: *const DesignBlock,
+    ) std.mem.Allocator.Error!Report {
+        if (self.report) |report| return report;
+        const report = try runFor(allocator, eval, block, self.project_dir, self.profile, self.design_name);
+        self.report = report;
+        return report;
+    }
+};
+
 /// Everything one run threads through the design walk: the owning allocator
 /// for finding messages, the scratch arena, the strictness profile, the
 /// design-level forms, the requirement outcomes and the findings sink.

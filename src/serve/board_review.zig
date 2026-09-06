@@ -1,8 +1,19 @@
-//! Board-scoped review checklist page and persistence.
+//! Board-scoped review checklist page and persistence — the REFERENCE view of
+//! `/review/:name`.
 //!
-//! The page keeps the research checklist as human dispositions while loading
-//! the generated review-audit separately. Machine facts stay live, while
-//! Pass/Fail/N-A/Needs-info decisions and evidence persist beside the design.
+//! `/review/:name` answers the Board Review Card
+//! (`serve/review_card_page.zig`): twelve fixed categories, every row citing a
+//! registered check. This module keeps the 258-item research catalogue that
+//! used to be that page, now one query parameter away at `?view=reference`,
+//! with its saved `.review.json` dispositions, its generated assessment and
+//! its MCP tools unchanged. Each generated item names the registry rows that
+//! prove it, so a reference criterion links to the card row that actually ran
+//! rather than carrying a second opinion.
+//!
+//! The catalogue keeps the research checklist as human dispositions while
+//! loading the generated review-audit separately. Machine facts stay live,
+//! while Pass/Fail/N-A/Needs-info decisions and evidence persist beside the
+//! design.
 
 const std = @import("std");
 const httpz = @import("httpz");
@@ -16,6 +27,7 @@ const paths = @import("../paths.zig");
 const review = @import("../review.zig");
 const review_audit = @import("../review_audit.zig");
 const review_assessment = @import("../review_assessment.zig");
+const review_card_page = @import("review_card_page.zig");
 const review_datasheets = @import("../review_datasheet_inventory.zig");
 const serve_root = @import("../serve.zig");
 const navbar = @import("navbar.zig");
@@ -139,46 +151,15 @@ fn writeHtmlEscaped(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!voi
     try escape.writeXml(w, text);
 }
 
-fn writeUrlEncoded(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
-    for (text) |c| {
-        const safe = std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~';
-        if (safe) try w.writeByte(c) else try w.print("%{X:0>2}", .{c});
-    }
-}
+const writeUrlEncoded = review_card_page.writeUrlEncoded;
+const writeReviewNav = review_card_page.writeReviewNav;
+const writeDesignHref = review_card_page.writeDesignHref;
 
-fn writeDesignHref(w: *std.Io.Writer, path: []const u8, name: []const u8, layout: ?[]const u8, view_3d: bool) std.Io.Writer.Error!void {
-    try w.writeAll(path);
-    try writeUrlEncoded(w, name);
-    if (view_3d or layout != null) {
-        try w.writeByte('?');
-        if (view_3d) {
-            try w.writeAll("view=3d");
-            if (layout != null) try escape.writeXml(w, "&");
-        }
-        if (layout) |selected| {
-            try w.writeAll("layout=");
-            try writeUrlEncoded(w, selected);
-        }
-    }
-}
-
-fn writeReviewNav(w: *std.Io.Writer, name: []const u8, layout: ?[]const u8) std.Io.Writer.Error!void {
-    try w.writeAll("<nav class=\"viewtoggle\" aria-label=\"View\"><a href=\"/schematics/");
-    try writeUrlEncoded(w, name);
-    try w.writeAll("\">Schematic</a><a href=\"");
-    try writeDesignHref(w, "/pcb-layout/", name, layout, false);
-    try w.writeAll("\">PCB Layout</a><a href=\"");
-    try writeDesignHref(w, "/pcb-layout/", name, layout, true);
-    try w.writeAll("\">3D View</a><a href=\"");
-    try writeDesignHref(w, "/assembly-debug/", name, layout, false);
-    try w.writeAll("\">Assembly</a><a href=\"");
-    try writeDesignHref(w, "/thermal/", name, layout, false);
-    try w.writeAll("\">Thermal</a><a class=\"active\" href=\"");
-    try writeDesignHref(w, "/review/", name, layout, false);
-    try w.writeAll("\">Review</a></nav>");
-}
-
-/// Render the board checklist and live generated-evidence dashboard.
+/// `GET /review/:name` — the Board Review Card by default, the 258-item
+/// research catalogue at `?view=reference`.
+///
+/// One URL answers both because the Review tab on every board surface links
+/// here: demoting the catalogue must not break a bookmark or a tab.
 pub fn reviewPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void {
     const name = req.param("name") orelse {
         res.status = 404;
@@ -191,18 +172,26 @@ pub fn reviewPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
         return;
     }
     const layout = queryOpt(req, "layout");
+    const reference = std.mem.eql(u8, queryOpt(req, "view") orelse "", "reference");
+    if (!reference) return review_card_page.render(res, name, layout);
+    return referencePage(ctx, res, name, layout);
+}
+
+/// The 258-item research catalogue: applicability, generated verdicts, saved
+/// human dispositions, and the registry rows that prove each item.
+fn referencePage(ctx: *Server, res: *httpz.Response, name: []const u8, layout: ?[]const u8) HandlerError!void {
     var out: std.Io.Writer.Allocating = .init(res.arena);
     const w = &out.writer;
     try w.writeAll("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>");
     try writeHtmlEscaped(w, name);
-    try w.writeAll(" — Board Review</title><style>");
+    try w.writeAll(" — Reference checklist</title><style>");
     try w.writeAll(navbar.css);
     try w.writeAll(page_css);
     try w.writeAll("</style></head><body>");
     try navbar.write(w, .none);
     try w.writeAll("<main class=\"review-shell\"><header class=\"review-head\"><div class=\"review-title\"><h1>");
     try writeHtmlEscaped(w, name);
-    try w.writeAll("</h1><p>Board design review · ");
+    try w.writeAll("</h1><p>Reference checklist · ");
     if (layout) |selected| {
         try w.writeAll("saved layout ");
         try writeHtmlEscaped(w, selected);
@@ -215,7 +204,9 @@ pub fn reviewPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Handl
     try writeUrlEncoded(w, name);
     try w.writeAll("\">Review PDF</a><a href=\"/api/export-review/");
     try writeUrlEncoded(w, name);
-    try w.writeAll("\">Review package</a></div></div><div class=\"progress-card\"><div class=\"metric ready\"><strong id=\"metric-ready\">0 / 258</strong><span>ready (Pass + N/A)</span></div><div class=\"metric\"><strong id=\"metric-static\">0</strong><span>closed statically</span></div><div class=\"metric agent\"><strong id=\"metric-agent\">258</strong><span>agent queue</span></div><div class=\"metric manual\"><strong id=\"metric-manual\">0</strong><span>human / measurement</span></div><div class=\"metric blocked\"><strong id=\"metric-blocked\">0</strong><span>Fail / Needs info</span></div><div class=\"metric open\"><strong id=\"metric-open\">258</strong><span>remaining</span></div><div class=\"bar\" aria-label=\"Review readiness\"><span id=\"progress-bar\"></span></div></div></section>");
+    try w.writeAll("\">Review package</a><a class=\"card-back-link\" href=\"");
+    try writeDesignHref(w, "/review/", name, layout, false);
+    try w.writeAll("\">Board Review Card</a></div></div><div class=\"progress-card\"><div class=\"metric ready\"><strong id=\"metric-ready\">0 / 258</strong><span>ready (Pass + N/A)</span></div><div class=\"metric\"><strong id=\"metric-static\">0</strong><span>closed statically</span></div><div class=\"metric agent\"><strong id=\"metric-agent\">258</strong><span>agent queue</span></div><div class=\"metric manual\"><strong id=\"metric-manual\">0</strong><span>human / measurement</span></div><div class=\"metric blocked\"><strong id=\"metric-blocked\">0</strong><span>Fail / Needs info</span></div><div class=\"metric open\"><strong id=\"metric-open\">258</strong><span>remaining</span></div><div class=\"bar\" aria-label=\"Review readiness\"><span id=\"progress-bar\"></span></div></div></section>");
     try w.writeAll("<div class=\"toolbar\"><input id=\"review-search\" type=\"search\" placeholder=\"Search criteria and generated evidence…\"><button class=\"filter active\" data-filter=\"all\">All</button><button class=\"filter\" data-filter=\"remaining\">Remaining</button><button class=\"filter\" data-filter=\"fail\">Fail</button><button class=\"filter\" data-filter=\"agent\">Agent queue</button><button class=\"filter\" data-filter=\"manual\">Human</button><button class=\"filter\" data-filter=\"na\">N/A</button><button class=\"filter\" data-filter=\"needs_info\">Needs info</button><button class=\"quiet-btn\" id=\"expand-all\">Expand all</button><button class=\"quiet-btn\" id=\"collapse-all\">Collapse all</button><span class=\"save-state\" id=\"save-state\"></span></div><div id=\"checklist\"></div><div class=\"empty\" id=\"empty\" hidden>No checklist items match this view.</div>");
     try w.writeAll("</main><script>const DESIGN_NAME=");
     try json_writer.writeScriptString(w, name);
@@ -316,6 +307,7 @@ test "board review page exposes scoped progress filters and read-only controls" 
     defer request.deinit();
     request.param("name", "demo");
     request.query("layout", "release-A");
+    request.query("view", "reference");
     try reviewPage(&server, request.req, request.res);
 
     const body = request.res.body;
@@ -347,6 +339,44 @@ test "board review page exposes scoped progress filters and read-only controls" 
 
     try std.testing.expect(std.mem.indexOf(u8, body, "fabrication readiness") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "Generated evidence register") == null);
+}
+
+// spec: serve/board-review - the Review tab answers the Board Review Card by default and the 258-item catalogue only at view=reference
+test "the review route defaults to the card and keeps the catalogue behind view=reference" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try tmp.dir.createDirPath(std.testing.io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/demo.sexp", .data = "(design-block \"Demo\")" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", arena);
+    var state: serve_root.ServerState = .{};
+    var server = Server{ .allocator = arena, .project_dir = root, .auth_dir = root, .state = &state };
+
+    var default_view = httpz.testing.init(.{});
+    defer default_view.deinit();
+    default_view.param("name", "demo");
+    try reviewPage(&server, default_view.req, default_view.res);
+    try std.testing.expect(std.mem.indexOf(u8, default_view.res.body, "id=\"card-categories\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, default_view.res.body, "/review/demo?view=reference") != null);
+    try std.testing.expect(std.mem.indexOf(u8, default_view.res.body, "id=\"checklist\"") == null);
+
+    var reference = httpz.testing.init(.{});
+    defer reference.deinit();
+    reference.param("name", "demo");
+    reference.query("view", "reference");
+    try reviewPage(&server, reference.req, reference.res);
+    // The catalogue is intact: its shell, its saved-state script and its
+    // 258 items are exactly what they were before the card took the URL.
+    try std.testing.expect(std.mem.indexOf(u8, reference.res.body, "id=\"checklist\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reference.res.body, "0 / 258") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reference.res.body, "Board Review Card") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reference.res.body, "id=\"card-categories\"") == null);
+    // Each generated item shows the registry rows that prove it, as links
+    // onto the card row that ran.
+    try std.testing.expect(std.mem.indexOf(u8, page_js, "auto.registry_ids") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page_js, "\"#row-\"+id") != null);
 }
 
 // spec: serve/board-review - a checklist mutation accepts only a catalog item id and fixed status, bounds its evidence and note, requires writer authority plus the review mutation header, and stamps the authenticated identity instead of a body-supplied reviewer

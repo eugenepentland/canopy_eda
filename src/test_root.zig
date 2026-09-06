@@ -555,6 +555,7 @@ test {
     _ = @import("serve/schematic_pdf.zig");
     _ = @import("serve/part_review_api.zig");
     _ = @import("serve/review_card_api.zig");
+    _ = @import("serve/review_card_page.zig");
     _ = @import("serve/thermal_api.zig");
     _ = @import("serve/thermal_cache.zig");
     _ = @import("serve/thermal_page.zig");

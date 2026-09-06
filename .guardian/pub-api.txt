@@ -4151,6 +4151,7 @@ src/power_integrity_json.zig::Inputs struct_
 src/power_integrity_json.zig::write | fn write(w: *std.Io.Writer, allocators: Allocators, in: Inputs) std.Io.Writer.Error!void
 src/power_integrity_json.zig::writeAcResponse | fn writeAcResponse(w: *std.Io.Writer, allocators: Allocators, in: Inputs, rev: i64) std.Io.Writer.Error!void
 src/power_integrity_json.zig::writeFlow | fn writeFlow(w: *std.Io.Writer, flow: power_integrity.Flow) std.Io.Writer.Error!void
+src/preflight.zig::Cache struct_
 src/preflight.zig::Finding struct_
 src/preflight.zig::FindingKind enum_
 src/preflight.zig::FindingStatus enum_
@@ -4159,6 +4160,7 @@ src/preflight.zig::Report struct_
 src/preflight.zig::deinit | fn deinit(self: Report, allocator: std.mem.Allocator) void
 src/preflight.zig::deinitFindings | fn deinitFindings(allocator: std.mem.Allocator, findings: []const Finding) void
 src/preflight.zig::evalWarningSeverity | fn evalWarningSeverity(message: []const u8) checks.Severity
+src/preflight.zig::get | fn get( self: *Cache, allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, ) std.mem.Allocator.Error!Report
 src/preflight.zig::isStrict | fn isStrict(profile: Profile) bool
 src/preflight.zig::parseProfile | fn parseProfile(word: ?[]const u8) ?Profile
 src/preflight.zig::profileSeverity | fn profileSeverity(profile: Profile) checks.Severity
@@ -5659,6 +5661,11 @@ src/serve/review_card_api.zig::CardError value
 src/serve/review_card_api.zig::HandlerError value
 src/serve/review_card_api.zig::cardApi | fn cardApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/review_card_api.zig::mcpReviewCard | fn mcpReviewCard( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
+src/serve/review_card_page.zig::HandlerError value
+src/serve/review_card_page.zig::render | fn render(res: *httpz.Response, name: []const u8, layout: ?[]const u8) HandlerError!void
+src/serve/review_card_page.zig::writeDesignHref | fn writeDesignHref( w: *std.Io.Writer, path: []const u8, name: []const u8, layout: ?[]const u8, view_3d: bool, ) std.Io.Writer.Error!void
+src/serve/review_card_page.zig::writeReviewNav | fn writeReviewNav(w: *std.Io.Writer, name: []const u8, layout: ?[]const u8) std.Io.Writer.Error!void
+src/serve/review_card_page.zig::writeUrlEncoded | fn writeUrlEncoded(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void
 src/serve/rework_guide.zig::Guide struct_
 src/serve/rework_guide.zig::loadAll | fn loadAll( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) []const Guide
 src/serve/rough_best.zig::bestRoughApi | fn bestRoughApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void

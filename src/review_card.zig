@@ -36,6 +36,7 @@ const part_review = @import("part_review.zig");
 const paths = @import("paths.zig");
 const pll_loop = @import("pll_loop.zig");
 const power_budget = @import("eval/power_budget.zig");
+const preflight = @import("preflight.zig");
 const registry = @import("review_registry.zig");
 const review_audit = @import("review_audit.zig");
 const drc = @import("placement/drc.zig");
@@ -1219,8 +1220,24 @@ pub fn collectWith(
     // `ambient_c` is a reader's what-if and wins over it.
     const plan = brief_checks.planFor(arena, project_dir, name);
     const ambient = options.ambient_c orelse plan.ambient_c;
-    const facts = try review_audit.collectFactsFor(arena, eval, block, project_dir, name, .{ .layout = options.layout });
-    const board = try part_review.collectFor(arena, eval, block, project_dir, name, .{ .ambient_c = ambient });
+    // The audit's facts and the per-part sheet each ran their OWN release
+    // preflight over this one block — two identical passes, about half the
+    // card's cold cost on a board the size of Barracuda. One cache, handed to
+    // both, makes it one pass; the facts collector still runs first, so the
+    // shared report is taken at exactly the point the first surface took it.
+    var preflight_cache = preflight.Cache{
+        .project_dir = project_dir,
+        .profile = .release,
+        .design_name = name,
+    };
+    const facts = try review_audit.collectFactsFor(arena, eval, block, project_dir, name, .{
+        .layout = options.layout,
+        .preflight_cache = &preflight_cache,
+    });
+    const board = try part_review.collectFor(arena, eval, block, project_dir, name, .{
+        .ambient_c = ambient,
+        .preflight_cache = &preflight_cache,
+    });
     var heat = try thermal.analyze(arena, block, ambient);
     heat.ambient_source = plan.source;
     heat.ambient_source.overridden = options.ambient_c != null;
@@ -1504,6 +1521,20 @@ fn collectFixture(alloc: std.mem.Allocator, project: []const u8) CollectError!Ca
     return collect(alloc, project, "board", .{});
 }
 
+/// The fixture board, evaluated into a caller-owned evaluator.
+fn evalFixtureBlock(
+    alloc: std.mem.Allocator,
+    eval: *Evaluator,
+    project: []const u8,
+) CollectError!*const env.DesignBlock {
+    const board_path = try paths.designSourcePath(alloc, project, "board");
+    const result = eval.evalFile(board_path) catch return error.EvaluateFailed;
+    return switch (result) {
+        .design_block => |value| value,
+        else => error.NotADesign,
+    };
+}
+
 // spec: review-card - the card carries all twelve review categories in registry order and every row cites a registered check
 test "the card composes twelve categories whose rows all resolve in the registry" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1660,4 +1691,33 @@ test "a governing brief parametrizes the card's thermal and brief rows" {
     const derating_row = card.row("component-derating-standard") orelse return error.MissingRow;
     try testing.expectEqual(Verdict.pass, derating_row.verdict);
     try testing.expect(std.mem.indexOf(u8, derating_row.result, "NASA") != null);
+}
+
+// spec: review-card - the composer runs one release preflight for the facts and the per-part sheet instead of repeating it
+test "the composer shares one release preflight between the facts and the parts" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeCardFixture(tmp.dir);
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+
+    // The cache is the seam the card composes through: filled once, it is what
+    // both surfaces read, and a second `get` never runs the pass again.
+    var eval = Evaluator.init(alloc, project);
+    defer eval.deinit();
+    const block = try evalFixtureBlock(alloc, &eval, project);
+    var cache = preflight.Cache{ .project_dir = project, .profile = .release, .design_name = "board" };
+    const first = try cache.get(alloc, &eval, block);
+    const second = try cache.get(alloc, &eval, block);
+    try testing.expectEqual(first.findings.ptr, second.findings.ptr);
+    try testing.expectEqual(first.findings.len, second.findings.len);
+
+    // And the shared run is the same review: the card composed over one
+    // preflight still carries every category and a decided overall verdict.
+    const card = try collectFixture(alloc, project);
+    try testing.expectEqual(category_count, card.categories.len);
+    try testing.expect(card.overall.stripe.total() > 0);
 }

@@ -853,6 +853,7 @@ never gave the engine an input) and `manual`.
 | `net-open` | unit | net | Every net's drawn copper forms one connected island. | route the missing link between the islands | blocking |
 | `layout-evidence-incomplete` | unit | board | The release carries the layout evidence its lock names. | attach the layout evidence the release lock asks for | blocking |
 | `layout-ladder-complete` | unit | board | Every rung of the layout completion ladder is done on the reviewed layout. | finish the open items the rung lists | blocking |
+| `assembly-fiducials-present` | unit | board | The board carries the global fiducials an assembler needs, plus local ones beside fine-pitch and BGA placements. | place fiducial parts on the board, or waive the row for a hand-assembled build | waivable |
 | `drc` | unit | board | The release run reports zero DRC errors. | fix the copper the DRC errors name | blocking |
 | `drc-warn` | unit | board | Every DRC warning category is waived with a current count. | fix the copper, or record the category in drc-waivers.md | waivable |
 | `drc-missing` | unit | board | A DRC run exists for the layout the release is cut from. | run the design-rule check on the saved layout | blocking |

@@ -1911,6 +1911,17 @@ pub const rows: []const Row = &.{
         .closes_with = "finish the open items the rung lists",
     },
     .{
+        .id = "assembly-fiducials-present",
+        .layer = .unit,
+        .category = .layout,
+        .scope = .board,
+        .policy = .waivable,
+        .verdicts = waivable_population,
+        .asserts = "The board carries the global fiducials an assembler needs, plus local ones beside fine-pitch and BGA placements.",
+        .engine = "review_audit.zig - evaluated fiducial population",
+        .closes_with = "place fiducial parts on the board, or waive the row for a hand-assembled build",
+    },
+    .{
         .id = "drc",
         .layer = .unit,
         .category = .layout,

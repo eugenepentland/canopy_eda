@@ -259,6 +259,7 @@ candidate for deployment.
 - The saved-pose identity tests remain claimed by the shard manifest
 - The per-part review tests remain claimed by the shard manifest
 - The Board Review Card tests remain claimed by the shard manifest
+- The Board Review Card page tests remain claimed by the shard manifest
 - The review-check registry tests remain claimed by the shard manifest
 - Panelization export tests remain claimed by the shard manifest
 - The system brief and goal evaluations remain claimed by the shard manifest
@@ -7164,6 +7165,12 @@ design-sibling .review.json sidecar.
 - the PCB header exposes Review only for board designs and preserves a selected saved layout
 - the Review page carries the selected saved layout through every physical-board link
 - the supplied review catalog retains all 13 sections and 258 discrete decisions
+- the Review tab answers the Board Review Card by default and the 258-item catalogue only at view=reference
+- the card view renders a shell that fetches the Board Review Card, the seven-verdict filters and a link to the reference checklist
+- the card view carries the selected saved layout into every board link, the card request and the reference view
+- the card page escapes a hostile design name everywhere it appears
+- every registry id the generated assessment names resolves to a registered review check, so a reference item links to a card row that exists
+- a generated item carries the registry rows that prove it and the assessment JSON publishes them
 - the page reports ready, static pass, agent queue, human/measurement, blocked and open totals, and supports search plus generated-work filters
 - generated applicability closes an absent component or interface family only from evaluated board inventory, while present or uncertain families remain queued unless an analyzer proves the complete criterion
 - generated Pass and Fail decisions cite current ERC, power-budget, layout, fabrication, BOM, identity, test-point, or board-declaration evidence rather than the saved sidecar
@@ -9088,6 +9095,7 @@ export never invents them.
 - a governing system brief sets the ambient the card screens at and turns its brief-driven checks into rows
 - review_card is a registered read-only CLI tool answering with the endpoint's own bytes
 - the review-card CLI parses its flags and names the error a card it cannot compose failed with
+- the composer runs one release preflight for the facts and the per-part sheet instead of repeating it
 - completeness-waiver: empty inputs (a design that declares no rail, no analysis form and no layout still gets a row per category saying so, rather than an empty card)
 - completeness-waiver: large inputs (every category is built from slices the evaluation already bounded; no fixed-size output buffer)
 - completeness-waiver: unauthorized access (the card reads the caller's project directory through the same evaluator, gate and check run the CLI already exposes, and writes nothing)
