@@ -258,34 +258,53 @@ Every measurement against `projects/designs` was read-only, and the checkout was
 byte-identical afterwards each time (it carries two pre-existing modifications
 from another session, untouched).
 
-## Gate/integration status — MERGED AND DEPLOYED
+## Gate/integration status — ALL MERGED AND DEPLOYED
 
-Main advanced from `517cc58b` to `52df45e0` during the sprint (several other
-sessions landed). Merged main into `claude/sprint-0906` rather than rebasing 16
-commits through the same append-file conflicts; the only real conflict was
-`FEEDBACK.md`, resolved by keeping both sides in log order.
-`SPEC.md`, `.guardian/pub-api.txt`, `test_root.zig` and `test_shards.zig`
-auto-merged, and all six of my SPEC sections plus every test registration
-survived (verified by grep before committing).
+Three integration rounds, because `main` advanced under the sprint four times
+(other sessions landed the rail column, via budgets, power-island joins and a
+re-recorded PCB-page baseline). Each round: merge `main` into the branch, whole
+suite, `.githooks/prepare-release.sh`, fast-forward `main`, deploy hook.
 
-- Merge commit: `d947830a`; full suite on the merged tree: **5,346 tests, 0 failures**.
-- `.githooks/prepare-release.sh`: queued **271 s** behind another session's
-  `perf_gate.sh --record`, then **candidate ready for d947830a4** —
-  tests 127 s, ReleaseSafe build 131 s, editor perf 616 s, wall 790 s.
-  The editor-perf stage missed once by 0.4 ms (`canvas.zoom_out.worst_p95_ms:
-  45.4 ms > 45 ms`) under that contention; the script classified it as a
-  timing-only miss and its own attempt 3 passed on a confirmed quiet host.
-  **No baseline was re-recorded and no threshold relaxed** — my changes touch no
-  editor canvas code.
-- Fast-forwarded `main` to `d947830a`; the post-merge hook reused the verified
-  candidate, restarted the service, and reported **health OK (all probes), service active**.
-- Verified against the DEPLOYED binary (`.deploy/bin/netlisp`, not the stale
-  `zig-out/` artifact): `serve --help` exits 0, `serve --port abc` refuses,
-  `envelopes` answers, `check-test-manifest` reports 5,058 tests each claimed
-  once, and `get_schematic {"viwe":…}` is rejected by argument name. Live server
-  answers on :7050.
-- `projects/designs` carries only the two modifications it already had from
-  another session; nothing in it was written by this sprint.
+| Round | Branch head gated | Gate result | main after | Deploy |
+| --- | --- | --- | --- | --- |
+| 1 | `d947830a` | candidate ready — tests 127 s, build 131 s, editor perf 616 s, wall 790 s (queued 271 s behind another session's `perf_gate.sh --record`) | `d947830a` | health OK, service active |
+| 2 | `a5d0aef5` | candidate ready — tests 119 s, build 121 s, editor perf 197 s, wall 362 s | `a5d0aef5` | health OK, service active |
+| 3 | `ea35645c` | candidate ready — tests 121 s, build 119 s, editor perf 207 s, wall 370 s | `ea35645c` | health OK, service active |
+
+`git log main..claude/sprint-0906` is **empty** — nothing is left unmerged.
+
+**Benchmark limitation, stated plainly.** The editor-perf stage missed its
+budget twice under host contention (round 1: `canvas.zoom_out.worst_p95_ms`
+45.4 ms > 45 ms; round 2 first attempt: `canvas.zoom_in` 56.3 ms > 45 ms with
+the run queue at 6). Both times the harness classified it as a timing-only miss
+and its own retry passed on a confirmed quiet host. **No baseline was
+re-recorded and no threshold was relaxed** — the sprint touches no editor canvas
+code. The harness also NOTEs on every run that
+`docs/benchmarks/pcb-editor/baseline.json` carries no designs-workload identity
+and that it is measuring a dirty designs checkout; both are pre-existing and
+were left alone.
+
+The only conflict across three merges was `FEEDBACK.md` (both sides appended),
+resolved by keeping both in log order. `SPEC.md`, `.guardian/pub-api.txt`,
+`test_root.zig` and `test_shards.zig` auto-merged every time, and every SPEC
+section and test registration was grepped for afterwards.
+
+Verified on the DEPLOYED binary (`.deploy/bin/netlisp` at `ea35645c5`, not the
+stale `zig-out/` artifact — `netlisp version` reads the cwd's git HEAD, so it is
+not evidence of which binary is running):
+
+```
+serve --help                       → exit 0
+serve --port 99999                 → "not a port number (1-65535)"
+envelopes --text blinky-breakout   → 16 envelope rows
+check-test-manifest                → 5,068 named tests, each claimed once
+tool package_show {"famly":…}      → refused by argument name
+tool get_pcb_layout_image {"scenario":"breeze"} → refused, accepted values named
+GET http://127.0.0.1:7050/         → 302 (service healthy)
+```
+
+`projects/designs` still carries only the two modifications it had at sprint
+start, from another session. Nothing in it was written.
 
 ## Reproduced blockers and preserved experiments
 
