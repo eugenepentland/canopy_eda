@@ -410,6 +410,8 @@ Public functions: solve
 - a part bound only to a supply rail follows its private chain to the pad that anchors it
 - a series part across two package edges takes its signal end, and the busier node when both are signals
 - an authored group's unbindable members join the edge its bound members hold, and a bypass bank is untouched
+- rough chains prefer local signal connections over sparse supplies and obey authored net classes
+- a precise signal pad outranks a sparse supply target while authored adjacency remains authoritative
 - a chain child hangs off a ring-bound entry on its chain's home edge, spreading over the entries there
 - a 2-pad part with a precise partner on each leg turns its pad axis to face them
 - authored rough groups map to a per-part grouping, first membership winning
