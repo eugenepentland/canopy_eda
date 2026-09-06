@@ -5727,6 +5727,9 @@ Public functions: renderSchematic
 - A Functional turned series return shares the destination rail's x-coordinate so VTUNE closes straight down without an outside detour
 - A sub-block's path-qualified supply rail is still a supply, not a signal return
 - Pull-ups between neighbouring pin groups turn vertical on the pin-stub column and land on the destination group's nearest stub
+- A return to a shared rail turns onto the pin group where this hub produces that rail
+- A feedback divider's upper leg turns onto the regulator's own output stub instead of an outside lane
+- Two returns turning onto one output row name the shared rail once
 - An outside direct-return lane is pushed past any net label drawn on a row it spans
 - Group heights follow render order: a spoke shared with an earlier group is counted there, and the own net's row is reserved once an earlier group draws a spoke on it
 - A turned return lands on its rail's stub tie and the rail's own labelled row, whether absorbed into the column or left above the stubs, names the net exactly once
