@@ -258,6 +258,7 @@ candidate for deployment.
 - The library-fact envelope rules remain claimed by the shard manifest
 - The saved-pose identity tests remain claimed by the shard manifest
 - The per-part review tests remain claimed by the shard manifest
+- The review-check registry tests remain claimed by the shard manifest
 - Panelization export tests remain claimed by the shard manifest
 - The system brief and goal evaluations remain claimed by the shard manifest
 - The anonymous-wiring tests remain claimed by exactly one shard
@@ -4747,6 +4748,7 @@ Public functions: worldShape, worldCourtyardCorners, pointDist, shapeGap
 - SectionIterator walks every ## heading of the rendered reference in order
 - The generated reference names every category key so (category …) docs follow the classifier map
 - The generated reference has a Requirement checks section rendered from the checker's check_docs table
+- The generated reference has a Review checks section rendered from the review registry
 - Every document the generated reference links to exists in docs/
 - The section-classifier reference states that an explicit (category …) is the source of truth
 - The assert form's registry summary states that build and export-kicad fail on a failed assertion
@@ -9033,6 +9035,15 @@ export never invents them.
 
 - the rendered audit parses as safe review Markdown with no raw HTML
 - regenerating into an existing audit keeps the reviewer's disposition cells for rows that are still rendered
+- every review-registry id is unique and kebab-case
+- every electrical-rule violation kind maps to a registered review check
+- every design-rule check kind maps to a registered review check
+- every fabrication finding id is registered under its own name
+- every documented requirement check and net-rule predicate maps to a registered review check
+- every preflight finding kind and class-profile item code maps to a registered review check
+- every rail, thermal, loop and interface-contract verdict maps to a registered review check
+- every review category carries at least one registered check
+- lookup returns the registered row and nothing for an unknown id
 - completeness-waiver: empty inputs (a design with no active parts, no findings and no layout renders the placeholder rows)
 - completeness-waiver: large inputs (the findings register is capped and every cell is clipped on a codepoint boundary)
 - completeness-waiver: unauthorized access (the audit reads the caller's project directory through the same evaluator and gate the CLI already exposes)

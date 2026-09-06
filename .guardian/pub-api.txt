@@ -4451,6 +4451,29 @@ src/review_profiles.zig::key | fn key(self: Class) []const u8
 src/review_profiles.zig::parseClass | fn parseClass(word: []const u8) ?Class
 src/review_profiles.zig::requiresThermal | fn requiresThermal(class: Class) bool
 src/review_profiles.zig::resolve | fn resolve(arena: std.mem.Allocator, project_dir: []const u8, inst: env.Instance) Resolved
+src/review_registry.zig::Category enum_
+src/review_registry.zig::Layer enum_
+src/review_registry.zig::Policy enum_
+src/review_registry.zig::Row struct_
+src/review_registry.zig::Scope enum_
+src/review_registry.zig::Verdict enum_
+src/review_registry.zig::checkPrimitiveId | fn checkPrimitiveId(keyword: []const u8) ?[]const u8
+src/review_registry.zig::drcId | fn drcId(kind: drc.Kind) []const u8
+src/review_registry.zig::ercId | fn ercId(kind: erc.ViolationKind) []const u8
+src/review_registry.zig::fabFindingId | fn fabFindingId(finding_id: []const u8) ?[]const u8
+src/review_registry.zig::fab_finding_ids value
+src/review_registry.zig::frequencyPlanScreenId | fn frequencyPlanScreenId(screen: frequency_plan.Screen) []const u8
+src/review_registry.zig::interfaceMismatchId | fn interfaceMismatchId(kind: system_interface_check.Kind) []const u8
+src/review_registry.zig::lookup | fn lookup(id: []const u8) ?Row
+src/review_registry.zig::netRulePredicateId | fn netRulePredicateId(keyword: []const u8) ?[]const u8
+src/review_registry.zig::pllScreenId | fn pllScreenId(screen: pll_loop.Screen) []const u8
+src/review_registry.zig::preflightId | fn preflightId(kind: preflight.FindingKind, code: []const u8) ?[]const u8
+src/review_registry.zig::profileItemId | fn profileItemId(code: []const u8) ?[]const u8
+src/review_registry.zig::railStatusId | fn railStatusId(status: power_budget.RailStatus) []const u8
+src/review_registry.zig::rows value
+src/review_registry.zig::systemGateId | fn systemGateId(field_name: []const u8) ?[]const u8
+src/review_registry.zig::thermalVerdictId | fn thermalVerdictId(verdict: thermal.Verdict) []const u8
+src/review_registry.zig::title | fn title(self: Category) []const u8
 src/review_thermal.zig::Cells struct_
 src/review_thermal.zig::Lines struct_
 src/review_thermal.zig::ScenarioCells struct_

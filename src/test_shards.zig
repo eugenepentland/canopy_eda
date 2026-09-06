@@ -243,6 +243,7 @@ pub const shards: []const []const []const u8 = &.{
         "review_datasheet_inventory.test.",
         "review_audit.test.",
         "review_profiles.test.",
+        "review_registry.test.",
         "waiver_register.test.",
         "render_svg.draw.test.",
         "review.test.",
@@ -750,6 +751,17 @@ test {
     for (shards) |shard| {
         for (shard) |filter| {
             if (std.mem.eql(u8, filter, "part_review.test.")) claims += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), claims);
+}
+
+// spec: Development pipeline - The review-check registry tests remain claimed by the shard manifest
+test {
+    var claims: usize = 0;
+    for (shards) |shard| {
+        for (shard) |filter| {
+            if (std.mem.eql(u8, filter, "review_registry.test.")) claims += 1;
         }
     }
     try std.testing.expectEqual(@as(usize, 1), claims);

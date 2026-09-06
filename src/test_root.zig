@@ -390,6 +390,7 @@ test {
     _ = @import("review_audit.zig");
     _ = @import("part_review.zig");
     _ = @import("review_profiles.zig");
+    _ = @import("review_registry.zig");
     _ = @import("waiver_register.zig");
     _ = @import("raster.zig");
     _ = @import("refdes_stability.zig");

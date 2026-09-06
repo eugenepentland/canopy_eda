@@ -95,6 +95,7 @@
 13 src/review.zig|ReviewDoc
 10 src/review.zig|SectionReport
 14 src/review.zig|Summary
+9 src/review_registry.zig|Row
 9 src/serve.zig|ServerState
 10 src/serve/digikey.zig|Product
 13 src/serve/library.zig|LibraryRow
