@@ -96,7 +96,12 @@
 13 src/review.zig|ReviewDoc
 10 src/review.zig|SectionReport
 14 src/review.zig|Summary
+8 src/review_audit.zig|Facts
+11 src/review_card.zig|Card
+9 src/review_card.zig|PartRow
+9 src/review_card.zig|Row
 9 src/review_registry.zig|Row
+8 src/serve.zig|ReadCaches
 9 src/serve.zig|ServerState
 10 src/serve/digikey.zig|Product
 13 src/serve/library.zig|LibraryRow

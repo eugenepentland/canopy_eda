@@ -66,6 +66,7 @@ const schematic_page = @import("serve/schematic_page.zig");
 const schematic_png = @import("serve/schematic_png.zig");
 const schematic_pdf = @import("serve/schematic_pdf.zig");
 const part_review_api = @import("serve/part_review_api.zig");
+const review_card_api = @import("serve/review_card_api.zig");
 const thermal_api = @import("serve/thermal_api.zig");
 const thermal_page = @import("serve/thermal_page.zig");
 const kicad_sch_export = @import("serve/kicad_sch_export.zig");
@@ -345,6 +346,8 @@ pub const ReadCaches = struct {
     erc: read_cache.Store(read_cache.erc) = .{},
     /// `GET /api/part-review/:name[/:ref]` — the per-part review JSON.
     part_review: read_cache.Store(read_cache.part_review) = .{},
+    /// `GET /api/review-card/:name` — the Board Review Card JSON.
+    review_card: read_cache.Store(read_cache.review_card) = .{},
     /// `GET /api/thermal/:name` — the thermal facts JSON.
     thermal_facts: read_cache.Store(read_cache.thermal_facts) = .{},
     /// `GET /thermal/:name` — the rendered thermal review page.
@@ -366,6 +369,7 @@ pub const ReadCaches = struct {
         return .{
             .erc = .{ .allocator = allocator },
             .part_review = .{ .allocator = allocator },
+            .review_card = .{ .allocator = allocator },
             .thermal_facts = .{ .allocator = allocator },
             .thermal_page = .{ .allocator = allocator },
             .schematic_pdf = .{ .allocator = allocator },
@@ -378,6 +382,7 @@ pub const ReadCaches = struct {
     pub fn deinit(self: *ReadCaches) void {
         self.erc.deinit();
         self.part_review.deinit();
+        self.review_card.deinit();
         self.thermal_facts.deinit();
         self.thermal_page.deinit();
         self.schematic_pdf.deinit();
@@ -1086,6 +1091,11 @@ pub fn serve(
     // spec sheet. HTTP twin of the `part_review` CLI tool.
     router.get("/api/part-review/:name", part_review_api.chipsApi, .{});
     router.get("/api/part-review/:name/:ref", part_review_api.partApi, .{});
+    // The Board Review Card: the twelve review categories, every row citing a
+    // registry check id, the part table, the fab block and the ladder. HTTP
+    // twin of the `review_card` CLI tool and the source of the review-audit
+    // Markdown.
+    router.get("/api/review-card/:name", review_card_api.cardApi, .{});
     // Lumped steady-state thermal screening as read-only facts JSON — the
     // HTTP twin of the `describe_thermal` CLI tool, sharing its whole body.
     // `?ambient=NN` screens at the caller's ambient instead of bench 25 °C.

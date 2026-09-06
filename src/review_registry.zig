@@ -325,6 +325,105 @@ pub const rows: []const Row = &.{
         .closes_with = "fix the evaluator warning at the source span it names",
     },
     .{
+        .id = "source-tree-clean",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = screened,
+        .asserts = "The project tree carries no uncommitted change when the release evidence is taken.",
+        .engine = "fab_readiness.zig - project_status",
+        .closes_with = "commit or revert the working tree, then take the evidence again",
+    },
+    .{
+        .id = "layout-frozen",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = screened,
+        .asserts = "The reviewed layout is frozen: its parts are placed and locked and every sub-block layout is starred.",
+        .engine = "serve/pcb_describe.zig - completion ladder placement and sub_circuits rungs",
+        .closes_with = "lock the placement and star each sub-block's layout",
+    },
+    .{
+        .id = "release-gate-clear",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = screened,
+        .asserts = "The fabrication-readiness gate reports no blocking error for the reviewed layout.",
+        .engine = "serve/fab_release_service.zig - readiness errors",
+        .closes_with = "close every gate error the readiness run names",
+    },
+    .{
+        .id = "design-notes-closed",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .advisory,
+        .verdicts = binary,
+        .asserts = "Every design note raised against the board is closed.",
+        .engine = "serve/notes.zig - open tasks in <design>.notes.md",
+        .closes_with = "close the note, or restate it as a checklist item",
+    },
+    .{
+        .id = "release-differential-reviewed",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .advisory,
+        .verdicts = judged,
+        .asserts = "The fabrication package is diffed against the previous release and every change is intended.",
+        .engine = "gerber-dump --digest and netlist-dump on both commits (human)",
+        .closes_with = "record the differential in the audit's Disposition cell",
+    },
+    .{
+        .id = "source-revision-unavailable",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "The release can read the source revision the package is cut from.",
+        .engine = "fab_release.zig - source-revision-unavailable",
+        .closes_with = "run the release from a checkout whose revision the tool can read",
+    },
+    .{
+        .id = "source-worktree-dirty",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = binary,
+        .asserts = "The worktree the package is cut from carries no uncommitted change.",
+        .engine = "fab_release.zig - source-worktree-dirty",
+        .closes_with = "commit or revert the working tree, then cut the package again",
+    },
+    .{
+        .id = "source-snapshot-changed",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = binary,
+        .asserts = "The source did not change under the release while the package was being cut.",
+        .engine = "fab_release.zig - source-snapshot-changed",
+        .closes_with = "re-cut the package from a settled tree",
+    },
+    .{
+        .id = "source-bundle-ambiguous",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = binary,
+        .asserts = "Exactly one source bundle describes the release.",
+        .engine = "fab_release.zig - source-bundle-ambiguous",
+        .closes_with = "leave one source bundle beside the release and delete the others",
+    },
+    .{
         .id = "system-identity-complete",
         .layer = .system,
         .category = .identity,
@@ -392,6 +491,17 @@ pub const rows: []const Row = &.{
     },
 
     // ── Connectivity ──────────────────────────────────────────────
+    .{
+        .id = "erc-clean",
+        .layer = .unit,
+        .category = .connectivity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = binary,
+        .asserts = "The electrical-rule check reports no error and no warning on the board.",
+        .engine = "erc.zig - runErc totals",
+        .closes_with = "close every violation the check reports, kind by kind",
+    },
     .{
         .id = "net-not-floating",
         .layer = .unit,
@@ -1247,6 +1357,28 @@ pub const rows: []const Row = &.{
         .closes_with = "(requirement \"…\" (ref …) (check …)) or (ignore-requirements) for an inert part",
     },
     .{
+        .id = "verification-evidence-incomplete",
+        .layer = .unit,
+        .category = .datasheet_compliance,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "The release carries the verification evidence its lock names.",
+        .engine = "fab_gate.zig - verification-evidence-incomplete",
+        .closes_with = "attach the verification evidence the release lock asks for",
+    },
+    .{
+        .id = "class-profile-items-met",
+        .layer = .unit,
+        .category = .datasheet_compliance,
+        .scope = .part,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "Every active part meets every item of the component-class profile it was judged under.",
+        .engine = "review_profiles.zig - evaluate; preflight.zig profile_incomplete",
+        .closes_with = "author the declaration each unmet item names, or (class …) the part correctly",
+    },
+    .{
         .id = "requirement-check",
         .layer = .library,
         .category = .datasheet_compliance,
@@ -1368,6 +1500,39 @@ pub const rows: []const Row = &.{
         .asserts = "A placement's typed attributes agree with the parts-table row it resolves to.",
         .engine = "erc.zig - attribute_row_mismatch; parts.zig",
         .closes_with = "edit the attributes or the parts-table row so they agree",
+    },
+    .{
+        .id = "bom-selection-drift",
+        .layer = .unit,
+        .category = .bom,
+        .scope = .part,
+        .policy = .blocking,
+        .verdicts = binary,
+        .asserts = "Every placement's fitted identity still matches the selection the BOM sidecar recorded.",
+        .engine = "fab_schematic_gate.zig - bom-selection-drift",
+        .closes_with = "rebuild the BOM, or restore the selection the design authored",
+    },
+    .{
+        .id = "bom-evidence-incomplete",
+        .layer = .unit,
+        .category = .bom,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "The release carries the BOM evidence its lock names.",
+        .engine = "fab_gate.zig - bom-evidence-incomplete",
+        .closes_with = "attach the BOM evidence the release lock asks for",
+    },
+    .{
+        .id = "bom-lifecycle-stock-dated",
+        .layer = .unit,
+        .category = .bom,
+        .scope = .part,
+        .policy = .waivable,
+        .verdicts = judged,
+        .asserts = "Every purchasable placement is a lifecycle-active part with a dated stock check.",
+        .engine = "resolve_mpn and check_stock, read by a reviewer",
+        .closes_with = "record the lifecycle and stock date, or replace the part",
     },
     .{
         .id = "centroid-parity",
@@ -1722,6 +1887,28 @@ pub const rows: []const Row = &.{
         .asserts = "Every net's drawn copper forms one connected island.",
         .engine = "placement/drc.zig - net_open; placement/net_open.zig via serve/drc_rules.zig",
         .closes_with = "route the missing link between the islands",
+    },
+    .{
+        .id = "layout-evidence-incomplete",
+        .layer = .unit,
+        .category = .layout,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "The release carries the layout evidence its lock names.",
+        .engine = "fab_gate.zig - layout-evidence-incomplete",
+        .closes_with = "attach the layout evidence the release lock asks for",
+    },
+    .{
+        .id = "layout-ladder-complete",
+        .layer = .unit,
+        .category = .layout,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = screened,
+        .asserts = "Every rung of the layout completion ladder is done on the reviewed layout.",
+        .engine = "placement/progress.zig - completion ladder",
+        .closes_with = "finish the open items the rung lists",
     },
     .{
         .id = "drc",
@@ -2146,7 +2333,9 @@ pub fn drcId(kind: drc.Kind) []const u8 {
 /// schematic gate can emit. Each is registered under its own name, so the
 /// gate's id IS the registry id; the test below proves it.
 pub const fab_finding_ids: []const []const u8 = &.{
+    "bom-evidence-incomplete",
     "bom-identity",
+    "bom-selection-drift",
     "bom-spec-library-missing",
     "bom-spec-missing",
     "bom-spec-unmatched",
@@ -2169,6 +2358,7 @@ pub const fab_finding_ids: []const []const u8 = &.{
     "fabrication-identity-incomplete",
     "footprint-geometry-unresolved",
     "hairline-gap",
+    "layout-evidence-incomplete",
     "malformed-outline",
     "missing-identity",
     "no-outline",
@@ -2177,16 +2367,27 @@ pub const fab_finding_ids: []const []const u8 = &.{
     "revision-missing",
     "reviewed-input-evidence-incomplete",
     "schematic-check-failed",
+    "source-bundle-ambiguous",
+    "source-revision-unavailable",
+    "source-snapshot-changed",
+    "source-worktree-dirty",
     "unresolvable-pin",
     "unrouted-net",
+    "verification-evidence-incomplete",
     "via-no-drill",
 };
 
 /// The registry id a fabrication finding belongs to, or null when the id is
 /// not one the registry knows.
+///
+/// Most gate findings carry the gate's own id, which IS the registry id. The
+/// schematic half of the gate instead folds the release check run in under the
+/// check KIND's name (`requirement`, `assertion`, …), so those spellings are
+/// aliased onto the rows that already carry those checks rather than being
+/// registered a second time.
 pub fn fabFindingId(finding_id: []const u8) ?[]const u8 {
-    const row = lookup(finding_id) orelse return null;
-    return row.id;
+    if (lookup(finding_id)) |row| return row.id;
+    return keyedId(fab_alias_table, finding_id);
 }
 
 /// A string key of an engine vocabulary paired with the registry row it means.
@@ -2204,6 +2405,17 @@ fn keyedId(table: []const KeyedId, key: []const u8) ?[]const u8 {
     }
     return null;
 }
+
+/// Check-run kind names the fabrication gate emits as finding ids, each paired
+/// with the registry row that already carries that check.
+const fab_alias_table: []const KeyedId = &.{
+    .{ .key = "requirement", .id = "requirement-check" },
+    .{ .key = "assertion", .id = "design-assertion" },
+    .{ .key = "profile_incomplete", .id = "class-profile-items-met" },
+    .{ .key = "datasheet_review", .id = "datasheet-review-complete" },
+    .{ .key = "eval_warning", .id = "build-warning-free" },
+    .{ .key = "erc", .id = "erc-clean" },
+};
 
 /// The eight class-profile item codes `review_profiles.evaluate` can push,
 /// each paired with the registry row it fills.

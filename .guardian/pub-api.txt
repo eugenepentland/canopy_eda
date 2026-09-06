@@ -290,6 +290,7 @@ src/commands.zig::cmdImportKicadLayout | fn cmdImportKicadLayout( allocator: std
 src/commands.zig::cmdInspectKicad | fn cmdInspectKicad( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdMergeLayout | fn cmdMergeLayout( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdReviewAudit | fn cmdReviewAudit(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
+src/commands.zig::cmdReviewCard | fn cmdReviewCard(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdRouteKicadReference | fn cmdRouteKicadReference( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdSyncKicadSch | fn cmdSyncKicadSch(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdSystemCheck | fn cmdSystemCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
@@ -1996,6 +1997,7 @@ src/part_review.zig::Verdict enum_
 src/part_review.zig::add | fn add(self: *Counts, verdict: Verdict) void
 src/part_review.zig::chip | fn chip(self: PartReview) Chip
 src/part_review.zig::collect | fn collect( arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) CollectError!Board
+src/part_review.zig::collectFor | fn collectFor( arena: std.mem.Allocator, eval: *Evaluator, block: *const env.DesignBlock, project_dir: []const u8, name: []const u8, options: Options, ) CollectError!Board
 src/part_review.zig::collectWith | fn collectWith( arena: std.mem.Allocator, eval: *Evaluator, project_dir: []const u8, name: []const u8, options: Options, ) CollectError!Board
 src/part_review.zig::find | fn find(self: Board, ref: []const u8) ?PartReview
 src/part_review.zig::key | fn key(self: Verdict) []const u8
@@ -4440,9 +4442,27 @@ src/review_audit.zig::RenderError value
 src/review_audit.zig::Schematic struct_
 src/review_audit.zig::StageRow struct_
 src/review_audit.zig::collectFacts | fn collectFacts( arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) RenderError!Facts
+src/review_audit.zig::collectFactsFor | fn collectFactsFor( arena: std.mem.Allocator, eval: *Evaluator, block: *const env.DesignBlock, project_dir: []const u8, name: []const u8, options: Options, ) RenderError!Facts
 src/review_audit.zig::mergeDispositions | fn mergeDispositions( allocator: std.mem.Allocator, rendered: []const u8, previous: []const u8, ) std.mem.Allocator.Error![]u8
 src/review_audit.zig::render | fn render( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) RenderError![]u8
-src/review_audit.zig::renderFacts | fn renderFacts(allocator: std.mem.Allocator, facts: Facts) std.mem.Allocator.Error![]u8
+src/review_audit.zig::renderCard | fn renderCard(allocator: std.mem.Allocator, card: review_card.Card) std.mem.Allocator.Error![]u8
+src/review_card.zig::Card struct_
+src/review_card.zig::Category struct_
+src/review_card.zig::CollectError value
+src/review_card.zig::Options struct_
+src/review_card.zig::Overall struct_
+src/review_card.zig::PartRow struct_
+src/review_card.zig::Row struct_
+src/review_card.zig::Stripe struct_
+src/review_card.zig::Verdict value
+src/review_card.zig::add | fn add(self: *Stripe, verdict: Verdict) void
+src/review_card.zig::collect | fn collect( arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) CollectError!Card
+src/review_card.zig::collectWith | fn collectWith( arena: std.mem.Allocator, eval: *Evaluator, project_dir: []const u8, name: []const u8, options: Options, ) CollectError!Card
+src/review_card.zig::find | fn find(self: Card, key: registry.Category) ?Category
+src/review_card.zig::row | fn row(self: Card, id: []const u8) ?Row
+src/review_card.zig::total | fn total(self: Stripe) usize
+src/review_card.zig::worst | fn worst(self: Stripe) Verdict
+src/review_card.zig::writeCardJson | fn writeCardJson(w: anytype, card: Card) json_writer.WriteError!void
 src/review_datasheet_inventory.zig::CollectError value
 src/review_datasheet_inventory.zig::Row struct_
 src/review_datasheet_inventory.zig::Status enum_
@@ -5604,6 +5624,7 @@ src/serve/read_cache.zig::Store | fn Store(comptime cfg: Config) type
 src/serve/read_cache.zig::erc value
 src/serve/read_cache.zig::kicad_sch value
 src/serve/read_cache.zig::part_review value
+src/serve/read_cache.zig::review_card value
 src/serve/read_cache.zig::schematic_pdf value
 src/serve/read_cache.zig::thermal_facts value
 src/serve/read_cache.zig::thermal_page value
@@ -5631,6 +5652,10 @@ src/serve/request_log.zig::stages | fn stages(self: *const StageTimer) []const S
 src/serve/request_log.zig::stampServerMs | fn stampServerMs(req: *httpz.Request, res: *httpz.Response, started_ns: i128) void
 src/serve/request_log.zig::start | fn start() StageTimer
 src/serve/request_log.zig::totalMs | fn totalMs(self: *const StageTimer) f64
+src/serve/review_card_api.zig::CardError value
+src/serve/review_card_api.zig::HandlerError value
+src/serve/review_card_api.zig::cardApi | fn cardApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/review_card_api.zig::mcpReviewCard | fn mcpReviewCard( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
 src/serve/rework_guide.zig::Guide struct_
 src/serve/rework_guide.zig::loadAll | fn loadAll( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) []const Guide
 src/serve/rough_best.zig::bestRoughApi | fn bestRoughApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void

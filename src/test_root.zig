@@ -390,6 +390,7 @@ test {
     _ = @import("review_datasheet_inventory.zig");
     _ = @import("review_audit.zig");
     _ = @import("part_review.zig");
+    _ = @import("review_card.zig");
     _ = @import("review_profiles.zig");
     _ = @import("review_registry.zig");
     _ = @import("waiver_register.zig");
@@ -553,6 +554,7 @@ test {
     _ = @import("serve/schematic_page.zig");
     _ = @import("serve/schematic_pdf.zig");
     _ = @import("serve/part_review_api.zig");
+    _ = @import("serve/review_card_api.zig");
     _ = @import("serve/thermal_api.zig");
     _ = @import("serve/thermal_cache.zig");
     _ = @import("serve/thermal_page.zig");
