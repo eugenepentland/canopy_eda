@@ -1244,6 +1244,7 @@ src/fab_readiness.zig::openNets | fn openNets( arena: std.mem.Allocator, placeme
 src/fab_readiness.zig::openNetsAmong | fn openNetsAmong( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, names: ?[]const []const u8, ) std.mem.Allocator.Error![]const OpenNet
 src/fab_readiness.zig::openNetsPrepared | fn openNetsPrepared( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, prep: BoardPrep, ) std.mem.Allocator.Error![]const OpenNet
 src/fab_readiness.zig::outlineDrift | fn outlineDrift( arena: std.mem.Allocator, declared: outline_mod.Declared, saved: ?outline_mod.Saved, ) std.mem.Allocator.Error!?Item
+src/fab_readiness.zig::ratingReport | fn ratingReport( arena: std.mem.Allocator, placement: optimizer.Placement, keep_dnp: bool, ) std.mem.Allocator.Error!Report
 src/fab_readiness.zig::root | fn root(self: NetGraph, node: usize) usize
 src/fab_readiness.zig::routableTally | fn routableTally( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ) std.mem.Allocator.Error!Tally
 src/fab_readiness.zig::savedOutline | fn savedOutline(placement: optimizer.Placement) ?outline_mod.Saved
@@ -1288,6 +1289,7 @@ src/fab_release.zig::writeMachineReport | fn writeMachineReport( writer: *std.Io
 src/fab_release.zig::writeReadinessJson | fn writeReadinessJson( allocator: std.mem.Allocator, writer: *std.Io.Writer, evidence: Evidence, lock: Lock, ) ReadinessJsonError!void
 src/fab_release.zig::writeRulesJson | fn writeRulesJson(writer: *std.Io.Writer, evidence: Evidence) ReportWriteError!void
 src/fab_schematic_gate.zig::append | fn append( allocator: std.mem.Allocator, base: fab.Report, evaluator: *Evaluator, block: *const env.DesignBlock, project_dir: []const u8, keep_dnp: bool, ) std.mem.Allocator.Error!fab.Report
+src/fab_schematic_gate.zig::selectionReport | fn selectionReport( allocator: std.mem.Allocator, block: *const env.DesignBlock, project_dir: []const u8, keep_dnp: bool, ) std.mem.Allocator.Error![]const fab.Item
 src/flat_netlist.zig::CanonicalNetMap value
 src/flat_netlist.zig::FlatInstance struct_
 src/flat_netlist.zig::FlatNet struct_
@@ -1953,6 +1955,32 @@ src/panelize.zig::Segment struct_
 src/panelize.zig::Source struct_
 src/panelize.zig::plan | fn plan(arena: std.mem.Allocator, source: Source, options: Options) Error!Plan
 src/panelize.zig::sourceFor | fn sourceFor(placement: optimizer.Placement) Source
+src/part_review.zig::Board struct_
+src/part_review.zig::Chip struct_
+src/part_review.zig::Citation struct_
+src/part_review.zig::CollectError value
+src/part_review.zig::Counts struct_
+src/part_review.zig::DatasheetBlock struct_
+src/part_review.zig::Identity struct_
+src/part_review.zig::Options struct_
+src/part_review.zig::PartReview struct_
+src/part_review.zig::PowerRow struct_
+src/part_review.zig::ProfileRow struct_
+src/part_review.zig::RatingRow struct_
+src/part_review.zig::RequirementRow struct_
+src/part_review.zig::ReviewRecord struct_
+src/part_review.zig::SupplyWindow struct_
+src/part_review.zig::ThermalRow struct_
+src/part_review.zig::Verdict enum_
+src/part_review.zig::add | fn add(self: *Counts, verdict: Verdict) void
+src/part_review.zig::chip | fn chip(self: PartReview) Chip
+src/part_review.zig::collect | fn collect( arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) CollectError!Board
+src/part_review.zig::collectWith | fn collectWith( arena: std.mem.Allocator, eval: *Evaluator, project_dir: []const u8, name: []const u8, options: Options, ) CollectError!Board
+src/part_review.zig::find | fn find(self: Board, ref: []const u8) ?PartReview
+src/part_review.zig::key | fn key(self: Verdict) []const u8
+src/part_review.zig::worst | fn worst(self: Counts) Verdict
+src/part_review.zig::writeChipsJson | fn writeChipsJson(w: anytype, board: Board) json_writer.WriteError!void
+src/part_review.zig::writePartJson | fn writePartJson(w: anytype, design: []const u8, part: PartReview) json_writer.WriteError!void
 src/parts.zig::PartEntry struct_
 src/parts.zig::PartsDb struct_
 src/parts.zig::deinit | fn deinit(self: *PartsDb) void
@@ -5081,6 +5109,11 @@ src/serve/pages.zig::gatherHome | fn gatherHome(allocator: std.mem.Allocator, pr
 src/serve/pages.zig::indexPage | fn indexPage(ctx: *Server, _: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/panel_export.zig::requested | fn requested(arena: std.mem.Allocator, req: *httpz.Request, source: panelize.Source) panelize.Error!?*const panelize.Plan
 src/serve/panel_export.zig::writeError | fn writeError(res: *httpz.Response, err: panelize.Error) void
+src/serve/part_review_api.zig::HandlerError value
+src/serve/part_review_api.zig::ReviewError value
+src/serve/part_review_api.zig::chipsApi | fn chipsApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/part_review_api.zig::mcpPartReview | fn mcpPartReview( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
+src/serve/part_review_api.zig::partApi | fn partApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
 src/serve/pcb_derived.zig::BothPayloads struct_
 src/serve/pcb_derived.zig::PageSink struct_
 src/serve/pcb_derived.zig::WarmLimit struct_
@@ -5520,6 +5553,7 @@ src/serve/read_cache.zig::Config struct_
 src/serve/read_cache.zig::Store | fn Store(comptime cfg: Config) type
 src/serve/read_cache.zig::erc value
 src/serve/read_cache.zig::kicad_sch value
+src/serve/read_cache.zig::part_review value
 src/serve/read_cache.zig::schematic_pdf value
 src/serve/read_cache.zig::thermal_facts value
 src/serve/read_cache.zig::thermal_page value

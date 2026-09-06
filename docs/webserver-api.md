@@ -439,6 +439,43 @@ Auth in full: [auth.md](auth.md).
   resolve that may rewrite the `.bom`. The endpoint takes no query parameters,
   so any query bypasses. `X-Netlisp-Erc-Cache: hit|miss|bypass` reports which
   happened.
+- **Part review**: `GET /api/part-review/:name` and
+  `GET /api/part-review/:name/:ref` — the per-part review
+  (`src/part_review.zig`, served by `src/serve/part_review_api.zig`) as
+  read-only JSON. The bare route answers `{design, ambient_c, parts[]}` with one
+  compact chip per placed part — `{ref, class, pass, unproven, fail,
+  not_declared, verdict}` — which is what the schematic page's BOM tab fills its
+  **Review** column from. The `/:ref` route answers ONE part's whole review
+  contract, joined from every engine that already judges it: `identity` (value,
+  footprint, MPN, manufacturer, datasheet, DNP, authored attributes and
+  properties, from the BOM resolve path), `class` / `class_declared`,
+  `datasheet_review` (the preflight verdict plus the authored record — PDF,
+  sha256, `digest_bound`, status, reviewer, date, categories, `not_applicable`
+  rationales — and the exact fitted part's local-PDF `inventory` state),
+  `profile_items[]` (unmet component-class obligations by code),
+  `requirements[]` (id, text, datasheet `citation` with page and quote, check
+  primitive, status, verdict, check message and the `(verifies …)` sign-off's
+  rationale and signer), `supply_windows[]` (the `voltage-range` rules lifted
+  out of those requirements, per supply pin), `ratings[]` (the fabrication
+  gate's own `component-rating-*` / `component-underrated` / `bom-spec-*` finding
+  ids for this ref), `power[]` (rail, net, pins, `i_typ`, `i_max` and the share
+  of the rail's typical load), `thermal` (dissipation, θJA, Tj, margin and
+  limiting ambient, formatted by `review_thermal` so the sheet and the Thermal
+  tab round identically), `electrical[]` (the per-pin `(electrical …)`
+  declarations) and `counts`. Every row states a verdict in the shared
+  seven-word vocabulary — `pass`, `fail`, `unproven`, `waived`,
+  `not_applicable`, `not_declared`, `manual` — and `counts` tallies them.
+  Refs are sub-block-qualified (`ldo_3v3_lmx/U21`, percent-encode the slash); a
+  bare leaf ref-des resolves too. No geometry is involved: the rating screen is
+  entered over a board-free placement, so a design that has never been placed
+  still gets its ratings judged. Unknown design → 404; known design with an
+  unknown ref → 404 naming the ref. Read-only, and both shapes are two
+  projections of ONE composition (one evaluation, one release-profile preflight
+  run, one rating screen), retained in `src/serve/read_cache.zig` against the
+  evaluator read-set; the per-ref entry keys on the design and the ref together
+  because the ref is a path segment the store's query folding cannot see.
+  `X-Netlisp-Part-Review-Cache: hit|miss|bypass` reports which happened. CLI
+  twin: `part_review`, sharing this body.
 - **Thermal facts**: `GET /api/thermal/:name[?ambient=NN][?layout=<saved>]` — the lumped
   steady-state thermal screening (`src/eval/thermal.zig`) as read-only JSON:
   `ambient_c`, the board `verdict`
@@ -833,6 +870,15 @@ Tools include:
   be told different junction temperatures for the same design, ambient and
   layout. It
   resolves a design or a bare `lib/modules` module and touches nothing on disk.
+- **Per-part review (read-only)**: `part_review` `{name, ref?}` — the CLI twin
+  of `GET /api/part-review/:name[/:ref]`, returning the identical bytes through
+  one shared body. With `ref` it answers that placed part's whole review
+  contract (identity, class, datasheet review, cited requirements with their
+  citations and sign-offs, supply-pin windows, applied stress against rating,
+  rail draw, junction temperature, per-pin electrical declarations, and the
+  verdict counts); without one, the compact chip for every placed part. Refs are
+  sub-block-qualified (`ldo_3v3_lmx/U21`); a bare leaf ref-des resolves too. It
+  reads the project directory and writes nothing.
 - **Release audit (read-only)**: `review_audit` `{name, layout?}` — the
   generated Board Review Audit as Markdown (`{ok,name,layout,markdown}`): the
   identity block with the release token and digests, the release-profile

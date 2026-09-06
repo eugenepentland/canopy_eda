@@ -538,6 +538,38 @@ details li{margin:3px 0;font-size:0.88rem;color:#c9d1d9;line-height:1.45;}
 .sch-bom-mpn input.bom-error,.sch-bom-mfr input.bom-error{border-color:#f85149;background:rgba(248,81,73,0.06);}
 .sch-bom-mpn button,.sch-bom-mfr button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:3px;padding:3px 9px;font-size:0.72rem;cursor:pointer;margin-left:4px;font-family:inherit;font-weight:600;}
 .sch-bom-mpn button:hover,.sch-bom-mfr button:hover{background:#30363d;border-color:#58a6ff;}
+/* Review column: one verdict chip per BOM row, and the spec sheet it expands
+   into. Filled by schematic_viewer.js from /api/part-review/:name. */
+.sch-bom-review{white-space:nowrap;}
+.sch-bom-review-h button{background:none;border:none;color:inherit;font:inherit;text-transform:inherit;letter-spacing:inherit;cursor:pointer;padding:0;}
+.sch-bom-review-h button:hover{color:#58a6ff;}
+.sch-bom-chip{display:inline-block;border-radius:3px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;font:inherit;font-size:0.72rem;padding:1px 7px;cursor:pointer;}
+.sch-bom-chip-pass,.sch-bom-chip-waived{border-color:#238636;color:#7ee787;background:rgba(63,185,80,0.08);}
+.sch-bom-chip-unproven,.sch-bom-chip-manual{border-color:#9e6a03;color:#e3b341;background:rgba(210,153,34,0.08);}
+.sch-bom-chip-fail{border-color:#f85149;color:#ff9da4;background:rgba(248,81,73,0.10);}
+.sch-bom-chip-not_declared{border-color:#3d444d;color:#8b949e;background:#1c2128;}
+.sch-bom-chip-none,.sch-bom-chip-not_applicable{border-color:#30363d;color:#6e7681;cursor:default;}
+.sch-bom-sheet-row td{background:#0b0f14;border-bottom:1px solid #30363d;}
+.sch-bom-sheet{padding:12px 14px 14px;}
+.sch-part-title{display:flex;gap:10px;align-items:baseline;margin-bottom:8px;color:#c9d1d9;}
+.sch-part-comp{color:#d2a8ff;}
+.sch-part-picker{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;}
+.sch-part-section{margin-top:10px;}
+.sch-part-section h4{margin:0 0 5px;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.05em;color:#8b949e;font-weight:600;}
+.sch-part-list{display:flex;flex-direction:column;gap:3px;}
+.sch-part-kv{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;}
+.sch-part-k{color:#8b949e;min-width:120px;}
+.sch-part-v{color:#c9d1d9;flex:1 1 260px;}
+.sch-part-req{border-left:2px solid #21262d;padding-left:8px;margin-bottom:5px;}
+.sch-part-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;}
+.sch-part-msg{color:#c9d1d9;flex:1 1 260px;}
+.sch-part-meta{display:flex;gap:4px;flex-wrap:wrap;margin:2px 0;}
+.sch-part-tag{display:inline-block;background:#1f2a3d;border:1px solid #243454;border-radius:3px;color:#79c0ff;padding:0 5px;font-size:0.68rem;}
+.sch-part-signoff{color:#7ee787;margin-top:2px;}
+.sch-part-verdict{display:inline-block;border-radius:3px;padding:0 6px;font-size:0.68rem;border:1px solid #30363d;color:#8b949e;}
+.sch-part-verdict-pass,.sch-part-verdict-waived{border-color:#238636;color:#7ee787;}
+.sch-part-verdict-unproven,.sch-part-verdict-manual{border-color:#9e6a03;color:#e3b341;}
+.sch-part-verdict-fail{border-color:#f85149;color:#ff9da4;}
 .sch-bom-mpn button:disabled,.sch-bom-mfr button:disabled{opacity:0.5;cursor:wait;}
 
 /* Sub circuit card: header actions (Copy source + the PCB Layout link) cluster

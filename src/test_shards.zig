@@ -235,6 +235,7 @@ pub const shards: []const []const []const u8 = &.{
         "placement.router.test.qua",
         "placement.topo_plan.test.a l",
         "placement.trace_em.test.",
+        "part_review.test.",
         "preflight.test.",
         "board_review_catalog.test.",
         "board_review_state.test.",
@@ -329,6 +330,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.describe_cache.test.",
         "serve.cache_core.test.",
         "serve.page_cache_endpoint.test.",
+        "serve.part_review_api.test.",
         "serve.read_cache.test.",
         "serve.png_cache.test.",
         "serve.route_plan.test.",
@@ -737,6 +739,17 @@ test {
     for (shards) |shard| {
         for (shard) |filter| {
             if (std.mem.eql(u8, filter, "system_brief.test.")) claims += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), claims);
+}
+
+// spec: Development pipeline - The per-part review tests remain claimed by the shard manifest
+test {
+    var claims: usize = 0;
+    for (shards) |shard| {
+        for (shard) |filter| {
+            if (std.mem.eql(u8, filter, "part_review.test.")) claims += 1;
         }
     }
     try std.testing.expectEqual(@as(usize, 1), claims);
