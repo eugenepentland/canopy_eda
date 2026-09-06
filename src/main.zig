@@ -27,6 +27,7 @@ const drc_dump = @import("drc_dump.zig");
 const power_flow_cli = @import("power_flow_cli.zig");
 const gerber_dump = @import("gerber_dump.zig");
 const netlist_dump = @import("netlist_dump.zig");
+const envelope_dump = @import("envelope_dump.zig");
 const export_pinmap = @import("export_pinmap.zig");
 const export_spice = @import("export_spice.zig");
 const plugin_tokens = @import("serve/plugin_tokens.zig");
@@ -425,6 +426,10 @@ fn dispatchDumpCommand(
         try netlist_dump.cmdNetlistDump(allocator, args);
         return true;
     }
+    if (std.mem.eql(u8, command, "envelopes")) {
+        try envelope_dump.cmdEnvelopes(allocator, args);
+        return true;
+    }
     return false;
 }
 
@@ -653,6 +658,7 @@ fn printUsage() !void {
         \\  netlisp gerber-dump [--project-dir <d>] [--layout <name>] [--digest] <name>…  Dump the unstamped fabrication artwork of a saved layout — every Gerber layer, the job file and both drills (read-only; `#` lines carry the timings, so `diff -I '^#'` compares artwork alone)
         \\  netlisp power-flow [--project-dir <d>] [--layout <name>] [--net <name>] [--text] <name>  Explain every power rail's current solve — the two axis statuses, source terminals with contact counts, each load's resolution (contacts / complete / placed) and unplaced amperes, then per-track and per-via required vs actual with the reason (read-only; JSON unless --text)
         \\  netlisp netlist-dump [--project-dir <d>] <name>…  Dump the flattened netlist — one sorted line per net carrying its sorted refdes.pad members (read-only; `#` lines carry the timings)
+        \\  netlisp envelopes [--project-dir <d>] [--text] <name>…  Dump every flattened net's worst-case DC voltage envelope from ONE evaluation — bounds, source, provenance, and an explicit unknown for a net nothing bounds (read-only; JSON unless --text)
         \\  netlisp export-schematic-png [--project-dir <d>] <name> [--sub <slug>|--ref <hub>] [--view sequential|functional] [--theme light|dark] [--width <px>] [--output <file>]  Export a schematic block PNG without a browser
         \\  netlisp package <command>             Create, preview, check, save and export IC packages
         \\  netlisp convert-footprint <file>        Convert KiCad .kicad_mod to .sexp

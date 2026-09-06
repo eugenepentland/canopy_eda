@@ -38,6 +38,7 @@ test {
     _ = @import("serve/package_tools.zig");
     _ = @import("serve/package_component.zig");
     _ = @import("dump_args.zig");
+    _ = @import("envelope_dump.zig");
     _ = @import("bench_route.zig");
     _ = @import("bench_page.zig");
     _ = @import("authored_heatsink.zig");

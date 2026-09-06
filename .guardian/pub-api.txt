@@ -512,6 +512,8 @@ src/elmer_thermal_command.zig::benchCommand | fn benchCommand(alloc: std.mem.All
 src/elmer_thermal_command.zig::compareCommand | fn compareCommand(alloc: std.mem.Allocator, argv: []const []const u8) void
 src/elmer_thermal_command.zig::exportCommand | fn exportCommand(alloc: std.mem.Allocator, argv: []const []const u8) void
 src/emit.zig::emitResolved | fn emitResolved(allocator: std.mem.Allocator, block: *const DesignBlock) (std.mem.Allocator.Error || std.Io.Writer.Error)![]const u8
+src/envelope_dump.zig::DumpError value
+src/envelope_dump.zig::cmdEnvelopes | fn cmdEnvelopes(allocator: std.mem.Allocator, args: []const []const u8) DumpError!void
 src/erc.zig::PinoutEntry struct_
 src/erc.zig::Severity value
 src/erc.zig::Violation struct_

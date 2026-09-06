@@ -975,6 +975,34 @@ nothing reads exactly like a dump that found no difference.
 - completeness-waiver: integer overflow (a single forward pass over argv with no arithmetic on its length)
 - completeness-waiver: panic-free (the only failure is the caller's allocator, returned as an error; every other path returns a bool)
 
+## envelope dump
+
+Public functions: cmdEnvelopes
+
+Every flattened net's worst-case DC voltage envelope from ONE evaluation. The
+single-net answer already existed (`netlisp net`'s `"envelope"` object); reading
+them all meant 1,863 separate invocations, each re-evaluating the whole design.
+The per-net object here is written by the very function the single-net query
+calls, so a bulk value and a single-net value cannot disagree, and a net nothing
+bounds is reported as an explicit unknown rather than as zero volts.
+
+- the CLI parses the project dir and text flag with positionals as design names and refuses a run that names no design
+- a bulk row carries the same envelope object the single-net query writes for that net
+- a net nothing bounds reports an explicit unknown rather than a zero-volt envelope
+- a ground-class name is bounded at zero volts and counted as known
+- hierarchical and non-ASCII net names survive the JSON encoding
+- nets sort by name so two runs of one design compare byte for byte
+- a design that fails to resolve fails the run instead of emitting an empty comparison
+
+- completeness-waiver: empty inputs (a run naming no design is a usage error; a design with no nets emits an empty net array with its zero counts rather than passing as a trivial match)
+- completeness-waiver: large inputs (one arena per design, freed before the next, so a corpus sweep peaks at one design's flattened netlist)
+- completeness-waiver: unauthorized access (a local read-only CLI over the caller's own project directory; no network, no auth surface, and no file is written)
+- completeness-waiver: concurrent access (single-threaded, sharing no state between designs)
+- completeness-waiver: i/o failure (a design that cannot be resolved emits an explicit unresolved row and the command fails after every design has had its chance)
+- completeness-waiver: malformed encoding (net names are escaped through json_writer, which is what carries a hierarchical or non-ASCII name intact)
+- completeness-waiver: integer overflow (no arithmetic beyond formatting already-computed bounds and counts)
+- completeness-waiver: panic-free (an absent envelope is the documented unknown state, not a failure; a design that fails to resolve degrades to a row and the next design)
+
 ## netlist-dump
 
 Public functions: cmdNetlistDump
