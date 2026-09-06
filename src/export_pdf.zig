@@ -1578,6 +1578,7 @@ fn thermalTable(
         const range = try std.fmt.allocPrint(c.scratch, "Board ambient range: {s}", .{lines.ambient});
         try c.line(range, .{ .size = body_size, .color = c.fur.muted }, body_leading);
     }
+    try c.line(lines.provenance, .{ .size = body_size, .color = c.fur.muted }, body_leading);
     if (bt.parts.len > 0) try thermalRows(c, bt.parts);
     try coolingScenarios(c, scenarios);
     const cover = try std.fmt.allocPrint(c.scratch, "Coverage: {s}.", .{lines.coverage});

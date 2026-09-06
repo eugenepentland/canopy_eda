@@ -1836,6 +1836,14 @@ pub const system_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
         .summary = "Maximum input current the product may draw, in amps.",
     },
     .{
+        .name = "feeds",
+        .within = "input-power",
+        .syntax = "(feeds \"V_12V\")",
+        .summary = "Board net the input power lands on. Binds the (voltage LO HI) window to that net's " ++
+            "proven envelope for the unit checks; without it the binding falls back to the first " ++
+            "(interface \"NAME\") whose name matches a board port.",
+    },
+    .{
         .name = "temperature-grade",
         .within = "brief",
         .syntax = "(temperature-grade industrial)",

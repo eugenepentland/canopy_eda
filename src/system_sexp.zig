@@ -71,6 +71,7 @@ pub const accepted_forms = [_][]const u8{
     "emc",            "safety",         "connector",   "impedance",
     "power-max",      "protocol",       "goal",        "unit",
     "min",            "max",            "verify-by",   "measured",
+    "feeds",
 };
 
 /// One connector contact as the evaluated board reports it. `net` is empty
@@ -450,6 +451,8 @@ fn parseInputPower(
             if (power.current_max_a != null)
                 return fail(diagnostic, .duplicate_sexp_field, "brief.input-power", "input power declares (current-max …) once", "");
             power.current_max_a = try requiredArgNumber(child, "brief.input-power.current-max", diagnostic);
+        } else if (std.mem.eql(u8, head, "feeds")) {
+            try setOnce(&power.feeds, try requiredArgString(allocator, child, "feeds", diagnostic), "feeds", diagnostic);
         } else {
             return fail(diagnostic, .unknown_sexp_form, "brief.input-power", "unknown (input-power …) child form", head);
         }

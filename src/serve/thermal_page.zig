@@ -35,6 +35,7 @@ const Evaluator = @import("../eval/evaluator.zig").Evaluator;
 const escape = @import("../escape.zig");
 const mcp_tools = @import("mcp_tools.zig");
 const pcb_layout_page = @import("pcb_layout_page.zig");
+const brief_checks = @import("../brief_checks.zig");
 const review_thermal = @import("../review_thermal.zig");
 const serve_root = @import("../serve.zig");
 const handler_probe = @import("handler_probe.zig");
@@ -136,11 +137,20 @@ pub fn thermalPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) Hand
         else => return plainError(res, http_not_found, err_not_found),
     };
 
-    const ambient = clampAmbient(queryFloat(req, "ambient") orelse thermal.default_ambient_c);
-    const scenario = pcb_layout_page.parseScenario(queryOpt(req, "scenario")) orelse .natural;
+    const dialled = queryFloat(req, "ambient");
     // The lumped screen is layout-free, so ONE analysis serves the shown board,
     // every comparison row and the baseline they are all differenced against.
-    const bt = try thermal.analyze(alloc, nb.block, ambient);
+    // It runs at the governing system brief's ambient unless the reader dialled
+    // one in, and carries the provenance either way.
+    const bt = try brief_checks.analyzeGoverned(
+        alloc,
+        nb.block,
+        ctx.project_dir,
+        name,
+        if (dialled) |c| clampAmbient(c) else null,
+    );
+    const ambient = bt.ambient_c;
+    const scenario = pcb_layout_page.parseScenario(queryOpt(req, "scenario")) orelse .natural;
     const layouts = pcb_layout_page.readLayouts(alloc, ctx.project_dir, name);
     const want = queryOpt(req, "layout");
     const shown = shownLayout(layouts, want);
@@ -213,8 +223,8 @@ pub fn benchColdPage(allocator: std.mem.Allocator, project_dir: []const u8, name
     var eval = Evaluator.init(allocator, project_dir);
     defer eval.deinit();
     const nb = mcp_tools.evalNamedBlock(allocator, project_dir, name, &eval) catch return null;
-    const ambient = thermal.default_ambient_c;
-    const bt = thermal.analyze(allocator, nb.block, ambient) catch return null;
+    const bt = brief_checks.analyzeGoverned(allocator, nb.block, project_dir, name, null) catch return null;
+    const ambient = bt.ambient_c;
     const layouts = pcb_layout_page.readLayouts(allocator, project_dir, name);
     const scenarios = thermal_api.scenariosFor(allocator, project_dir, name, bt, ambient, null) catch return null;
     const view = View{
@@ -438,6 +448,7 @@ fn writeVerdictBlock(w: *std.Io.Writer, v: View) std.Io.Writer.Error!void {
     try w.writeAll("</p>");
     if (v.lines.package.len > 0) try writeHint(w, "", v.lines.package);
     if (v.lines.ambient.len > 0) try writeHint(w, "Board ambient range: ", v.lines.ambient);
+    try writeHint(w, "", v.lines.provenance);
     if (v.lines.hint.len > 0) try writeHint(w, "", v.lines.hint);
     try w.writeAll("</section>");
 }
@@ -1286,7 +1297,7 @@ fn navView(name: []const u8, is_module: bool) View {
         .scenario = .natural,
         .bt = .{ .ambient_c = 25 },
         .scenarios = .{},
-        .lines = .{ .verdict = "", .package = "", .ambient = "", .coverage = "", .hint = "" },
+        .lines = .{ .verdict = "", .package = "", .ambient = "", .coverage = "", .hint = "", .provenance = "" },
     };
 }
 
@@ -1888,7 +1899,7 @@ test "the thermal page exposes the shared phone layout" {
         .scenario = .natural,
         .bt = .{ .ambient_c = 25, .parts = &.{}, .verdict = .insufficient_data },
         .scenarios = .{},
-        .lines = .{ .verdict = "", .package = "", .ambient = "", .coverage = "", .hint = "" },
+        .lines = .{ .verdict = "", .package = "", .ambient = "", .coverage = "", .hint = "", .provenance = "" },
     }, "Demo");
     try testing.expect(std.mem.indexOf(u8, head.written(), "viewport-fit=cover") != null);
 }

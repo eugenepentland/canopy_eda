@@ -21,6 +21,7 @@
 //! coming from the optimizer cache rather than a saved snapshot.
 
 const std = @import("std");
+const brief_checks = @import("brief_checks.zig");
 const json_writer = @import("json_writer.zig");
 const optimizer = @import("placement/optimizer.zig");
 const router = @import("placement/router.zig");
@@ -114,6 +115,12 @@ pub const ReleaseContext = struct {
     /// The design's `(board …)` outline declaration, including any
     /// `(outline-approved "…")` pin — the input to the shared drift predicate.
     authored_outline: outline_mod.Declared = .{},
+    /// The derating factors the governing system brief's `(derating "…")`
+    /// names, resolved by the caller (which is the layer that knows WHICH
+    /// design this placement is). Null ⇒ the house default: the rating screen
+    /// compares applied stress against the rating itself, exactly as it always
+    /// has, and emits no derating finding.
+    derating: ?brief_checks.Derating = null,
 };
 
 /// Saved-layout and DNP policy supplied by fabrication-export callers.
@@ -173,7 +180,7 @@ pub fn check(
     if (ctx.release) |release| {
         try appendReleaseIdentityChecks(arena, &errors, placement, ctx.keep_dnp);
         try appendOutlineDrift(arena, &errors, placement, release.authored_outline);
-        try appendRailRatingChecks(arena, &errors, &warnings, placement, ctx.keep_dnp);
+        try appendRailRatingChecks(arena, &errors, &warnings, placement, ctx.keep_dnp, release.derating);
     }
 
     // A flattened net pin that no longer resolves to a footprint land must not
@@ -942,7 +949,49 @@ const RatingContext = struct {
     /// SAME graph `eval/net_envelopes` derives this board's voltages over,
     /// read here so current attribution sees the identical set of DC nodes.
     bridges: *std.StringHashMapUnmanaged([]const u8),
+    /// The named derating standard in force, or null for the house default.
+    derating: ?brief_checks.Derating = null,
 };
+
+/// One applied-stress-versus-derated-rating comparison.
+const DeratingCase = struct {
+    ref: []const u8,
+    /// What is being compared, e.g. `applied voltage`.
+    subject: []const u8,
+    applied: f64,
+    rated: f64,
+    /// Fraction of `rated` the standard allows.
+    factor: f64,
+    /// Unit symbol both figures are printed in.
+    unit: []const u8,
+};
+
+/// One `component-derating-standard` finding when applied stress exceeds the
+/// fraction of a rating the brief's named standard allows.
+///
+/// This is strictly ADDITIONAL to the comparisons above: the existing
+/// `component-underrated` error still fires when a part is over its rating
+/// outright, and this fires when the part is inside its rating but outside the
+/// programme's derating policy. A board whose system names no standard, or
+/// names `house`, gets neither — the screen is exactly what it was.
+fn appendDerating(ctx: RatingContext, case: DeratingCase) std.mem.Allocator.Error!void {
+    const derating = ctx.derating orelse return;
+    if (!(case.rated > 0)) return;
+    const allowed = case.rated * case.factor;
+    if (case.applied <= allowed + 1e-12) return;
+    try ctx.errors.append(ctx.arena, .{
+        .id = "component-derating-standard",
+        .message = try std.fmt.allocPrint(
+            ctx.arena,
+            "{s} {s} {d:.4} {s} exceeds the {d:.4} {s} {s} allows ({d:.2} of its {d:.4} {s} rating)",
+            .{
+                case.ref,  case.subject,      case.applied, case.unit,  allowed,
+                case.unit, derating.standard, case.factor,  case.rated, case.unit,
+            },
+        ),
+        .ref = case.ref,
+    });
+}
 
 fn checkCapacitorRating(ctx: RatingContext, inst: flat_netlist.FlatInstance) std.mem.Allocator.Error!void {
     _ = try requireProperty(ctx.arena, ctx.errors, inst, &.{"dielectric"}, "dielectric");
@@ -970,6 +1019,14 @@ fn checkCapacitorRating(ctx: RatingContext, inst: flat_netlist.FlatInstance) std
         if (endpoints.seed_known > 0) try appendUnproven(ctx.arena, ctx.errors, inst, "applied capacitor voltage");
         return;
     }
+    if (ctx.derating) |derating| try appendDerating(ctx, .{
+        .ref = inst.ref_des,
+        .subject = "applied voltage",
+        .applied = applied,
+        .rated = if (rated.present) rated.value else 0,
+        .factor = derating.ceramic_voltage,
+        .unit = "V",
+    });
     if (rated.present and rated.value + 1e-9 < applied) {
         try ctx.errors.append(ctx.arena, .{
             .id = "component-underrated",
@@ -1059,6 +1116,14 @@ fn checkResistorRating(ctx: RatingContext, inst: flat_netlist.FlatInstance) std.
     if (!(ohms > 0) or !has_power) return;
     const actual = delta * delta / ohms;
     const rated = parseRating(propertyValue(inst, "power"));
+    if (ctx.derating) |derating| try appendDerating(ctx, .{
+        .ref = inst.ref_des,
+        .subject = "worst-case dissipation",
+        .applied = actual,
+        .rated = if (rated.present) rated.value else 0,
+        .factor = derating.resistor_power,
+        .unit = "W",
+    });
     if (rated.present and actual > rated.value + 1e-12) {
         try ctx.errors.append(ctx.arena, .{
             .id = "component-underrated",
@@ -1084,6 +1149,14 @@ fn checkMagneticRating(ctx: RatingContext, inst: flat_netlist.FlatInstance) std.
     };
     if (has_current) {
         const rated = parseRating(propertyAny(inst, &.{ "rated-current", "current-rating", "current" }));
+        if (ctx.derating) |derating| try appendDerating(ctx, .{
+            .ref = inst.ref_des,
+            .subject = "carried current",
+            .applied = current,
+            .rated = if (rated.present) rated.value else 0,
+            .factor = derating.inductor_current,
+            .unit = "A",
+        });
         if (rated.present and current > rated.value + 1e-9) try ctx.errors.append(ctx.arena, .{
             .id = "component-underrated",
             .message = try std.fmt.allocPrint(ctx.arena, "{s} carries up to {d:.3} A but is rated only {d:.3} A", .{ inst.ref_des, current, rated.value }),
@@ -1117,10 +1190,11 @@ pub fn ratingReport(
     arena: std.mem.Allocator,
     placement: optimizer.Placement,
     keep_dnp: bool,
+    derating: ?brief_checks.Derating,
 ) std.mem.Allocator.Error!Report {
     var errors: std.ArrayList(Item) = .empty;
     var warnings: std.ArrayList(Item) = .empty;
-    try appendRailRatingChecks(arena, &errors, &warnings, placement, keep_dnp);
+    try appendRailRatingChecks(arena, &errors, &warnings, placement, keep_dnp, derating);
     return .{
         .errors = try errors.toOwnedSlice(arena),
         .warnings = try warnings.toOwnedSlice(arena),
@@ -1134,6 +1208,7 @@ fn appendRailRatingChecks(
     warnings: *std.ArrayList(Item),
     placement: optimizer.Placement,
     keep_dnp: bool,
+    derating: ?brief_checks.Derating,
 ) std.mem.Allocator.Error!void {
     var bridges = try net_envelopes.ferriteBridges(arena, placement.instances, placement.nets);
     defer bridges.deinit(arena);
@@ -1143,6 +1218,7 @@ fn appendRailRatingChecks(
         .warnings = warnings,
         .placement = placement,
         .bridges = &bridges,
+        .derating = derating,
     };
     for (placement.instances) |inst| {
         if (!export_fab.assemblyPopulated(inst, if (keep_dnp) .keep else .drop)) continue;
@@ -1277,7 +1353,7 @@ test "rail-aware passive ratings cover voltage unknown endpoints and zero-ohm cu
     };
     var errors: std.ArrayList(Item) = .empty;
     var warnings: std.ArrayList(Item) = .empty;
-    try appendRailRatingChecks(arena, &errors, &warnings, placement, false);
+    try appendRailRatingChecks(arena, &errors, &warnings, placement, false, null);
     try std.testing.expect(hasItemRef(errors.items, "component-underrated", "C_BAD"));
     try std.testing.expect(!hasItemRef(errors.items, "component-underrated", "C_OK"));
     try std.testing.expect(hasItemRef(errors.items, "component-rating-unproven", "R_UN"));
@@ -1349,7 +1425,7 @@ test "series-correlated resistor endpoints collapse instead of flagging" {
     };
     var errors: std.ArrayList(Item) = .empty;
     var warnings: std.ArrayList(Item) = .empty;
-    try appendRailRatingChecks(arena, &errors, &warnings, placement, false);
+    try appendRailRatingChecks(arena, &errors, &warnings, placement, false, null);
     // Previously: component-rating-unproven on all three; with independent
     // intervals instead: component-underrated on both resistors. Now: clean.
     try std.testing.expectEqual(@as(usize, 0), errors.items.len);
@@ -1396,7 +1472,7 @@ test "declared-envelope pair keeps the independent-interval check" {
     };
     var errors: std.ArrayList(Item) = .empty;
     var warnings: std.ArrayList(Item) = .empty;
-    try appendRailRatingChecks(arena, &errors, &warnings, placement, false);
+    try appendRailRatingChecks(arena, &errors, &warnings, placement, false, null);
     try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "R_DROP", "dissipates up to"));
 }
 
@@ -1485,7 +1561,7 @@ test "series-element current attribution prefers a declared branch over the whol
     };
     var errors: std.ArrayList(Item) = .empty;
     var warnings: std.ArrayList(Item) = .empty;
-    try appendRailRatingChecks(arena, &errors, &warnings, placement, false);
+    try appendRailRatingChecks(arena, &errors, &warnings, placement, false, null);
     // The part's own annotated roll-up, the declared leg it feeds, and the
     // module boundary it sits behind each beat the rail total.
     try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "FB_ROLLUP", "carries up to 0.080 A"));
@@ -1550,7 +1626,7 @@ test "a rail that declares no branch data still charges the whole rail" {
     };
     var errors: std.ArrayList(Item) = .empty;
     var warnings: std.ArrayList(Item) = .empty;
-    try appendRailRatingChecks(arena, &errors, &warnings, placement, false);
+    try appendRailRatingChecks(arena, &errors, &warnings, placement, false, null);
     try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "mod/FB", "carries up to 0.500 A"));
     try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "mod/R0", "carries up to 0.500 A"));
 }
@@ -1631,11 +1707,49 @@ test "a config strap to ground is proved at zero amps and nothing else is" {
     };
     var errors: std.ArrayList(Item) = .empty;
     var warnings: std.ArrayList(Item) = .empty;
-    try appendRailRatingChecks(arena, &errors, &warnings, ratingPlacement(&instances, &nets, &rails, .{ .specs = &rail_specs }), false);
+    try appendRailRatingChecks(arena, &errors, &warnings, ratingPlacement(&instances, &nets, &rails, .{ .specs = &rail_specs }), false, null);
     try std.testing.expect(!hasItemRef(errors.items, "component-rating-unproven", "buck/R_MODE"));
     try std.testing.expect(!hasItemRef(errors.items, "component-underrated", "buck/R_MODE"));
     try std.testing.expect(hasItemRefMessage(errors.items, "component-rating-unproven", "R_DEAD", "zero-ohm jumper current"));
     try std.testing.expect(hasItemRefMessage(errors.items, "component-rating-unproven", "R_GNDLINK", "zero-ohm jumper current"));
+}
+
+// spec: fabrication-release - a derating standard named by the system brief screens applied stress against a fraction of each rating, and the house default screens exactly as before
+test "a named derating standard adds a screen the house default does not" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // A 16 V X7R across a 12 V rail: comfortably inside its rating, and over
+    // the 0.6 x 16 V = 9.6 V that NASA EEE-INST-002 allows.
+    const cap_properties = [_]env_mod.Property{
+        .{ .key = "voltage", .value = "16V" }, .{ .key = "dielectric", .value = "X7R" }, .{ .key = "tolerance", .value = "10%" },
+    };
+    const instances = [_]flat_netlist.FlatInstance{
+        .{ .ref_des = "C_IN", .component = "cap-0603", .value = "4.7uF", .footprint = "c0603", .uuid = "cin", .properties = &cap_properties },
+    };
+    const rail_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C_IN", .pin = "1" }};
+    const ground_pins = [_]flat_netlist.FlatPin{.{ .ref_des = "C_IN", .pin = "2" }};
+    const nets = [_]flat_netlist.FlatNet{
+        .{ .name = "V12", .pins = &rail_pins },
+        .{ .name = "GND", .pins = &ground_pins },
+    };
+    const rail_specs = [_]env_mod.PowerRail{.{ .name = "V12", .nominal = 12, .rated_voltage = .{ .min = 11.4, .max = 12.6 } }};
+    const placement = ratingPlacement(&instances, &nets, &.{}, .{ .specs = &rail_specs });
+
+    var house_errors: std.ArrayList(Item) = .empty;
+    var house_warnings: std.ArrayList(Item) = .empty;
+    try appendRailRatingChecks(arena, &house_errors, &house_warnings, placement, false, null);
+    try std.testing.expect(!hasItemRef(house_errors.items, "component-derating-standard", "C_IN"));
+    try std.testing.expect(!hasItemRef(house_errors.items, "component-underrated", "C_IN"));
+
+    var derated_errors: std.ArrayList(Item) = .empty;
+    var derated_warnings: std.ArrayList(Item) = .empty;
+    const nasa = brief_checks.deratingFor("NASA EEE-INST-002").?;
+    try appendRailRatingChecks(arena, &derated_errors, &derated_warnings, placement, false, nasa);
+    try std.testing.expect(hasItemRefMessage(derated_errors.items, "component-derating-standard", "C_IN", "NASA EEE-INST-002"));
+    // Still not over its own rating: the derating finding is additional, never
+    // a restatement of `component-underrated`.
+    try std.testing.expect(!hasItemRef(derated_errors.items, "component-underrated", "C_IN"));
 }
 
 // spec: fabrication-release - a series magnetic sealed inside a module inherits that module's declared input current, and keeps none of it on a leg the declaration never covered
@@ -1682,7 +1796,7 @@ test "module-internal magnetics inherit the sub-block's declared inflow" {
     const model: impedance_rules.RailModel = .{ .specs = &rail_specs, .branch_loads = &branch_loads };
     var errors: std.ArrayList(Item) = .empty;
     var warnings: std.ArrayList(Item) = .empty;
-    try appendRailRatingChecks(arena, &errors, &warnings, ratingPlacement(&instances, &nets, &.{}, model), false);
+    try appendRailRatingChecks(arena, &errors, &warnings, ratingPlacement(&instances, &nets, &.{}, model), false, null);
     try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "lna/FB_IN", "carries up to 0.144 A"));
     try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "lna/L_BIAS", "carries up to 0.144 A"));
     try std.testing.expect(!hasItemRef(errors.items, "component-rating-unproven", "lna/L_BIAS"));
@@ -1720,7 +1834,7 @@ test "a bead-bridged module net is charged the rail it conducts to" {
     };
     var errors: std.ArrayList(Item) = .empty;
     var warnings: std.ArrayList(Item) = .empty;
-    try appendRailRatingChecks(arena, &errors, &warnings, ratingPlacement(&instances, &nets, &rails, .{ .specs = &rail_specs }), false);
+    try appendRailRatingChecks(arena, &errors, &warnings, ratingPlacement(&instances, &nets, &rails, .{ .specs = &rail_specs }), false, null);
     try std.testing.expect(hasItemRefMessage(errors.items, "component-underrated", "boost/L1", "carries up to 0.390 A"));
     try std.testing.expect(!hasItemRef(errors.items, "component-rating-unproven", "boost/L1"));
 }

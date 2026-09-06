@@ -40,6 +40,7 @@ const power_budget = @import("eval/power_budget.zig");
 const preflight = @import("preflight.zig");
 const review_datasheet_inventory = @import("review_datasheet_inventory.zig");
 const review_profiles = @import("review_profiles.zig");
+const brief_checks = @import("brief_checks.zig");
 const review_thermal = @import("review_thermal.zig");
 const thermal = @import("eval/thermal.zig");
 
@@ -416,9 +417,8 @@ pub fn collectWith(
         else => {},
     };
 
-    const ambient = options.ambient_c orelse thermal.default_ambient_c;
-    const report = try preflight.run(arena, eval, block, project_dir, .release);
-    const rating = try ratingReportFor(arena, block);
+    const report = try preflight.runFor(arena, eval, block, project_dir, .release, name);
+    const rating = try ratingReportFor(arena, block, brief_checks.deratingForBoard(arena, project_dir, name));
     const evidence = Evidence{
         .arena = arena,
         .project_dir = project_dir,
@@ -426,7 +426,7 @@ pub fn collectWith(
         .forms = formsOf(eval),
         .report = report,
         .rails = try power_budget.analyze(arena, block),
-        .heat = try thermal.analyze(arena, block, ambient),
+        .heat = try brief_checks.analyzeGoverned(arena, block, project_dir, name, options.ambient_c),
         .ratings = rating.errors,
         .rating_warnings = rating.warnings,
         .specs = try fab_schematic_gate.selectionReport(arena, block, project_dir, false),
@@ -437,7 +437,7 @@ pub fn collectWith(
     try walkParts(evidence, block, "", &parts);
     return .{
         .design = name,
-        .ambient_c = ambient,
+        .ambient_c = evidence.heat.ambient_c,
         .parts = try parts.toOwnedSlice(arena),
     };
 }
@@ -467,6 +467,7 @@ fn formsOf(eval: *const Evaluator) review_profiles.Forms {
 fn ratingReportFor(
     arena: std.mem.Allocator,
     block: *const env.DesignBlock,
+    derating: ?brief_checks.Derating,
 ) std.mem.Allocator.Error!fab_readiness.Report {
     var instances: std.ArrayList(flat_netlist.FlatInstance) = .empty;
     try flat_netlist.collectInstances(arena, block, "", &instances);
@@ -496,7 +497,7 @@ fn ratingReportFor(
             .rail_model = model,
         } },
     };
-    return fab_readiness.ratingReport(arena, placement, false);
+    return fab_readiness.ratingReport(arena, placement, false, derating);
 }
 
 fn walkParts(

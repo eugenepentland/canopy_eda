@@ -416,6 +416,7 @@ in their template.
 | `(voltage 11.4 12.6)` | Low and high edges of the input voltage window, in volts. |
 | `(transient 15)` | Survivable input transient, in volts. |
 | `(current-max 1.2)` | Maximum input current the product may draw, in amps. |
+| `(feeds "V_12V")` | Board net the input power lands on. Binds the (voltage LO HI) window to that net's proven envelope for the unit checks; without it the binding falls back to the first (interface "NAME") whose name matches a board port. |
 | `(temperature-grade industrial)` | commercial, industrial, extended or automotive — the grade every part must meet. |
 | `(derating "NASA EEE-INST-002")` | Named derating standard the rating screens work to. Free text: the citation is what a reviewer reads. |
 | `(ipc-class 2)` | IPC-A-610 class, 1 to 3. |
@@ -697,6 +698,7 @@ never gave the engine an input) and `manual`.
 | `check-not-connected` | library | pin | The named pin is left unconnected, as the datasheet demands. | (requirement "…" (check (not-connected (pin "P")))) | blocking |
 | `check-pin-not-floating` | library | pin | The named pin is tied to a defined level rather than left floating. | (requirement "…" (check (pin-not-floating (pin "P")))) | blocking |
 | `check-pins-on-same-net` | library | pin | Every listed pin function of the placement resolves to one net. | (requirement "…" (check (pins-on-same-net (pins "A" "B" …)))) | blocking |
+| `interface-esd-protection` | unit | net | Every externally exposed interface the system brief names carries a protection-class part when the brief declares an ESD class. | place a TVS/ESD part on the interface net, or a part with (class protection) | blocking |
 
 ### Supply voltages
 
@@ -710,6 +712,7 @@ never gave the engine an input) and `manual`.
 | `interface-voltage-domain` | system | net | A contract signal joins two board nets of the same declared potential. | align the rails, or declare the translation the contract needs | blocking |
 | `check-voltage-range` | library | pin | The voltage on the named pin's net lies inside the datasheet window. | (requirement "…" (check (voltage-range (pin "V") (min L) (max H)))) | blocking |
 | `check-voltage-not-above` | library | pin | The highest voltage on one pin's net stays within a margin of another's lowest. | (requirement "…" (check (voltage-not-above (pin "A") (pin "B") (margin M)))) | blocking |
+| `brief-input-power-envelope` | unit | net | The board net the system brief's input power feeds proves an envelope covering the brief's (voltage LO HI) window and any (transient V) it must survive. | (port … (rated LO HI)) or (net-envelope "NET" (rated LO HI)) on the input net, and (input-power … (feeds "NET")) in the brief | blocking |
 
 ### Power budget and copper
 
@@ -758,6 +761,8 @@ never gave the engine an input) and `manual`.
 | `component-underrated` | unit | part | No part sees an applied voltage, power or current above its rating. | up-rate the part, or reduce the applied stress | blocking |
 | `component-rating-margin` | unit | part | Every rated part keeps the derating margin the screen asks for. | up-rate the part, or record the accepted margin | waivable |
 | `check-cap-rating` | library | part | Every capacitor bridging the named pins is rated the required multiple of its working voltage. | (requirement "…" (check (cap-rating (pin "A") (pin "B") (min-ratio X)))) | blocking |
+| `part-temperature-grade` | unit | part | Every placed part's declared temperature grade meets or exceeds the grade the system brief requires. | (temperature-grade industrial) on the component, the call site, or the parts-table row | blocking |
+| `component-derating-standard` | unit | part | Applied stress stays inside the fraction of each part's rating that the derating standard named by the system brief allows. | select a higher-rated part, or state the programme's own standard in (derating "…") | blocking |
 
 ### Thermal
 
@@ -767,6 +772,8 @@ never gave the engine an input) and `manual`.
 | `thermal-theta-ja-declared` | library | part | Every active part declares its junction-to-ambient resistance and maximum junction temperature. | (thermal (theta-ja C/W) (tj-max C)) in the component body | blocking |
 | `thermal-junction-margin` | unit | part | Every part's junction temperature stays under its limit at the screened ambient. | cut the dissipation, improve theta-ja, or move up the cooling ladder | blocking |
 | `thermal-board-cooling-scenario` | unit | board | The board's screened cooling scenario is the one the release is built for. | (board (heatsink …)) or the airflow the release assumes | waivable |
+| `thermal-brief-ambient` | unit | board | The thermal screen runs at the ambient the governing system brief states, in the scenario its declared cooling case maps to. | (brief (environment (ambient MIN MAX) (cooling …))) on the system that owns the board | advisory |
+| `part-operating-range` | unit | part | Every placed part's rated ambient range covers the whole ambient window the system brief states. | (thermal (operating MIN MAX)) in the component body, or a part rated over the brief window | blocking |
 
 ### Datasheet compliance
 

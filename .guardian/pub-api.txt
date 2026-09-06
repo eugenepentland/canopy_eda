@@ -248,6 +248,26 @@ src/bom_resolve.zig::entryMatchesSource | fn entryMatchesSource(entry: bom_mod.B
 src/bom_resolve.zig::existingSidecarMatches | fn existingSidecarMatches( allocator: std.mem.Allocator, block: *const DesignBlock, bom_path: []const u8, project_dir: []const u8, ) ResolveError!bool
 src/bom_resolve.zig::resolveIdentities | fn resolveIdentities( allocator: std.mem.Allocator, block: *const DesignBlock, bom_path: []const u8, project_dir: []const u8, ) ResolveError!void
 src/bom_resolve.zig::setBomProperty | fn setBomProperty( allocator: std.mem.Allocator, bom_path: []const u8, ref_des: []const u8, key: []const u8, value: []const u8, ) SetPropertyError!void
+src/brief_checks.zig::Derating struct_
+src/brief_checks.zig::Mapping struct_
+src/brief_checks.zig::Observation struct_
+src/brief_checks.zig::Plan struct_
+src/brief_checks.zig::Result enum_
+src/brief_checks.zig::Window struct_
+src/brief_checks.zig::analyzeGoverned | fn analyzeGoverned( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, override_c: ?f64, ) std.mem.Allocator.Error!thermal.BoardThermal
+src/brief_checks.zig::declaredGrade | fn declaredGrade(inst: Instance) ?system_review.TemperatureGrade
+src/brief_checks.zig::deratingFor | fn deratingFor(declared: ?[]const u8) ?Derating
+src/brief_checks.zig::deratingForBoard | fn deratingForBoard( allocator: std.mem.Allocator, project_dir: []const u8, design_name: []const u8, ) ?Derating
+src/brief_checks.zig::id_esd_protection value
+src/brief_checks.zig::id_input_power value
+src/brief_checks.zig::id_operating_range value
+src/brief_checks.zig::id_temperature_grade value
+src/brief_checks.zig::observe | fn observe( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, plan: Plan, ) std.mem.Allocator.Error![]const Observation
+src/brief_checks.zig::parseGrade | fn parseGrade(word: []const u8) ?system_review.TemperatureGrade
+src/brief_checks.zig::planFor | fn planFor( allocator: std.mem.Allocator, project_dir: []const u8, design_name: []const u8, ) Plan
+src/brief_checks.zig::planOf | fn planOf(system: []const u8, brief: Brief) Plan
+src/brief_checks.zig::scenarioFor | fn scenarioFor(cooling: system_review.Cooling) Mapping
+src/brief_checks.zig::sealed_conduction_note value
 src/build_id.zig::current | fn current() []const u8
 src/build_id.zig::load | fn load( io: std.Io, allocator: std.mem.Allocator, repo_root: []const u8, ) []const u8
 src/canonical_module_check.zig::Finding struct_
@@ -1006,6 +1026,7 @@ src/eval/test_point.zig::EvalContext struct_
 src/eval/test_point.zig::evalForm | fn evalForm( self: *Evaluator, form_children: []const Node, env: *Env, ctx: EvalContext, ) EvalError!?Instance
 src/eval/test_point.zig::parse | fn parse( allocator: std.mem.Allocator, form_children: []const Node, ) std.mem.Allocator.Error!?TestPoint
 src/eval/thermal.zig::AmbientLimit struct_
+src/eval/thermal.zig::AmbientSource struct_
 src/eval/thermal.zig::BoardThermal struct_
 src/eval/thermal.zig::PartCounts struct_
 src/eval/thermal.zig::PartLimits struct_
@@ -1244,7 +1265,7 @@ src/fab_readiness.zig::openNets | fn openNets( arena: std.mem.Allocator, placeme
 src/fab_readiness.zig::openNetsAmong | fn openNetsAmong( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, names: ?[]const []const u8, ) std.mem.Allocator.Error![]const OpenNet
 src/fab_readiness.zig::openNetsPrepared | fn openNetsPrepared( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, prep: BoardPrep, ) std.mem.Allocator.Error![]const OpenNet
 src/fab_readiness.zig::outlineDrift | fn outlineDrift( arena: std.mem.Allocator, declared: outline_mod.Declared, saved: ?outline_mod.Saved, ) std.mem.Allocator.Error!?Item
-src/fab_readiness.zig::ratingReport | fn ratingReport( arena: std.mem.Allocator, placement: optimizer.Placement, keep_dnp: bool, ) std.mem.Allocator.Error!Report
+src/fab_readiness.zig::ratingReport | fn ratingReport( arena: std.mem.Allocator, placement: optimizer.Placement, keep_dnp: bool, derating: ?brief_checks.Derating, ) std.mem.Allocator.Error!Report
 src/fab_readiness.zig::root | fn root(self: NetGraph, node: usize) usize
 src/fab_readiness.zig::routableTally | fn routableTally( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ) std.mem.Allocator.Error!Tally
 src/fab_readiness.zig::savedOutline | fn savedOutline(placement: optimizer.Placement) ?outline_mod.Saved
@@ -4142,6 +4163,7 @@ src/preflight.zig::profileSeverity | fn profileSeverity(profile: Profile) checks
 src/preflight.zig::required_review_categories value
 src/preflight.zig::requirementSeverity | fn requirementSeverity(status: req_checks.Status, profile: Profile) checks.Severity
 src/preflight.zig::run | fn run( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, project_dir: []const u8, profile: Profile, ) std.mem.Allocator.Error!Report
+src/preflight.zig::runFor | fn runFor( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, project_dir: []const u8, profile: Profile, design_name: []const u8, ) std.mem.Allocator.Error!Report
 src/query.zig::Listing struct_
 src/query.zig::QueryError value
 src/query.zig::cmdDescribe | fn cmdDescribe(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void
@@ -4460,6 +4482,7 @@ src/review_registry.zig::Policy enum_
 src/review_registry.zig::Row struct_
 src/review_registry.zig::Scope enum_
 src/review_registry.zig::Verdict enum_
+src/review_registry.zig::briefCheckId | fn briefCheckId(code: []const u8) ?[]const u8
 src/review_registry.zig::checkPrimitiveId | fn checkPrimitiveId(keyword: []const u8) ?[]const u8
 src/review_registry.zig::drcId | fn drcId(kind: drc.Kind) []const u8
 src/review_registry.zig::ercId | fn ercId(kind: erc.ViolationKind) []const u8
@@ -4483,6 +4506,7 @@ src/review_thermal.zig::ScenarioCells struct_
 src/review_thermal.zig::cells | fn cells( allocator: std.mem.Allocator, row: thermal.PartThermal, ) std.mem.Allocator.Error!Cells
 src/review_thermal.zig::dash value
 src/review_thermal.zig::headlineVerdict | fn headlineVerdict( bt: thermal.BoardThermal, scenarios: thermal_scenarios.Answer, ) thermal.Verdict
+src/review_thermal.zig::provenanceLine | fn provenanceLine( allocator: std.mem.Allocator, bt: thermal.BoardThermal, ) std.mem.Allocator.Error![]const u8
 src/review_thermal.zig::scenarioCells | fn scenarioCells( allocator: std.mem.Allocator, ladder: thermal_scenarios.Ladder, row: thermal_scenarios.Row, ) std.mem.Allocator.Error!ScenarioCells
 src/review_thermal.zig::scenarioNote | fn scenarioNote(answer: thermal_scenarios.Answer) []const u8
 src/review_thermal.zig::summaryLines | fn summaryLines( allocator: std.mem.Allocator, bt: thermal.BoardThermal, scenarios: thermal_scenarios.Answer, ) std.mem.Allocator.Error!Lines
@@ -6093,10 +6117,12 @@ src/svg2pdf.zig::translate | fn translate(gpa: Allocator, svg: []const u8, opts:
 src/svg2pdf.zig::translateAll | fn translateAll(gpa: Allocator, markup: []const u8, opts: Options, diag: ?*Diagnostic) Error![]Document
 src/system_brief.zig::BoardReports struct_
 src/system_brief.zig::Evaluation struct_
+src/system_brief.zig::Governing struct_
 src/system_brief.zig::Verdict enum_
 src/system_brief.zig::blocks | fn blocks(evaluations: []const Evaluation) bool
 src/system_brief.zig::briefForBoard | fn briefForBoard( allocator: std.mem.Allocator, project_dir: []const u8, design_name: []const u8, ) ?system_review.Brief
 src/system_brief.zig::evaluate | fn evaluate( allocator: std.mem.Allocator, goals: []const GoalSpec, boards: []const BoardReports, ) std.mem.Allocator.Error![]const Evaluation
+src/system_brief.zig::governingBrief | fn governingBrief( allocator: std.mem.Allocator, project_dir: []const u8, design_name: []const u8, ) ?Governing
 src/system_interface_check.zig::Endpoint struct_
 src/system_interface_check.zig::Finding struct_
 src/system_interface_check.zig::Kind enum_

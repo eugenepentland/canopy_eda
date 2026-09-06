@@ -104,6 +104,7 @@ pub const shards: []const []const []const u8 = &.{
     &.{
         "authored_heatsink.test.",
         "bom_resolve.test.",
+        "brief_checks.test.",
         "component_classification.test.",
         "convert.footprint.test.",
         "convert.symbol.test.",
@@ -740,6 +741,17 @@ test {
     for (shards) |shard| {
         for (shard) |filter| {
             if (std.mem.eql(u8, filter, "system_brief.test.")) claims += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), claims);
+}
+
+// spec: Development pipeline - The brief-driven unit-check tests remain claimed by the shard manifest
+test {
+    var claims: usize = 0;
+    for (shards) |shard| {
+        for (shard) |filter| {
+            if (std.mem.eql(u8, filter, "brief_checks.test.")) claims += 1;
         }
     }
     try std.testing.expectEqual(@as(usize, 1), claims);

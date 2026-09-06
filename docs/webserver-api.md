@@ -481,7 +481,8 @@ Auth in full: [auth.md](auth.md).
   `ambient_c`, the board `verdict`
   (`passive_ok`/`needs_airflow`/`needs_heatsink`/`over_limit`/`insufficient_data`),
   the `limiting_ref` it hangs on, the `max_ambient`/`min_ambient` window with the
-  part setting each end, coverage `counts`, and a `parts[]` row per part
+  part setting each end, coverage `counts`, an `ambient_source` object saying
+  where the screening ambient came from, and a `parts[]` row per part
   (power/theta/limits/result; unknown figures are `null`, never 0). `:name` is a
   design or a bare `lib/modules` module (percent-decoded, resolved standalone
   through its parameter defaults); an unknown name is 404 plain text and a
@@ -496,8 +497,17 @@ Auth in full: [auth.md](auth.md).
   with the sentence saying so instead of the default board's numbers, and naming
   the starred layout folds to the default board so both spellings share one
   cached solve. `GET /api/thermal-field/:name` (the board overlay's heat field)
-  takes the same argument. CLI twin: `describe_thermal`, sharing this
-  endpoint's whole body (`src/serve/thermal_api.zig`).
+  takes the same argument. **Without `?ambient`, the screen runs at the ambient
+  the governing system brief states** (`(brief (environment (ambient MIN MAX)))`
+  on the system that declares this board — its MAX), falling back to the 25 °C
+  bench default when no brief governs it. `ambient_source` carries `system`,
+  `ambient_min_c`, `ambient_max_c`, `cooling`, `scenario`, `note` and
+  `overridden`: every field but the last is `null` when nothing declared one,
+  `note` is non-null only when the screened scenario is a conservative stand-in
+  for a cooling case the solver cannot model (`sealed-conduction`), and
+  `overridden` is `true` when `?ambient` was supplied, so a client can tell a
+  what-if from the product's own envelope. CLI twin: `describe_thermal`, sharing
+  this endpoint's whole body (`src/serve/thermal_api.zig`).
 
   The retained solve (`src/serve/thermal_cache.zig`) skips the relaxation, not
   the design evaluation each request opens with — so the finished RESPONSE is
