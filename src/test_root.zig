@@ -329,6 +329,7 @@ test {
     _ = @import("placement/power_branch_width.zig");
     _ = @import("placement/power_capacity.zig");
     _ = @import("placement/power_current.zig");
+    _ = @import("placement/power_voltage_regression.zig");
     _ = @import("placement/port_escape.zig");
     _ = @import("placement/pose_math.zig");
     _ = @import("placement/pose_snapshot.zig");
@@ -337,6 +338,7 @@ test {
     _ = @import("placement/progress.zig");
     _ = @import("placement/rf_path_solver.zig");
     _ = @import("placement/rf_port_finish.zig");
+    _ = @import("placement/rf_pad_route.zig");
     _ = @import("placement/rf_port_frames.zig");
     _ = @import("placement/rf_shadow.zig");
     _ = @import("placement/rf_taper_paths.zig");

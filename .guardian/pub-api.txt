@@ -733,6 +733,7 @@ src/eval/env.zig::VariantRuleKind enum_
 src/eval/env.zig::VariantScope struct_
 src/eval/env.zig::Verification struct_
 src/eval/env.zig::ViaRules struct_
+src/eval/env.zig::VoltageDrop struct_
 src/eval/env.zig::activeName | fn activeName(self: VariantScope) []const u8
 src/eval/env.zig::asBool | fn asBool(self: Value) ?bool
 src/eval/env.zig::asNumber | fn asNumber(self: Value) ?f64
@@ -758,6 +759,7 @@ src/eval/env.zig::parseNoteRef | fn parseNoteRef(node: ast.Node) ?NoteRef
 src/eval/env.zig::put | fn put(self: *Env, name: []const u8, value: Value) std.mem.Allocator.Error!void
 src/eval/env.zig::requirementIdForText | fn requirementIdForText(allocator: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error![]const u8
 src/eval/env.zig::sourceName | fn sourceName(self: NetPredicate) []const u8
+src/eval/env.zig::valid | fn valid(self: VoltageDrop) bool
 src/eval/evaluator.zig::AltFunc struct_
 src/eval/evaluator.zig::AuthoredRef struct_
 src/eval/evaluator.zig::BusDef struct_
@@ -2416,6 +2418,7 @@ src/placement/drc_pour.zig::checkAudited | fn checkAudited( arena: std.mem.Alloc
 src/placement/drc_pour.zig::padShapes | fn padShapes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!PadShapes
 src/placement/drc_power_via.zig::check | fn check( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), placement: optimizer.Placement, routed: router.RouteResult, prepared: ?drc.PreparedCopper, fills: ?pour.FillMemo, ) std.mem.Allocator.Error!void
 src/placement/drc_power_via.zig::report | fn report( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), routed: router.RouteResult, requirements: []const ?power_integrity.ViaCurrent, ) std.mem.Allocator.Error!void
+src/placement/drc_power_voltage.zig::report | fn report( alloc: std.mem.Allocator, out: *std.ArrayList(drc.Violation), placement: optimizer.Placement, assessments: []const power_voltage.Assessment, ) std.mem.Allocator.Error!void
 src/placement/drc_power_width.zig::Duty struct_
 src/placement/drc_power_width.zig::LocalWidth value
 src/placement/drc_power_width.zig::Shortfall struct_
@@ -3242,7 +3245,6 @@ src/placement/power_branch_width.zig::NetLimits struct_
 src/placement/power_branch_width.zig::boardTargets | fn boardTargets( board: router.CleanupBoard, limits: []const NetLimits, ) std.mem.Allocator.Error![]f64
 src/placement/power_branch_width.zig::margin value
 src/placement/power_branch_width.zig::netLimits | fn netLimits(board: router.CleanupBoard) std.mem.Allocator.Error![]const NetLimits
-src/placement/power_branch_width.zig::solveLocalWidths | fn solveLocalWidths( alloc: std.mem.Allocator, placement: optimizer.Placement, tracks: []const router.Track, vias: []const router.Via, ) std.mem.Allocator.Error![]const ?LocalWidth
 src/placement/power_branch_width.zig::solve_passes value
 src/placement/power_branch_width.zig::targetFor | fn targetFor(limits: Limits, local: ?LocalWidth) f64
 src/placement/power_branch_width.zig::trackLimits | fn trackLimits(limits: []const NetLimits, track: router.Track) ?Limits
@@ -3308,6 +3310,10 @@ src/placement/power_integrity.zig::via_plating_mm value
 src/placement/power_route_width.zig::adaptiveFloorWidth | fn adaptiveFloorWidth(placement: optimizer.Placement, net_i: usize, base_width: f64) f64
 src/placement/power_route_width.zig::adaptiveTargetWidth | fn adaptiveTargetWidth( zones: []const route_policy.ExistingZone, placement: optimizer.Placement, net_i: usize, authored: f64, ) ?f64
 src/placement/power_route_width.zig::exactWidth | fn exactWidth( zones: []const route_policy.ExistingZone, placement: optimizer.Placement, net_i: usize, authored: f64, ) f64
+src/placement/power_voltage.zig::Assessment struct_
+src/placement/power_voltage.zig::exceeded | fn exceeded(self: Assessment) bool
+src/placement/power_voltage.zig::knownDrop | fn knownDrop(self: Assessment) f64
+src/placement/power_voltage.zig::scale | fn scale(self: Assessment) f64
 src/placement/progress.zig::Inputs struct_
 src/placement/progress.zig::Item struct_
 src/placement/progress.zig::NetConn struct_
@@ -3328,6 +3334,7 @@ src/placement/return_path.zig::returnPathViolations | fn returnPathViolations(pl
 src/placement/return_path.zig::returnPathViolationsForNets | fn returnPathViolationsForNets( placement: optimizer.Placement, routed: RouteResult, radius: f64, selected_names: []const []const u8, ) usize
 src/placement/return_path.zig::return_path_radius_mm value
 src/placement/rf_pad_adapt.zig::apply | fn apply( arena: std.mem.Allocator, parts: anytype, nets: []const flat_netlist.FlatNet, rules: []const net_rules.NetRule, ) std.mem.Allocator.Error!void
+src/placement/rf_pad_route.zig::attempt | fn attempt(run: direct.DirectRun, pts: []const pad_exit.NetPt) std.mem.Allocator.Error!bool
 src/placement/rf_path_solver.zig::EndSection struct_
 src/placement/rf_path_solver.zig::FrameFit struct_
 src/placement/rf_path_solver.zig::Input struct_
@@ -3865,6 +3872,7 @@ src/placement/router_direct.zig::tryGuidedRoute | fn tryGuidedRoute( run: Direct
 src/placement/router_direct.zig::tryGuidedTree | fn tryGuidedTree( run: DirectRun, pts: []const NetPt, branches: []const route_policy.GuideBranch, ) std.mem.Allocator.Error!bool
 src/placement/router_direct.zig::tryMazeGuidedTree | fn tryMazeGuidedTree( run: DirectRun, pts: []const NetPt, waypoints: []const route_policy.Waypoint, ) std.mem.Allocator.Error!bool
 src/placement/router_direct.zig::trySharedGuidedTree | fn trySharedGuidedTree( run: DirectRun, pts: []const NetPt, waypoints: []const route_policy.Waypoint, ) std.mem.Allocator.Error!bool
+src/placement/router_direct.zig::tryStraightOneVia | fn tryStraightOneVia(run: DirectRun, from: NetPt, to: NetPt) std.mem.Allocator.Error!bool
 src/placement/router_direct.zig::tryTwoViaSeededMaze | fn tryTwoViaSeededMaze(run: DirectRun, from: NetPt, to: NetPt) std.mem.Allocator.Error!bool
 src/placement/router_gap_close.zig::GapState value
 src/placement/router_gap_close.zig::buildGapCtx | fn buildGapCtx( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, divisor: f64, window: ?GapWindow, ) std.mem.Allocator.Error!CtxResult

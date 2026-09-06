@@ -70,12 +70,8 @@ pub const Limits = struct {
 /// carrying no current at all — a test-point stub, an unloaded connector leg —
 /// stays at the fabrication floor and its class branch minimum.
 ///
-/// `(power-branch-width MM)` is the opt-in, and `branch_floor` carries it. A
-/// class that never declared one asked for its authored width on every segment
-/// of the net, and gets it: a solved branch current is an argument for narrower
-/// copper, not a licence to overrule the geometry the board author wrote down.
-/// This is the same boundary the reporting DRC draws, so the copper this pass
-/// lays and the copper DRC demands stay one rule.
+/// `(power-branch-width MM)` is an optional branch floor. Without it, the
+/// fabrication minimum and solved current govern every branch.
 ///
 /// The solved term is capped at `net_target` so this pass is never wider than
 /// the behaviour it replaces; the class branch minimum is not capped, because
@@ -98,6 +94,8 @@ pub const NetLimits = struct {
     candidate: bool = false,
     /// Something on this net can actually grow.
     active: bool = false,
+    /// A voltage budget can require growth even above the thermal rail target.
+    voltage: bool = false,
 };
 
 /// Resolve every net's routing floor, class branch minimum, and whole-rail
@@ -115,8 +113,11 @@ pub fn netLimits(board: router.CleanupBoard) std.mem.Allocator.Error![]const Net
     for (out, 0..) |*slot, net_i| {
         slot.* = .{};
         if (!board.enabled(net_i)) continue;
-        const net_target = board.adaptivePowerWidth(net_i) orelse continue;
+        const voltage = voltageCandidate(board, net_i);
+        const thermal = board.adaptivePowerWidth(net_i);
+        if (thermal == null and !voltage) continue;
         const floor = power_route_width.adaptiveFloorWidth(placement, net_i, board.ctx.base.track_width);
+        const net_target = thermal orelse floor;
         slot.* = .{
             .limits = .{
                 .floor = floor,
@@ -127,10 +128,28 @@ pub fn netLimits(board: router.CleanupBoard) std.mem.Allocator.Error![]const Net
                 .net_target = net_target,
             },
             .candidate = true,
-            .active = net_target > floor + eps,
+            .active = voltage or net_target > floor + eps,
+            .voltage = voltage,
         };
     }
     return out;
+}
+
+fn voltageCandidate(board: router.CleanupBoard, net_i: usize) bool {
+    const placement = board.placement;
+    if (net_i >= placement.nets.len) return false;
+    if (@import("plane_stitch.zig").netHasPlane(placement, placement.nets[net_i].name)) return false;
+    for (board.ctx.zones) |zone| if (zone.copper and zone.net == net_i) return false;
+    for (placement.diff_pairs) |pair| if (pair.p == net_i or pair.n == net_i) return false;
+    if (net_i < placement.rules.net.len) {
+        const rule = placement.rules.net[net_i];
+        if (rule.rf.impedance.ohms > 0 or rule.rf.impedance.diff_ohms > 0) return false;
+        if (rule.voltage_drop.limit_v != 0) return true;
+    }
+    for (placement.rules.net) |rule| {
+        if (rule.voltage_drop.limit_v != 0 and std.ascii.eqlIgnoreCase(rule.voltage_drop.return_net, placement.nets[net_i].name)) return true;
+    }
+    return false;
 }
 
 /// The limits one track is shaped under, or null when this pass does not own
@@ -140,7 +159,7 @@ pub fn trackLimits(limits: []const NetLimits, track: router.Track) ?Limits {
     if (track.net < 0) return null;
     const net_i: usize = @intCast(track.net);
     if (net_i >= limits.len or !limits[net_i].active) return null;
-    if (track.width > limits[net_i].limits.floor + router.clearance_eps) return null;
+    if (!limits[net_i].voltage and track.width > limits[net_i].limits.floor + router.clearance_eps) return null;
     return limits[net_i].limits;
 }
 
@@ -175,14 +194,15 @@ pub fn boardTargets(
     const tracks = board.tracks.items;
     const targets = try arena.alloc(f64, tracks.len);
     @memset(targets, 0);
-    const first = try solveLocalWidths(arena, board.placement, tracks, board.vias.items);
+    const first = try solveRequirements(arena, board.placement, tracks, board.vias.items);
     var narrowed = false;
     for (tracks, targets, 0..) |track, *slot, index| {
         const lim = trackLimits(limits, track) orelse continue;
-        slot.* = targetFor(lim, at(first, index));
+        slot.* = @max(track.width, targetFor(lim, at(first.tracks, index)));
         if (slot.* < lim.net_target - eps) narrowed = true;
     }
-    if (!narrowed) return targets;
+    applyVoltageTargets(tracks, targets, limits, first.voltage);
+    if (!narrowed and first.voltage.len == 0) return targets;
 
     // Copper this pass widens carries less resistance and therefore draws more
     // of a parallel split than it did at the floor. Re-solve against the widths
@@ -199,30 +219,45 @@ pub fn boardTargets(
             slot.* = track;
             if (target > 0) slot.width = @max(track.width, target);
         }
-        const again = try solveLocalWidths(arena, board.placement, widened, board.vias.items);
+        const again = try solveRequirements(arena, board.placement, widened, board.vias.items);
         for (tracks, targets, 0..) |track, *slot, index| {
             if (!(slot.* > 0)) continue;
             const lim = trackLimits(limits, track) orelse continue;
-            slot.* = @max(slot.*, targetFor(lim, at(again, index)));
+            slot.* = @max(slot.*, targetFor(lim, at(again.tracks, index)));
         }
+        applyVoltageTargets(widened, targets, limits, again.voltage);
     }
     return targets;
+}
+
+fn applyVoltageTargets(
+    tracks: []const router.Track,
+    targets: []f64,
+    limits: []const NetLimits,
+    voltage: []const @import("power_voltage.zig").Assessment,
+) void {
+    for (voltage) |assessment| {
+        const scale = assessment.scale();
+        if (scale <= 1) continue;
+        for (tracks, targets) |track, *target| {
+            if (trackLimits(limits, track) == null) continue;
+            const net: usize = @intCast(track.net);
+            if (net != assessment.net and (assessment.return_drop_v == null or assessment.return_net != net)) continue;
+            target.* = @max(target.*, track.width * scale);
+        }
+    }
 }
 
 fn at(local: []const ?LocalWidth, index: usize) ?LocalWidth {
     return if (index < local.len) local[index] else null;
 }
 
-/// Per-track solved local widths, index-aligned with `tracks`.
-///
-/// Null entries are tracks the current solve does not cover (signal nets, and
-/// nets with no declared rail demand).
-pub fn solveLocalWidths(
+fn solveRequirements(
     alloc: std.mem.Allocator,
     placement: optimizer.Placement,
     tracks: []const router.Track,
     vias: []const router.Via,
-) std.mem.Allocator.Error![]const ?LocalWidth {
+) std.mem.Allocator.Error!power_integrity.PowerRequirements {
     const routed = router.RouteResult{
         .tracks = tracks,
         .vias = vias,
@@ -230,7 +265,7 @@ pub fn solveLocalWidths(
         .total = 0,
     };
     // The router holds no pour-fill memo, so this is the unmemoised spelling.
-    const raw = try power_integrity.routedTrackRequiredWidthsMemo(alloc, placement, routed, null);
+    const raw = try power_integrity.routedPowerRequirementsMemo(alloc, placement, routed, null);
     return raw;
 }
 
@@ -297,4 +332,21 @@ test "per-track power target follows the solved branch current" {
         targetFor(unopted, .{ .width_mm = 0.30, .envelope = true }),
         1e-12,
     );
+}
+
+// spec: placement/power-routing - voltage-driven widening can exceed the thermal rail target and never shrinks existing copper
+test "voltage budget widening exceeds thermal target on already wide tracks" {
+    const limits = [_]NetLimits{.{
+        .limits = .{ .floor = 0.127, .branch_floor = 0, .net_target = 0.2532 },
+        .candidate = true,
+        .active = true,
+        .voltage = true,
+    }};
+    const tracks = [_]router.Track{.{ .x1 = 0, .y1 = 0, .x2 = 100, .y2 = 0, .width = 0.3432, .layer = 0, .net = 0 }};
+    var targets = [_]f64{tracks[0].width};
+    applyVoltageTargets(&tracks, &targets, &limits, &.{.{ .net = 0, .budget = .{ .limit_v = 0.05 }, .supply_drop_v = 0.1 }});
+    try testing.expect(targets[0] > 0.3432);
+    const before = targets[0];
+    applyVoltageTargets(&tracks, &targets, &limits, &.{.{ .net = 0, .budget = .{ .limit_v = 0.05 }, .supply_drop_v = 0.001 }});
+    try testing.expectEqual(before, targets[0]);
 }

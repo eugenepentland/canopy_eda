@@ -36,6 +36,7 @@ pub const NetRule = struct {
         conflict: bool = false,
     } = .{},
     width: f64 = 0,
+    voltage_drop: env.NetClassSpec.VoltageDrop = .{},
     /// Resolved SMD pad-local neck profile. The router keeps `width` as the
     /// nominal trunk geometry and uses this narrower profile only at lands.
     pad_neck: env.NetClassSpec.PadNeck = .{},
@@ -123,11 +124,15 @@ pub const Rf = struct {
     /// out of the reserve. Undeclared on a max-freq class defaults to
     /// `default_rf_escape_mm`.
     escape_mm: f64 = 0,
+    /// The one-millimetre maze preference was inferred, not authored. Analytic
+    /// RF joins may use a half-width launch instead of forcing a short hop to
+    /// detour solely to spend that heuristic distance. Explicit escape is hard.
+    escape_automatic: bool = false,
     /// Resolved `(min-bend-radius N)` bend-radius floor, as a multiple of the
     /// effective trace width (0 = undeclared → `bend_smooth.radius_width_ratio`,
     /// the 3× default). Only acts on a max-freq net; raising it flags more
-    /// corners under-radius (and lifts the smoother's aim above the 5× cap when
-    /// N exceeds it), lowering it accepts tighter sweeps.
+    /// corners under-radius, lowering it accepts tighter sweeps. Available
+    /// tangent room and clearance determine how far above the floor arcs grow.
     min_bend_ratio: f64 = 0,
     /// Resolved `(fence …)` ground-via fencing for this net (see `FenceRule`);
     /// `declared = false` when no winning class asked for a fence.
@@ -257,6 +262,12 @@ const ProfileRank = struct {
     }
 };
 
+fn mergeVoltageDrop(out: *NetRule, p: ClassProfileDecl, rank: *ProfileRank) void {
+    if (p.spec.voltage_drop.limit_v == 0 or !rank.better(p)) return;
+    out.voltage_drop = p.spec.voltage_drop;
+    rank.take(p);
+}
+
 fn mergePowerBranchWidth(out: *NetRule, p: ClassProfileDecl, rank: *ProfileRank) void {
     if (p.spec.pad_neck.power_branch_width <= 0 or !rank.better(p)) return;
     out.pad_neck.power_branch_width = p.spec.pad_neck.power_branch_width;
@@ -316,6 +327,7 @@ fn profileRule(profiles: []const ClassProfileDecl, win: WinningClass, conflict: 
     var out = NetRule{ .class = .{ .name = win.class_name, .source = win.source, .conflict = conflict } };
     var width_rank = ProfileRank{};
     var power_branch_width_rank = ProfileRank{};
+    var voltage_rank = ProfileRank{};
     var neck_width_rank = ProfileRank{};
     var neck_length_rank = ProfileRank{};
     var taper_length_rank = ProfileRank{};
@@ -380,6 +392,7 @@ fn profileRule(profiles: []const ClassProfileDecl, win: WinningClass, conflict: 
             width_rank.take(p);
         }
         mergePowerBranchWidth(&out, p, &power_branch_width_rank);
+        mergeVoltageDrop(&out, p, &voltage_rank);
         if (p.spec.pad_neck.width > 0 and neck_width_rank.better(p)) {
             out.pad_neck.width = p.spec.pad_neck.width;
             neck_width_rank.take(p);
@@ -425,7 +438,10 @@ fn profileRule(profiles: []const ClassProfileDecl, win: WinningClass, conflict: 
         }
     }
     if (out.rf.max_freq_hz > 0 and out.rf.electrical.band_start_hz <= 0) out.rf.electrical.band_start_hz = out.rf.max_freq_hz / 100;
-    if (!escape_declared and out.rf.max_freq_hz > 0) out.rf.escape_mm = default_rf_escape_mm;
+    if (!escape_declared and out.rf.max_freq_hz > 0) {
+        out.rf.escape_mm = default_rf_escape_mm;
+        out.rf.escape_automatic = true;
+    }
     // A declared keepout with no authored escape radius inherits this net's
     // resolved pad escape (itself possibly the max-freq default just applied),
     // so the resolved rule never carries the spec's −1 "undeclared" sentinel.
@@ -629,6 +645,7 @@ test "escape resolves from max-freq default, explicit value, and explicit zero" 
     const rules = try resolvedNetRules(arena, &root, flat.items);
     try std.testing.expectEqual(@as(usize, 3), rules.len);
     for (flat.items, rules) |net, rule| {
+        try std.testing.expectEqual(std.mem.eql(u8, net.name, "LO"), rule.rf.escape_automatic);
         if (std.mem.eql(u8, net.name, "LO"))
             try std.testing.expectEqual(default_rf_escape_mm, rule.rf.escape_mm)
         else if (std.mem.eql(u8, net.name, "IF"))
@@ -913,4 +930,15 @@ test "keepout escape collapses to the resolved rf escape unless authored" {
             try std.testing.expectEqual(@as(f64, 0), rule.rf.keepout_escape_mm);
         }
     }
+}
+
+// spec: placement/power-routing - the destination class voltage budget overrides the child budget as one policy including its return reference
+test "voltage budget resolves destination override without mixing return nets" {
+    const profiles = [_]ClassProfileDecl{
+        .{ .spec = .{ .name = "power", .voltage_drop = .{ .limit_v = 0.1, .return_net = "child/GND" } }, .source = "child", .depth = 1, .order = 0 },
+        .{ .spec = .{ .name = "power", .voltage_drop = .{ .limit_v = 0.05, .return_net = "GND" } }, .source = "", .depth = 0, .order = 1 },
+    };
+    const rule = profileRule(&profiles, .{ .class_name = "power", .source = "", .depth = 0, .order = 0 }, false);
+    try std.testing.expectEqual(@as(f64, 0.05), rule.voltage_drop.limit_v);
+    try std.testing.expectEqualStrings("GND", rule.voltage_drop.return_net);
 }

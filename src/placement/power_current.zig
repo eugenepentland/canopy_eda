@@ -181,6 +181,8 @@ pub const Axis = struct {
     status: Status,
     track_current_a: []f64,
     track_drop_v: []f64,
+    /// Source-to-load endpoint loss, indexed by load; null means unplaced.
+    load_drop_v: []const ?f64 = &.{},
     via_current_a: []f64,
     via_drop_v: []f64,
     /// Per `Input.loads` entry: did this load's terminal resolve to copper the
@@ -859,6 +861,12 @@ fn buildAxisOutput(
     const partial = place.missing_terminal or place.unreachable_load;
     var out = try emptyAxis(arena, input, if (partial) .solved_partial else .solved);
     out.placed = place.placed;
+    const load_drop = try arena.alloc(?f64, input.loads.len);
+    @memset(load_drop, null);
+    for (place.placed, 0..) |placed, i| {
+        if (placed) load_drop[i] = @abs(voltage[graph.load_hubs[i].?] - voltage[graph.source_hub.?]);
+    }
+    out.load_drop_v = load_drop;
     out.unplaced = .{ .typical_a = place.unplaced_typical_a, .maximum_a = place.unplaced_maximum_a };
     for (graph.edges.items) |edge| {
         if (!reachable[edge.a] or !reachable[edge.b]) continue;

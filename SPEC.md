@@ -520,6 +520,11 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - the router's fence-corridor width agrees with the via-fence generator's outermost resolved row
 - routes corners as 45° diagonals rather than 90° bends
 - straightEscapePair accepts an axis-aligned pad pair that faces along the hop, rejecting a diagonal, a perpendicular-facing, a coincident, or a cross-layer pair
+- facing cross-layer RF pads use two collinear segments and one via before the escape maze
+- RF launch rays construct a straight, a forward elbow, a rotated elbow or one offset bridge without raster jogs
+- pad-stub cleanup preserves RF arc tangent points inside a terminal land
+- RF passive launch direction follows its two pads through rotation and mirroring, independent of footprint origin
+- the straight one-via quality probe refuses obstacles, forbidden transitions and non-collinear terminals
 - LoopRouter measures a real per-leg trace length that detours foreign pads
 - counts signal vias lacking a nearby ground stitching via as return-path discontinuities
 - stitches each signal via's return path with a nearby GND plane via
@@ -3712,6 +3717,30 @@ Public functions: analyze, classifyNetName, isInductor
 - exports the detected policy as an editable (module-policy …) block
 
 ## placement/power-routing
+
+- the autorouter widens a thermally adequate supply and return loop until the final copper meets its voltage budget
+
+- the voltage budget scales copper resistance to its declared conductor temperature without taking credit for cold copper
+
+- the destination class voltage budget overrides the child budget as one policy including its return reference
+
+Power classes may declare `(voltage-drop VOLTS [(return-net "GND")])`.
+The limit allocates DC copper loss from source supply to load supply and back
+through the return conductor at annotated maximum current. It is separate from
+regulator tolerance, ripple, transient impedance and the load voltage rating.
+The voltage budget scales the 20 C copper model to `(copper-temperature C)`
+(default 35 C, from 25 C ambient plus the 10 C rise screen). It does not take
+credit for colder copper. Trace/via-only,
+single-rail loops can be verified; equipotential sheets, shared returns and
+ambiguous terminal ownership explicitly remain unverified. A declared budget
+never implies that an unmodeled return has zero resistance. The router proposes
+bounded widening with 10% voltage margin, respects clearance and existing wider
+copper, and the final DRC re-solves the achieved geometry.
+
+- a voltage budget measures the complete maximum-current supply and return path, so individually acceptable series segments can fail together and wider copper can pass
+- missing maximum current, missing source terminals, disconnected return copper and unmodeled sheets produce an unverified voltage budget instead of a pass
+- voltage loss uses the actual foil on each routed layer and refuses shared returns whose other rail currents were not modeled
+- voltage-driven widening can exceed the thermal rail target and never shrinks existing copper
 - a branch whose end lands inside the trunk's copper joins the trunk even when its centreline misses the trunk's by less than the copper half-width
 - a via joins every track whose copper its barrel overlaps, not only tracks ending exactly at its centre
 - an explicit copper-contact junction joins a branch that overlaps the trunk's copper but whose centreline misses it by more than the branch half-width
@@ -5917,6 +5946,8 @@ Public functions: analyze
 - completeness-waiver: integer overflow (no arithmetic on design-supplied numbers; the only counter is the 1..1000-bounded name-disambiguation ordinal)
 
 ## eval/design_block
+
+- a net-class voltage-drop form parses volts and its return net, and invalid limits remain declared but unverified
 
 - two instances authored with one ref-des are an error naming both source locations
 - a repeat body that mints one ref-des twice is a duplicate like any other

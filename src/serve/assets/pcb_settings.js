@@ -235,6 +235,8 @@ var DRC_HELP={
  hole_hole:"Two drilled holes sit closer than the hole-to-hole rule; the drill can break out.",
  min_drill:"A hole is smaller than the smallest drill the fab rules permit.",
  track_width:"A track is narrower than the minimum width the fab rules permit.",
+ power_voltage_drop:"Maximum-current source-to-load copper loss exceeds the authored voltage budget. Widen or shorten the supply and return route; final DRC measures the actual result.",
+ power_voltage_unverified:"The full copper loop cannot be verified. The finding names missing load/source data, unresolved returns, or unmodeled sheet resistance. This is not a passing voltage check.",
  power_width:"A power trace segment is fabrication-legal but narrower than the IPC-2221 width solved for the current this very segment carries. Every actionable undersized segment is reported in the same DRC run.",
  power_width_envelope:"A power trace segment is narrower than the WHOLE-RAIL current envelope, used because the per-branch current solve failed — the finding names the reason (no source terminal, a disconnected load, a singular graph). Nobody has proven this branch carries the rail's whole demand, so it is a warning: repair the power model, or widen the copper if the envelope is genuinely what it must carry.",
  via_current:"A routed via carries more current than its plated barrel can take at the screen's temperature rise. The gap is the solved current through this barrel and the rule is the barrel's capacity, so ceil(current / capacity) is how many vias the transition needs — add the difference beside it rather than enlarging the drill, since parallel barrels share the load.",

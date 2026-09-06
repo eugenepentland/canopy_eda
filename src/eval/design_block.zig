@@ -3724,6 +3724,32 @@ fn parseClassImpedance(self: *Evaluator, rf: *env_mod.ClassRf, c: []const Node, 
 /// `nets` (the caller handles membership). Split out of `parseNetClass` so
 /// neither the loop nor this ladder carries the whole form's complexity; the RF
 /// discipline heads live in `parseNetClassRfField`.
+fn parseVoltageDrop(self: *Evaluator, policy: *env_mod.NetClassSpec.VoltageDrop, c: []const Node) void {
+    policy.limit_v = if (c.len >= 2) c[1].asNumber() orelse -1 else -1;
+    for (c[@min(c.len, 2)..]) |child| {
+        const field = child.asList() orelse {
+            policy.limit_v = -1;
+            continue;
+        };
+        if (field.len != 2) {
+            policy.limit_v = -1;
+            continue;
+        }
+        const head = field[0].asAtom() orelse "";
+        if (std.mem.eql(u8, head, "return-net")) {
+            policy.return_net = field[1].asText() orelse "";
+        } else if (std.mem.eql(u8, head, "copper-temperature")) {
+            policy.copper_temperature_c = field[1].asNumber() orelse std.math.nan(f64);
+        } else policy.limit_v = -1;
+    }
+    if (!policy.valid()) {
+        policy.limit_v = -1;
+        // Invalid input must still serialize as JSON in the layout inspector.
+        if (!std.math.isFinite(policy.copper_temperature_c)) policy.copper_temperature_c = 35;
+        self.warnFmt(c[0].span, "voltage-drop needs positive finite volts, a return-net name, and copper-temperature between -50 and 200 C", .{});
+    }
+}
+
 fn parseNetClassField(
     self: *Evaluator,
     spec: *env_mod.NetClassSpec,
@@ -3734,6 +3760,8 @@ fn parseNetClassField(
         return true;
     } else if (std.mem.eql(u8, head, "width")) {
         if (c.len >= 2) spec.width = c[1].asNumber() orelse 0;
+    } else if (std.mem.eql(u8, head, "voltage-drop")) {
+        parseVoltageDrop(self, &spec.voltage_drop, c);
     } else if (std.mem.eql(u8, head, "power-branch-width")) {
         if (c.len >= 2) spec.pad_neck.power_branch_width = c[1].asNumber() orelse 0;
         if (spec.pad_neck.power_branch_width <= 0)
@@ -7521,4 +7549,29 @@ test "module budget accepts weighted and defaults to equal" {
     try testing.expect(!(try planFor(a, "(design-block \"t\" (pcb-plan (route (module-budget equal))))")).module_budget_weighted);
     try testing.expect(!(try planFor(a, "(design-block \"t\" (pcb-plan (route (module-budget typo))))")).module_budget_weighted);
     try testing.expect(!(try planFor(a, "(design-block \"t\" (pcb-plan (place (module-budget weighted))))")).module_budget_weighted);
+}
+
+// spec: eval/design_block - a net-class voltage-drop form parses volts and its return net, and invalid limits remain declared but unverified
+test "voltage budget DSL parses SI volts and rejects zero limits" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nodes = try sexpr_parser.parse(a,
+        \\(design-block "test"
+        \\ (net-class "power" (voltage-drop 50mV (return-net "AGND") (copper-temperature 95)) (nets "VDD"))
+        \\ (net-class "bad" (voltage-drop 0) (nets "BAD"))
+        \\ (net-class "bad-temperature" (voltage-drop 0.05 (copper-temperature hot)) (nets "HOT")))
+    );
+    var eval = Evaluator.init(a, "");
+    defer eval.deinit();
+    var scope = env_mod.Env.init(a, null);
+    defer scope.deinit();
+    const block = try designBlockOf(try evalDesignBlock(&eval, nodes[0].asList().?[1..], &scope));
+    try testing.expectApproxEqAbs(@as(f64, 0.05), block.net_classes[0].voltage_drop.limit_v, 1e-12);
+    try testing.expectEqualStrings("AGND", block.net_classes[0].voltage_drop.return_net);
+    try testing.expectEqual(@as(f64, 95), block.net_classes[0].voltage_drop.copper_temperature_c);
+    try testing.expectEqual(@as(f64, -1), block.net_classes[1].voltage_drop.limit_v);
+    try testing.expectEqual(@as(f64, -1), block.net_classes[2].voltage_drop.limit_v);
+    try testing.expect(std.math.isFinite(block.net_classes[2].voltage_drop.copper_temperature_c));
+    try testing.expect(eval.warnings.items.len > 0);
 }
