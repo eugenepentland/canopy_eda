@@ -1102,6 +1102,32 @@ fn checkMagneticRating(ctx: RatingContext, inst: flat_netlist.FlatInstance) std.
     });
 }
 
+/// Run ONLY the rail-aware component-rating screen over `placement`, with no
+/// geometry, no DRC and no identity checks — the narrowest entry point into the
+/// release gate's `component-rating-*` / `component-underrated` findings.
+///
+/// The screen reads nothing but `placement.instances`, `placement.nets` and
+/// `placement.rules.physical` (the analysed rails, their declared specs, the
+/// published net envelopes and the per-module branch loads), so a caller that
+/// only wants applied-stress-versus-rating for a schematic — `part_review.zig`
+/// is the one — can build a board-free placement out of the flattened netlist
+/// and get the same findings the gate would emit, without resolving a layout.
+/// Everything returned is owned by `arena`.
+pub fn ratingReport(
+    arena: std.mem.Allocator,
+    placement: optimizer.Placement,
+    keep_dnp: bool,
+) std.mem.Allocator.Error!Report {
+    var errors: std.ArrayList(Item) = .empty;
+    var warnings: std.ArrayList(Item) = .empty;
+    try appendRailRatingChecks(arena, &errors, &warnings, placement, keep_dnp);
+    return .{
+        .errors = try errors.toOwnedSlice(arena),
+        .warnings = try warnings.toOwnedSlice(arena),
+        .stats = .{},
+    };
+}
+
 fn appendRailRatingChecks(
     arena: std.mem.Allocator,
     errors: *std.ArrayList(Item),

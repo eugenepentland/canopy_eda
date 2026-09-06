@@ -90,6 +90,17 @@ pub const thermal_facts: Config = .{
     .max_bytes = 16 * 1024 * 1024,
 };
 
+/// `GET /api/part-review/:name[/:ref]` — the per-part review. The ref is a PATH
+/// segment, not a query parameter, so it is folded into the key by the handler
+/// (`serve/part_review_api.zig`) rather than listed here; the endpoint takes no
+/// query parameters at all, so any query bypasses. One design holds one chip
+/// body plus one entry per part a reader expanded, hence the larger entry cap.
+pub const part_review: Config = .{
+    .header = "X-Netlisp-Part-Review-Cache",
+    .max_entries = 256,
+    .max_bytes = 16 * 1024 * 1024,
+};
+
 /// `GET /thermal/:name` — the page's five view parameters are keyed. `?row=`
 /// is not: it answers the cells of a DIFFERENT board than the one on screen,
 /// solved against a baseline this store's dependency set does not describe.

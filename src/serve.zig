@@ -65,6 +65,7 @@ const footprint_editor = @import("serve/footprint_editor.zig");
 const schematic_page = @import("serve/schematic_page.zig");
 const schematic_png = @import("serve/schematic_png.zig");
 const schematic_pdf = @import("serve/schematic_pdf.zig");
+const part_review_api = @import("serve/part_review_api.zig");
 const thermal_api = @import("serve/thermal_api.zig");
 const thermal_page = @import("serve/thermal_page.zig");
 const kicad_sch_export = @import("serve/kicad_sch_export.zig");
@@ -342,6 +343,8 @@ pub fn pcbJobSnapshot(alloc: std.mem.Allocator, name: []const u8) ?PcbJobView {
 pub const ReadCaches = struct {
     /// `GET /api/erc/:name` — the electrical-rule violations document.
     erc: read_cache.Store(read_cache.erc) = .{},
+    /// `GET /api/part-review/:name[/:ref]` — the per-part review JSON.
+    part_review: read_cache.Store(read_cache.part_review) = .{},
     /// `GET /api/thermal/:name` — the thermal facts JSON.
     thermal_facts: read_cache.Store(read_cache.thermal_facts) = .{},
     /// `GET /thermal/:name` — the rendered thermal review page.
@@ -362,6 +365,7 @@ pub const ReadCaches = struct {
     pub fn init(allocator: std.mem.Allocator) ReadCaches {
         return .{
             .erc = .{ .allocator = allocator },
+            .part_review = .{ .allocator = allocator },
             .thermal_facts = .{ .allocator = allocator },
             .thermal_page = .{ .allocator = allocator },
             .schematic_pdf = .{ .allocator = allocator },
@@ -373,6 +377,7 @@ pub const ReadCaches = struct {
     /// Release every retained body. Safe on a default-constructed value.
     pub fn deinit(self: *ReadCaches) void {
         self.erc.deinit();
+        self.part_review.deinit();
         self.thermal_facts.deinit();
         self.thermal_page.deinit();
         self.schematic_pdf.deinit();
@@ -1073,6 +1078,14 @@ pub fn serve(
     // plan without writing; a hand-drawn sheet in the way or a KiCad lock on
     // the project answers 409 and writes nothing.
     router.post("/api/sync-kicad-sch/:name", sync_kicad_sch.syncKicadSchApi, .{});
+    // The per-part review: every placed part's contract joined from the BOM
+    // identity, the class profile, the datasheet review, its cited
+    // requirements, the rating screen, the power budget and the thermal
+    // screen. The bare route answers one compact chip per part (what the BOM
+    // tab's Review column is filled from); `/:ref` answers one part's whole
+    // spec sheet. HTTP twin of the `part_review` CLI tool.
+    router.get("/api/part-review/:name", part_review_api.chipsApi, .{});
+    router.get("/api/part-review/:name/:ref", part_review_api.partApi, .{});
     // Lumped steady-state thermal screening as read-only facts JSON — the
     // HTTP twin of the `describe_thermal` CLI tool, sharing its whole body.
     // `?ambient=NN` screens at the caller's ambient instead of bench 25 °C.

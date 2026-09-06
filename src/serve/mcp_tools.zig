@@ -139,6 +139,11 @@ const tools = [_]ToolEntry{
     // the ambient window. The CLI twin of GET /api/thermal/:name, sharing its
     // whole body so the two can never report different temperatures.
     .{ .name = "describe_thermal", .is_mutation = false },
+    // One placed part's whole review contract — identity, class, datasheet
+    // review, cited requirements, applied stress against rating, rail draw and
+    // junction temperature — or the compact chip for every part when no ref is
+    // given. The CLI twin of GET /api/part-review/:name[/:ref].
+    .{ .name = "part_review", .is_mutation = false },
     // The completion-progress ladder (schematic → sub-circuits → board-setup →
     // placement → routing → fab-ready) for a design/module's blessed layout —
     // the same `progress` block `describe_pcb_layout` embeds, standalone.
@@ -465,6 +470,7 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "route_order_search")) return try mcp_route_order.mcpRouteOrderSearch(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "diagnose_net")) return try route_analyze_api.mcpDiagnoseNet(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "describe_thermal")) return try thermal_api.mcpDescribeThermal(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "part_review")) return try @import("part_review_api.zig").mcpPartReview(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "get_version")) return try toolGetVersion(args_val, out, allocator);
     if (std.mem.eql(u8, tool_name, "run_checks")) {
         var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, out);

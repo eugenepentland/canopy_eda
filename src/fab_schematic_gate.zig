@@ -102,6 +102,36 @@ pub fn append(
     };
 }
 
+/// Run ONLY the parts-table selection screen over `block`: the `bom-spec-*`,
+/// `bom-selection-drift` and `duplicate-source-identity` findings, with none of
+/// the ERC, assertion or preflight work `append` also does.
+///
+/// `part_review.zig` is the caller — it wants one placed part's authored-spec
+/// evidence, and running the whole schematic gate to get it would re-run
+/// preflight a second time per request. Findings are owned by `allocator` and
+/// carry the same sub-block-qualified refs `append` produces.
+pub fn selectionReport(
+    allocator: std.mem.Allocator,
+    block: *const env.DesignBlock,
+    project_dir: []const u8,
+    keep_dnp: bool,
+) std.mem.Allocator.Error![]const fab.Item {
+    var errors: std.ArrayList(fab.Item) = .empty;
+    var db = parts.PartsDb.init(allocator, project_dir);
+    defer db.deinit();
+    var stable_ids = std.StringHashMapUnmanaged([]const u8).empty;
+    defer stable_ids.deinit(allocator);
+    var selection: SelectionContext = .{
+        .allocator = allocator,
+        .errors = &errors,
+        .db = &db,
+        .stable_ids = &stable_ids,
+        .keep_dnp = keep_dnp,
+    };
+    try appendSelectionChecks(&selection, block, "");
+    return try errors.toOwnedSlice(allocator);
+}
+
 const SelectionContext = struct {
     allocator: std.mem.Allocator,
     errors: *std.ArrayList(fab.Item),

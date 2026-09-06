@@ -50,6 +50,10 @@
 8 src/layout_sidecar_types.zig|SavedOutline
 12 src/layout_sidecar_types.zig|SavedTrack
 10 src/layout_sidecar_types.zig|SavedVia
+8 src/part_review.zig|Identity
+17 src/part_review.zig|PartReview
+10 src/part_review.zig|RequirementRow
+9 src/part_review.zig|ReviewRecord
 8 src/placement/copper_support.zig|Zone
 8 src/placement/drc.zig|Parties
 8 src/placement/drc.zig|Violation
@@ -115,5 +119,5 @@
 8 src/system_review.zig|Brief
 9 src/system_review.zig|DocumentSpec
 8 src/system_review.zig|GoalSpec
-12 src/system_review.zig|SystemSpec
+9 src/system_review.zig|SystemSpec
 8 src/thermal_scenarios.zig|Row

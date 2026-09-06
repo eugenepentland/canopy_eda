@@ -233,7 +233,9 @@ pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *
 
     try wr.writeAll("<div class=\"sch-bom-wrap\"><table class=\"sch-bom-table\"><thead><tr>");
     try wr.writeAll("<th>Qty</th><th>Refs</th><th>Component</th><th>Value</th>" ++
-        "<th>Footprint</th><th>Attrs</th><th>MPN</th><th>Manufacturer</th><th>Other</th>");
+        "<th>Footprint</th><th>Attrs</th><th>MPN</th><th>Manufacturer</th><th>Other</th>" ++
+        "<th class=\"sch-bom-review-h\"><button type=\"button\" class=\"sch-bom-review-sort\" " ++
+        "title=\"Sort by review verdict: failing parts first\">Review</button></th>");
     try wr.writeAll("</tr></thead><tbody>");
 
     for (lines.items) |line| {
@@ -326,6 +328,15 @@ pub fn writeSchematicBomHtml(allocator: std.mem.Allocator, wr: anytype, block: *
             }
         }
         try wr.writeAll("</td>");
+
+        // Review — the per-part verdict chip, filled by the viewer from
+        // `GET /api/part-review/:name` and expanded into the part's spec sheet
+        // from `GET /api/part-review/:name/:ref`. Rendered empty on the server:
+        // the review is a whole second evaluation of the design, and making the
+        // schematic page wait for it would put that cost on every page load.
+        try wr.writeAll("<td class=\"sch-bom-review\" data-refs=\"");
+        try escape.writeXml(wr, refs_csv);
+        try wr.writeAll("\"></td>");
 
         try wr.writeAll("</tr>");
     }
@@ -1096,6 +1107,40 @@ test "the schematic BOM card escapes every field a user can write into it" {
     // URL is rendered as inert text, never as an href.
     try std.testing.expect(std.mem.indexOf(u8, html, "href=\"javascript:") == null);
     try std.testing.expect(std.mem.indexOf(u8, html, "datasheet: javascript:alert(&#39;ds&#39;)") != null);
+}
+
+// spec: Web Server - The schematic BOM card carries a Review column whose cell names the group's ref-deses so the viewer can fill one verdict chip per row
+test "the BOM card renders a Review column keyed by the row's ref-deses" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Two identical placements roll up into ONE row, so the Review cell has to
+    // carry both ref-deses: the chip shown is the group's worst, and expanding
+    // it has to be able to ask for each member's own sheet.
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "C1", .component = "cap-0402", .value = "100nF", .footprint = "c0402", .symbol = "c" },
+        .{ .ref_des = "C2", .component = "cap-0402", .value = "100nF", .footprint = "c0402", .symbol = "c" },
+    };
+    const block = env_mod.DesignBlock{
+        .name = "Board",
+        .instances = &instances,
+        .nets = &.{},
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    try writeSchematicBomHtml(alloc, &aw.writer, &block);
+    const html = aw.written();
+
+    try std.testing.expect(std.mem.indexOf(u8, html, "sch-bom-review-sort") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<td class=\"sch-bom-review\" data-refs=\"C1,C2\">") != null);
+    // Server-rendered empty: the review is a second evaluation of the design
+    // and the page must not wait for it.
+    try std.testing.expect(std.mem.indexOf(u8, html, "data-refs=\"C1,C2\"></td>") != null);
 }
 
 // spec: Web Server - The BOM card links a datasheet only for an http(s) or site-absolute URL, and that link is emitted with rel="noopener noreferrer"

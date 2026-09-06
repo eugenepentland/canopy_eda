@@ -2533,6 +2533,349 @@
   bomEditSetup('sch-bom-mpn-save', 'sch-bom-mpn-edit', 'mpn', '/api/edit-mpn');
   bomEditSetup('sch-bom-mfr-save', 'sch-bom-mfr-edit', 'manufacturer', '/api/edit-mpn');
 
+  // ---- Schematic BOM card: per-part Review chip + spec sheet ----
+  // The Review column is server-rendered EMPTY (src/serve/bom_html.zig): the
+  // per-part review is a second whole evaluation of the design, so the
+  // schematic page must not wait for it. The chips arrive from
+  // GET /api/part-review/<design> the first time the BOM card is opened, and
+  // one part's sheet from GET /api/part-review/<design>/<ref> on expand.
+  (function () {
+    var table = document.querySelector('.sch-bom-table');
+    if (!table) return;
+    var body = table.querySelector('tbody');
+    var cells = Array.prototype.slice.call(table.querySelectorAll('td.sch-bom-review'));
+    if (!body || cells.length === 0) return;
+
+    // Worst-first, the order a reviewer triages in. Mirrors Counts.worst in
+    // src/part_review.zig — keep the two in step.
+    var RANK = { fail: 5, not_declared: 4, unproven: 3, manual: 2, pass: 1, waived: 1, not_applicable: 0 };
+    var chipByRef = null;
+    var loading = false;
+    var sortDesc = true;
+
+    function el(tag, cls, text) {
+      var node = document.createElement(tag);
+      if (cls) node.className = cls;
+      if (text !== undefined && text !== null && text !== '') node.textContent = String(text);
+      return node;
+    }
+
+    function refsOf(cell) {
+      return (cell.getAttribute('data-refs') || '').split(',').filter(function (s) { return s.length > 0; });
+    }
+
+    function worstOf(refs) {
+      var worst = null;
+      refs.forEach(function (ref) {
+        var chip = chipByRef[ref];
+        if (!chip) return;
+        if (!worst || (RANK[chip.verdict] || 0) > (RANK[worst.verdict] || 0)) worst = chip;
+      });
+      return worst;
+    }
+
+    function totalsOf(refs) {
+      var sum = { pass: 0, unproven: 0, fail: 0, not_declared: 0 };
+      refs.forEach(function (ref) {
+        var chip = chipByRef[ref];
+        if (!chip) return;
+        sum.pass += chip.pass;
+        sum.unproven += chip.unproven;
+        sum.fail += chip.fail;
+        sum.not_declared += chip.not_declared;
+      });
+      return sum;
+    }
+
+    function chipButton(label, verdict, title) {
+      var btn = el('button', 'sch-bom-chip sch-bom-chip-' + (verdict || 'none'), label);
+      btn.type = 'button';
+      btn.title = title;
+      return btn;
+    }
+
+    function chipLabel(sum) {
+      var parts = [sum.pass + ' ✓'];
+      if (sum.unproven > 0) parts.push(sum.unproven + ' ◐');
+      if (sum.fail > 0) parts.push(sum.fail + ' ✗');
+      if (sum.not_declared > 0) parts.push(sum.not_declared + ' –');
+      return parts.join(' · ');
+    }
+
+    // ---- The spec sheet ----
+
+    function kv(list, key, value) {
+      if (value === undefined || value === null || value === '') return;
+      var row = el('div', 'sch-part-kv');
+      row.appendChild(el('span', 'sch-part-k', key));
+      row.appendChild(el('span', 'sch-part-v', value));
+      list.appendChild(row);
+    }
+
+    function section(title) {
+      var box = el('section', 'sch-part-section');
+      box.appendChild(el('h4', null, title));
+      return box;
+    }
+
+    function verdictTag(verdict) {
+      return el('span', 'sch-part-verdict sch-part-verdict-' + verdict, verdict.replace(/_/g, ' '));
+    }
+
+    function datasheetSection(part) {
+      var box = section('Datasheet review');
+      var rec = part.datasheet_review || {};
+      var head = el('div', 'sch-part-head');
+      head.appendChild(verdictTag(rec.verdict || 'not_declared'));
+      head.appendChild(el('span', 'sch-part-msg', rec.message || 'no review record'));
+      box.appendChild(head);
+      var list = el('div', 'sch-part-list');
+      var r = rec.record || {};
+      if (r.present) {
+        kv(list, 'record', r.datasheet + (r.status ? ' · ' + r.status : ''));
+        kv(list, 'digest', r.digest_bound ? 'bound to the PDF digest' : 'not bound to a digest');
+        kv(list, 'reviewed', [r.reviewed_by, r.date].filter(Boolean).join(' · '));
+        if (r.categories && r.categories.length) kv(list, 'categories', r.categories.join(', '));
+        (r.not_applicable || []).forEach(function (na) { kv(list, 'n/a ' + na.category, na.rationale); });
+      }
+      kv(list, 'local PDF', rec.inventory);
+      box.appendChild(list);
+      return box;
+    }
+
+    function appliedSection(part) {
+      var box = section('Applied vs rated');
+      var list = el('div', 'sch-part-list');
+      (part.supply_windows || []).forEach(function (w) {
+        var row = el('div', 'sch-part-kv');
+        row.appendChild(el('span', 'sch-part-k', w.pin));
+        row.appendChild(el('span', 'sch-part-v', w.min_v + '–' + w.max_v + ' V · ' + (w.message || w.status)));
+        row.appendChild(verdictTag(w.verdict));
+        list.appendChild(row);
+      });
+      (part.ratings || []).forEach(function (r) {
+        if (r.id.indexOf('bom-') === 0) return;
+        var row = el('div', 'sch-part-kv');
+        row.appendChild(el('span', 'sch-part-k', r.id));
+        row.appendChild(el('span', 'sch-part-v', r.message));
+        row.appendChild(verdictTag(r.verdict));
+        list.appendChild(row);
+      });
+      (part.power || []).forEach(function (p) {
+        var draw = [];
+        if (p.i_typ !== null) draw.push(p.i_typ + ' A typ');
+        if (p.i_max !== null) draw.push(p.i_max + ' A max');
+        if (p.share_pct !== null) draw.push(Math.round(p.share_pct) + ' % of the rail');
+        kv(list, p.rail + (p.net && p.net !== p.rail ? ' (' + p.net + ')' : ''), draw.join(' · ') || 'no annotated draw');
+      });
+      if (!list.childNodes.length) kv(list, 'ratings', 'nothing applied against a rating on this part');
+      box.appendChild(list);
+      return box;
+    }
+
+    function thermalSection(part) {
+      var box = section('Thermal');
+      var list = el('div', 'sch-part-list');
+      var t = part.thermal;
+      if (!t) {
+        kv(list, 'screen', 'this part dissipates nothing the screen could work from');
+      } else {
+        kv(list, 'dissipation', t.power);
+        kv(list, 'θJA', t.theta_ja + ' °C/W');
+        kv(list, 'Tj at ' + t.ambient_c + ' °C', t.tj + ' °C · ' + t.margin + ' °C margin');
+        kv(list, 'max ambient', t.max_ambient + ' °C');
+      }
+      box.appendChild(list);
+      return box;
+    }
+
+    function requirementsSection(part) {
+      var box = section('Requirements');
+      var list = el('div', 'sch-part-list');
+      (part.requirements || []).forEach(function (req) {
+        var row = el('div', 'sch-part-req');
+        var head = el('div', 'sch-part-head');
+        head.appendChild(verdictTag(req.verdict));
+        head.appendChild(el('span', 'sch-part-msg', req.text));
+        row.appendChild(head);
+        var meta = el('div', 'sch-part-meta');
+        if (req.check) meta.appendChild(el('span', 'sch-part-tag', req.check));
+        if (req.citation && req.citation.pdf) {
+          meta.appendChild(el('span', 'sch-part-tag', req.citation.pdf + (req.citation.page ? ' p.' + req.citation.page : '')));
+        }
+        meta.appendChild(el('span', 'sch-part-tag', req.source));
+        row.appendChild(meta);
+        row.appendChild(el('div', 'sch-part-msg', req.message));
+        if (req.rationale) {
+          row.appendChild(el('div', 'sch-part-signoff', 'signed off' + (req.signed_off_by ? ' by ' + req.signed_off_by : '') + ': ' + req.rationale));
+        }
+        list.appendChild(row);
+      });
+      if (!list.childNodes.length) kv(list, 'requirements', 'this part carries no cited requirement');
+      box.appendChild(list);
+      return box;
+    }
+
+    function authoredSection(part) {
+      var box = section('Spec authored');
+      var list = el('div', 'sch-part-list');
+      var id = part.identity || {};
+      kv(list, 'part', [id.mpn, id.manufacturer].filter(Boolean).join(' · '));
+      kv(list, 'value', [id.value, id.footprint].filter(Boolean).join(' · '));
+      if (id.attrs && id.attrs.length) kv(list, 'attrs', id.attrs.join(', '));
+      if (id.dnp) kv(list, 'population', 'DNP');
+      kv(list, 'class', part.class + (part.class_declared ? ' (declared)' : ' (inferred)'));
+      (part.ratings || []).forEach(function (r) {
+        if (r.id.indexOf('bom-') !== 0) return;
+        var row = el('div', 'sch-part-kv');
+        row.appendChild(el('span', 'sch-part-k', r.id));
+        row.appendChild(el('span', 'sch-part-v', r.message));
+        row.appendChild(verdictTag(r.verdict));
+        list.appendChild(row);
+      });
+      (part.profile_items || []).forEach(function (item) {
+        var row = el('div', 'sch-part-kv');
+        row.appendChild(el('span', 'sch-part-k', item.code));
+        row.appendChild(el('span', 'sch-part-v', item.message));
+        row.appendChild(verdictTag('not_declared'));
+        list.appendChild(row);
+      });
+      box.appendChild(list);
+      return box;
+    }
+
+    function renderSheet(host, part) {
+      host.textContent = '';
+      var head = el('div', 'sch-part-title');
+      head.appendChild(el('strong', null, part.ref));
+      head.appendChild(el('span', 'sch-part-comp', part.component));
+      host.appendChild(head);
+      host.appendChild(datasheetSection(part));
+      host.appendChild(appliedSection(part));
+      host.appendChild(thermalSection(part));
+      host.appendChild(requirementsSection(part));
+      host.appendChild(authoredSection(part));
+    }
+
+    function loadSheet(host, ref) {
+      host.textContent = 'loading ' + ref + '…';
+      fetch('/api/part-review/' + encodeURIComponent(DESIGN_NAME) + '/' + encodeURIComponent(ref))
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+        .then(function (part) { renderSheet(host, part); })
+        .catch(function () { host.textContent = 'could not load the review for ' + ref; });
+    }
+
+    // ---- Expansion ----
+
+    function sheetRow(row) {
+      var next = row.nextElementSibling;
+      if (next && next.classList.contains('sch-bom-sheet-row')) return next;
+      var tr = el('tr', 'sch-bom-sheet-row');
+      var td = document.createElement('td');
+      td.colSpan = row.children.length;
+      td.className = 'sch-bom-sheet';
+      tr.appendChild(td);
+      row.parentNode.insertBefore(tr, row.nextSibling);
+      return tr;
+    }
+
+    function openGroup(row, refs) {
+      var tr = sheetRow(row);
+      var host = tr.firstChild;
+      if (refs.length === 1) {
+        loadSheet(host, refs[0]);
+        return;
+      }
+      host.textContent = '';
+      var picker = el('div', 'sch-part-picker');
+      var sheet = el('div', 'sch-part-sheet');
+      refs.forEach(function (ref) {
+        var chip = chipByRef[ref];
+        var btn = chipButton(ref + '  ' + (chip ? chipLabel(chip) : '–'), chip ? chip.verdict : 'none', ref);
+        btn.addEventListener('click', function () { loadSheet(sheet, ref); });
+        picker.appendChild(btn);
+      });
+      host.appendChild(picker);
+      host.appendChild(sheet);
+      loadSheet(sheet, refs[0]);
+    }
+
+    function toggle(row, refs) {
+      var next = row.nextElementSibling;
+      if (next && next.classList.contains('sch-bom-sheet-row')) {
+        next.parentNode.removeChild(next);
+        return;
+      }
+      openGroup(row, refs);
+    }
+
+    // ---- Filling the column ----
+
+    function fill() {
+      cells.forEach(function (cell) {
+        var refs = refsOf(cell);
+        var worst = worstOf(refs);
+        cell.textContent = '';
+        if (!worst) {
+          cell.appendChild(el('span', 'sch-bom-chip sch-bom-chip-none', '–'));
+          cell.setAttribute('data-rank', '-1');
+          return;
+        }
+        var sum = totalsOf(refs);
+        var btn = chipButton(chipLabel(sum), worst.verdict, 'Review verdict: ' + worst.verdict.replace(/_/g, ' ') + ' — click for the spec sheet');
+        btn.addEventListener('click', function () { toggle(cell.parentNode, refs); });
+        cell.appendChild(btn);
+        cell.setAttribute('data-rank', String(RANK[worst.verdict] || 0));
+      });
+    }
+
+    function load() {
+      if (chipByRef || loading) return;
+      loading = true;
+      cells.forEach(function (cell) { cell.textContent = '…'; });
+      fetch('/api/part-review/' + encodeURIComponent(DESIGN_NAME))
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+        .then(function (doc) {
+          chipByRef = {};
+          (doc.parts || []).forEach(function (chip) { chipByRef[chip.ref] = chip; });
+          fill();
+        })
+        .catch(function () {
+          loading = false;
+          cells.forEach(function (cell) { cell.textContent = ''; });
+        });
+    }
+
+    // ---- Sorting ----
+
+    var sortBtn = table.querySelector('.sch-bom-review-sort');
+    if (sortBtn) {
+      sortBtn.addEventListener('click', function () {
+        if (!chipByRef) { load(); return; }
+        // Drop any open sheet: it belongs under a row that is about to move.
+        Array.prototype.slice.call(body.querySelectorAll('tr.sch-bom-sheet-row')).forEach(function (tr) {
+          tr.parentNode.removeChild(tr);
+        });
+        var rows = Array.prototype.slice.call(body.querySelectorAll('tr'));
+        rows.sort(function (a, b) {
+          var ra = parseInt(a.querySelector('td.sch-bom-review').getAttribute('data-rank') || '-1', 10);
+          var rb = parseInt(b.querySelector('td.sch-bom-review').getAttribute('data-rank') || '-1', 10);
+          return sortDesc ? rb - ra : ra - rb;
+        });
+        rows.forEach(function (r) { body.appendChild(r); });
+        sortDesc = !sortDesc;
+        sortBtn.textContent = sortDesc ? 'Review ▾' : 'Review ▴';
+      });
+    }
+
+    var card = table.closest ? table.closest('details.sch-bom-card') : null;
+    if (card && !card.open) {
+      card.addEventListener('toggle', function () { if (card.open) load(); });
+    } else {
+      load();
+    }
+  })();
+
   // Design-notes panel: structured TODOs + free-form scratchpad. Same
   // file (`<design>.notes.md`) backs the MCP `add_design_note` /
   // `complete_design_note` tools, so checking off a task here is

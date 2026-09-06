@@ -257,6 +257,7 @@ candidate for deployment.
 - The live sub-circuit Stamp endpoint regression remains claimed by the shard manifest
 - The library-fact envelope rules remain claimed by the shard manifest
 - The saved-pose identity tests remain claimed by the shard manifest
+- The per-part review tests remain claimed by the shard manifest
 - Panelization export tests remain claimed by the shard manifest
 - The system brief and goal evaluations remain claimed by the shard manifest
 - The anonymous-wiring tests remain claimed by exactly one shard
@@ -7620,6 +7621,8 @@ is what makes the predicate exact rather than approximately right.
 
 ## Web Server
 
+- GET /api/part-review/:name answers one chip per placed part and /:ref answers that part's sheet or 404
+- The schematic BOM card carries a Review column whose cell names the group's ref-deses so the viewer can fill one verdict chip per row
 - Saving from an explicit source project creates a separate review candidate, retains complete layout metadata, refuses name collisions, and preserves the destination star
 
 
@@ -9037,6 +9040,25 @@ export never invents them.
 - completeness-waiver: concurrent access (collection owns its evaluator and arena; nothing is written)
 - completeness-waiver: malformed encoding (readiness and ladder JSON that fails to parse leaves those sections unavailable)
 - completeness-waiver: integer overflow (counts are tallied from bounded slices with no input-derived arithmetic)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
+## part-review
+
+- a requirement status maps onto exactly one word of the shared verdict vocabulary
+- a part's chip counts every row it carries and the group chip shows the worst verdict
+- the board resolves a sub-block-qualified ref and its bare leaf, and answers nothing for an unknown one
+- the per-part JSON carries every section a reviewer needs and escapes hostile text
+- the chips body names every placed part with its four counts and its worst verdict
+- the composer joins identity, requirements, ratings, power and thermal onto every placed part of a design
+- the composer names the reason it could not review instead of answering an empty board
+- part_review is a registered read-only CLI tool answering with the endpoint's own bytes
+- completeness-waiver: empty inputs (a design that places nothing composes an empty parts list, and a part with no requirement, rating or thermal row still carries its identity and its counts)
+- completeness-waiver: large inputs (every section is built from slices the evaluation already bounded; no fixed-size output buffer)
+- completeness-waiver: unauthorized access (the review reads the caller's project directory through the same evaluator the CLI already exposes, and writes nothing)
+- completeness-waiver: i/o failure (an unreadable BOM sidecar or datasheet inventory degrades to the authored identity instead of aborting the review)
+- completeness-waiver: concurrent access (composition owns its arena and its evaluator; the retained bodies are validated against the read-set they were computed from)
+- completeness-waiver: malformed encoding (strings are written through json_writer's escaper and the endpoints percent-decode their path segments before use)
+- completeness-waiver: integer overflow (counts are tallied from bounded slices and the one ratio is floating-point with a zero-denominator guard)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
 ## saved-route-copper
