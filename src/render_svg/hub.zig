@@ -5,7 +5,6 @@
 
 const std = @import("std");
 const env_mod = @import("../eval/env.zig");
-const rails_mod = @import("../eval/rails.zig");
 const ctx_mod = @import("context.zig");
 const RenderCtx = ctx_mod.RenderCtx;
 const FlatInst = ctx_mod.FlatInst;
@@ -329,13 +328,13 @@ pub const SplitGroups = struct {
     right_heights: []f64,
 };
 
-fn functionalSignalAnchor(net: []const u8) bool {
-    if (net.len == 0 or isGroundNet(net)) return false;
-    for (rails_mod.schematic_supply_prefixes) |prefix| {
-        if (std.ascii.startsWithIgnoreCase(net, prefix)) return false;
-    }
-    return true;
-}
+/// Whether a net joins two pin groups for layout purposes — a signal, or a
+/// supply private to this hub. The one rule, shared with `connection`. Only
+/// a DIRECT reach (`groupReachesNet`) uses it: the island walk below still
+/// stops at every supply, so two pull-ups to one local rail do not pair
+/// their signal pins through it.
+const functionalLayoutNet = connection.functionalLayoutNet;
+const functionalSignalAnchor = draw.isFunctionalSignalNet;
 
 /// Do two pin groups hang off the SAME functional signal through their
 /// passives? Two groups that do belong side by side with no gap — they are one
@@ -448,7 +447,7 @@ fn groupReachesNet(self: *RenderCtx, hub_ref: []const u8, group: PinGroup, targe
         };
         if (!self.spoke_set.contains(spoke.ref_des)) continue;
         const terminal = baseNetName(try connection.getConnTerminal(self, conn.endpoint, hub_ref, conn.pin));
-        if (functionalSignalAnchor(terminal) and std.mem.eql(u8, terminal, target_net)) return true;
+        if (functionalLayoutNet(self, terminal) and std.mem.eql(u8, terminal, target_net)) return true;
     }
     return false;
 }
@@ -532,7 +531,40 @@ pub fn splitGroupsByHeight(
     return splitGroupsAtBalancedPrefix(self, hub_ref, all_groups, all_heights);
 }
 
+/// Whether `spoke_ref` hangs off a hub pin in one of `earlier` groups — the
+/// rows that render before this one, in this order, and so draw it first.
+fn spokeDrawnByEarlierGroup(self: *const RenderCtx, spoke_ref: []const u8, hub_ref: []const u8, earlier: []const PinGroup) bool {
+    const adj = self.adjacency.get(spoke_ref) orelse return false;
+    for (adj.items) |entry| switch (entry.endpoint) {
+        .pin => |hp| {
+            if (!std.mem.eql(u8, hp.ref_des, hub_ref)) continue;
+            for (earlier) |g| if (groupContainsHubPin(g, hp.pin)) return true;
+        },
+        .net => {},
+    };
+    return false;
+}
+
+/// `shouldShowOwnNet` as it will answer when this row renders: it also turns
+/// true once an earlier row has drawn a spoke on the net. Heights are computed
+/// before any row has drawn, so that render-order fact is predicted from the
+/// group order here; reading `rendered_spokes` instead left the row out of the
+/// band and the fan overran it by one row on each side.
+fn ownNetRowShown(self: *RenderCtx, net: []const u8, hub_ref: []const u8, earlier: []const PinGroup) bool {
+    if (connection.shouldShowOwnNet(self, net, hub_ref)) return true;
+    const pins = self.net_index.get(net) orelse return false;
+    for (pins.items) |np| {
+        if (!self.spoke_set.contains(np.ref_des)) continue;
+        if (spokeDrawnByEarlierGroup(self, np.ref_des, hub_ref, earlier)) return true;
+    }
+    return false;
+}
+
 /// Calculate per-group heights based on connection count and branch estimates.
+/// `groups` is in render order, which the estimate leans on: a spoke shared
+/// with an earlier group is drawn there and skipped here (`rendered_spokes`),
+/// and the pin's own net gains a row once an earlier group has drawn a spoke
+/// on it.
 pub fn groupHeights(self: *RenderCtx, groups: []const PinGroup, hub_ref: []const u8) RenderError![]f64 {
     var heights = try self.allocator.alloc(f64, groups.len);
     for (groups, 0..) |group, i| {
@@ -544,10 +576,12 @@ pub fn groupHeights(self: *RenderCtx, groups: []const PinGroup, hub_ref: []const
         }
         const canon_key = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ hub_ref, first_pin_id });
         const pin_net_name = self.pin_canonical_nets.get(canon_key) orelse "";
+        const earlier = groups[0..i];
         for (group.conns) |conn| {
             switch (conn.endpoint) {
                 .pin => |p| {
                     if (self.spoke_set.contains(p.ref_des)) {
+                        if (spokeDrawnByEarlierGroup(self, p.ref_des, hub_ref, earlier)) continue;
                         total_slots += @intCast(estimateBranchCount(self, p.ref_des, hub_ref));
                     } else {
                         total_slots += 1;
@@ -557,7 +591,7 @@ pub fn groupHeights(self: *RenderCtx, groups: []const PinGroup, hub_ref: []const
                     const bn = baseNetName(net);
                     if (self.significant_nets.contains(bn)) {
                         const own = std.mem.eql(u8, bn, baseNetName(pin_net_name));
-                        if (own and !connection.shouldShowOwnNet(self, bn, hub_ref)) continue;
+                        if (own and !ownNetRowShown(self, bn, hub_ref, earlier)) continue;
                         total_slots += 1;
                     }
                 },
@@ -678,6 +712,57 @@ pub fn estimateBranchCount(self: *RenderCtx, spoke_rd: []const u8, hub_ref: []co
         }
     }
     return 1;
+}
+
+// spec: render_svg - Group heights follow render order: a spoke shared with an earlier group is counted there, and the own net's row is reserved once an earlier group draws a spoke on it
+test "group heights follow render order for spokes shared between two groups" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+
+    // Two pull-ups from pin 1 to the hub-private rail on pin 6. Pin 1's row
+    // draws both; pin 6's row skips them (`rendered_spokes`) and instead
+    // shows its own net, which those drawn spokes now make worth following.
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ic", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "R1", .component = "res-0402", .value = "10k", .footprint = "", .symbol = "generic-res" },
+        .{ .ref_des = "R3", .component = "res-0402", .value = "10k", .footprint = "", .symbol = "generic-res" },
+    };
+    const ctrl = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "R1", .pin = "2" },
+        .{ .ref_des = "R3", .pin = "2" },
+    };
+    const rail = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "6" },
+        .{ .ref_des = "R1", .pin = "1" },
+        .{ .ref_des = "R3", .pin = "1" },
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "CTRL", .pins = &ctrl },
+        .{ .name = "VDD_F", .pins = &rail },
+    };
+    const block: env_mod.DesignBlock = .{
+        .name = "shared-spoke-heights",
+        .instances = &instances,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+    var ctx = RenderCtx.init(allocator);
+    try ctx.setup(&block);
+    var pin_names: std.StringHashMapUnmanaged([]const u8) = .empty;
+    const pins = [_][]const u8{ "1", "6" };
+    const groups = try groupHubPinsFunctional(&ctx, &pins, ctx.adjacency.get("U1").?.items, &pin_names);
+    try testing.expectEqual(@as(usize, 2), groups.len);
+
+    const heights = try groupHeights(&ctx, groups, "U1");
+    // Pin 1: two spoke rows. Pin 6: one row for its own net — not one per
+    // already-drawn spoke plus a surprise own-net row at render time.
+    try testing.expectEqual(@as(f64, 80.0), heights[0]);
+    try testing.expectEqual(@as(f64, 40.0), heights[1]);
 }
 
 // spec: render_svg - Parallel passives returning to the same hub pin reserve their full branch-tree height instead of masquerading as a cross-pin island

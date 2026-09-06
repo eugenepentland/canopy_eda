@@ -1388,14 +1388,6 @@ fn isFeedbackPinLabel(label: []const u8) bool {
         std.ascii.startsWithIgnoreCase(label, "VSENSE_(");
 }
 
-fn isFunctionalSignalTerminal(net: []const u8) bool {
-    if (net.len == 0 or draw.isGroundNet(net)) return false;
-    for (rails_mod.schematic_supply_prefixes) |prefix| {
-        if (std.ascii.startsWithIgnoreCase(net, prefix)) return false;
-    }
-    return true;
-}
-
 /// `canonical_nets` is the per-position canonical net of `groups`, computed once
 /// per hub by the caller and permuted alongside it. Deriving it here instead
 /// cost an `allocPrint` per (source conn × candidate) pair — O(n²) arena
@@ -1416,7 +1408,7 @@ fn relatedTargetIndex(
         };
         if (!ctx.spoke_set.contains(spoke.ref_des)) continue;
         const terminal = draw.baseNetName(try connection.getConnTerminal(ctx, conn.endpoint, hub_ref, conn.pin));
-        if (!accepts_supply and !isFunctionalSignalTerminal(terminal)) continue;
+        if (!accepts_supply and !connection.functionalLayoutNet(ctx, terminal)) continue;
         for (canonical_nets, 0..) |candidate_net, candidate_idx| {
             if (candidate_idx == source_idx) continue;
             if (std.mem.eql(u8, terminal, candidate_net)) return candidate_idx;

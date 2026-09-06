@@ -172,6 +172,7 @@ pub fn renderHubAllPins(
             .side = .left,
             .start_y = y_start + hub_vpad,
             .group_gap = group_gap,
+            .stub_x = layout_hub_x - pin_stub,
         });
         try rememberFunctionalPinRows(ctx, .{
             .hub_ref = hub.ref_des,
@@ -180,6 +181,7 @@ pub fn renderHubAllPins(
             .side = .right,
             .start_y = y_start + hub_vpad,
             .group_gap = group_gap,
+            .stub_x = layout_hub_x + hub_width + pin_stub,
         });
     }
 
@@ -254,8 +256,13 @@ const FunctionalRowLayout = struct {
     side: ctx_mod.Side,
     start_y: f64,
     group_gap: f64,
+    /// The side's pin-stub column (`renderPinStub`'s `stub_x`).
+    stub_x: f64,
 };
 
+/// Record each group's row and stub span (the same spread `renderPinStub`
+/// draws) so a series part on a neighbouring group can turn toward it and
+/// close on its nearest pin stub.
 fn rememberFunctionalPinRows(ctx: *RenderCtx, layout: FunctionalRowLayout) !void {
     var py = layout.start_y;
     for (layout.groups, 0..) |group, i| {
@@ -267,7 +274,14 @@ fn rememberFunctionalPinRows(ctx: *RenderCtx, layout: FunctionalRowLayout) !void
                     .left => &ctx.render_scratch.functional_left_pin_y,
                     .right => &ctx.render_scratch.functional_right_pin_y,
                 };
-                try rows.put(ctx.allocator, baseNetName(net), cy);
+                const stubs = @as(f64, @floatFromInt(@max(group.stub_labels.len, 1) - 1));
+                const half_span = stubs / half_divisor * per_conn_spacing;
+                try rows.put(ctx.allocator, baseNetName(net), .{
+                    .cy = cy,
+                    .first_stub_y = cy - half_span,
+                    .last_stub_y = cy + half_span,
+                    .stub_x = layout.stub_x,
+                });
             }
         }
         py += layout.heights[i] + gapAfterGroup(ctx, layout.groups, i, layout.group_gap);
@@ -412,4 +426,93 @@ test "long passive chain expands side padding beyond the fixed minimum" {
 
     const pad = try requiredSidePad(&ctx, "U1", &group);
     try testing.expect(pad > default_side_pad);
+}
+
+// spec: render_svg - Pull-ups between neighbouring pin groups turn vertical on the pin-stub column and land on the destination group's nearest stub
+test "functional pull-ups to a neighbouring group turn onto its pin stubs" {
+    const testing = std.testing;
+    // A sub-block's attenuator: C16 pulled up to the module-local filtered
+    // rail VDD_F, the parallel bus pulled up to the same rail, a bypass cap,
+    // and a bead to the board's shared V_3V3 (which U2 also sits on).
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "dat-31a-sp+", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "U2", .component = "ldo", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "U3", .component = "mcu", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "R1", .component = "res-0402", .value = "10k", .footprint = "", .symbol = "generic-res" },
+        .{ .ref_des = "R2", .component = "res-0402", .value = "10k", .footprint = "", .symbol = "generic-res" },
+        .{ .ref_des = "C1", .component = "cap-0402", .value = "100nF", .footprint = "", .symbol = "generic-cap" },
+        .{ .ref_des = "L1", .component = "ferrite-0402", .value = "600R", .footprint = "", .symbol = "generic-ind" },
+    };
+    const c16 = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "R1", .pin = "2" } };
+    const vdd_f = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "6" },
+        .{ .ref_des = "U1", .pin = "9" },
+        .{ .ref_des = "R1", .pin = "1" },
+        .{ .ref_des = "R2", .pin = "2" },
+        .{ .ref_des = "C1", .pin = "1" },
+        .{ .ref_des = "L1", .pin = "2" },
+    };
+    const par = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "15" },
+        .{ .ref_des = "U1", .pin = "16" },
+        .{ .ref_des = "R2", .pin = "1" },
+    };
+    const gnd = [_]env_mod.PinRef{.{ .ref_des = "C1", .pin = "2" }};
+    // Two other hubs on V_3V3: a rail with one hub pin would make that hub
+    // the bead's owner and pull it off this schematic.
+    const v3v3 = [_]env_mod.PinRef{
+        .{ .ref_des = "L1", .pin = "1" },
+        .{ .ref_des = "U2", .pin = "1" },
+        .{ .ref_des = "U3", .pin = "1" },
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "dsa/PAR_C16", .pins = &c16 },
+        .{ .name = "dsa/VDD_F", .pins = &vdd_f },
+        .{ .name = "dsa/PAR_CTRL", .pins = &par },
+        .{ .name = "GND", .pins = &gnd },
+        .{ .name = "V_3V3", .pins = &v3v3 },
+    };
+    const block: env_mod.DesignBlock = .{
+        .name = "neighbour-pull-ups",
+        .instances = &instances,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = RenderCtx.init(a);
+    try ctx.setup(&block);
+    var pin_names: std.StringHashMapUnmanaged([]const u8) = .empty;
+    const pins = [_][]const u8{ "1", "6", "9", "15", "16" };
+    const groups = try hub_mod.groupHubPinsFunctional(&ctx, &pins, ctx.adjacency.get("U1").?.items, &pin_names);
+    try testing.expectEqual(@as(usize, 3), groups.len);
+
+    var got: std.Io.Writer.Allocating = .init(a);
+    try renderHubAllPins(&ctx, &got.writer, ctx.inst_map.get("U1").?, groups, true);
+    const svg = got.written();
+
+    // Pin 1 (y=80) is its own group; R1 hangs off its stub end on the
+    // pin-stub column (x=312) and the lane runs straight down to VDD's first
+    // stub, pin 6 at y=176 — no jog onto the group's bus at x=302.
+    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 312.0 100.0)\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "points=\"312.0,120.0 312.0,120.0 312.0,176.0 312.0,176.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"312.0\" y1=\"176.0\" x2=\"352.0\"") != null);
+    // The rail's rows: bypass, bead to the shared V_3V3 (labelled), and the
+    // pull-up to the parallel bus LAST, nearest the bus's group below. R2
+    // steps from the bus (302) back onto the column and turns down to pin 15.
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"302.0\" y1=\"236.0\" x2=\"312.0\" y2=\"236.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 312.0 256.0)\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "points=\"312.0,276.0 312.0,276.0 312.0,312.0 312.0,312.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"312.0\" y1=\"312.0\" x2=\"352.0\"") != null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, svg, ">V_3V3</text>"));
+    // Neither hub-private net earns a label, and nothing runs on the outside
+    // lane (x=188) that used to cut through the V_3V3 label.
+    try testing.expect(std.mem.indexOf(u8, svg, ">dsa/VDD_F</text>") == null);
+    try testing.expect(std.mem.indexOf(u8, svg, ">dsa/PAR_CTRL</text>") == null);
+    try testing.expect(std.mem.indexOf(u8, svg, "188.0,") == null);
 }

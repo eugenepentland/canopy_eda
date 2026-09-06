@@ -64,6 +64,17 @@ const IslandAnchorInputs = struct {
     spoke_nets: *const RefNetsMap,
 };
 
+/// One Functional-view pin group's row on one side of a hub: its centre and
+/// the span of its pin stubs, on the pin-stub column. A series part turned
+/// toward this group lands on its NEAREST stub, so the lane meets the stub tie
+/// head-on instead of jogging onto the group's connection bus.
+pub const FunctionalPinRow = struct {
+    cy: f64,
+    first_stub_y: f64,
+    last_stub_y: f64,
+    stub_x: f64,
+};
+
 const RenderScratch = struct {
     hub_splits: std.StringHashMapUnmanaged(MergeAwareSplit) = .empty,
     deferred_branch_terminals: std.ArrayList(BranchBody) = .empty,
@@ -72,13 +83,17 @@ const RenderScratch = struct {
     /// rendering consults these to turn an outside-edge series resistor toward
     /// the signal pin it feeds instead of spending another horizontal lane.
     functional_layout: bool = false,
-    functional_left_pin_y: std.StringHashMapUnmanaged(f64) = .empty,
-    functional_right_pin_y: std.StringHashMapUnmanaged(f64) = .empty,
+    functional_left_pin_y: std.StringHashMapUnmanaged(FunctionalPinRow) = .empty,
+    functional_right_pin_y: std.StringHashMapUnmanaged(FunctionalPinRow) = .empty,
     /// Nets whose Functional return already turns through a vertical series
     /// part. Their destination pin anchors directly on that inline rail rather
     /// than emitting a short outward terminal stub first.
     functional_inline_nets: std.StringHashMapUnmanaged(void) = .empty,
     functional_series_target_y: ?f64 = null,
+    /// The pin-stub column of the group being drawn. A turned series part
+    /// stands on it — not on the group's connection bus ten pixels out — so
+    /// its lane runs straight into the neighbouring group's stub tie.
+    functional_series_column_x: ?f64 = null,
     rendered_connection_end_y: ?f64 = null,
 };
 

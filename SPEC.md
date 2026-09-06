@@ -5725,6 +5725,10 @@ Public functions: renderSchematic
 - Parallel passives returning to the same hub pin reserve their full branch-tree height instead of masquerading as a cross-pin island
 - A parallel passive island reserves one grouped hub entry so its outer bus stops at the last visible branch
 - A Functional turned series return shares the destination rail's x-coordinate so VTUNE closes straight down without an outside detour
+- A sub-block's path-qualified supply rail is still a supply, not a signal return
+- Pull-ups between neighbouring pin groups turn vertical on the pin-stub column and land on the destination group's nearest stub
+- An outside direct-return lane is pushed past any net label drawn on a row it spans
+- Group heights follow render order: a spoke shared with an earlier group is counted there, and the own net's row is reserved once an earlier group draws a spoke on it
 - A vertical passive labels away from its hub: left of left-side parts and right of right-side parts
 - Functional pin rows put the pin's own net before a ground shunt so the shunt draws below the pin; Original remains alphabetical
 - Identical decoupling capacitors each render as their own labeled schematic symbol

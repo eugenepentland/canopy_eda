@@ -4245,6 +4245,7 @@ src/render_svg/connection.zig::GroupRender struct_
 src/render_svg/connection.zig::PlannedSpoke struct_
 src/render_svg/connection.zig::deduplicateGroupedSpokes | fn deduplicateGroupedSpokes( self: *RenderCtx, comptime Entry: type, classified: *std.ArrayList(Entry), hub_ref: []const u8, ) error{OutOfMemory}!void
 src/render_svg/connection.zig::findSpokeChain | fn findSpokeChain(self: *RenderCtx, ref_des: []const u8, came_from: Endpoint, visited: *std.StringHashMapUnmanaged(void)) error{OutOfMemory}!ChainResult
+src/render_svg/connection.zig::functionalLayoutNet | fn functionalLayoutNet(self: *const RenderCtx, net: []const u8) bool
 src/render_svg/connection.zig::getConnTerminal | fn getConnTerminal(self: *RenderCtx, endpoint: Endpoint, hub_ref: []const u8, from_pin: []const u8) RenderError![]const u8
 src/render_svg/connection.zig::renderConnBody | fn renderConnBody( self: *RenderCtx, w: anytype, endpoint: Endpoint, hub_ref: []const u8, from_pin: []const u8, stub_x: f64, stub_y: f64, cy: f64, side: Side, net_name: []const u8, ) RenderError!f64
 src/render_svg/connection.zig::renderDeferredTerminals | fn renderDeferredTerminals( self: *RenderCtx, w: anytype, deferred: *const DeferredTerminals, functional: bool, ) RenderError!void
@@ -4259,6 +4260,7 @@ src/render_svg/context.zig::BranchBody struct_
 src/render_svg/context.zig::Endpoint union_
 src/render_svg/context.zig::FlatInst struct_
 src/render_svg/context.zig::FlatNet struct_
+src/render_svg/context.zig::FunctionalPinRow struct_
 src/render_svg/context.zig::LonePinRole enum_
 src/render_svg/context.zig::MergeAwareSplit struct_
 src/render_svg/context.zig::PinGroup struct_
@@ -4295,6 +4297,7 @@ src/render_svg/draw.zig::endpointEql | fn endpointEql(a: Endpoint, b: Endpoint) 
 src/render_svg/draw.zig::formatShort | fn formatShort(inst: FlatInst) []const u8
 src/render_svg/draw.zig::hub_width value
 src/render_svg/draw.zig::hub_x value
+src/render_svg/draw.zig::isFunctionalSignalNet | fn isFunctionalSignalNet(net: []const u8) bool
 src/render_svg/draw.zig::isGroundNet | fn isGroundNet(name: []const u8) bool
 src/render_svg/draw.zig::isHub | fn isHub(inst: FlatInst) bool
 src/render_svg/draw.zig::isHubRef | fn isHubRef(ref_des: []const u8) bool
