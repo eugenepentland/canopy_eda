@@ -1032,6 +1032,38 @@ bounds is reported as an explicit unknown rather than as zero volts.
 - completeness-waiver: integer overflow (no arithmetic beyond formatting already-computed bounds and counts)
 - completeness-waiver: panic-free (an absent envelope is the documented unknown state, not a failure; a design that fails to resolve degrades to a row and the next design)
 
+## tool schema
+
+Public functions: validate
+
+`assets/tools_list_result.json` is the structured tools' contract — `tools/list`
+returns it, an agent's client validates against it — and nothing enforced it. A
+test keeps the tool NAMES in lockstep with the registration table; the
+parameters were on their honour, so whether a bad argument was refused depended
+on whether the individual handler happened to check. `list_free_pins` with an
+invalid `filter` returned an empty pin list and exit 0; `get_pcb_layout_image`
+and `get_schematic_image` rendered a PNG of a DIFFERENT view for an invalid
+`scenario`/`view`/`theme`; a misspelled argument name passed straight through an
+`"additionalProperties": false` schema; a string reached a declared boolean. The
+check now runs once, in the dispatch every surface shares, against the advertised
+document itself — so the rule and the contract cannot drift.
+
+- a call that conforms to the advertised schema is accepted unchanged
+- a value outside a declared enum is rejected and the accepted values are named
+- an argument the schema does not declare is rejected when the schema closes the object
+- a required argument that is absent is rejected by name
+- an argument whose JSON type contradicts the declared type is rejected
+- a tool the document does not describe is left for the caller to reject
+
+- completeness-waiver: empty inputs (a call with no arguments is validated as an empty object, which is how a missing required argument is caught)
+- completeness-waiver: large inputs (the schema document is a compiled-in constant of known size; caller arguments are already-parsed values it only reads)
+- completeness-waiver: unauthorized access (validation grants nothing and reads no file; it runs before any handler opens a project)
+- completeness-waiver: concurrent access (the document is parsed per call into the caller's own allocator, so no state is shared between threads)
+- completeness-waiver: i/o failure (nothing here performs I/O)
+- completeness-waiver: malformed encoding (argument names and values are compared as bytes and escaped through json_writer on the way into the rejection)
+- completeness-waiver: integer overflow (no arithmetic; numeric arguments are only classified, never converted)
+- completeness-waiver: panic-free (an allocation failure or an unexpected document shape yields "no violation" rather than turning an internal failure into a caller error)
+
 ## test manifest
 
 Public functions: collectQualifiedNames, collectQualifiedNamesIn, qualifiedPrefix, appendNamedTests, claimingShards, audit, auditIn, writeReport, checkAndReport, checkAndReportIn

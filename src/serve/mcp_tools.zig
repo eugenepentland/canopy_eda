@@ -21,6 +21,7 @@ const env_mod = @import("../eval/env.zig");
 const eval_modules = @import("../eval/modules.zig");
 const erc_mod = @import("../erc.zig");
 const log = @import("../infra/log.zig");
+const tool_schema = @import("tool_schema.zig");
 const process_alloc = @import("../infra/process_alloc.zig");
 const bom = @import("../bom.zig");
 const sexpr_parser = @import("../sexpr/parser.zig");
@@ -353,6 +354,25 @@ pub const CallResult = struct {
     image_mime: ?[]const u8 = null,
 };
 
+/// Render a schema rejection as the same `{"ok":false,"error":…}` envelope every
+/// other refusal uses, escaping the message rather than interpolating it.
+fn writeSchemaViolation(
+    allocator: std.mem.Allocator,
+    tool_name: []const u8,
+    violation: tool_schema.Violation,
+    out: *std.ArrayList(u8),
+) !void {
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    const w = &buf.writer;
+    try w.writeAll("{\"ok\":false,\"error\":");
+    const text = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ tool_name, violation.message });
+    try json_writer.writeString(w, text);
+    try w.writeAll(",\"argument\":");
+    try json_writer.writeString(w, violation.property);
+    try w.writeAll("}");
+    try out.appendSlice(allocator, buf.written());
+}
+
 /// Dispatch a tool call. Writes the result into `out` and returns how the
 /// caller should frame it in the CLI envelope.
 pub fn call(
@@ -362,6 +382,21 @@ pub fn call(
     args_val: ?std.json.Value,
     out: *std.ArrayList(u8),
 ) CallResult {
+    // Hold the call to the schema this tool ADVERTISES, before any handler sees
+    // it. Every surface passes through here, so an unknown argument name, a
+    // value outside a declared enum or a wrongly typed one is a rejection
+    // rather than whatever the individual handler happened to do with it —
+    // which used to include rendering a PNG with a silent default view, and
+    // returning an empty pin list for a misspelled filter.
+    if (tool_schema.validate(allocator, tools_list_result, tool_name, args_val)) |violation| {
+        // Through `json_writer`, not `allocPrint`: the message quotes the
+        // caller's own argument names and values, so composing it by
+        // interpolation produced a body that was not JSON at all.
+        writeSchemaViolation(allocator, tool_name, violation, out) catch |e| {
+            log.warn("failed to write schema violation: {s}", .{@errorName(e)});
+        };
+        return .{ .ok = false };
+    }
     // The image tool returns binary content, so it's handled here (not in
     // `callInner`, which only ever produces text) and tagged with its MIME type
     // so the CLI layer frames it as an image content block.

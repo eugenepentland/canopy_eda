@@ -5947,6 +5947,8 @@ src/serve/thermal_cache.zig::put | fn put( self: *Store, scratch: std.mem.Alloca
 src/serve/thermal_page.zig::HandlerError value
 src/serve/thermal_page.zig::benchColdPage | fn benchColdPage(allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8) ?usize
 src/serve/thermal_page.zig::thermalPage | fn thermalPage(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/tool_schema.zig::Violation struct_
+src/serve/tool_schema.zig::validate | fn validate( allocator: std.mem.Allocator, schema_doc: []const u8, tool_name: []const u8, args: ?std.json.Value, ) ?Violation
 src/serve/trace_em_json.zig::write | fn write( w: *std.Io.Writer, alloc: std.mem.Allocator, placement: optimizer.Placement, routed: ?router.RouteResult, ) std.Io.Writer.Error!void
 src/serve/upload.zig::ComponentWrite enum_
 src/serve/upload.zig::HandlerError value

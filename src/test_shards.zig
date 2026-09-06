@@ -100,6 +100,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve_args.test.",
         "dump_args.test.",
         "test_manifest.test.",
+        "serve.tool_schema.test.",
         "envelope_dump.test.",
         "bench_checkpoint.test.",
         "panelize.test.",
