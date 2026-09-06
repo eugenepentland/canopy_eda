@@ -661,6 +661,15 @@ never gave the engine an input) and `manual`.
 | `reviewed-input-evidence-incomplete` | unit | board | The release names the reviewed inputs it was cut from. | attach the reviewed-input evidence the release lock asks for | blocking |
 | `cache-layout` | unit | board | The cached layout the release reads matches the design it was saved from. | re-save the layout so the cached poses match the design | blocking |
 | `build-warning-free` | unit | board | Evaluating the design emits no warning. | fix the evaluator warning at the source span it names | blocking |
+| `source-tree-clean` | unit | board | The project tree carries no uncommitted change when the release evidence is taken. | commit or revert the working tree, then take the evidence again | blocking |
+| `layout-frozen` | unit | board | The reviewed layout is frozen: its parts are placed and locked and every sub-block layout is starred. | lock the placement and star each sub-block's layout | blocking |
+| `release-gate-clear` | unit | board | The fabrication-readiness gate reports no blocking error for the reviewed layout. | close every gate error the readiness run names | blocking |
+| `design-notes-closed` | unit | board | Every design note raised against the board is closed. | close the note, or restate it as a checklist item | advisory |
+| `release-differential-reviewed` | unit | board | The fabrication package is diffed against the previous release and every change is intended. | record the differential in the audit's Disposition cell | advisory |
+| `source-revision-unavailable` | unit | board | The release can read the source revision the package is cut from. | run the release from a checkout whose revision the tool can read | blocking |
+| `source-worktree-dirty` | unit | board | The worktree the package is cut from carries no uncommitted change. | commit or revert the working tree, then cut the package again | blocking |
+| `source-snapshot-changed` | unit | board | The source did not change under the release while the package was being cut. | re-cut the package from a settled tree | blocking |
+| `source-bundle-ambiguous` | unit | board | Exactly one source bundle describes the release. | leave one source bundle beside the release and delete the others | blocking |
 | `system-identity-complete` | system | system | The system declares title, part number and revision. | (title …) (part-number …) (revision …) in src/systems/<name>/system.sexp | blocking |
 | `system-board-reviews` | system | system | Every board the system claims has a current board review. | run and record the board review for each (board …) | blocking |
 | `system-fabrication-ready` | system | system | Every board the system claims passes its own fabrication gate. | clear each board's blocking fabrication findings | blocking |
@@ -672,6 +681,7 @@ never gave the engine an input) and `manual`.
 
 | Check | Layer | Scope | Asserts | Closes with | Policy |
 | --- | --- | --- | --- | --- | --- |
+| `erc-clean` | unit | board | The electrical-rule check reports no error and no warning on the board. | close every violation the check reports, kind by kind | blocking |
 | `net-not-floating` | unit | net | Every net reaches at least two pins or is declared a block port. | wire the net, or declare it with (port …) | blocking |
 | `pin-connected` | unit | pin | Every pad of every placed part is wired or explicitly dispositioned. | wire the pad, or mark it with (nc …) | blocking |
 | `no-connect-dispositioned` | unit | pin | Every deliberately unconnected pad carries a reason. | (nc "PIN" "reason") on the instance | waivable |
@@ -783,6 +793,8 @@ never gave the engine an input) and `manual`.
 | `datasheet-review-complete` | library | part | Every active part has a complete datasheet review bound to the exact PDF digest. | (datasheet-review (datasheet …) (sha256 …) (status complete) …) | blocking |
 | `datasheet-review-categories` | library | part | The review answers every category the part's class requires. | (category KEY) or (category-na KEY "rationale") in the review record | blocking |
 | `part-requirements-authored` | library | part | Every active part carries at least one cited datasheet requirement. | (requirement "…" (ref …) (check …)) or (ignore-requirements) for an inert part | blocking |
+| `verification-evidence-incomplete` | unit | board | The release carries the verification evidence its lock names. | attach the verification evidence the release lock asks for | blocking |
+| `class-profile-items-met` | unit | part | Every active part meets every item of the component-class profile it was judged under. | author the declaration each unmet item names, or (class …) the part correctly | blocking |
 | `requirement-check` | library | part | Every requirement on a placed part passes its machine check or is signed off with a citation. | fix the design, or (verifies (req (id …) …) "rationale") in the design's checks file | blocking |
 | `verification-bound` | unit | part | Every authored sign-off names a requirement that still exists. | retarget or delete the orphaned (verifies …) record | blocking |
 | `check-pullup-range` | library | pin | A resistor in the datasheet's range bridges the named pin's net and the target net. | (requirement "…" (check (pullup-range (pin "P") (net "N") (min-ohms L) (max-ohms H)))) | blocking |
@@ -799,6 +811,9 @@ never gave the engine an input) and `manual`.
 | `bom-spec-unmatched` | unit | part | Every authored passive spec matches a row of the design's parts table. | reconcile the call-site attributes with the parts-table row | blocking |
 | `bom-spec-library-missing` | unit | part | The library the passive spec screen reads is present. | add the parts-table or component library the gate names | blocking |
 | `attribute-row-matches-parts-table` | unit | part | A placement's typed attributes agree with the parts-table row it resolves to. | edit the attributes or the parts-table row so they agree | blocking |
+| `bom-selection-drift` | unit | part | Every placement's fitted identity still matches the selection the BOM sidecar recorded. | rebuild the BOM, or restore the selection the design authored | blocking |
+| `bom-evidence-incomplete` | unit | board | The release carries the BOM evidence its lock names. | attach the BOM evidence the release lock asks for | blocking |
+| `bom-lifecycle-stock-dated` | unit | part | Every purchasable placement is a lifecycle-active part with a dated stock check. | record the lifecycle and stock date, or replace the part | waivable |
 | `centroid-parity` | unit | board | The assembly centroid lists exactly the placements the netlist does. | re-save the layout so every placement has a pose | blocking |
 | `dnp-in-centroid` | unit | board | No do-not-populate part appears in the assembly centroid. | mark the part (dnp), or remove it from the assembly output | blocking |
 
@@ -836,6 +851,8 @@ never gave the engine an input) and `manual`.
 | `drc-perimeter-keepout` | unit | board | Nothing sits inside the board's authored perimeter exclusion band. | move the feature out of (board … (perimeter-fence … (keepout …))) | blocking |
 | `drc-board-keepout` | unit | board | Nothing sits inside a named mechanical keepout region. | move the feature out of (board … (keepout "NAME" (rect …))) | blocking |
 | `net-open` | unit | net | Every net's drawn copper forms one connected island. | route the missing link between the islands | blocking |
+| `layout-evidence-incomplete` | unit | board | The release carries the layout evidence its lock names. | attach the layout evidence the release lock asks for | blocking |
+| `layout-ladder-complete` | unit | board | Every rung of the layout completion ladder is done on the reviewed layout. | finish the open items the rung lists | blocking |
 | `drc` | unit | board | The release run reports zero DRC errors. | fix the copper the DRC errors name | blocking |
 | `drc-warn` | unit | board | Every DRC warning category is waived with a current count. | fix the copper, or record the category in drc-waivers.md | waivable |
 | `drc-missing` | unit | board | A DRC run exists for the layout the release is cut from. | run the design-rule check on the saved layout | blocking |

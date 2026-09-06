@@ -286,6 +286,10 @@ fn dispatchEarlyCommand(
         try commands.cmdReviewAudit(allocator, args);
         return true;
     }
+    if (std.mem.eql(u8, command, "review-card")) {
+        try commands.cmdReviewCard(allocator, args);
+        return true;
+    }
     if (try dispatchKicadCommand(allocator, command, args)) return true;
     return dispatchQueryCommand(allocator, command, args);
 }
@@ -616,6 +620,7 @@ fn printUsage() !void {
         \\  netlisp system-check [--project-dir <d>] <system>  Print system review/fabrication readiness as JSON; fail while blocked
         \\                                                    (contract: src/systems/<system>/system.sexp, else system.json)
         \\  netlisp review-audit [--project-dir <d>] [--layout <name>] [--output <file.md>] <design>  Write the generated Board Review Audit (Markdown) from release-profile checks, profiles, ladder, fab gate, notes
+        \\  netlisp review-card [--project-dir <d>] [--layout <name>] [--output <file>] [--markdown] <design>  Print the Board Review Card: 12 review categories, every row citing a registry check id with a verdict (JSON, or --markdown for the audit form)
         \\  netlisp designs [--project-dir <d>]     List designs (name + title + declared assembly variants) as JSON
         \\  netlisp instances [--project-dir <d>] [--variant <v>] <name>  List a design's parts as JSON (with the variant catalog and each part's populated_in when the design declares variants)
         \\  netlisp net [--project-dir <d>] <name> <net>  Pins + passives on a net as JSON

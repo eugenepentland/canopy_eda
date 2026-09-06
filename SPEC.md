@@ -258,6 +258,7 @@ candidate for deployment.
 - The library-fact envelope rules remain claimed by the shard manifest
 - The saved-pose identity tests remain claimed by the shard manifest
 - The per-part review tests remain claimed by the shard manifest
+- The Board Review Card tests remain claimed by the shard manifest
 - The review-check registry tests remain claimed by the shard manifest
 - Panelization export tests remain claimed by the shard manifest
 - The system brief and goal evaluations remain claimed by the shard manifest
@@ -7639,6 +7640,7 @@ is what makes the predicate exact rather than approximately right.
 ## Web Server
 
 - GET /api/part-review/:name answers one chip per placed part and /:ref answers that part's sheet or 404
+- GET /api/review-card/:name answers the composed Board Review Card and 404s an unknown design
 - The schematic BOM card carries a Review column whose cell names the group's ref-deses so the viewer can fill one verdict chip per row
 - Saving from an explicit source project creates a separate review candidate, retains complete layout metadata, refuses name collisions, and preserves the destination star
 
@@ -9067,6 +9069,24 @@ export never invents them.
 - completeness-waiver: concurrent access (collection owns its evaluator and arena; nothing is written)
 - completeness-waiver: malformed encoding (readiness and ladder JSON that fails to parse leaves those sections unavailable)
 - completeness-waiver: integer overflow (counts are tallied from bounded slices with no input-derived arithmetic)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
+## review-card
+
+- the card carries all twelve review categories in registry order and every row cites a registered check
+- a rail whose consumers carry no (i-max …) reports a not-declared power-budget row naming the missing form
+- the composer names the reason it could not review instead of answering an empty card
+- the stripe tallies every verdict and reports the worst one
+- a governing system brief sets the ambient the card screens at and turns its brief-driven checks into rows
+- review_card is a registered read-only CLI tool answering with the endpoint's own bytes
+- the review-card CLI parses its flags and names the error a card it cannot compose failed with
+- completeness-waiver: empty inputs (a design that declares no rail, no analysis form and no layout still gets a row per category saying so, rather than an empty card)
+- completeness-waiver: large inputs (every category is built from slices the evaluation already bounded; no fixed-size output buffer)
+- completeness-waiver: unauthorized access (the card reads the caller's project directory through the same evaluator, gate and check run the CLI already exposes, and writes nothing)
+- completeness-waiver: i/o failure (an unavailable fabrication gate or ladder leaves those rows unproven instead of aborting the composition)
+- completeness-waiver: concurrent access (composition owns its arena and its evaluator; the retained body is validated against the read-set it was computed from)
+- completeness-waiver: malformed encoding (every string is written through json_writer's escaper, and the audit form clips and neutralizes each Markdown cell)
+- completeness-waiver: integer overflow (verdict counts are tallied from bounded slices with no input-derived arithmetic)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
 ## part-review

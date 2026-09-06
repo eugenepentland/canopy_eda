@@ -407,6 +407,22 @@ pub fn collectWith(
         .design_block => |b| b,
         else => return error.NotADesign,
     };
+    return collectFor(arena, eval, block, project_dir, name, options);
+}
+
+/// The same review, over a design the CALLER already evaluated into an
+/// evaluator it keeps alive. The Board Review Card composes this review beside
+/// the audit's facts over ONE evaluation — evaluating the same file twice into
+/// one evaluator would double the analysis reports it collects — so this is the
+/// seam that takes the block rather than the path.
+pub fn collectFor(
+    arena: std.mem.Allocator,
+    eval: *Evaluator,
+    block: *const env.DesignBlock,
+    project_dir: []const u8,
+    name: []const u8,
+    options: Options,
+) CollectError!Board {
     const bom_path = try paths.designSiblingPath(arena, project_dir, name, ".bom");
     // A `.bom` sidecar that is missing or unreadable is a NORMAL state — the
     // design may never have been built — and every identity the review needs is
