@@ -21,9 +21,14 @@
 //! measured copper as a new, unstarred layout for inspection and finishing.
 //! It refuses an existing name and never replaces the source layout.
 //!
+//! `--jsonl <path>` additionally appends each board's row the moment that board
+//! finishes, so a corpus killed partway (exit 137 under memory pressure is the
+//! recorded case) keeps every board it already measured — see
+//! `bench_checkpoint.zig`. The aggregate `--json` document is unchanged.
+//!
 //! Usage:
 //!   netlisp bench-route --project-dir <dir> [--route-space lattice|field]
-//!       [--json] [<design> ...]
+//!       [--json] [--jsonl <path>] [<design> ...]
 //!
 //! With no design names it benchmarks every design in the project.
 
@@ -31,6 +36,8 @@ const std = @import("std");
 const clock = @import("infra/clock.zig");
 const infra_fs = @import("infra/fs.zig");
 const bench_args = @import("bench_args.zig");
+const bench_checkpoint = @import("bench_checkpoint.zig");
+const build_id = @import("build_id.zig");
 const optimizer = @import("placement/optimizer.zig");
 const drc = @import("placement/drc.zig");
 const drc_rules = @import("serve/drc_rules.zig");
@@ -69,7 +76,8 @@ pub const BenchError = std.mem.Allocator.Error ||
     std.Io.Writer.Error ||
     infra_fs.File.WriteError ||
     infra_fs.Iterator.Error ||
-    error{ BaselineRegression, CandidateSaveFailed, InvalidCandidateName }; // the --baseline gate failed
+    bench_checkpoint.CheckpointError ||
+    error{ BaselineRegression, CandidateSaveFailed, InvalidCandidateName, InvalidCheckpointPath }; // the --baseline gate failed
 
 /// A board's connectivity, as the oracle counts it.
 pub const Nets = struct {
@@ -555,6 +563,17 @@ pub fn writeJson(w: *std.Io.Writer, results: []const BoardResult) json_writer.Wr
     try w.print("{{\"geomean_completion\":{d:.6},\"boards\":[", .{geomeanCompletion(results)});
     for (results, 0..) |r, i| {
         if (i > 0) try w.writeAll(",");
+        try writeBoardJson(w, r);
+    }
+    try w.writeAll("]}\n");
+}
+
+/// One board's row, the ONE renderer both the aggregate `--json` document and
+/// the `--jsonl` checkpoint stream use. A checkpoint row that drifted from the
+/// aggregate row would make the two records incomparable, which is the whole
+/// point of keeping a checkpoint.
+pub fn writeBoardJson(w: *std.Io.Writer, r: BoardResult) json_writer.WriteError!void {
+    {
         // The board name is a design filename, so it is escaped rather than
         // interpolated: a quote or backslash in one used to tear the record.
         try w.writeAll("{\"name\":");
@@ -630,7 +649,6 @@ pub fn writeJson(w: *std.Io.Writer, results: []const BoardResult) json_writer.Wr
         try writePerNet(w, r.copper.per_net, r.nets.open);
         try w.writeAll("}");
     }
-    try w.writeAll("]}\n");
 }
 
 fn writeOpen(w: *std.Io.Writer, open: []const []const u8) json_writer.WriteError!void {
@@ -721,6 +739,9 @@ const Args = struct {
     breakdown: bool = false,
     saved_module_routes: bool = true,
     save_candidate: ?[]const u8 = null,
+    /// `--jsonl <path>`: append each board's row as it finishes, so an
+    /// interrupted corpus keeps the boards it already measured.
+    jsonl: ?[]const u8 = null,
 };
 
 /// Parse the shared bench flags plus the path-director A/B selector and the
@@ -748,6 +769,11 @@ fn takeExtra(out: *Args, args: []const []const u8, i: *usize) bool {
         out.saved_module_routes = false;
         return true;
     }
+    if (std.mem.eql(u8, args[i.*], "--jsonl")) {
+        i.* += 1;
+        out.jsonl = if (i.* < args.len) args[i.*] else "";
+        return true;
+    }
     if (std.mem.eql(u8, args[i.*], "--breakdown")) {
         out.breakdown = true;
         return true;
@@ -762,7 +788,8 @@ fn benchAll(
     arena: std.mem.Allocator,
     names: []const []const u8,
     config: Args,
-) std.mem.Allocator.Error![]const BoardResult {
+    checkpoint: ?*bench_checkpoint.Checkpoint,
+) BenchError![]const BoardResult {
     const project_dir = config.cli.project_dir;
     const breakdown = config.breakdown;
     const route_space = config.route_space;
@@ -801,6 +828,8 @@ fn benchAll(
             issue.b = try arena.dupe(u8, issue.b);
         }
         try results.append(arena, r);
+        // On disk before the NEXT board starts: that is the whole point.
+        if (checkpoint) |cp| try cp.writeBoard(r, writeBoardJson);
     }
     return results.toOwnedSlice(arena);
 }
@@ -1020,7 +1049,26 @@ fn runBenchRoute(allocator: std.mem.Allocator, args: []const []const u8, writer:
         parsed.cli.named.items
     else
         try corpus(arena, parsed.cli.project_dir);
-    const results = try benchAll(allocator, arena, names, parsed);
+
+    // Opened BEFORE the first board so an interrupted run still says what it
+    // was measuring, and closed after `finish` so an interrupted run's file
+    // simply has no completion record.
+    var checkpoint: ?bench_checkpoint.Checkpoint = null;
+    if (parsed.jsonl) |path| {
+        if (path.len == 0 or std.mem.startsWith(u8, path, "--")) return error.InvalidCheckpointPath;
+        checkpoint = try bench_checkpoint.Checkpoint.create(allocator, path, .{
+            .tool = build_id.current(),
+            .project_dir = parsed.cli.project_dir,
+            .route_space = parsed.route_space,
+            .saved_module_routes = parsed.saved_module_routes,
+            .save_candidate = parsed.save_candidate,
+            .boards = names,
+        });
+    }
+    defer if (checkpoint) |*cp| cp.deinit();
+
+    const results = try benchAll(allocator, arena, names, parsed, if (checkpoint) |*cp| cp else null);
+    if (checkpoint) |*cp| try cp.finish(results.len, geomeanCompletion(results));
 
     if (parsed.cli.json) try writeJson(writer, results) else try writeTable(writer, results);
     if (parsed.breakdown) try writeBreakdown(writer, results);
@@ -1045,6 +1093,32 @@ fn runBenchRoute(allocator: std.mem.Allocator, args: []const []const u8, writer:
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+// spec: bench-route - --jsonl names a checkpoint path, and an empty or flag-shaped one fails the run rather than measuring without a record
+test "the jsonl checkpoint path is parsed and a malformed one fails the run" {
+    var parsed = try parseArgs(testing.allocator, &.{ "--jsonl", "/tmp/run.jsonl", "board-a" });
+    defer parsed.cli.named.deinit(testing.allocator);
+    try testing.expectEqualStrings("/tmp/run.jsonl", parsed.jsonl.?);
+    var missing = try parseArgs(testing.allocator, &.{"--jsonl"});
+    defer missing.cli.named.deinit(testing.allocator);
+    try testing.expectEqualStrings("", missing.jsonl.?);
+    var none = try parseArgs(testing.allocator, &.{"board-a"});
+    defer none.cli.named.deinit(testing.allocator);
+    try testing.expect(none.jsonl == null);
+
+    // A path that is empty, or that is the next flag because the value was
+    // omitted, must not become a filename — the run fails instead.
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    try testing.expectError(
+        error.InvalidCheckpointPath,
+        runBenchRoute(testing.allocator, &.{ "--jsonl", "--breakdown" }, &out.writer),
+    );
+    try testing.expectError(
+        error.InvalidCheckpointPath,
+        runBenchRoute(testing.allocator, &.{"--jsonl"}, &out.writer),
+    );
+}
 
 // spec: bench-route - --route-space field selects the signed-margin path director while lattice remains the default
 // spec: bench-route - --no-saved-module-routes measures generated routing without module snapshot tracks or vias; saved placement and shown pours remain inputs, and JSON reports the selected policy plus each local attempt

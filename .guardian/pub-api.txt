@@ -13,6 +13,17 @@ src/authored_heatsink.zig::resolveFan | fn resolveFan(placement: optimizer.Place
 src/authored_heatsink.zig::thermalInput | fn thermalInput( placement: optimizer.Placement, bt: thermal.BoardThermal, saved: sidecar.SavedHeatsink, ) ?scenarios.Heatsink
 src/bench_args.zig::Common struct_
 src/bench_args.zig::parse | fn parse( self: *Common, arena: std.mem.Allocator, args: []const []const u8, extra: anytype, comptime takeExtra: anytype, ) std.mem.Allocator.Error!void
+src/bench_checkpoint.zig::Checkpoint struct_
+src/bench_checkpoint.zig::CheckpointError value
+src/bench_checkpoint.zig::Reading struct_
+src/bench_checkpoint.zig::RunHeader struct_
+src/bench_checkpoint.zig::create | fn create(allocator: std.mem.Allocator, path: []const u8, header: RunHeader) CheckpointError!Checkpoint
+src/bench_checkpoint.zig::createIn | fn createIn( allocator: std.mem.Allocator, dir: infra_fs.Dir, sub_path: []const u8, header: RunHeader, ) CheckpointError!Checkpoint
+src/bench_checkpoint.zig::deinit | fn deinit(self: *Checkpoint) void
+src/bench_checkpoint.zig::finish | fn finish(self: *Checkpoint, boards: usize, geomean_completion: f64) CheckpointError!void
+src/bench_checkpoint.zig::parseCountingRows | fn parseCountingRows(allocator: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error!Reading
+src/bench_checkpoint.zig::renderHeader | fn renderHeader(w: *std.Io.Writer, header: RunHeader) json_writer.WriteError!void
+src/bench_checkpoint.zig::writeBoard | fn writeBoard(self: *Checkpoint, context: anytype, comptime render: anytype) CheckpointError!void
 src/bench_layout.zig::main | fn main(init: std.process.Init) !void
 src/bench_layout.zig::process_io value
 src/bench_page.zig::BenchError value
@@ -36,6 +47,7 @@ src/bench_route.zig::completion | fn completion(self: BoardResult) f64
 src/bench_route.zig::corpus | fn corpus(arena: std.mem.Allocator, project_dir: []const u8) std.mem.Allocator.Error![]const []const u8
 src/bench_route.zig::geomeanCompletion | fn geomeanCompletion(results: []const BoardResult) f64
 src/bench_route.zig::scorable | fn scorable(self: BoardResult) bool
+src/bench_route.zig::writeBoardJson | fn writeBoardJson(w: *std.Io.Writer, r: BoardResult) json_writer.WriteError!void
 src/bench_route.zig::writeBreakdown | fn writeBreakdown(w: *std.Io.Writer, results: []const BoardResult) std.Io.Writer.Error!void
 src/bench_route.zig::writeJson | fn writeJson(w: *std.Io.Writer, results: []const BoardResult) json_writer.WriteError!void
 src/bench_route.zig::writeTable | fn writeTable(w: *std.Io.Writer, results: []const BoardResult) std.Io.Writer.Error!void

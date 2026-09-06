@@ -802,6 +802,7 @@ Public functions: edgeInset, pointInset, clearsOutline, buildOutlineMask, netOff
 
 ## bench-route
 
+- --jsonl names a checkpoint path, and an empty or flag-shaped one fails the run rather than measuring without a record
 - --save-candidate writes the measured copper and solved poses to a new layout, preserving the source layout and its star and refusing a name collision
 - benchmark candidates include generated perimeter copper and use the physical connectivity oracle before measurement and capture
 
@@ -974,6 +975,34 @@ nothing reads exactly like a dump that found no difference.
 - completeness-waiver: malformed encoding (arguments are compared as bytes and never decoded)
 - completeness-waiver: integer overflow (a single forward pass over argv with no arithmetic on its length)
 - completeness-waiver: panic-free (the only failure is the caller's allocator, returned as an error; every other path returns a bool)
+
+## bench checkpoint
+
+Public functions: renderHeader, create, writeBoard, finish, deinit, parseCountingRows
+
+`bench-route --json` buffers the whole corpus and writes one document at the end.
+A three-board run killed with exit 137 under memory pressure lost the two boards
+that had finished along with the one that had not. `--jsonl` writes each board's
+row the moment that board finishes — the same row the aggregate document carries,
+from the same renderer — so an interrupted corpus keeps everything it measured.
+A board that FAILED is a recorded row with `ok:false`; a corpus that never
+finished simply has no completion record, so the two can never be confused.
+
+- a finished board is on disk and parseable before the next board is measured
+- an interrupted corpus has no completion record so a partial file can never read as a finished run
+- a board that failed to route is a recorded failure, distinct from a corpus that never finished
+- a line truncated by a kill is dropped and every earlier board survives
+- the run header records the tool revision, project and seed policy so an interrupted file identifies its own inputs
+- a checkpoint path that cannot be created fails the run instead of measuring without a record
+
+- completeness-waiver: empty inputs (a run naming no board writes a header and an immediate completion record, which is a truthful empty result)
+- completeness-waiver: large inputs (each line is composed into one reused buffer that is cleared after every record, so the stream holds one board's row at a time)
+- completeness-waiver: unauthorized access (the checkpoint is a local file at a path the invoking user named and already has authority over)
+- completeness-waiver: concurrent access (one benchmark process owns its stream and appends from its single board loop)
+- completeness-waiver: i/o failure (an unopenable path fails the run before a board is measured, and a failed write or sync is returned rather than swallowed — durability is the feature)
+- completeness-waiver: malformed encoding (every free string goes through json_writer, and the read rule drops a line that does not parse)
+- completeness-waiver: integer overflow (the only arithmetic is a recovered-row count bounded by the corpus size)
+- completeness-waiver: panic-free (an unopenable path and a failed write or sync are returned as errors; nothing here asserts)
 
 ## envelope dump
 
