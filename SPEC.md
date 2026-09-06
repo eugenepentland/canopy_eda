@@ -450,6 +450,7 @@ Public functions: solve
 - gap closing honors authored layer restrictions and new-via limits before accepting or absorbing copper
 - gap closing refuses an opposite-face bridge when the net has no new-via allowance
 - reconciliation counts all retained and generated vias against the authored total limit
+- A surface-only gap preserves authored layers and cannot restrict a later ordinary gap in the same batch
 - a via-limited gap retries a longer legal path with a nonzero via allowance instead of rejecting the cheaper excessive-via path
 - a gap batch spends via allowance only on accepted hops and does not reset it for later requests
 
@@ -8142,6 +8143,8 @@ is what makes the predicate exact rather than approximately right.
 - The close_open_nets tool plans hops only for the open nets the caller named
 - A close_open_nets stitch is never planned for the island its plane or pour already carries
 - A close_open_nets stitch island whose first pad is memoised dead is retried from its next pad
+- A refused surface-only join does not memoize failure of an ordinary multilayer bridge
+- A via-limited poured rail joins surface islands before spending an insufficient stitch allowance
 - A close_open_nets round bridges a plane-carried net straight away when that round could plan it no stitch at all, so a call scoped to such a net is never a no-op
 - A no-path bridge takes the fine corridor rescue only in the last few open nets, while a stitch always remains eligible
 - the routability_preflight tool emits each finding's measurements and a per-rule tally

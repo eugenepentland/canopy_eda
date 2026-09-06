@@ -1151,3 +1151,47 @@ Evidence, the working-source patch and Debug executable SHA-256 are in
 `/tmp/autorouter-via-search-20260906`. This is an incremental repair experiment,
 not a fresh full-board run. Release verification of the combined branch follows
 this change; the earlier release failure above applies to its earlier commit.
+
+
+## Sharing power vias through surface island joins — 2026-09-06
+
+Finishing could exhaust a power rail's via allowance by independently stitching
+each disconnected pad island before trying to join them on a surface. Its first
+round now compares planned stitches against the remaining authored total. When
+that allowance is insufficient, it first tries the oracle's island joins on a
+shared pad face, without new vias or copper rip-up. Later rounds retain ordinary
+stitching and multilayer bridges. Ordinary and wholesale finishing share the
+planner. An unconstrained rail or one with enough allowance keeps the prior order.
+
+The surface-only constraint follows fine and boundary retries, respects the raw
+authored layer mask rather than borrowing terminal-escape exceptions, and resets
+before a later ordinary hop. Its failed-hop memo entry is separate from the
+ordinary bridge's entry. The regression that previously planned two stitches
+with only one via available now joins the two pads without a via and verifies
+connectivity and geometry. The 96 focused finishing/policy tests also cover
+layer restrictions, state restoration and eligibility of later fallbacks.
+
+On the frozen RF candidate, native clear/finish of `V_1V8A` now joins five pad
+island pairs without vias, then completes two ordinary bridges. Independent
+inspection with verified ReleaseSafe `2428ef3ad` confirms **130/130 connected,
+987 physical tracks, 433 vias, zero geometry errors and 439 warnings**, with no
+missing bypass bonds. `V_1V8A` falls from eight vias to its authored four and
+increases from 41.8 to 43.1 mm. The candidate has 954 persisted tracks. Compared
+with the preceding published candidate, dangling-copper warnings fall by 20 and
+single-layer-via warnings by two. Feature routing progress reaches **129/130**;
+`V_24V_CLEAN` is the remaining via violation (four against two).
+
+The Debug finishing call reached its time limit after connecting all pads, so
+optional cleanup was skipped. Its final saved-copper inspection, rather than
+the timeout flag or intermediate mutation counts, establishes the result. The
+same-budget previous ReleaseSafe finishing attempt remained 129/130 connected;
+these mixed-build timings are not a performance comparison. No hand copper was
+added and no authored limit changed. The 24 V surface joins remained blocked;
+its separate trial is not the review candidate.
+
+Frozen candidate: `power-islands-v1v8-1` in
+`/tmp/autorouter-fanout-20260906/project`. Evidence, the exact working-source
+patch and Debug executable hash are in `/tmp/autorouter-power-vias-20260906`.
+Release verification and promotion follow the implementation; the broader goal
+still includes Base's open nets, the RF 24 V constraint, power-model gaps and
+warning review on all boards.

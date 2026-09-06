@@ -430,7 +430,7 @@ fn closeOneGap(state: *GapState, gap: Gap) std.mem.Allocator.Error!?GapPath {
         if (try shapeHop(state, live, from, to, net)) |path| return path;
     }
 
-    if (!state.opts.ripup) return null;
+    if (!state.opts.ripup or gap.surface_only) return null;
     // The DIRECT attempt's diagnosis is the honest one — a rip-up retry that
     // also fails says nothing new — so restore it over whatever the retries set.
     const direct = state.reason;
@@ -1854,7 +1854,9 @@ fn applyGapPolicy(state: *GapState, gap: Gap) std.mem.Allocator.Error!bool {
     const available = gapLayers(ctx, state.routing_net);
     if (state.opts.constraints.net.len == 0) {
         ctx.allowed_layers = available;
-        return true;
+        ctx.max_vias = null;
+        ctx.allow_vias = true;
+        return applySurfacePolicy(state, gap);
     }
     ctx.net_policy = state.opts.constraints.net;
     const pts = try ctx.arena.alloc(NetPt, 2);
@@ -1874,5 +1876,24 @@ fn applyGapPolicy(state: *GapState, gap: Gap) std.mem.Allocator.Error!bool {
         ctx.max_vias = limit - @as(u16, @intCast(@min(spent, limit)));
     }
     ctx.allow_vias = ctx.max_vias != 0;
+    return applySurfacePolicy(state, gap);
+}
+
+fn applySurfacePolicy(state: *GapState, gap: Gap) bool {
+    if (!gap.surface_only) return true;
+    const mask = @as(u64, 1) << @intCast(gap.from.layer);
+    // Ordinary routing adds terminal escape faces to the effective mask. That
+    // exception does not authorize an entire surface join on a forbidden face.
+    const policies = state.opts.constraints.net;
+    const authored = if (gap.net_i < policies.len) policies[gap.net_i].allowed_layers else 0;
+    const forbidden = authored != 0 and authored & mask == 0;
+    const same_face = if (gap.to) |to| to.layer == gap.from.layer else false;
+    if (forbidden or state.ctx.allowed_layers & mask == 0 or !same_face) {
+        state.reason = .policy;
+        return false;
+    }
+    state.ctx.allowed_layers = mask;
+    state.ctx.max_vias = 0;
+    state.ctx.allow_vias = false;
     return true;
 }
