@@ -2729,12 +2729,12 @@ fn ringGlueMacro(
         local[k + 1].locked = false;
         try idx_of.put(arena, parts[pi].ref_des, k + 1);
     }
-    const topology = try buildHubTopology(arena, local, 0, nets, &idx_of);
+    const topology = try buildHubTopology(arena, local, 0, nets, &idx_of, prep.block.net_class_pins);
     const hkb = keepBoxOf(local[0]);
     const roles = pin_roles.load(arena, prep.project_dir, if (hpi < prep.instances.len) prep.instances[hpi].component else "");
     var sides = [_]std.ArrayList(SidePart){ .empty, .empty, .empty, .empty };
     var leftover: std.ArrayList(usize) = .empty;
-    const ci = try buildClusters(arena, local, 0, nets, &idx_of);
+    const ci = try buildClusters(arena, local, 0, nets, &idx_of, prep.block.net_class_pins);
     const tier_of = try arena.alloc(usize, n);
     @memset(tier_of, 0);
     const sig_side = try arena.alloc(u8, n);
@@ -2748,6 +2748,7 @@ fn ringGlueMacro(
     for (members, 0..) |pi, k| {
         const want: CapTarget = if (pi < prep.instances.len) capTargetOf(prep.instances[pi]) else .{};
         served_pad[k + 1] = servedPadLocal(local, 0, k + 1, want, nets, &idx_of);
+        if (served_pad[k + 1]) |xy| cohere_side[k + 1] = pinTargetFromPad(hkb, xy[0], xy[1]).edge;
     }
     const saved_ic_gap = g_rough_ic_gap;
     const saved_part_gap = g_rough_part_gap;
@@ -2770,7 +2771,7 @@ fn ringGlueMacro(
             x += pkb.hw + pad_anchor_part_gap_mm;
         }
     }
-    try refineSidesByPull(arena, local, 0, topology, tier_of, cohere_side, &sides, hkb);
+    try refineSidesByPull(arena, local, 0, topology, tier_of, .{ .sides = cohere_side, .pads = served_pad }, &sides, hkb);
     orientPadsToIC(local, 0, null, nets, &idx_of);
     legalizeFinal(local);
     const g_members = try arena.alloc(usize, n);
@@ -3061,6 +3062,16 @@ fn hubPadsOnNet(arena: std.mem.Allocator, hub: *const Part, hi: usize, net: Flat
     return out.toOwnedSlice(arena);
 }
 
+/// Authored placement classes take precedence over spelling in every rough seed.
+fn placementNetClass(name: []const u8, pins: []const env.NetClassPin) module_policy.NetClass {
+    return module_policy.pinnedNetClass(pins, name) orelse module_policy.classifyNetName(name);
+}
+
+fn supplyNet(name: []const u8, pins: []const env.NetClassPin) bool {
+    const cls = placementNetClass(name, pins);
+    return cls == .power or cls == .input_rail;
+}
+
 /// Net topology relative to one anchor hub, prepared once for the ring passes.
 /// `part_nets` preserves the original net order while removing the repeated
 /// all-net scan and ref-des hashing from side assignment and refinement.
@@ -3071,6 +3082,7 @@ const HubTopology = struct {
         pin: []const u8,
         pin_count: usize,
         ground: bool,
+        supply: bool = false,
     };
 
     nets: []const Net,
@@ -3083,6 +3095,7 @@ fn buildHubTopology(
     hi: usize,
     nets: []const FlatNet,
     idx_of: *std.StringHashMapUnmanaged(usize),
+    class_pins: []const env.NetClassPin,
 ) std.mem.Allocator.Error!HubTopology {
     const info = try arena.alloc(HubTopology.Net, nets.len);
     const lists = try arena.alloc(std.ArrayList(usize), parts.len);
@@ -3112,7 +3125,8 @@ fn buildHubTopology(
             .pin_parts = try pin_parts.toOwnedSlice(arena),
             .pin = hub_pin,
             .pin_count = hub_count,
-            .ground = pin_roles.isGroundFn(shortName(net.name)),
+            .ground = placementNetClass(net.name, class_pins) == .ground,
+            .supply = supplyNet(net.name, class_pins),
         };
     }
     const part_nets = try arena.alloc([]const usize, parts.len);
@@ -3290,13 +3304,14 @@ fn buildClusters(
     hi: usize,
     nets: []const FlatNet,
     idx_of: *std.StringHashMapUnmanaged(usize),
+    class_pins: []const env.NetClassPin,
 ) std.mem.Allocator.Error!ClusterInfo {
     const n = parts.len;
     const p = try arena.alloc(usize, n);
     for (p, 0..) |*e, i| e.* = i;
     // Union non-hub parts that share a local net.
     for (nets) |net| {
-        if (pin_roles.isGroundFn(shortName(net.name))) continue;
+        if (placementNetClass(net.name, class_pins) == .ground or supplyNet(net.name, class_pins)) continue;
         var hubpads: usize = 0;
         var members: usize = 0;
         var first: ?usize = null;
@@ -3329,7 +3344,7 @@ fn buildClusters(
     var attach_n = try arena.alloc(usize, n);
     @memset(attach_n, 0);
     for (nets) |net| {
-        if (pin_roles.isGroundFn(shortName(net.name))) continue;
+        if (placementNetClass(net.name, class_pins) == .ground or supplyNet(net.name, class_pins)) continue;
         const pads = try hubPadsOnNet(arena, &parts[hi], hi, net, idx_of);
         if (pads.len == 0 or pads.len > 2) continue; // need a single-ish IC signal pad
         for (net.pins) |pr| {
@@ -3355,8 +3370,7 @@ fn buildClusters(
 /// attach centroid so connected parts stay together; anything with no IC connection
 /// drops to `leftover`. Pad offset → side + along-edge coordinate.
 /// True when `net` can serve a part's cohesion anchor: a CONCENTRATED (≤2-pad)
-/// net that is ground by neither the role data nor the net name. A power rail
-/// lands on many pads, so the pad count alone excludes it, and both ground tests
+/// net that is neither a declared/inferred supply nor ground. Both ground tests
 /// are needed because each catches what the other misses — the role data misses
 /// a hub GND pad, and the role classification catches a ground pin whose net
 /// name does not read like one. Named because it is the whole difference between
@@ -3364,7 +3378,7 @@ fn buildClusters(
 /// the ground pad it happens to sit on.
 fn isCohesionAnchorNet(net: HubTopology.Net, roles: pin_roles.PartRoles) bool {
     if (net.pin_count > 2) return false;
-    if (net.ground) return false;
+    if (net.ground or net.supply) return false;
     return roles.classOf(net.pin) != .ground;
 }
 
@@ -3417,8 +3431,8 @@ fn assignSides(
                     anchor_cnt = cnt;
                 }
             }
-            if (roles.classOf(hub_net.pin) == .ground) continue;
-            if (cnt <= 2 and (sig == null or cnt < sig_cnt)) {
+            if (hub_net.ground or roles.classOf(hub_net.pin) == .ground) continue;
+            if (!hub_net.supply and cnt <= 2 and (sig == null or cnt < sig_cnt)) {
                 if (hub_net.pads.len > 0) {
                     sig = hub_net.pads[0];
                     sig_cnt = cnt;
@@ -3443,7 +3457,7 @@ fn assignSides(
         // layout); else rail round-robin for an unbound cap; else the part's own
         // signal pad; else its cluster's attach; else leftover.
         var pad: [2]f64 = undefined;
-        if (is_cap and served_pad[pi] != null) {
+        if (served_pad[pi] != null) {
             pad = served_pad[pi].?;
         } else if (is_cap and rail != null and rail_cnt >= cluster_max_rail_pads) {
             pad = (try rrPad(arena, topology, &net_next, rail.?)) orelse {
@@ -3463,8 +3477,11 @@ fn assignSides(
             try leftover.append(arena, pi);
             continue;
         }
-        const vert = @abs(pad[0]) >= @abs(pad[1]);
-        const s: usize = if (vert) (if (pad[0] < 0) 0 else 1) else (if (pad[1] < 0) 2 else 3);
+        const s: usize = if (served_pad[pi] != null)
+            pinTargetFromPad(keepBoxOf(parts[hi]), pad[0], pad[1]).edge
+        else
+            posSide(0, 0, pad[0], pad[1]);
+        const vert = s < 2;
         parts[pi].rot = if (vert) 0 else 90;
         const pkb = keepBoxOf(parts[pi]);
         try sides[s].append(arena, .{
@@ -3530,6 +3547,7 @@ fn cohereGroups(
         // side's orientation (vertical sides run at rot 0, horizontal at rot 90).
         const vert = dom < 2;
         for (members.items) |pi| {
+            if (cohere_side[pi] < 4) continue; // an exact binding or earlier group owns the side
             // Only re-side members already docked to a side; a ground-only member
             // sitting in the leftover row stays there (cohesion is a ring concern).
             var found = false;
@@ -3615,7 +3633,7 @@ fn sidePullTarget(
         }
         if (hubpads > 0) {
             const pads = hub_net.pads;
-            if (hubpads <= 2) {
+            if (!hub_net.supply and hubpads <= 2) {
                 for (pads) |pd| {
                     sx += pd[0] * reside_w_sig;
                     sy += pd[1] * reside_w_sig;
@@ -3639,7 +3657,7 @@ fn sidePullTarget(
         // Neighbour pull — only on a local net (not a wide rail, not a bus),
         // matching the clustering rules so VDD/GND don't drag every part toward
         // every other.
-        if (hubpads >= cluster_max_rail_pads or members > cluster_max_net_parts) continue;
+        if (hub_net.supply or hubpads >= cluster_max_rail_pads or members > cluster_max_net_parts) continue;
         for (hub_net.pin_parts) |idx| {
             if (idx == hi or idx == pi) continue;
             sx += parts[idx].x * reside_w_nbr;
@@ -3651,6 +3669,19 @@ fn sidePullTarget(
     if (!has_dir or sw <= solver_eps) return .{ .x = parts[pi].x, .y = parts[pi].y, .dir = false };
     return .{ .x = sx / sw, .y = sy / sw, .dir = true };
 }
+
+/// Exact pad targets retain their along-edge coordinate during ring refinement;
+/// group-only constraints share a side but let the lane packer choose positions.
+const RingConstraints = struct {
+    sides: []const u8,
+    pads: []const ?[2]f64 = &.{},
+
+    fn alongFor(self: RingConstraints, pi: usize, side: usize) f64 {
+        if (pi >= self.pads.len) return along_pack_seq;
+        const pad = self.pads[pi] orelse return along_pack_seq;
+        return if (side < 2) pad[1] else pad[0];
+    }
+};
 
 /// Connectivity-aware side refinement. `assignSides` buckets each part by ONE
 /// chosen IC pad, blind to where the part's *other* ends sit — so a series R
@@ -3668,7 +3699,7 @@ fn refineSidesByPull(
     hi: usize,
     topology: HubTopology,
     tier_of: []const usize,
-    cohere_side: []const u8,
+    constraints: RingConstraints,
     sides: *[4]std.ArrayList(SidePart),
     hkb: KeepBox,
 ) std.mem.Allocator.Error!void {
@@ -3698,12 +3729,12 @@ fn refineSidesByPull(
             var vert = @abs(t.x) >= @abs(t.y);
             var s: usize = if (vert) (if (t.x < 0) 0 else 1) else (if (t.y < 0) 2 else 3);
             var along: f64 = if (vert) t.y else t.x;
-            // A group-cohered part is pinned to its group's shared side, so the
-            // per-part pull can't re-scatter a deliberately-grouped subsystem.
-            if (cohere_side[pi] < 4) {
-                s = cohere_side[pi];
+            // Exact bindings and group cohesion own the side ahead of inferred
+            // pulls; only exact bindings also retain a pad-relative position.
+            if (constraints.sides[pi] < 4) {
+                s = constraints.sides[pi];
                 vert = s < 2;
-                along = along_pack_seq;
+                along = constraints.alongFor(pi, s);
             }
             if (cur_side[pi] != s) {
                 moved = true;
@@ -4042,6 +4073,32 @@ fn resolveRoughAnchor(parts: []const Part, prep: *const Prepared, nets: []const 
     return pickAnchorHub(parts, nets);
 }
 
+/// Exact adjacency outranks bypass inference, which in turn outranks net locality.
+fn roughBoundPads(
+    arena: std.mem.Allocator,
+    parts: []const Part,
+    hi: usize,
+    instances: []const flat_netlist.FlatInstance,
+    ctx: PinCtx,
+    enabled: bool,
+) std.mem.Allocator.Error![]?[2]f64 {
+    const pads = try arena.alloc(?[2]f64, parts.len);
+    @memset(pads, null);
+    if (!enabled) return pads;
+    for (parts, 0..) |_, pi| {
+        if (pi == hi) continue;
+        const want: CapTarget = if (pi < instances.len) capTargetOf(instances[pi]) else .{};
+        pads[pi] = servedPadLocal(parts, hi, pi, want, ctx.nets, ctx.idx_of);
+    }
+    const near = try near_bind.resolve(arena, instances, ctx.nets);
+    for (near.pairs) |np| {
+        if (np.target != hi) continue;
+        const pad = padLocal(&parts[hi], np.target_pin);
+        pads[np.part] = .{ pad.x, pad.y };
+    }
+    return pads;
+}
+
 fn packPadAnchored(
     arena: std.mem.Allocator,
     parts: []Part,
@@ -4104,24 +4161,14 @@ fn packPadAnchored(
     // a series R between two local nets) dock at the cluster's attach centroid so
     // connected parts stay together — keeping their airwires short instead of
     // spanning the board, which was the dominant ratsnest-crossing source.
-    const topology = try buildHubTopology(arena, parts, hi, nets, &prep.idx_of);
-    const ci = try buildClusters(arena, parts, hi, nets, &prep.idx_of);
+    const topology = try buildHubTopology(arena, parts, hi, nets, &prep.idx_of, prep.block.net_class_pins);
+    const ci = try buildClusters(arena, parts, hi, nets, &prep.idx_of, prep.block.net_class_pins);
     const sig_side = try arena.alloc(u8, parts.len);
     @memset(sig_side, 255);
-    // Per-cap served decoupling pad (from `(decouples "IC" PIN)` or a per-pin
-    // generator key), net-scoped to the anchor hub. Lets `assignSides` dock each
-    // bound bypass cap on the edge of the pad it serves — the hand-layout spread —
-    // instead of round-robining it. Rough path only (`cohere`): the force seed
-    // keeps its round-robin spread so its tuned solve stays bit-identical to before.
-    const served_pad = try arena.alloc(?[2]f64, parts.len);
-    @memset(served_pad, null);
-    if (cohere) {
-        for (parts, 0..) |_, pi| {
-            if (pi == hi) continue;
-            const want: CapTarget = if (pi < prep.instances.len) capTargetOf(prep.instances[pi]) else .{};
-            served_pad[pi] = servedPadLocal(parts, hi, pi, want, nets, &prep.idx_of);
-        }
-    }
+    // Exact `(near …)` and per-pin bypass targets take precedence over net
+    // locality, cohesion, and later side refinement. The force seed retains its
+    // unbound ring policy; the explicit rough output uses the authored pads.
+    const served_pad = try roughBoundPads(arena, parts, hi, prep.instances, .{ .nets = nets, .idx_of = &prep.idx_of }, cohere);
     try assignSides(arena, parts, hi, topology, roles, ci, tier_of, sig_side, served_pad, &sides, &leftover);
 
     // Cohere each authored `(group …)` onto one IC edge (the side its
@@ -4130,6 +4177,9 @@ fn packPadAnchored(
     // the explicit rough path — a force seed stays uncohered (see `cohere`).
     const cohere_side = try arena.alloc(u8, parts.len);
     @memset(cohere_side, 255);
+    for (served_pad, 0..) |pad, pi| {
+        if (pad) |xy| cohere_side[pi] = pinTargetFromPad(hkb, xy[0], xy[1]).edge;
+    }
     if (cohere) try cohereGroups(arena, parts, hi, prep.block.groups, prep.instances, tier_of, sig_side, cohere_side, &sides);
 
     // Lay each side's parts into tier-ordered lanes around the IC.
@@ -4151,7 +4201,7 @@ fn packPadAnchored(
     // Connectivity-aware re-side: now that everyone has a position, move parts to
     // the IC side their real neighbours pull toward (the initial dock chose by one
     // IC pad, blind to the part's far ends — the main wrong-side source).
-    try refineSidesByPull(arena, parts, hi, topology, tier_of, cohere_side, &sides, hkb);
+    try refineSidesByPull(arena, parts, hi, topology, tier_of, .{ .sides = cohere_side, .pads = served_pad }, &sides, hkb);
 
     // Freeze each directionally-wired part's correct side so the crossing polish
     // can't undo it; a part with no directional pull (a pure decoupling cap) is
@@ -4233,6 +4283,7 @@ const PinCtx = struct {
     idx_of: *std.StringHashMapUnmanaged(usize),
     compass: ?[]const ?u2 = null,
     group_of: []const i32 = &.{},
+    net_class_pins: []const env.NetClassPin = &.{},
 
     /// Ungrouped (−1) past the map's end, so a caller that built no grouping
     /// behaves exactly as one whose parts are all ungrouped.
@@ -4314,14 +4365,13 @@ fn sideWordToEdge(word: []const u8) ?u2 {
 /// independent signals of that, because each misses cases the other catches:
 ///   * the name is a supply class (`(pin 1 "VDD")` — a pull-up belongs at the
 ///     signal pin it pulls, never at the supply pin, however few supply pads
-///     the package has), and
+///     the package has), with authored placement classes overriding names, and
 ///   * the pads STRADDLE more than one package edge, whatever the name says —
 ///     a rail spelled `V_RF_3P3` classifies as RF, and a rule reading only the
 ///     name would treat its six supply pads as one signal pin.
 /// A two-pad signal net on one edge is neither, and keeps its real midpoint.
-fn diffuseNet(hkb: KeepBox, name: []const u8, pads: []const [2]f64) bool {
-    const cls = module_policy.classifyNetName(name);
-    if (cls == .power or cls == .input_rail) return true;
+fn diffuseNet(hkb: KeepBox, name: []const u8, pads: []const [2]f64, pins: []const env.NetClassPin) bool {
+    if (supplyNet(name, pins)) return true;
     if (pads.len < 2) return false;
     const e0 = pinTargetFromPad(hkb, pads[0][0], pads[0][1]).edge;
     for (pads[1..]) |q| {
@@ -4394,7 +4444,7 @@ fn pinTargets(
 
 /// One part's direct owner-pad binding: the owner-pad centroid of its most
 /// signal-like shared net (fewest owner pads, ground skipped) as an edge target,
-/// plus whether that net is a DIFFUSE rail — a supply-class net on ≥2 owner pads,
+/// plus whether that net is DIFFUSE — a supply or a net spanning package edges,
 /// which pins the part nowhere in particular. Null = no owner pad on any of its
 /// nets. `compass` settles the one genuinely ambiguous case: a rail landing on
 /// several owner pads spread over multiple edges — the part follows the rail's
@@ -4414,14 +4464,19 @@ fn netBinding(
     var best_cnt: usize = std.math.maxInt(usize);
     var best_diffuse = false;
     for (ctx.nets, 0..) |net, ni| {
-        if (pin_roles.isGroundFn(shortName(net.name))) continue;
+        if (placementNetClass(net.name, ctx.net_class_pins) == .ground) continue;
         if (!netHasPart(net, scope.parts, pi)) continue;
         const pads = try hubPadsOnNet(arena, &scope.parts[scope.owner], scope.owner, net, ctx.idx_of);
-        if (pads.len == 0 or pads.len >= best_cnt) continue;
+        if (pads.len == 0) continue;
+        const is_diffuse = diffuseNet(hkb, net.name, pads, ctx.net_class_pins);
+        if (best != null) {
+            if (is_diffuse and !best_diffuse) continue;
+            if (is_diffuse == best_diffuse and pads.len >= best_cnt) continue;
+        }
         best = pads;
         best_cnt = pads.len;
         best_edge = if (ctx.compass) |c| c[ni] else null;
-        best_diffuse = diffuseNet(hkb, net.name, pads);
+        best_diffuse = is_diffuse;
     }
     const pads = best orelse return null;
     const use = if (best_edge) |e| try flowEdgePads(arena, hkb, pads, e) else pads;
@@ -4516,21 +4571,21 @@ fn legInfo(
             if (scope.owner_of[qi] != scope.owner) continue;
             if (netHasPart(net, scope.parts, qi)) cnt += 1;
         }
-        return .{ .siblings = cnt, .rail = diffuseNet(keepBoxOf(scope.parts[scope.owner]), net.name, pads) };
+        return .{ .siblings = cnt, .rail = diffuseNet(keepBoxOf(scope.parts[scope.owner]), net.name, pads, ctx.net_class_pins) };
     }
     return .{ .siblings = 0, .rail = false };
 }
 
 /// True when `net` binds nothing on the owner's package — a PRIVATE chain node
 /// (the bias node between a choke and its bypass cap, an RC filter's inner
-/// node). Ground is never a chain: every part shares it.
+/// node). Ground and supplies are not private chains, regardless of fanout.
 fn privateNet(
     arena: std.mem.Allocator,
     scope: OwnerScope,
     ctx: PinCtx,
     net: FlatNet,
 ) std.mem.Allocator.Error!bool {
-    if (pin_roles.isGroundFn(shortName(net.name))) return false;
+    if (placementNetClass(net.name, ctx.net_class_pins) == .ground or supplyNet(net.name, ctx.net_class_pins)) return false;
     const pads = try hubPadsOnNet(arena, &scope.parts[scope.owner], scope.owner, net, ctx.idx_of);
     return pads.len == 0;
 }
@@ -4692,7 +4747,7 @@ fn freeTwoPad(p: Part) bool {
 }
 
 /// Attach parts with no direct anchor binding to the placed partner they share
-/// their most local net with (fewest total pins, ground skipped), directly
+/// their most local signal net with (supply only as a fallback), directly
 /// OUTWARD of that partner on its edge — an RC loop filter or output match
 /// extends away from the IC exactly the way a hand layout chains it, so the
 /// whole chain sits on the edge of the pad that anchors it. Iterates so a chain
@@ -4732,12 +4787,12 @@ fn pinChainAttach(
 }
 
 /// A candidate chain parent's rank — lower wins, compared field by field: the
-/// shared net's pin count (locality; the most local net decides, as it always
-/// has), then a partner in the same authored group, then a ring-bound ENTRY over
+/// signal connection before a supply fallback, then the shared net's pin count
+/// (locality), then a partner in the same authored group, then a ring-bound ENTRY over
 /// another chain child, then the partner carrying the fewest children so far (so
 /// a bias tee spreads over both of the pull-ups it feeds instead of stacking one
 /// three deep), then flatten order.
-const ParentRank = struct { pins: usize, foreign: u8, not_entry: u8, kids: usize, idx: usize };
+const ParentRank = struct { rail: u8, pins: usize, foreign: u8, not_entry: u8, kids: usize, idx: usize };
 
 /// Who a `pinChainAttach` run may chain: the module's parts, the owner every
 /// chain hangs off, and (for a satellite's local solve) the membership both
@@ -4750,6 +4805,7 @@ const ChainScope = struct { parts: []const Part, hi: usize, owner_of: ?[]const u
 const ChainState = struct { placed: []bool, entry: []const bool, kids: []usize };
 
 fn rankLess(a: ParentRank, b: ParentRank) bool {
+    if (a.rail != b.rail) return a.rail < b.rail;
     if (a.pins != b.pins) return a.pins < b.pins;
     if (a.foreign != b.foreign) return a.foreign < b.foreign;
     if (a.not_entry != b.not_entry) return a.not_entry < b.not_entry;
@@ -4779,7 +4835,7 @@ fn bestParent(scope: ChainScope, pi: usize, ctx: PinCtx, st: ChainState, restric
     var best: ?ParentRank = null;
     var best_i: usize = 0;
     for (ctx.nets) |net| {
-        if (pin_roles.isGroundFn(shortName(net.name))) continue;
+        if (placementNetClass(net.name, ctx.net_class_pins) == .ground) continue;
         if (net.pins.len > cluster_max_net_parts) continue;
         if (!netHasPart(net, scope.parts, pi)) continue;
         for (net.pins) |pr| {
@@ -4793,6 +4849,7 @@ fn bestParent(scope: ChainScope, pi: usize, ctx: PinCtx, st: ChainState, restric
                 if (posSide(0, 0, scope.parts[qi].x, scope.parts[qi].y) != e) continue;
             }
             const r = ParentRank{
+                .rail = @intFromBool(supplyNet(net.name, ctx.net_class_pins)),
                 .pins = net.pins.len,
                 .foreign = if (g >= 0 and ctx.groupOf(qi) == g) 0 else 1,
                 .not_entry = if (st.entry[qi]) 0 else 1,
@@ -4853,8 +4910,7 @@ fn pinOwners(
     arena: std.mem.Allocator,
     parts: []const Part,
     hi: usize,
-    nets: []const FlatNet,
-    idx_of: *std.StringHashMapUnmanaged(usize),
+    ctx: PinCtx,
     built: Built,
 ) std.mem.Allocator.Error![]usize {
     const owner_of = try arena.alloc(usize, parts.len);
@@ -4886,14 +4942,14 @@ fn pinOwners(
         if (p.kind == .hub or bound[pi]) continue;
         var best: usize = hi;
         var best_cnt: usize = std.math.maxInt(usize);
-        for (nets) |net| {
+        for (ctx.nets) |net| {
             if (pin_roles.isGroundFn(shortName(net.name))) continue;
-            const cls = module_policy.classifyNetName(net.name);
-            if (cls == .ground or cls == .power) continue;
+            const cls = placementNetClass(net.name, ctx.net_class_pins);
+            if (cls == .ground or cls == .power or cls == .input_rail) continue;
             if (!netHasPart(net, parts, pi)) continue;
             for (parts, 0..) |h, hidx| {
                 if (h.kind != .hub) continue;
-                const pads = try hubPadsOnNet(arena, &h, hidx, net, idx_of);
+                const pads = try hubPadsOnNet(arena, &h, hidx, net, ctx.idx_of);
                 const tie_satellite = pads.len == best_cnt and best == hi and hidx != hi;
                 if (pads.len == 0 or (pads.len >= best_cnt and !tie_satellite)) continue;
                 best = hidx;
@@ -5499,8 +5555,9 @@ fn runPinAdjacent(
         .idx_of = &prep.idx_of,
         .compass = compass,
         .group_of = try roughGroupOf(arena, prep.instances, prep.block),
+        .net_class_pins = prep.block.net_class_pins,
     };
-    const owner_of = try pinOwners(arena, parts, hi, nets, &prep.idx_of, built);
+    const owner_of = try pinOwners(arena, parts, hi, ctx, built);
     try overlayAuthoredGroups(arena, parts, owner_of, hi, prep.block, prep.instances, ctx);
     const groups = try buildPinGroups(arena, parts, owner_of, hi, ctx, built);
 
@@ -5604,7 +5661,7 @@ fn netOfPartPad(ctx: PinCtx, pi: usize, pin: []const u8) ?usize {
 /// than one candidate — such a leg names no direction to face.
 fn precisePartnerPt(parts: []const Part, hi: usize, pi: usize, ni: usize, ctx: PinCtx) ?Pt {
     const net = ctx.nets[ni];
-    if (pin_roles.isGroundFn(shortName(net.name))) return null;
+    if (placementNetClass(net.name, ctx.net_class_pins) == .ground or supplyNet(net.name, ctx.net_class_pins)) return null;
     var hub_pt: ?Pt = null;
     var hub_n: usize = 0;
     var part_pt: ?Pt = null;
@@ -11574,8 +11631,8 @@ test "refineSidesByPull re-sides a part toward its signal pad" {
     parts[1].y = 0;
     const hkb = KeepBox{ .cxo = 0, .cyo = 0, .hw = 2, .hh = 2 };
 
-    const topology = try buildHubTopology(arena, &parts, 0, &nets, &idx_of);
-    try refineSidesByPull(arena, &parts, 0, topology, &tier_of, &cohere_side, &sides, hkb);
+    const topology = try buildHubTopology(arena, &parts, 0, &nets, &idx_of, &.{});
+    try refineSidesByPull(arena, &parts, 0, topology, &tier_of, .{ .sides = &cohere_side }, &sides, hkb);
 
     // Moved from the LEFT bucket (s=0) to the RIGHT (s=1), now at positive x.
     try testing.expectEqual(@as(usize, 0), sides[0].items.len);
@@ -11589,46 +11646,50 @@ test "cohereGroups coheres an anchored group and leaves a pure-bypass group dist
     defer astate.deinit();
     const arena = astate.allocator();
 
-    // PWR = L1 (anchored: sig_side top) + C1,C2 (bypass, no anchor) → cohere all
-    // to top. BYP = C3,C4 (bypass only, no anchor) → must stay where they were.
-    var parts = [_]Part{
-        .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false },
-        .{ .ref_des = "L1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
-        .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
-        .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
-        .{ .ref_des = "C3", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
-        .{ .ref_des = "C4", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
-    };
-    const pwr_m = [_][]const u8{ "L1", "C1", "C2" };
-    const byp_m = [_][]const u8{ "C3", "C4" };
-    const groups = [_]env.Group{ .{ .name = "PWR", .members = &pwr_m }, .{ .name = "BYP", .members = &byp_m } };
-    // Only L1 has a directional anchor (top = side 2); all caps are anchorless.
-    const sig_side = [_]u8{ 255, 2, 255, 255, 255, 255 };
-    const tier_of = [_]usize{ 0, 0, 0, 0, 0, 0 };
-    const cohere_side = try arena.alloc(u8, parts.len);
-    @memset(cohere_side, 255);
+    for ([_]bool{ false, true }) |bound| {
+        // PWR = L1 (anchored: sig_side top) + C1,C2 (bypass, no anchor) → cohere all
+        // to top. BYP = C3,C4 (bypass only, no anchor) → must stay where they were.
+        var parts = [_]Part{
+            .{ .ref_des = "U1", .kind = .hub, .hw = 2, .hh = 2, .pads = &.{}, .fallback = false },
+            .{ .ref_des = "L1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+            .{ .ref_des = "C1", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+            .{ .ref_des = "C2", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+            .{ .ref_des = "C3", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+            .{ .ref_des = "C4", .kind = .passive, .hw = 0.5, .hh = 0.5, .pads = &.{}, .fallback = false },
+        };
+        const pwr_m = [_][]const u8{ "L1", "C1", "C2" };
+        const byp_m = [_][]const u8{ "C3", "C4" };
+        const groups = [_]env.Group{ .{ .name = "PWR", .members = &pwr_m }, .{ .name = "BYP", .members = &byp_m } };
+        // Only L1 has a directional anchor (top = side 2); all caps are anchorless.
+        const sig_side = [_]u8{ 255, 2, 255, 255, 255, 255 };
+        const tier_of = [_]usize{ 0, 0, 0, 0, 0, 0 };
+        const cohere_side = try arena.alloc(u8, parts.len);
+        @memset(cohere_side, 255);
+        if (bound) cohere_side[3] = 3; // C2 explicitly serves a bottom-edge pad
 
-    // Seed each ringed part on a NON-top side so cohesion visibly moves the PWR
-    // group: L1,C3→left(0); C1,C4→right(1); C2→bottom(3).
-    var sides = [_]std.ArrayList(SidePart){ .empty, .empty, .empty, .empty };
-    try sides[0].append(arena, .{ .i = 1, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
-    try sides[1].append(arena, .{ .i = 2, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
-    try sides[3].append(arena, .{ .i = 3, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
-    try sides[0].append(arena, .{ .i = 4, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
-    try sides[1].append(arena, .{ .i = 5, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
+        // Seed each ringed part on a NON-top side so cohesion visibly moves the PWR
+        // group: L1,C3→left(0); C1,C4→right(1); C2→bottom(3).
+        var sides = [_]std.ArrayList(SidePart){ .empty, .empty, .empty, .empty };
+        try sides[0].append(arena, .{ .i = 1, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
+        try sides[1].append(arena, .{ .i = 2, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
+        try sides[3].append(arena, .{ .i = 3, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
+        try sides[0].append(arena, .{ .i = 4, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
+        try sides[1].append(arena, .{ .i = 5, .tier = 0, .along = 0, .half_along = 0.5, .depth = 0.5 });
 
-    try cohereGroups(arena, &parts, 0, &groups, &.{}, &tier_of, &sig_side, cohere_side, &sides);
+        try cohereGroups(arena, &parts, 0, &groups, &.{}, &tier_of, &sig_side, cohere_side, &sides);
 
-    // PWR (L1,C1,C2) all cohered to top (side 2); BYP (C3,C4) untouched.
-    try testing.expectEqual(@as(u8, 2), cohere_side[1]);
-    try testing.expectEqual(@as(u8, 2), cohere_side[2]);
-    try testing.expectEqual(@as(u8, 2), cohere_side[3]);
-    try testing.expectEqual(@as(u8, 255), cohere_side[4]);
-    try testing.expectEqual(@as(u8, 255), cohere_side[5]);
-    try testing.expectEqual(@as(usize, 3), sides[2].items.len); // all PWR on top
-    // BYP members stayed on their seeded sides (C3 left, C4 right).
-    try testing.expectEqual(@as(usize, 1), sides[0].items.len);
-    try testing.expectEqual(@as(usize, 1), sides[1].items.len);
+        // PWR (L1,C1,C2) all cohered to top (side 2); BYP (C3,C4) untouched.
+        try testing.expectEqual(@as(u8, 2), cohere_side[1]);
+        try testing.expectEqual(@as(u8, 2), cohere_side[2]);
+        try testing.expectEqual(@as(u8, if (bound) 3 else 2), cohere_side[3]);
+        try testing.expectEqual(@as(u8, 255), cohere_side[4]);
+        try testing.expectEqual(@as(u8, 255), cohere_side[5]);
+        try testing.expectEqual(@as(usize, if (bound) 2 else 3), sides[2].items.len);
+        try testing.expectEqual(@as(usize, if (bound) 1 else 0), sides[3].items.len);
+        // BYP members stayed on their seeded sides (C3 left, C4 right).
+        try testing.expectEqual(@as(usize, 1), sides[0].items.len);
+        try testing.expectEqual(@as(usize, 1), sides[1].items.len);
+    }
 }
 
 test "isCohesionAnchorNet accepts only a concentrated non-ground net" {
@@ -12106,7 +12167,7 @@ test "pinOwners assigns passives to the hub they serve" {
     const loops = try arena.alloc(Loop, 1);
     loops[0] = .{ .cap = 2, .hub = 1, .cap_pwr = zero, .cap_gnd = zero, .hub_pwr = &.{}, .hub_gnd = &.{} };
     const built = Built{ .springs = &.{}, .loops = loops, .series = &.{} };
-    const owner_of = try pinOwners(arena, &parts, 0, &nets, &idx_of, built);
+    const owner_of = try pinOwners(arena, &parts, 0, .{ .nets = &nets, .idx_of = &idx_of }, built);
     try testing.expectEqual(@as(usize, 1), owner_of[2]); // loop-bound cap → its hub
     try testing.expectEqual(@as(usize, 1), owner_of[3]); // CS pull-up: 1-pad tie → satellite
     try testing.expectEqual(@as(usize, 0), owner_of[4]); // RUN pull-up: anchor-only net
@@ -12144,7 +12205,7 @@ test "buildPinGroups + dockGroups keep a satellite's cap with its owner at the a
     try idx_of.put(arena, "X1", 1);
     try idx_of.put(arena, "C1", 2);
     const built = Built{ .springs = &.{}, .loops = &.{}, .series = &.{} };
-    const owner_of = try pinOwners(arena, &parts, 0, &nets, &idx_of, built);
+    const owner_of = try pinOwners(arena, &parts, 0, .{ .nets = &nets, .idx_of = &idx_of }, built);
     try testing.expectEqual(@as(usize, 1), owner_of[2]); // the load cap belongs to the crystal
     const ctx = PinCtx{ .nets = &nets, .idx_of = &idx_of };
     const groups = try buildPinGroups(arena, &parts, owner_of, 0, ctx, built);
@@ -12299,16 +12360,19 @@ test "a cross-hub near binding claims its owner and seeds against the named pad"
             .bind = .{ .near = .{ .ref = "U_MCU", .pin = "3" } },
         },
     };
+    var idx_of = try refIndexMap(arena, &parts);
+    const ring_pads = try roughBoundPads(arena, &parts, 0, &instances, .{ .nets = &nets, .idx_of = &idx_of }, true);
+    try testing.expectApproxEqAbs(@as(f64, 3), ring_pads[2].?[0], 1e-9);
+    try testing.expectApproxEqAbs(@as(f64, 0), ring_pads[2].?[1], 1e-9);
     const near = try near_bind.resolve(arena, &instances, &nets);
     try testing.expectEqual(@as(usize, 1), near.pairs.len);
     try testing.expectEqualStrings("1", near.pairs[0].own_pin); // the GPIO10 leg
 
-    var idx_of = try refIndexMap(arena, &parts);
     const built = Built{ .springs = &.{}, .loops = &.{}, .series = &.{}, .near = near.pairs };
 
     // Ownership follows the NAMED target, not whichever hub the locality scan
     // would have preferred.
-    const owner_of = try pinOwners(arena, &parts, 0, &nets, &idx_of, built);
+    const owner_of = try pinOwners(arena, &parts, 0, .{ .nets = &nets, .idx_of = &idx_of }, built);
     try testing.expectEqual(@as(usize, 0), owner_of[2]);
 
     // And within that owner the seed aims at pad 3 — the right edge — which is
@@ -12420,6 +12484,90 @@ test "groupFallback homes a chain group's port-only member and leaves a bypass b
     try testing.expectEqual(@as(u2, 1), tgt[1].?.edge); // R_IN at pad 3
     try testing.expectEqual(@as(u2, 1), tgt[2].?.edge); // R_TERM joins its group's edge
     try testing.expectEqual(@as(u2, 0), tgt[3].?.edge); // the bank keeps its own pad
+}
+
+// spec: placement/optimizer - rough chains prefer local signal connections over sparse supplies and obey authored net classes
+test "rough intent keeps sparse supplies out of signal chains" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    const cases = [_]struct { name: []const u8, class: []const u8, local: bool }{
+        .{ .name = "V_3V3", .class = "", .local = false },
+        .{ .name = "module/CUSTOM", .class = "power", .local = false },
+        .{ .name = "module/CUSTOM", .class = "input_rail", .local = false },
+        .{ .name = "V_3V3", .class = "signal", .local = true },
+    };
+    for (cases) |case| {
+        var parts = [_]Part{
+            .{ .ref_des = "U1", .kind = .hub, .fallback = false, .hw = 3, .hh = 3, .pads = &chain_hub_pads },
+            .{ .ref_des = "R_PULL", .kind = .passive, .fallback = false, .pads = &chain_two_pads, .hw = 0.5, .hh = 0.25, .x = -4 },
+            .{ .ref_des = "R_OUT", .kind = .passive, .fallback = false, .pads = &chain_two_pads, .hw = 0.5, .hh = 0.25, .x = 4 },
+            .{ .ref_des = "C_BIAS", .kind = .passive, .fallback = false, .pads = &chain_two_pads, .hw = 0.5, .hh = 0.25, .x = 4, .y = 2 },
+            .{ .ref_des = "L_FEED", .kind = .passive, .fallback = false, .pads = &chain_two_pads, .hw = 0.5, .hh = 0.25 },
+        };
+        const nets = [_]FlatNet{
+            .{ .name = case.name, .pins = &.{ .{ .ref_des = "R_PULL", .pin = "1" }, .{ .ref_des = "L_FEED", .pin = "2" } } },
+            .{ .name = "BIAS", .pins = &.{ .{ .ref_des = "R_OUT", .pin = "2" }, .{ .ref_des = "C_BIAS", .pin = "1" }, .{ .ref_des = "L_FEED", .pin = "1" } } },
+            .{ .name = "OUT", .pins = &.{ .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "R_OUT", .pin = "1" } } },
+        };
+        const declared = [_]env.NetClassPin{.{ .net = shortName(case.name), .class = case.class }};
+        const pins: []const env.NetClassPin = if (case.class.len == 0) &.{} else &declared;
+        var idx = try refIndexMap(arena, &parts);
+        var placed = [_]bool{ true, true, true, true, false };
+        const ctx = PinCtx{ .nets = &nets, .idx_of = &idx, .net_class_pins = pins };
+        try pinChainAttach(arena, &parts, 0, null, ctx, &placed);
+        try testing.expect(placed[4]);
+        try testing.expectEqual(case.local, parts[4].x < 0);
+        const ci = try buildClusters(arena, &parts, 0, &nets, &idx, pins);
+        try testing.expectEqual(ci.root[2], ci.root[4]);
+        try testing.expectEqual(case.local, ci.root[1] == ci.root[4]);
+        // A rail-only member still has a fallback; supply classification must
+        // not strand a real local power chain when no signal partner exists.
+        placed[2] = false;
+        placed[3] = false;
+        placed[4] = false;
+        const st = ChainState{ .placed = &placed, .entry = &placed, .kids = try arena.alloc(usize, parts.len) };
+        @memset(st.kids, 0);
+        try testing.expectEqual(@as(?usize, 1), chainParent(.{ .parts = &parts, .hi = 0, .owner_of = null }, 4, ctx, st));
+    }
+}
+
+// spec: placement/optimizer - a precise signal pad outranks a sparse supply target while authored adjacency remains authoritative
+test "rough intent prefers signal pads over sparse supply pads" {
+    var astate = std.heap.ArenaAllocator.init(testing.allocator);
+    defer astate.deinit();
+    const arena = astate.allocator();
+    const pads = [_]geometry.Pad{
+        .{ .number = "1", .x = -3, .y = 0, .w = 0.3, .h = 0.3 },
+        .{ .number = "2", .x = 3, .y = -0.5, .w = 0.3, .h = 0.3 },
+        .{ .number = "3", .x = 3, .y = 0.5, .w = 0.3, .h = 0.3 },
+    };
+    var parts = [_]Part{
+        .{ .ref_des = "U1", .kind = .hub, .fallback = false, .hw = 3, .hh = 3, .pads = &pads },
+        .{ .ref_des = "R1", .kind = .passive, .fallback = false, .hw = 0.5, .hh = 0.25, .pads = &chain_two_pads },
+    };
+    const nets = [_]FlatNet{
+        .{ .name = "CUSTOM", .pins = &.{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "R1", .pin = "2" } } },
+        .{ .name = "SIG", .pins = &.{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "R1", .pin = "1" } } },
+    };
+    var idx = try refIndexMap(arena, &parts);
+    const ctx = PinCtx{ .nets = &nets, .idx_of = &idx, .net_class_pins = &.{.{ .net = "CUSTOM", .class = "power" }} };
+    var built = Built{ .springs = &.{}, .loops = &.{}, .series = &.{} };
+    const owner_of = [_]usize{ 0, 0 };
+    const inferred = try pinTargets(arena, &parts, 0, &owner_of, ctx, built);
+    try testing.expectEqual(@as(u2, 1), inferred[1].?.edge);
+    built.near = &.{.{ .part = 1, .target = 0, .target_pin = "1", .own_pin = "2", .net = "CUSTOM" }};
+    const bound = try pinTargets(arena, &parts, 0, &owner_of, ctx, built);
+    try testing.expectEqual(@as(u2, 0), bound[1].?.edge);
+    const topology = try buildHubTopology(arena, &parts, 0, &nets, &idx, ctx.net_class_pins);
+    const pull = sidePullTarget(&parts, 0, 1, topology);
+    try testing.expect(pull.dir and pull.x > 0);
+    var sides = [_]std.ArrayList(SidePart){ .empty, .empty, .empty, .empty };
+    try sides[0].append(arena, .{ .i = 1, .tier = 0, .along = 0.75, .half_along = 0.25, .depth = 0.5 });
+    const constraints = RingConstraints{ .sides = &.{ 255, 0 }, .pads = &.{ null, .{ -3, 0.75 } } };
+    try refineSidesByPull(arena, &parts, 0, topology, &.{ 0, 0 }, constraints, &sides, keepBoxOf(parts[0]));
+    try testing.expect(parts[1].x < 0); // the rightward signal pull cannot undo the binding
+    try testing.expectApproxEqAbs(@as(f64, 0.75), sides[0].items[0].along, 1e-9);
 }
 
 // spec: placement/optimizer - a chain child hangs off a ring-bound entry on its chain's home edge, spreading over the entries there
