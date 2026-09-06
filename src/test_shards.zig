@@ -104,6 +104,7 @@ pub const shards: []const []const []const u8 = &.{
     &.{
         "authored_heatsink.test.",
         "bom_resolve.test.",
+        "brief_checks.test.",
         "component_classification.test.",
         "convert.footprint.test.",
         "convert.symbol.test.",
@@ -222,8 +223,10 @@ pub const shards: []const []const []const u8 = &.{
         "placement.power_integrity.test.",
         "placement.pdn_impedance.test.",
         "placement.power_current.test.",
+        "placement.power_voltage_regression.test.",
         "power_integrity_json.test.",
         "placement.rf_port_finish.test.",
+        "placement.rf_pad_route.test.",
         "placement.rough_routability.test.",
         "placement.route_grid.test.",
         "placement.route_session.test.stu",
@@ -242,6 +245,7 @@ pub const shards: []const []const []const u8 = &.{
         "review_assessment.test.",
         "review_datasheet_inventory.test.",
         "review_audit.test.",
+        "review_card.test.",
         "review_profiles.test.",
         "review_registry.test.",
         "waiver_register.test.",
@@ -314,6 +318,7 @@ pub const shards: []const []const []const u8 = &.{
         "serve.footprint_editor.test.",
         "serve.layout_layers.test.",
         "serve.mcp_escape_assign.test.",
+        "placement.copper_window.test.",
         "serve.mcp_parts_tools.test.",
         "serve.mcp_read_opts.test.",
         "serve.mcp_route_experiment.test.",
@@ -332,6 +337,8 @@ pub const shards: []const []const []const u8 = &.{
         "serve.cache_core.test.",
         "serve.page_cache_endpoint.test.",
         "serve.part_review_api.test.",
+        "serve.review_card_api.test.",
+        "serve.review_card_page.test.",
         "serve.read_cache.test.",
         "serve.png_cache.test.",
         "serve.route_plan.test.",
@@ -745,12 +752,45 @@ test {
     try std.testing.expectEqual(@as(usize, 1), claims);
 }
 
+// spec: Development pipeline - The brief-driven unit-check tests remain claimed by the shard manifest
+test {
+    var claims: usize = 0;
+    for (shards) |shard| {
+        for (shard) |filter| {
+            if (std.mem.eql(u8, filter, "brief_checks.test.")) claims += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), claims);
+}
+
 // spec: Development pipeline - The per-part review tests remain claimed by the shard manifest
 test {
     var claims: usize = 0;
     for (shards) |shard| {
         for (shard) |filter| {
             if (std.mem.eql(u8, filter, "part_review.test.")) claims += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), claims);
+}
+
+// spec: Development pipeline - The Board Review Card tests remain claimed by the shard manifest
+test {
+    var claims: usize = 0;
+    for (shards) |shard| {
+        for (shard) |filter| {
+            if (std.mem.eql(u8, filter, "review_card.test.")) claims += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), claims);
+}
+
+// spec: Development pipeline - The Board Review Card page tests remain claimed by the shard manifest
+test {
+    var claims: usize = 0;
+    for (shards) |shard| {
+        for (shard) |filter| {
+            if (std.mem.eql(u8, filter, "serve.review_card_page.test.")) claims += 1;
         }
     }
     try std.testing.expectEqual(@as(usize, 1), claims);

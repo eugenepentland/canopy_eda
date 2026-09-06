@@ -349,6 +349,11 @@ fn writeLoadFlow(w: *std.Io.Writer, load: power_integrity.LoadFlow) std.Io.Write
     try writeOptionalNumber(w, load.draw.typical_a);
     try w.writeAll(",\"i_max\":");
     try writeOptionalNumber(w, load.draw.maximum_a);
+    try w.writeAll(",\"drop_v\":{\"typical\":");
+    try writeOptionalNumber(w, load.drop_v.typical);
+    try w.writeAll(",\"maximum\":");
+    try writeOptionalNumber(w, load.drop_v.maximum);
+    try w.writeByte('}');
     try w.print(",\"contacts\":{d},\"complete\":{s},\"placed\":{{\"typical\":{s},\"maximum\":{s}}}}}", .{
         load.contacts,
         if (load.complete) "true" else "false",

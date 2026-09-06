@@ -21,11 +21,16 @@ const notes = @import("serve/notes.zig");
 const paths = @import("paths.zig");
 const pcb_describe = @import("serve/pcb_describe.zig");
 const preflight = @import("preflight.zig");
+const review_card = @import("review_card.zig");
 const review_profiles = @import("review_profiles.zig");
 
 /// Which saved layout to audit; null means the starred one.
 pub const Options = struct {
     layout: ?[]const u8 = null,
+    /// A preflight run to share instead of performing one. The Board Review
+    /// Card composes these facts beside `part_review`'s sheet over the same
+    /// evaluation, and both need the same release-profile report.
+    preflight_cache: ?*preflight.Cache = null,
 };
 
 /// Everything `render` can fail with beyond allocation.
@@ -82,7 +87,11 @@ pub const Layout = struct {
     ladder: []const StageRow = &.{},
     drc_errors: usize = 0,
     drc_warnings: usize = 0,
+    /// Warning-severity DRC findings, counted per kind.
     by_kind: []const KindCount = &.{},
+    /// Error-severity DRC findings, counted per kind. Kept apart from
+    /// `by_kind` because a warning is waivable and an error is not.
+    error_by_kind: []const KindCount = &.{},
 };
 
 /// The fabrication gate's board statistics.
@@ -220,6 +229,11 @@ pub const Facts = struct {
     fab: Fab = .{},
     inventory: Inventory = .{},
     findings: []const FindingRow = &.{},
+    /// Every electrical-rule violation the run reported, at every severity.
+    /// `findings` carries only the error and warning rows as prose; the review
+    /// card needs the typed kinds so it can state a verdict per kind, clean
+    /// ones included.
+    violations: []const erc_mod.Violation = &.{},
 };
 
 const max_finding_rows: usize = 400;
@@ -293,9 +307,16 @@ fn joinIds(allocator: std.mem.Allocator, ids: []const []const u8) std.mem.Alloca
     return try std.mem.join(allocator, ", ", ids);
 }
 
-/// Render the audit from already-collected facts. Pure, so a fixture can
-/// prove the output parses under the package's Markdown rules.
-pub fn renderFacts(allocator: std.mem.Allocator, facts: Facts) std.mem.Allocator.Error![]u8 {
+/// `id — text`: the Check cell every generated stage row now shows, so a
+/// reader can look the row up in the "Review checks" catalogue the language
+/// reference renders from the registry.
+fn checkCell(buf: []u8, id: []const u8, text: []const u8) []const u8 {
+    return fmtBuf(buf, "{s} — {s}", .{ id, text });
+}
+
+/// Render the audit from an already-composed Board Review Card. Pure, so a
+/// fixture can prove the output parses under the package's Markdown rules.
+pub fn renderCard(allocator: std.mem.Allocator, card: review_card.Card) std.mem.Allocator.Error![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     const w = &out.writer;
@@ -306,22 +327,38 @@ pub fn renderFacts(allocator: std.mem.Allocator, facts: Facts) std.mem.Allocator
     var buf2: [256]u8 = undefined;
     var buf3: [256]u8 = undefined;
 
-    renderInner(w, arena, facts, &buf, &buf2, &buf3) catch |err| switch (err) {
+    renderInner(w, arena, card, &buf, &buf2, &buf3) catch |err| switch (err) {
         error.WriteFailed => return error.OutOfMemory,
         error.OutOfMemory => return error.OutOfMemory,
     };
     return try out.toOwnedSlice();
 }
 
+const RenderFailure = std.Io.Writer.Error || std.mem.Allocator.Error;
+
+const audit_cols = [_][]const u8{ "Check", "Result", "Evidence", "Disposition" };
+
 fn renderInner(
     w: *std.Io.Writer,
     arena: std.mem.Allocator,
-    facts: Facts,
+    card: review_card.Card,
     buf: []u8,
     buf2: []u8,
     buf3: []u8,
-) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
-    const id = facts.identity;
+) RenderFailure!void {
+    try renderIdentity(w, card, buf);
+    try renderStripe(w, card, buf);
+    try renderStage0(w, arena, card, buf, buf2, buf3);
+    try renderStage1(w, card, buf, buf2);
+    try renderStage1b(w, card);
+    try renderAnalysesProse(w);
+    try renderStage4(w, card, buf, buf2);
+    try renderStage5(w, arena, card, buf);
+    try renderFindings(w, card, buf);
+}
+
+fn renderIdentity(w: *std.Io.Writer, card: review_card.Card, buf: []u8) RenderFailure!void {
+    const id = card.identity;
     try w.writeAll("# ");
     try writeCell(w, id.name);
     try w.writeAll(" Board Review Audit\n\n");
@@ -334,102 +371,199 @@ fn renderInner(
     try row(w, &.{ "Design", id.name });
     try row(w, &.{ "Board revision / part number", fmtBuf(buf, "{s} / {s}", .{ id.revision, id.part_number }) });
     try row(w, &.{ "Released layout", id.layout });
-    try row(w, &.{ "layout_sha256", facts.digests.layout_sha256 });
-    try row(w, &.{ "source_sha256", facts.digests.source_sha256 });
-    try row(w, &.{ "release_token", facts.digests.release_token });
-    try row(w, &.{ "fab_id", facts.digests.fab_id });
-    try row(w, &.{ "project_commit / tool_commit", fmtBuf(buf, "{s} / {s}", .{ facts.digests.project_commit, id.tool_commit }) });
+    try row(w, &.{ "layout_sha256", card.digests.layout_sha256 });
+    try row(w, &.{ "source_sha256", card.digests.source_sha256 });
+    try row(w, &.{ "release_token", card.digests.release_token });
+    try row(w, &.{ "fab_id", card.digests.fab_id });
+    try row(w, &.{ "project_commit / tool_commit", fmtBuf(buf, "{s} / {s}", .{ card.digests.project_commit, id.tool_commit }) });
     try row(w, &.{ "Audit date / auditor", fmtBuf(buf, "{s} / netlisp review-audit", .{id.generated_at}) });
     try row(w, &.{ "Tree state", id.project_status });
     try w.writeAll("\n");
+}
 
-    const audit_cols = [_][]const u8{ "Check", "Result", "Evidence", "Disposition" };
+/// The card's count stripe: one line per review category, plus the board
+/// answer. Six columns, so the regeneration merge leaves them alone — no cell
+/// here belongs to the reviewer.
+fn renderStripe(w: *std.Io.Writer, card: review_card.Card, buf: []u8) RenderFailure!void {
+    try w.writeAll("## Review card\n\n");
+    try header(w, &.{ "Category", "Pass", "Fail", "Unproven", "Not declared", "Waived / n/a / manual" });
+    for (card.categories) |category| {
+        const stripe = category.stripe;
+        try row(w, &.{
+            category.title,
+            fmtBuf(buf[0..32], "{d}", .{stripe.pass}),
+            fmtBuf(buf[32..64], "{d}", .{stripe.fail}),
+            fmtBuf(buf[64..96], "{d}", .{stripe.unproven}),
+            fmtBuf(buf[96..128], "{d}", .{stripe.not_declared}),
+            fmtBuf(buf[128..192], "{d} / {d} / {d}", .{ stripe.waived, stripe.not_applicable, stripe.manual }),
+        });
+    }
+    const overall = card.overall;
+    try row(w, &.{
+        "Board answer",
+        fmtBuf(buf[0..32], "{d}", .{overall.stripe.pass}),
+        fmtBuf(buf[32..64], "{d}", .{overall.stripe.fail}),
+        fmtBuf(buf[64..96], "{d}", .{overall.stripe.unproven}),
+        fmtBuf(buf[96..128], "{d}", .{overall.stripe.not_declared}),
+        fmtBuf(buf[128..192], "{s}; {d} blocking", .{ @tagName(overall.verdict), overall.blocking }),
+    });
+    try w.writeAll("\n");
+}
+
+fn renderStage0(
+    w: *std.Io.Writer,
+    arena: std.mem.Allocator,
+    card: review_card.Card,
+    buf: []u8,
+    buf2: []u8,
+    buf3: []u8,
+) RenderFailure!void {
+    const id = card.identity;
     try w.writeAll("## Stage 0 — Identity and source closure\n\n");
     try header(w, &audit_cols);
-    try row(w, &.{ "Clean tree", id.project_status, "run_fab_readiness.project_status", "" });
-    try row(w, &.{ "(revision …) declared", if (id.revision.len > 0) id.revision else "missing", "board source", "" });
-    const build_warnings = fmtBuf(buf, "{d} evaluator warning(s)", .{facts.schematic.build_warnings.len});
-    try row(w, &.{ "Build warnings", build_warnings, if (facts.schematic.build_warnings.len > 0) facts.schematic.build_warnings[0] else "netlisp build", "" });
-    if (facts.layout.available) {
-        const placement = ladderCell(buf, facts.layout.ladder, "placement");
-        const subs = ladderCell(buf2, facts.layout.ladder, "sub_circuits");
-        try row(w, &.{ "Layout frozen: parts locked, sub-blocks starred", fmtBuf(buf3, "{s}; {s}", .{ placement, subs }), "get_layout_progress", "" });
+    try row(w, &.{ checkCell(buf, "source-tree-clean", "Clean tree"), id.project_status, "run_fab_readiness.project_status", "" });
+    try row(w, &.{ checkCell(buf, "revision-missing", "(revision …) declared"), if (id.revision.len > 0) id.revision else "missing", "board source", "" });
+    const warnings = card.schematic.build_warnings;
+    const build_warnings = fmtBuf(buf2, "{d} evaluator warning(s)", .{warnings.len});
+    try row(w, &.{ checkCell(buf, "build-warning-free", "Build warnings"), build_warnings, if (warnings.len > 0) warnings[0] else "netlisp build", "" });
+    const frozen = checkCell(buf, "layout-frozen", "Layout frozen: parts locked, sub-blocks starred");
+    if (card.layout.available) {
+        const placement = ladderCell(buf2, card.layout.ladder, "placement");
+        const subs = ladderCell(buf3, card.layout.ladder, "sub_circuits");
+        var tail: [256]u8 = undefined;
+        try row(w, &.{ frozen, fmtBuf(&tail, "{s}; {s}", .{ placement, subs }), "get_layout_progress", "" });
     } else {
-        try row(w, &.{ "Layout frozen: parts locked, sub-blocks starred", "layout progress unavailable", "get_layout_progress", "" });
+        try row(w, &.{ frozen, "layout progress unavailable", "get_layout_progress", "" });
     }
-    try row(w, &.{ "Stable identities and gate errors", try joinIds(arena, facts.fab.error_ids), "run_fab_readiness.errors", "" });
+    try row(w, &.{ checkCell(buf, "release-gate-clear", "Stable identities and gate errors"), try joinIds(arena, card.fab.error_ids), "run_fab_readiness.errors", "" });
     try w.writeAll("\n");
+}
 
+fn renderStage1(w: *std.Io.Writer, card: review_card.Card, buf: []u8, buf2: []u8) RenderFailure!void {
     try w.writeAll("## Stage 1 — Schematic\n\n");
     try header(w, &audit_cols);
-    const s = facts.schematic;
-    try row(w, &.{ "Release-profile check: errors / warnings / infos", fmtBuf(buf, "{d} / {d} / {d}", .{ s.preflight_errors, s.preflight_warnings, s.preflight_infos }), "netlisp check --profile release", "" });
-    try row(w, &.{ "ERC errors / warnings", fmtBuf(buf, "{d} / {d}", .{ s.erc_errors, s.erc_warnings }), "netlisp check", "" });
+    const s = card.schematic;
+    try row(w, &.{
+        checkCell(buf, "schematic-check-failed", "Release-profile check: errors / warnings / infos"),
+        fmtBuf(buf2, "{d} / {d} / {d}", .{ s.preflight_errors, s.preflight_warnings, s.preflight_infos }),
+        "netlisp check --profile release",
+        "",
+    });
+    try row(w, &.{ checkCell(buf, "erc-clean", "ERC errors / warnings"), fmtBuf(buf2, "{d} / {d}", .{ s.erc_errors, s.erc_warnings }), "netlisp check", "" });
     var reviewed: usize = 0;
     var unmet_parts: usize = 0;
-    for (facts.inventory.parts) |part| {
+    for (card.parts) |part| {
         if (std.mem.eql(u8, part.review, "pass")) reviewed += 1;
         if (!std.mem.eql(u8, part.unmet, "none")) unmet_parts += 1;
     }
-    try row(w, &.{ "Active parts with a complete datasheet review / total", fmtBuf(buf, "{d} / {d}", .{ reviewed, facts.inventory.parts.len }), "run_checks datasheet_review", "" });
-    try row(w, &.{ "Active parts with unmet class-profile items / total", fmtBuf(buf, "{d} / {d}", .{ unmet_parts, facts.inventory.parts.len }), "run_checks profile_incomplete", "" });
-    try row(w, &.{ "Open design notes", fmtBuf(buf, "{d}", .{s.notes_open}), "list_design_notes", "" });
+    try row(w, &.{
+        checkCell(buf, "datasheet-review-complete", "Active parts with a complete datasheet review / total"),
+        fmtBuf(buf2, "{d} / {d}", .{ reviewed, card.parts.len }),
+        "run_checks datasheet_review",
+        "",
+    });
+    try row(w, &.{
+        checkCell(buf, "class-profile-items-met", "Active parts with unmet class-profile items / total"),
+        fmtBuf(buf2, "{d} / {d}", .{ unmet_parts, card.parts.len }),
+        "run_checks profile_incomplete",
+        "",
+    });
+    try row(w, &.{ checkCell(buf, "design-notes-closed", "Open design notes"), fmtBuf(buf2, "{d}", .{s.notes_open}), "list_design_notes", "" });
     try w.writeAll("\n");
+}
 
+fn renderStage1b(w: *std.Io.Writer, card: review_card.Card) RenderFailure!void {
     try w.writeAll("## Stage 1b — Per-component profile compliance\n\n");
     try header(w, &.{ "Ref", "Component", "Class profile", "Review", "Checks", "Electrical / currents", "Unmet items", "Disposition" });
-    for (facts.inventory.parts) |part| {
+    for (card.parts) |part| {
         try row(w, &.{ part.ref, part.component, part.class, part.review, part.checks, part.data, part.unmet, "" });
     }
-    if (facts.inventory.parts.len == 0) try row(w, &.{ "none", "no active parts", "", "", "", "", "", "" });
+    if (card.parts.len == 0) try row(w, &.{ "none", "no active parts", "", "", "", "", "", "" });
     try w.writeAll("\n");
+}
 
+fn renderAnalysesProse(w: *std.Io.Writer) RenderFailure!void {
     try w.writeAll("## Stage 2 and 3 — Analyses and BOM (run by hand)\n\n");
     try w.writeAll("- Thermal at the maximum rated ambient in the release cooling scenario: netlisp tool describe_thermal, the Thermal tab on the release layout.\n");
     try w.writeAll("- Power budget and sequencing: the review PDF's Power budget and Power sequencing sheets; every rail's consumers annotated with (i-typ …)(i-max …).\n");
     try w.writeAll("- Ratings: component-rating findings in run_fab_readiness; net envelopes authored where derivation stops.\n");
     try w.writeAll("- Domain analyses in gate mode: pll-loop, frequency-plan, pdn, and the RF level budget as assert rows.\n");
-    try w.writeAll("- BOM: identities, authored passive specs (the bom-spec findings), lifecycle and dated stock via resolve_mpn and check_stock, DC-bias effective capacitance, the DNP list.\n\n");
+    try w.writeAll("- BOM: identities, authored passive specs (the bom-spec findings), lifecycle and dated stock via resolve_mpn and check_stock, DC-bias effective capacitance, the DNP list.\n");
+    try w.writeAll("- Every one of these is a row of the Review card above, with its registry id and verdict; netlisp review-card prints them for the board.\n\n");
+}
 
+fn renderStage4(w: *std.Io.Writer, card: review_card.Card, buf: []u8, buf2: []u8) RenderFailure!void {
     try w.writeAll("## Stage 4 — Layout\n\n");
     try header(w, &audit_cols);
-    if (facts.layout.available) {
-        for (facts.layout.ladder) |stage| {
-            try row(w, &.{ fmtBuf(buf, "Ladder rung {s}", .{stage.id}), fmtBuf(buf2, "{s} {d}/{d}", .{ stage.status, stage.done, stage.total }), "get_layout_progress", "" });
+    if (card.layout.available) {
+        for (card.layout.ladder) |stage| {
+            var cell: [256]u8 = undefined;
+            try row(w, &.{
+                checkCell(buf, "layout-ladder-complete", fmtBuf(&cell, "Ladder rung {s}", .{stage.id})),
+                fmtBuf(buf2, "{s} {d}/{d}", .{ stage.status, stage.done, stage.total }),
+                "get_layout_progress",
+                "",
+            });
         }
     } else {
-        try row(w, &.{ "Completion ladder", "unavailable", "get_layout_progress", "" });
+        try row(w, &.{ checkCell(buf, "layout-ladder-complete", "Completion ladder"), "unavailable", "get_layout_progress", "" });
     }
-    try row(w, &.{ "DRC errors / warnings on the release layout", fmtBuf(buf, "{d} / {d}", .{ facts.layout.drc_errors, facts.layout.drc_warnings }), "run_fab_readiness.raw_drc", "" });
-    for (facts.layout.by_kind) |kind| {
-        try row(w, &.{ fmtBuf(buf, "DRC warnings: {s}", .{kind.kind}), fmtBuf(buf2, "{d}", .{kind.count}), "docs/drc-waivers.md must list this count", "" });
+    try row(w, &.{
+        checkCell(buf, "drc", "DRC errors / warnings on the release layout"),
+        fmtBuf(buf2, "{d} / {d}", .{ card.layout.drc_errors, card.layout.drc_warnings }),
+        "run_fab_readiness.raw_drc",
+        "",
+    });
+    for (card.layout.by_kind) |kind| {
+        var cell: [256]u8 = undefined;
+        try row(w, &.{
+            checkCell(buf, "drc-warn", fmtBuf(&cell, "DRC warnings: {s}", .{kind.kind})),
+            fmtBuf(buf2, "{d}", .{kind.count}),
+            "docs/drc-waivers.md must list this count",
+            "",
+        });
     }
     try w.writeAll("\n");
+}
 
+fn renderStage5(w: *std.Io.Writer, arena: std.mem.Allocator, card: review_card.Card, buf: []u8) RenderFailure!void {
     try w.writeAll("## Stage 5 — Fabrication package\n\n");
     try header(w, &audit_cols);
-    const f = facts.fab;
-    try row(w, &.{ "run_fab_readiness", if (!f.available) "unavailable" else if (f.ok) "ok" else "blocked", "run_fab_readiness.ok", "" });
-    try row(w, &.{ "Gate errors", try joinIds(arena, f.error_ids), "run_fab_readiness.errors", "" });
-    try row(w, &.{ "Gate warnings", try joinIds(arena, f.warning_ids), "run_fab_readiness.warnings", "" });
-    try row(w, &.{ "needs_waiver explained by the register", if (f.needs_waiver) "needs waiver" else "no waiver needed", "docs/drc-waivers.md", "" });
-    try row(w, &.{ "Parts / nets / routable / connected", fmtBuf(buf, "{d} / {d} / {d} / {d}", .{ f.stats.parts, f.stats.nets, f.stats.routable, f.stats.connected }), "run_fab_readiness.stats", "" });
-    try row(w, &.{ "Tracks / vias / DNP parts", fmtBuf(buf, "{d} / {d} / {d}", .{ f.stats.tracks, f.stats.vias, f.stats.dnp }), "run_fab_readiness.stats", "" });
-    try row(w, &.{ "Differential vs previous release", "run gerber-dump --digest and netlist-dump on both commits", "diff -I '^#'", "" });
+    const f = card.fab;
+    var value: [256]u8 = undefined;
+    try row(w, &.{ checkCell(buf, "release-gate-clear", "run_fab_readiness"), if (!f.available) "unavailable" else if (f.ok) "ok" else "blocked", "run_fab_readiness.ok", "" });
+    try row(w, &.{ checkCell(buf, "release-gate-clear", "Gate errors"), try joinIds(arena, f.error_ids), "run_fab_readiness.errors", "" });
+    try row(w, &.{ checkCell(buf, "drc-warn", "Gate warnings"), try joinIds(arena, f.warning_ids), "run_fab_readiness.warnings", "" });
+    try row(w, &.{ checkCell(buf, "drc-warn", "needs_waiver explained by the register"), if (f.needs_waiver) "needs waiver" else "no waiver needed", "docs/drc-waivers.md", "" });
+    try row(w, &.{
+        checkCell(buf, "bom-identity", "Parts / nets / routable / connected"),
+        fmtBuf(&value, "{d} / {d} / {d} / {d}", .{ f.stats.parts, f.stats.nets, f.stats.routable, f.stats.connected }),
+        "run_fab_readiness.stats",
+        "",
+    });
+    try row(w, &.{
+        checkCell(buf, "bom-identity", "Tracks / vias / DNP parts"),
+        fmtBuf(&value, "{d} / {d} / {d}", .{ f.stats.tracks, f.stats.vias, f.stats.dnp }),
+        "run_fab_readiness.stats",
+        "",
+    });
+    try row(w, &.{ checkCell(buf, "release-differential-reviewed", "Differential vs previous release"), "run gerber-dump --digest and netlist-dump on both commits", "diff -I '^#'", "" });
     try w.writeAll("\n");
+}
 
+fn renderFindings(w: *std.Io.Writer, card: review_card.Card, buf: []u8) RenderFailure!void {
     try w.writeAll("## Findings register\n\n");
     try header(w, &.{ "Source", "Severity", "Ref", "Finding", "Disposition", "Owner", "Date" });
     var shown: usize = 0;
-    for (facts.findings) |finding| {
+    for (card.findings) |finding| {
         if (shown == max_finding_rows) break;
         try row(w, &.{ finding.source, finding.severity, finding.ref, finding.message, "", "", "" });
         shown += 1;
     }
-    if (facts.findings.len > shown) {
-        try row(w, &.{ "…", "", "", fmtBuf(buf, "{d} further findings not listed; read run_checks", .{facts.findings.len - shown}), "", "", "" });
+    if (card.findings.len > shown) {
+        try row(w, &.{ "…", "", "", fmtBuf(buf, "{d} further findings not listed; read run_checks", .{card.findings.len - shown}), "", "", "" });
     }
-    if (facts.findings.len == 0) try row(w, &.{ "none", "", "", "no error or warning findings", "", "", "" });
+    if (card.findings.len == 0) try row(w, &.{ "none", "", "", "no error or warning findings", "", "", "" });
     try w.writeAll("\n## Open questions for a human\n\n- (state the question, the options, and what each costs)\n");
 }
 
@@ -638,24 +772,28 @@ fn collectFab(arena: std.mem.Allocator, project_dir: []const u8, name: []const u
         };
     };
     var counts: std.array_hash_map.String(usize) = .empty;
+    var error_counts: std.array_hash_map.String(usize) = .empty;
     if (root == .object) if (root.object.get("raw_drc")) |raw| if (raw == .array) {
         for (raw.array.items) |item| {
             const severity = jsonStr(item, "severity");
-            if (std.mem.eql(u8, severity, "err")) {
-                facts.layout.drc_errors += 1;
-                continue;
-            }
-            facts.layout.drc_warnings += 1;
             const kind = try arena.dupe(u8, jsonStr(item, "kind"));
-            const gop = try counts.getOrPut(arena, kind);
+            const failed = std.mem.eql(u8, severity, "err");
+            if (failed) facts.layout.drc_errors += 1 else facts.layout.drc_warnings += 1;
+            const gop = try (if (failed) &error_counts else &counts).getOrPut(arena, kind);
             if (!gop.found_existing) gop.value_ptr.* = 0;
             gop.value_ptr.* += 1;
         }
     };
-    var by_kind: std.ArrayList(KindCount) = .empty;
+    facts.layout.by_kind = try kindCounts(arena, counts);
+    facts.layout.error_by_kind = try kindCounts(arena, error_counts);
+}
+
+/// Freeze a kind-to-count map into the rendered/serialized row order.
+fn kindCounts(arena: std.mem.Allocator, counts: std.array_hash_map.String(usize)) std.mem.Allocator.Error![]const KindCount {
+    var rows: std.ArrayList(KindCount) = .empty;
     var it = counts.iterator();
-    while (it.next()) |entry| try by_kind.append(arena, .{ .kind = entry.key_ptr.*, .count = entry.value_ptr.* });
-    facts.layout.by_kind = try by_kind.toOwnedSlice(arena);
+    while (it.next()) |entry| try rows.append(arena, .{ .kind = entry.key_ptr.*, .count = entry.value_ptr.* });
+    return rows.toOwnedSlice(arena);
 }
 
 fn collectLadder(arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, layout: ?[]const u8, facts: *Facts) std.mem.Allocator.Error!void {
@@ -876,6 +1014,22 @@ pub fn collectFacts(
         .design_block => |b| b,
         else => return error.NotADesign,
     };
+    return collectFactsFor(arena, &eval, block, project_dir, name, options);
+}
+
+/// The same facts, over a design the CALLER already evaluated into an
+/// evaluator it keeps alive. The review card composes several engines over one
+/// evaluation, and re-evaluating the same file into the same evaluator would
+/// double its reports; this is the seam that lets it evaluate once.
+pub fn collectFactsFor(
+    arena: std.mem.Allocator,
+    eval: *Evaluator,
+    block: *const env.DesignBlock,
+    project_dir: []const u8,
+    name: []const u8,
+    options: Options,
+) RenderError!Facts {
+    const board_path = try paths.designSourcePath(arena, project_dir, name);
     const bom_path = try paths.designSiblingPath(arena, project_dir, name, ".bom");
     var bom_warning: ?[]const u8 = null;
     bom.applyExisting(arena, block, bom_path, project_dir) catch |err| {
@@ -893,7 +1047,15 @@ pub fn collectFacts(
     } };
 
     const violations = try erc_mod.runErc(arena, block, project_dir);
-    const report = try preflight.run(arena, &eval, block, project_dir, .release);
+    facts.violations = violations;
+    // `runFor`, not `run`: the design NAME is what resolves the system whose
+    // `(brief …)` governs this board, so a brief-driven finding reaches the
+    // audit's register and the card's schematic tallies rather than being
+    // produced only on the surfaces that already pass a name.
+    const report = if (options.preflight_cache) |cache|
+        try cache.get(arena, eval, block)
+    else
+        try preflight.runFor(arena, eval, block, project_dir, .release, name);
     var forms: review_profiles.Forms = .{};
     for (eval.pll_reports.items) |pll| {
         forms.pll_any = true;
@@ -952,8 +1114,14 @@ pub fn collectFacts(
     return facts;
 }
 
-/// Collect every fact and render the audit. The returned Markdown is owned
-/// by `allocator`.
+/// Compose the Board Review Card and render the audit from it. The returned
+/// Markdown is owned by `allocator`.
+///
+/// The audit IS the card, in the standard's document form: every stage row
+/// cites the registry id of the check it shows, and the card's category stripe
+/// sits under the identity block. One composition feeds this document, the
+/// `/api/review-card` JSON and the `review_card` tool, so a committed audit and
+/// a live page cannot disagree about a board.
 pub fn render(
     allocator: std.mem.Allocator,
     project_dir: []const u8,
@@ -962,8 +1130,8 @@ pub fn render(
 ) RenderError![]u8 {
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
-    const facts = try collectFacts(scratch.allocator(), project_dir, name, options);
-    return try renderFacts(allocator, facts);
+    const card = try review_card.collect(scratch.allocator(), project_dir, name, .{ .layout = options.layout });
+    return try renderCard(allocator, card);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -973,7 +1141,8 @@ const system_review_md = @import("system_review_md.zig");
 // spec: review-audit - the rendered audit parses as safe review Markdown with no raw HTML
 test "rendered audit survives the package Markdown rules with hostile cells" {
     const allocator = std.testing.allocator;
-    const facts = Facts{
+    const card = review_card.Card{
+        .design = "demo",
         .identity = .{
             .name = "demo",
             .revision = "B4",
@@ -985,15 +1154,41 @@ test "rendered audit survives the package Markdown rules with hostile cells" {
         },
         .digests = .{ .layout_sha256 = "aa", .source_sha256 = "bb", .release_token = "cc", .fab_id = "dd", .project_commit = "ee" },
         .schematic = .{ .preflight_errors = 1, .preflight_warnings = 2, .build_warnings = &.{"unknown sub-form (placement-order …) in (design-block …)"}, .notes_open = 3 },
+        .categories = &.{.{
+            .key = "identity",
+            .title = "Identity and sources",
+            .stripe = .{ .pass = 2, .fail = 1 },
+            .rows = &.{.{
+                .id = "build-warning-free",
+                .scope = "board",
+                .subject = "board",
+                .result = "1 evaluator warning(s)",
+                .verdict = .fail,
+                .evidence = "preflight eval_warning",
+                .closes_with = "fix the evaluator warning at the source span it names",
+                .policy = "blocking",
+            }},
+        }},
         .layout = .{ .available = true, .ladder = &.{.{ .id = "placement", .status = "current", .done = 0, .total = 224 }}, .drc_warnings = 2, .by_kind = &.{.{ .kind = "land_transit", .count = 2 }} },
         .fab = .{ .available = true, .ok = true, .needs_waiver = true, .warning_ids = &.{"drc-warn"} },
-        .inventory = .{ .parts = &.{.{ .ref = "adf/U1", .component = "adf4159", .class = "pll-loop (inferred)", .review = "pass", .checks = "3 ok / 1 unmet", .data = "0 electrical decl(s); supply-current item open", .unmet = "control-levels, supply-current" }} },
+        .parts = &.{.{
+            .ref = "adf/U1",
+            .component = "adf4159",
+            .class = "pll-loop (inferred)",
+            .review = "pass",
+            .checks = "3 ok / 1 unmet",
+            .data = "0 electrical decl(s); supply-current item open",
+            .unmet = "control-levels, supply-current",
+            .chip = .{ .ref = "adf/U1", .class = "pll-loop", .pass = 3, .fail = 1 },
+            .verdict = .fail,
+        }},
         .findings = &.{
             .{ .source = "layout_class_inferred", .severity = "warning", .ref = "V_24V", .message = "pin it with (module-policy (net-class \"V_24V\" <class>)) `now` **bold** [x]" },
             .{ .source = "eval_warning", .severity = "error", .ref = "", .message = "<script>alert(1)</script>" },
         },
+        .overall = .{ .verdict = .fail, .stripe = .{ .pass = 2, .fail = 1 }, .blocking = 1 },
     };
-    const markdown = try renderFacts(allocator, facts);
+    const markdown = try renderCard(allocator, card);
     defer allocator.free(markdown);
     var parsed = try system_review_md.parse(allocator, markdown, .{});
     defer parsed.deinit();
@@ -1002,6 +1197,8 @@ test "rendered audit survives the package Markdown rules with hostile cells" {
     try std.testing.expect(std.mem.indexOf(u8, markdown, "Layout / one") != null);
     try std.testing.expect(std.mem.indexOf(u8, markdown, "## Stage 1b") != null);
     try std.testing.expect(std.mem.indexOf(u8, markdown, "pll-loop (inferred)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "build-warning-free — Build warnings") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "| Identity and sources | 2 | 1 |") != null);
 }
 
 // spec: review-audit - regenerating into an existing audit keeps the reviewer's disposition cells for rows that are still rendered

@@ -1907,9 +1907,23 @@ pub const StackupSpec = struct {
 pub const NetClassSpec = struct {
     /// Pad-local trace width, constant-neck length, and taper length.
     pub const PadNeck = pad_neck_profile.Profile;
+    pub const VoltageDrop = struct {
+        limit_v: f64 = 0,
+        return_net: []const u8 = "GND",
+        /// Assumed conductor temperature: 25 C ambient plus the 10 C rise screen.
+        copper_temperature_c: f64 = 35,
+
+        pub fn valid(self: VoltageDrop) bool {
+            const valid_limit = std.math.isFinite(self.limit_v) and self.limit_v > 0;
+            const valid_temperature = std.math.isFinite(self.copper_temperature_c) and self.copper_temperature_c >= -50 and self.copper_temperature_c <= 200;
+            return valid_limit and valid_temperature and self.return_net.len > 0;
+        }
+    };
 
     name: []const u8 = "",
     width: f64 = 0,
+    /// Maximum source-to-load copper loop loss in volts; zero disables it.
+    voltage_drop: VoltageDrop = .{},
     /// Pad-local neck-down profile. The ordinary class width remains the
     /// routed trunk width; generated copper may use `width` for at most
     /// `max_length` from an SMD land centre, then grows back to the trunk over

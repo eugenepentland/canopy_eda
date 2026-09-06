@@ -152,6 +152,11 @@ const tools = [_]ToolEntry{
     // class-profile compliance, the ladder, the fab gate and the notes as one
     // Markdown document a reviewer dispositions.
     .{ .name = "review_audit", .is_mutation = false },
+    // The Board Review Card: the twelve fixed review categories, every row
+    // citing a registry check id with a verdict in the shared seven-word
+    // vocabulary, the per-part table, the fabrication block and the ladder.
+    // The CLI twin of GET /api/review-card/:name.
+    .{ .name = "review_card", .is_mutation = false },
     // Item-level board review: generated static/N-A verdicts plus bounded
     // agent/manual work queues. Agents record evidence through the paired
     // mutation instead of editing the review sidecar.
@@ -461,6 +466,7 @@ fn dispatchInfo(
     if (std.mem.eql(u8, tool_name, "describe_pcb_layout")) return try toolDescribePcbLayout(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "get_layout_progress")) return try toolGetLayoutProgress(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "review_audit")) return try @import("mcp_review_audit.zig").run(allocator, project_dir, args_val, out);
+    if (std.mem.eql(u8, tool_name, "review_card")) return try @import("review_card_api.zig").mcpReviewCard(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "review_checklist")) return try @import("mcp_board_review.zig").runChecklist(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "review_datasheet_inventory")) return try @import("mcp_board_review.zig").runDatasheetInventory(allocator, project_dir, args_val, out);
     if (std.mem.eql(u8, tool_name, "compare_layout_to_starred")) return try toolCompareLayoutToStarred(allocator, project_dir, args_val, out);

@@ -68,11 +68,33 @@ const IslandAnchorInputs = struct {
 /// the span of its pin stubs, on the pin-stub column. A series part turned
 /// toward this group lands on its NEAREST stub, so the lane meets the stub tie
 /// head-on instead of jogging onto the group's connection bus.
+/// `produces_rail` marks a group whose pin names say the hub SOURCES the net
+/// on it (`hub.groupProducesRail`): a regulator's OUT / OUTS / VOUT. A return
+/// may turn toward such a row even when the rail is shared with other hubs —
+/// the reader is looking at where that rail is made.
 pub const FunctionalPinRow = struct {
     cy: f64,
     first_stub_y: f64,
     last_stub_y: f64,
     stub_x: f64,
+    /// The row fan this group was given room for (`hub.groupHeights`), which
+    /// is where its connection bus will run: a turned return needs one body of
+    /// room before the nearest of these rows.
+    first_row_y: f64,
+    last_row_y: f64,
+    produces_rail: bool = false,
+};
+
+/// The rows one pin group actually drew, recorded when it rendered: the span
+/// of its connection bus (one row: the row's own wire), on the bus column. A
+/// turned return lands on the nearest end of this, so the net runs straight
+/// down into the group. `rows == 0` when every connection was drawn from
+/// another group's side and nothing is on the bus column at all.
+pub const RenderedRowSpan = struct {
+    first_y: f64,
+    last_y: f64,
+    rows: usize,
+    bus_x: f64,
 };
 
 const RenderScratch = struct {
@@ -95,6 +117,10 @@ const RenderScratch = struct {
     /// its lane runs straight into the neighbouring group's stub tie.
     functional_series_column_x: ?f64 = null,
     rendered_connection_end_y: ?f64 = null,
+    /// `RenderedRowSpan` per `<side>:<net>` for the current hub, filled as each
+    /// pin group renders and read by the deferred pass that closes turned
+    /// returns onto their destination.
+    rendered_row_spans: std.StringHashMapUnmanaged(RenderedRowSpan) = .empty,
 };
 
 // ── Flat types ────────────────────────────────────────────────────────

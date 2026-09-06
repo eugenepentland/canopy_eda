@@ -24,6 +24,35 @@ Auth in full: [auth.md](auth.md).
 - **Design list**: `GET /` — links to all .sexp designs, with per-card health chips (ERC errors/warnings, failed assertions, open notes, green PASS)
 - **Schematic viewer**: `GET /schematics/:name` — server-rendered HTML schematic with embedded SVG. `?variant=NAME` renders one of the design's declared assembly variants (see “Assembly variants” below). The page also embeds the design-review panels inline (power-budget table, power-sequence, test-points, per-section coverage). There is no standalone review-report endpoint.
 - **Thermal review**: `GET /thermal/:name[?ambient=NN][?scenario=natural|fan|airflow_1ms|airflow_2ms|heatsink|fan_heatsink][?layout=<saved>][?fragment=1][?row=<saved>]` — the **Thermal** tab (last in the shared design-view bar, right after Assembly, on the schematic / PCB / 3D / assembly pages; modules get it too, without Assembly). Server-rendered dark page: the board-coupled verdict pill + sentence with the package-level screen demoted under it, the ambient window, a cooling-scenario picker, the `?thermal=1` heat-zone image of the selected scenario, the cooling ladder (four generic rungs plus a board-authored fan row when present, and a combined fan-plus-heatsink row when both physical assemblies are configured), a per-part junction table for that scenario sorted hottest first (each row cross-probing to `/pcb-layout/<name>?focus=<ref>` + `/schematics/<name>#comp-<ref>` and announcing itself on the shared `netlisp-xprobe` channel), and a coverage footer with the unplaced refs and the screening-grade caveat. In the combined rung, fan convection is confined to its selected PCB face. An opposite-face sink keeps its natural-convection resistance and receives no fan credit; a same-face board sink receives overlap-weighted cooling from outlet-to-outer-surface distance while its base replaces direct PCB convection beneath it. Every sentence and cell comes from `review_thermal.zig`, so the page and the review panel/PDF can never disagree. `?ambient` is clamped to −55…125 rather than refused and `?fragment=1` answers the two ambient-dependent regions alone (what the page's own client swaps in); switching scenario is client-side. A design with no cooling ladder shows the reason instead of the picker, the image and the ladder — never a broken image. Toolbar: `⤓ PDF` → `/api/schematic-pdf/:name`, `{ } JSON` → `/api/thermal/:name`. `?layout=<saved>` screens one named saved layout instead of the design's default board — a layout picker beside the ambient window switches it, and the choice rides into the board frame, the tab bar, the cross-probe links and the JSON link, so nothing on the page describes a board other than the one it names; a `?layout` nobody saved falls back to the default board and says so rather than screening a board under the wrong name. Below the tables a **Compare layouts** panel lists every saved layout of the design (parts, saved copper, hottest part, Tj, and Δ against the board on screen). Only the shown board's row is filled on load — every other row is a whole second solve, so rows fill one at a time on click or via a "Solve all" sweep the reader can stop; `?row=<saved>` answers one row's cells alone. A design with one board renders no panel. `:name` resolves as a design or a bare `lib/modules` module (percent-decoded first); unknown name → 404 plain text. Read-only (`src/serve/thermal_page.zig`).
+- **Board review**: `GET /review/:name[?layout=<saved>][?view=reference]` — the
+  **Review** tab of the shared design-view bar. By default it renders the
+  **Board Review Card**: a shell (`src/serve/review_card_page.zig`) that paints
+  immediately and then fetches `GET /api/review-card/:name[?layout=]` and lays
+  it out — a header (design, revision, part number, reviewed layout, short
+  release token, overall verdict pill, blocking/waivable/advisory counts,
+  releasable yes/no, the screening ambient and the card's own provenance row for
+  it), the twelve fixed review categories in registry order with a colour-coded
+  count stripe per category and a verdict legend, each category expanding to its
+  rows (`Check id · Scope/subject · Result · Verdict · Evidence · Closes with`,
+  the closing form in monospace and a waived row's record beside its evidence),
+  filters over the seven-word vocabulary (`fail · unproven · not declared ·
+  waived · manual · all`) plus a text search over ids, subjects, results and
+  evidence, the per-part table (ref, component, class, review, checks,
+  electrical, unmet, and the part's review chip linking to the schematic BOM
+  spec sheet at `/schematics/<name>#page-bom`), the fabrication-gate block and
+  the layout ladder with the DRC tallies. The card can take a minute cold —
+  every release check, the fabrication gate, the DRC and the thermal screen run
+  for it — so the page narrates the wait and never shows a blank shell.
+  `?view=reference` renders the **Reference checklist** instead
+  (`src/serve/board_review.zig`): the 258-item, 13-section research catalogue
+  with its generated assessment, its exact fitted-part datasheet coverage and
+  its saved `.review.json` dispositions, unchanged — `GET|POST
+  /api/board-review/:name` and `GET /api/board-review-audit/:name` still back
+  it, and each generated item now names the registry rows that prove it as
+  links onto the card's `#row-<registry id>` anchor. `?layout=` rides into every
+  board link, the card request and the reference link. Unknown design → 404
+  plain text. Read-only in the card view; the reference view's mutations need
+  the writer role and the `X-Netlisp-Review: 1` header.
 - **Scene graph**: `GET /api/scene-graph/:name` — JSON scene graph for schematic (used by the live-push pipeline)
 - **Schematic PDF**: `GET /api/schematic-pdf/:name[?theme=light]` — the design-review document as an `application/pdf` attachment (default = the viewer's dark screen theme, page background included; `?theme=light` = print palette) (`<name>.pdf`): cover, one A4-landscape sheet per `(section …)` (the section's hub blocks **plus the single-instance `(sub-block …)` modules that section owns** shelf-packed into a 2D grid at one uniform scale, each cell captioned with its pin-group label or `<sub-block> - <module title>`, the section's notes and its modules' notes under the grid; a section with no drawing at all packs as a compact entry, and the `(sub-block)` appendix keeps only what no section drew — unattached and multi-instance `x N` modules), validation appendix, power/test-point tables. The HTTP twin of `netlisp export-pdf` (`src/serve/schematic_pdf.zig` → `src/export_pdf.zig`), so the download and the CLI's output are the same document, with a real `/CreationDate` added. `:name` resolves as a design or a bare `lib/modules` module (percent-decoded first); unknown name → 404 plain text. Read-only, composed on demand, self-checked by `pdf.validate` before it is served, and then retained (`src/serve/read_cache.zig`) keyed by design and `?theme=`, against the evaluator read-set plus the placement sidecars its cooling ladder is solved from. A cached document is served without re-running `pdf.validate` — those exact bytes already passed it — and keeps the `/CreationDate` (and matching cover date) of the compose that produced it, so two downloads of an unchanged design are byte-identical. `X-Netlisp-Pdf-Cache: hit|miss|bypass` reports which happened. The schematic page's `⤓ PDF` toolbar button points here (module pages too).
 - **KiCad schematic**: `GET /api/kicad-sch/:name[?vendor=0][?flat=1]` — the
@@ -476,12 +505,46 @@ Auth in full: [auth.md](auth.md).
   because the ref is a path segment the store's query folding cannot see.
   `X-Netlisp-Part-Review-Cache: hit|miss|bypass` reports which happened. CLI
   twin: `part_review`, sharing this body.
+- **Board review card**: `GET /api/review-card/:name[?layout=<saved>]` — one
+  board's whole unit review (`src/review_card.zig`, served by
+  `src/serve/review_card_api.zig`) as read-only JSON. The body carries
+  `identity` and `digests` (the board, the reviewed layout, the tree state, the
+  release token and the content digests the evidence is bound to), `schematic`
+  (the release-profile and ERC tallies and the open-note count), the twelve
+  fixed review `categories[]` in registry order — `identity`, `connectivity`,
+  `supply_voltages`, `power_budget`, `decoupling`, `sequencing_levels`,
+  `component_ratings`, `thermal`, `datasheet_compliance`, `bom`, `layout`,
+  `domain_analyses` — each with a count `stripe` and its `rows[]`, `parts[]`
+  (one row per active part: class, datasheet review, requirement tally, unmet
+  class-profile items and the part's review chip), `fab` (the gate verdict, its
+  finding ids and the board statistics), `layout` (the completion ladder and the
+  DRC tallies by kind) and `overall` (the worst verdict, how many open rows
+  block a release at each policy, and whether the board is releasable).
+  Every row cites a check `id` from the review registry — the "Review checks"
+  catalogue `docs/language-forms.md` renders from `src/review_registry.zig` —
+  and carries the `scope` and `subject` it is about, the `result` the engine
+  returned, a `verdict` in the shared seven-word vocabulary (`pass`, `fail`,
+  `unproven`, `waived`, `not_applicable`, `not_declared`, `manual`), the
+  `evidence` that produced it, the `closes_with` form that closes it, its
+  `policy` (`blocking`, `waivable`, `advisory`) and the `record` a waived row is
+  closed by. The id decides the category, scope, policy and closing form, so a
+  row cannot drift from the catalogue. A category whose input the board never
+  declared reports `not_declared` rows naming the missing form rather than
+  staying silent. `?layout=` reviews a NAMED saved layout (a different board to
+  the DRC, the ladder and the gate) and is keyed into the cache rather than
+  bypassing it; unknown design → 404. Read-only, retained in
+  `src/serve/read_cache.zig` against the evaluator read-set;
+  `X-Netlisp-Review-Card-Cache: hit|miss|bypass` reports which happened. CLI
+  twins: the `review_card` tool and `netlisp review-card`, sharing this body;
+  the `review_audit` tool and `netlisp review-audit` render the same card as the
+  standard's Markdown audit.
 - **Thermal facts**: `GET /api/thermal/:name[?ambient=NN][?layout=<saved>]` — the lumped
   steady-state thermal screening (`src/eval/thermal.zig`) as read-only JSON:
   `ambient_c`, the board `verdict`
   (`passive_ok`/`needs_airflow`/`needs_heatsink`/`over_limit`/`insufficient_data`),
   the `limiting_ref` it hangs on, the `max_ambient`/`min_ambient` window with the
-  part setting each end, coverage `counts`, and a `parts[]` row per part
+  part setting each end, coverage `counts`, an `ambient_source` object saying
+  where the screening ambient came from, and a `parts[]` row per part
   (power/theta/limits/result; unknown figures are `null`, never 0). `:name` is a
   design or a bare `lib/modules` module (percent-decoded, resolved standalone
   through its parameter defaults); an unknown name is 404 plain text and a
@@ -496,8 +559,17 @@ Auth in full: [auth.md](auth.md).
   with the sentence saying so instead of the default board's numbers, and naming
   the starred layout folds to the default board so both spellings share one
   cached solve. `GET /api/thermal-field/:name` (the board overlay's heat field)
-  takes the same argument. CLI twin: `describe_thermal`, sharing this
-  endpoint's whole body (`src/serve/thermal_api.zig`).
+  takes the same argument. **Without `?ambient`, the screen runs at the ambient
+  the governing system brief states** (`(brief (environment (ambient MIN MAX)))`
+  on the system that declares this board — its MAX), falling back to the 25 °C
+  bench default when no brief governs it. `ambient_source` carries `system`,
+  `ambient_min_c`, `ambient_max_c`, `cooling`, `scenario`, `note` and
+  `overridden`: every field but the last is `null` when nothing declared one,
+  `note` is non-null only when the screened scenario is a conservative stand-in
+  for a cooling case the solver cannot model (`sealed-conduction`), and
+  `overridden` is `true` when `?ambient` was supplied, so a client can tell a
+  what-if from the product's own envelope. CLI twin: `describe_thermal`, sharing
+  this endpoint's whole body (`src/serve/thermal_api.zig`).
 
   The retained solve (`src/serve/thermal_cache.zig`) skips the relaxation, not
   the design evaluation each request opens with — so the finished RESPONSE is
@@ -870,6 +942,14 @@ Tools include:
   be told different junction temperatures for the same design, ambient and
   layout. It
   resolves a design or a bare `lib/modules` module and touches nothing on disk.
+- **Board review card (read-only)**: `review_card` `{name, layout?}` — the CLI
+  twin of `GET /api/review-card/:name[?layout=]`, returning the identical bytes
+  through one shared body: the twelve review categories with their count
+  stripes and rows (each citing a registry check id, with a verdict in the
+  seven-word vocabulary), the per-part table, the fabrication block, the layout
+  ladder and the board answer. `netlisp review-card [--layout N] [--output F]
+  [--markdown] <design>` prints the same JSON, or the audit's Markdown form.
+  Read-only.
 - **Per-part review (read-only)**: `part_review` `{name, ref?}` — the CLI twin
   of `GET /api/part-review/:name[/:ref]`, returning the identical bytes through
   one shared body. With `ref` it answers that placed part's whole review
@@ -887,7 +967,12 @@ Tools include:
   kind, open notes, and a findings register with empty Disposition cells.
   The CLI twin is `netlisp review-audit [--layout N] [--output F] <board>`;
   the document parses under the system-review Markdown rules, so it can be
-  registered as a board-scoped review document. `run_checks` and `build`
+  registered as a board-scoped review document. It is rendered FROM the Board
+  Review Card, so every stage row's Check cell now reads `<registry id> — <the
+  check>` and a "Review card" section carries the category count stripe;
+  regenerating with `--output` still carries the reviewer's filled
+  Disposition/Owner/Date cells forward onto every row the new evidence renders
+  identically. `run_checks` and `build`
   accept `profile:"release"` — preflight plus the component-class profile
   obligations (`profile_incomplete`), a cited-requirement demand on every
   active part, and evaluator warnings as findings.
@@ -1026,6 +1111,16 @@ every remedy `describe_pcb_layout`'s `stuck[]` emits. When a net's diagnosis is
 no priority edit reopens it"), no amount of DSL/priority iteration can close it;
 the loop is closed. **`add_tracks`** is the write seam that breaks it — the
 mutation counterpart of `clear_routes`:
+
+For a local repair, `clear_routes` accepts `x`, `y`, `radius`, a `nets` or
+`groups` scope, and `include_tracks:true`. This removes selected track/arc
+records whose copper intersects the circular window, plus selected vias whose
+centres lie inside it. Records are atomic: a long crossing track is removed in
+full. Distant records, foreign nets, pours and mechanical/fabrication metadata
+are preserved. Swept RF paths require whole-net clearing and are refused in
+this mode. Omitting `include_tracks` keeps the existing via-only operation.
+Use this on a separate candidate, then `close_open_nets` to reconnect both the
+original target and every displaced net before accepting the repair.
 
 ```jsonc
 add_tracks {

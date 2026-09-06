@@ -65,6 +65,14 @@
     generatedBox.append(el("strong",null,auto.summary));
     if(auto.evidence)generatedBox.append(el("span",null,auto.evidence));
     if(auto.source)generatedBox.append(el("small",null,"Evidence source: "+auto.source));
+    // The registry rows that PROVE this criterion. The catalogue is the
+    // reference behind the Board Review Card, so an item an engine answers
+    // links to the card row that ran rather than repeating its verdict here.
+    if((auto.registry_ids||[]).length){
+      const ids=el("div","id-list");ids.append(el("span",null,"Proved by:"));
+      auto.registry_ids.forEach(id=>{const link=el("a",null,id);link.href="/review/"+encodeURIComponent(DESIGN_NAME)+"#row-"+id;link.title="Open this check on the Board Review Card";ids.append(link)});
+      generatedBox.append(ids);
+    }
     row.append(generatedBox);
 
     const detail=el("details","item-detail"),detailSummary=el("summary",null,"Reviewer / agent override"),editor=el("div","override-editor"),evidence=el("input"),note=el("textarea"),save=el("button",null,"Save override");

@@ -9,6 +9,7 @@
 const std = @import("std");
 const catalog = @import("board_review_catalog.zig");
 const json_writer = @import("json_writer.zig");
+const registry = @import("review_registry.zig");
 const review_audit = @import("review_audit.zig");
 
 /// Machine-generated checklist disposition before a saved override is applied.
@@ -34,6 +35,11 @@ pub const Item = struct {
     summary: []const u8 = "Queued for agent review",
     evidence: []const u8 = "No deterministic rule currently proves the complete criterion.",
     source: []const u8 = "board review catalog",
+    /// The `review_registry` rows that prove this catalogue item, so the
+    /// reference view can send a reader to the Board Review Card row that
+    /// actually ran rather than to a second, hand-maintained verdict. Empty
+    /// for the items no engine answers.
+    registry_ids: []const []const u8 = &.{},
 };
 
 /// Totals displayed in the generated-review dashboard.
@@ -386,6 +392,67 @@ fn inheritRepeatedGotchas(allocator: std.mem.Allocator, items: []Item) std.mem.A
     }
 }
 
+/// One catalogue item and the registry rows that answer it.
+const RegistryLink = struct {
+    /// The catalogue item id, as `board_review_checklist.md` numbers it.
+    item: []const u8,
+    /// Every `review_registry` id whose row proves the item.
+    ids: []const []const u8,
+};
+
+/// Which registry rows prove which catalogue item.
+///
+/// The catalogue predates the registry: its 258 prose criteria were written
+/// against a checklist, and the machine rules above were then bolted onto the
+/// ones an engine could decide. This table is the join between the two, so the
+/// reference view can say "the Board Review Card already answers this, here"
+/// instead of carrying a second opinion. Only the items a registered check
+/// actually answers appear; the rest stay unlinked rather than pointing at a
+/// row that does not judge them.
+///
+/// A test below refuses an id `review_registry.lookup` does not know, which is
+/// what keeps the table from rotting as rows are renamed.
+const registry_links: []const RegistryLink = &.{
+    .{ .item = "1.3", .ids = &.{ "rail-budget-margin", "rail-consumers-annotated" } },
+    .{ .item = "1.14", .ids = &.{ "no-outline", "outline-drift" } },
+    .{ .item = "2.1", .ids = &.{"erc-clean"} },
+    .{ .item = "2.2", .ids = &.{ "net-not-floating", "pin-connected", "no-connect-dispositioned", "strap-dispositioned" } },
+    .{ .item = "2.3", .ids = &.{"pin-single-net"} },
+    .{ .item = "2.4", .ids = &.{"rail-source-used"} },
+    .{ .item = "2.6", .ids = &.{ "instance-footprint-present", "unresolvable-pin", "pin-function-known", "pin-function-required" } },
+    .{ .item = "2.9", .ids = &.{ "rail-voltage-resolved", "rail-voltage-consistent" } },
+    .{ .item = "2.10", .ids = &.{ "rail-budget-margin", "rail-sourced" } },
+    .{ .item = "2.11", .ids = &.{ "enable-order-acyclic", "check-sequence" } },
+    .{ .item = "2.12", .ids = &.{ "refdes-unique", "missing-identity", "duplicate-identity", "centroid-parity" } },
+    .{ .item = "2.13", .ids = &.{"dnp-in-centroid"} },
+    .{ .item = "2.14", .ids = &.{"test-point-present"} },
+    .{ .item = "2.15", .ids = &.{"revision-missing"} },
+    .{ .item = "3.2.1", .ids = &.{ "check-cap-rating", "component-rating-margin" } },
+    .{ .item = "4.1.2", .ids = &.{ "supply-pin-decoupled", "supply-pin-decoupling-rule", "decoupling-binding-resolved", "decoupling-binding-valid" } },
+    .{ .item = "4.2.1", .ids = &.{ "pin-abs-max-respected", "check-voltage-not-above" } },
+    .{ .item = "4.2.2", .ids = &.{ "logic-level-compatible", "control-pin-levels-declared" } },
+    .{ .item = "4.3.1", .ids = &.{ "strap-dispositioned", "no-connect-dispositioned", "check-pin-not-floating" } },
+    .{ .item = "4.5.7", .ids = &.{"diff-pair-both-halves"} },
+    .{ .item = "5.4.6", .ids = &.{ "rail-budget-margin", "rail-consumers-annotated", "power-width", "via-current" } },
+    .{ .item = "8.15", .ids = &.{"assembly-fiducials-present"} },
+    .{ .item = "8.16", .ids = &.{ "no-outline", "outline-drift", "malformed-outline", "part-off-board" } },
+    .{ .item = "9.1", .ids = &.{ "bom-identity", "missing-identity", "duplicate-identity", "centroid-parity", "dnp-in-centroid" } },
+    .{ .item = "9.2", .ids = &.{ "bom-identity", "bom-spec-missing", "bom-spec-unmatched" } },
+    .{ .item = "9.3", .ids = &.{ "footprint-geometry-unresolved", "unresolvable-pin" } },
+    .{ .item = "11.1", .ids = &.{ "release-gate-clear", "fabrication-identity-incomplete" } },
+    .{ .item = "11.2", .ids = &.{ "via-no-drill", "drc-min-drill" } },
+    .{ .item = "12.3", .ids = &.{"test-point-present"} },
+    .{ .item = "12.6", .ids = &.{ "layout-frozen", "design-notes-closed", "revision-missing" } },
+};
+
+/// Attach the registry rows that prove each linked catalogue item.
+fn linkRegistryIds(items: []Item) void {
+    for (registry_links) |link| {
+        const item = find(items, link.item) orelse continue;
+        item.registry_ids = link.ids;
+    }
+}
+
 fn applyStaticRules(allocator: std.mem.Allocator, items: []Item, facts: review_audit.Facts) std.mem.Allocator.Error!void {
     try applyPowerAndOutlineRules(allocator, items, facts);
     try applySchematicRules(allocator, items, facts);
@@ -394,6 +461,7 @@ fn applyStaticRules(allocator: std.mem.Allocator, items: []Item, facts: review_a
     try applyReleaseRules(allocator, items, facts);
     try inheritRepeatedGotchas(allocator, items);
     applyRequestedScope(items);
+    linkRegistryIds(items);
 }
 
 /// Generate applicability, deterministic results, and remaining work packets.
@@ -444,7 +512,12 @@ pub fn writeAssessmentJson(w: *std.Io.Writer, items: []const Item) (std.mem.Allo
         try json_writer.writeString(w, item.evidence);
         try w.writeAll(",\"source\":");
         try json_writer.writeString(w, item.source);
-        try w.writeByte('}');
+        try w.writeAll(",\"registry_ids\":[");
+        for (item.registry_ids, 0..) |id, id_index| {
+            if (id_index > 0) try w.writeByte(',');
+            try json_writer.writeString(w, id);
+        }
+        try w.writeAll("]}");
     }
     try w.writeAll("]}");
 }
@@ -489,4 +562,41 @@ test "assessment closes only exact static and clear N-A predicates" {
     const blocked_items = try build(arena, unrelated_fab_failure);
     try std.testing.expectEqual(Verdict.na, find(blocked_items, "11.2").?.classification.verdict);
     try std.testing.expectEqual(Method.static, find(blocked_items, "11.2").?.classification.method);
+}
+
+// spec: serve/board-review - every registry id the generated assessment names resolves to a registered review check, so a reference item links to a card row that exists
+test "assessment registry links all resolve in the review registry" {
+    var seen: usize = 0;
+    for (registry_links) |link| {
+        try std.testing.expect(catalog.validItemId(link.item));
+        try std.testing.expect(link.ids.len > 0);
+        for (link.ids) |id| {
+            _ = registry.lookup(id) orelse return error.UnregisteredCheckId;
+            seen += 1;
+        }
+    }
+    try std.testing.expect(seen >= registry_links.len);
+}
+
+// spec: serve/board-review - a generated item carries the registry rows that prove it and the assessment JSON publishes them
+test "generated items publish the registry rows that prove them" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const facts = review_audit.Facts{
+        .identity = .{ .name = "demo", .revision = "A", .part_number = "P", .layout = "release", .project_status = "clean", .tool_commit = "t", .generated_at = "now" },
+    };
+    const items = try build(arena, facts);
+    const erc_item = find(items, "2.1") orelse return error.MissingItem;
+    try std.testing.expectEqual(@as(usize, 1), erc_item.registry_ids.len);
+    try std.testing.expectEqualStrings("erc-clean", erc_item.registry_ids[0]);
+    const freeze = find(items, "12.6") orelse return error.MissingItem;
+    try std.testing.expectEqual(@as(usize, 3), freeze.registry_ids.len);
+    // An item no engine answers stays unlinked rather than pointing at a row
+    // that does not judge it.
+    try std.testing.expectEqual(@as(usize, 0), (find(items, "2.16") orelse return error.MissingItem).registry_ids.len);
+
+    var out: std.Io.Writer.Allocating = .init(arena);
+    try writeAssessmentJson(&out.writer, items);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"registry_ids\":[\"erc-clean\"]") != null);
 }

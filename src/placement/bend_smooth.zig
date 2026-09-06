@@ -5,11 +5,9 @@
 //! frequency, a radiator. The standard layout rule of thumb is a centerline
 //! bend radius of at least 3x the trace width. A net opts in by belonging to
 //! a `(net-class … (max-freq HZ))`; this pass then rebuilds the net's routed
-//! polylines and replaces every corner it can with a tangent arc at that
-//! radius. A RIGHT-ANGLE corner — the maze's staple and the harshest turn on
-//! the trace — aims instead at the biggest arc its two legs can physically
-//! host, which is free: a fillet only cuts inside its corner, so the copper
-//! gets shorter, not longer. A corner too short for the symmetric fillet is
+//! polylines and replaces every corner it can with the largest tangent arc
+//! its legs, pad launches and surrounding copper permit. The same rule applies
+//! at 45 degrees and at right angles. A corner too short for the symmetric fillet is
 //! retried three ways before it is conceded: shrink the radius (and, if a
 //! one-sided obstacle crowds the cut, below the floor to the largest clearing
 //! chamfer); on a lopsided corner slide the arc unequally along the two legs
@@ -45,27 +43,11 @@ const radius_eps_mm: f64 = 1e-6;
 /// width. A `(net-class … (min-bend-radius N))` overrides this floor per net
 /// (see `floorRatio`).
 pub const radius_width_ratio: f64 = 3.0;
-/// Radius the smoother AIMS for: the largest arc that fits the corner's legs
-/// and clearance, capped at 5x the trace width. Beyond ~5W the return-loss
-/// improvement is negligible while the corner cut keeps growing (hurting
-/// length matching), so the cap keeps generous bends without noodling. A
-/// `(min-bend-radius N)` above this cap lifts the aim to N (see `aimRatio`) —
-/// otherwise the smoother could never reach the floor it must satisfy.
+/// Initial radius request when sharing legs between neighbouring corners.
+/// Every corner then grows toward the geometric maximum, subject to copper
+/// clearance and the straight launch reserves. This is no longer a cap that
+/// makes a rotated 45-degree part receive a tighter bend than a 90-degree part.
 const max_radius_width_ratio: f64 = 5.0;
-
-/// A RIGHT-ANGLE corner is the exception to that cap: a square turn is the
-/// harshest discontinuity a routed RF trace carries, so it aims at the largest
-/// arc its two legs can physically host (`legMaxClaim`) instead of a width
-/// multiple. A fillet only ever cuts INSIDE its corner, so opening one up
-/// SHORTENS the copper rather than lengthening it, and a cut that crowds
-/// anything still walks back down the same ladder to the same floor.
-///
-/// This constant is how far (radians, ~3°) a corner may sit off a true quarter
-/// turn and still count as one. The maze turns on a lattice, so the tolerance
-/// only has to absorb the direction rounding of finite-precision endpoints; it
-/// stays far clear of the neighbouring 45° and 135° lattice turns, which keep
-/// the width-multiple aim exactly as before.
-const right_angle_tol: f64 = 0.05;
 
 const eps = 1e-9;
 /// Endpoint-matching quantum (mm) when rebuilding polylines from segments.
@@ -128,10 +110,9 @@ fn aimRatio(r: optimizer.NetRule) f64 {
     return @max(max_radius_width_ratio, floorRatio(r));
 }
 
-/// Does this corner turn a square corner — and so aim at the geometric maximum
-/// its legs allow instead of `aimRatio` x width (see `right_angle_tol`)?
-fn isRightAngle(defl: f64) bool {
-    return @abs(defl - std.math.pi / 2.0) <= right_angle_tol;
+/// Any real, non-reversing corner may use the available tangent room.
+fn maximalCorner(defl: f64) bool {
+    return defl >= min_deflection and defl <= max_deflection;
 }
 
 /// The smoothing outcome: replacement copper plus the under-radius report.
@@ -226,6 +207,9 @@ pub fn apply(arena: std.mem.Allocator, in: Input) std.mem.Allocator.Error!Result
             if (ni < placement.rules.net.len) placement.rules.net[ni] else null;
         r.* = minBendRadius(rule, in.params.track_width);
         esc.* = if (rule) |nr| nr.rf.escape_mm else 0;
+        if (rule) |nr| {
+            if (nr.rf.escape_automatic) esc.* = @min(esc.*, (if (nr.width > 0) nr.width else in.params.track_width) / 2);
+        }
         aim.* = if (rule) |nr| aimRatio(nr) else max_radius_width_ratio;
         any = any or r.* > 0;
     }
@@ -904,6 +888,11 @@ const Smoother = struct {
         const sink = self.sink;
         const p = c.chain.pts;
         const i = c.i;
+        const inside_start = c.esc.start > 0 and c.esc.cum[i] < c.esc.start;
+        const inside_end = c.esc.end > 0 and c.esc.total - c.esc.cum[i] < c.esc.end;
+        // A tiny gateway kink inside a reserved launch is not an invitation
+        // to grow an arc back into the launch. Keep the existing quiet stub.
+        if (c.defl[i] < shallow_kink_max and (inside_start or inside_end)) return;
         const width = @min(c.chain.widths[i - 1], c.chain.widths[i]);
         const flag_all = c.defl[i] > max_deflection;
         const half = c.defl[i] / 2.0;
@@ -912,18 +901,16 @@ const Smoother = struct {
         const len_next = dist(p[i], p[i + 1]);
         var allow_prev = legShare(len_prev, c.want[i], c.want[i - 1]);
         var allow_next = legShare(len_next, c.want[i], c.want[i + 1]);
-        // A square corner aims at the geometric maximum instead of the width
-        // multiple, so it also claims the leg room its neighbour's want leaves
-        // over (`legMaxClaim`). Zero on every other corner, which then keeps
-        // exactly the width-multiple budget it has always had.
-        const square = isRightAngle(c.defl[i]);
+        // Every valid corner claims the available tangent room, including a
+        // rotated passive's 45-degree exit. Adjacent corners share the leg.
+        const maximal = maximalCorner(c.defl[i]);
         const reserve = straightReserve(width);
-        var most_prev = if (square)
-            legMaxClaim(len_prev, c.want[i], c.want[i - 1], isRightAngle(c.defl[i - 1]), reserve)
+        var most_prev = if (maximal)
+            legMaxClaim(len_prev, c.want[i], c.want[i - 1], maximalCorner(c.defl[i - 1]), reserve)
         else
             0;
-        var most_next = if (square)
-            legMaxClaim(len_next, c.want[i], c.want[i + 1], isRightAngle(c.defl[i + 1]), reserve)
+        var most_next = if (maximal)
+            legMaxClaim(len_next, c.want[i], c.want[i + 1], maximalCorner(c.defl[i + 1]), reserve)
         else
             0;
         // The straight pad-escape reserve: an arc may not cut back into the
@@ -1870,14 +1857,9 @@ test "min-bend-radius raises the aim above the cap and lowers the flag threshold
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // (a) A floor ABOVE the 5x aim cap (6x width): long legs let the corner
-    // open all the way to the 6x radius (1.8 mm) — the aim rises to meet the
-    // floor, so it is NOT flagged. Under the plain 5x cap the arc would stall
-    // at 1.5 mm, short of the 1.8 mm floor, and flag.
-    //
-    // Measured on a 45-degree bend: a SQUARE corner ignores the width-multiple
-    // aim entirely (it takes the whole leg), so the aim ratio is only
-    // observable on the lattice's other turn.
+    // (a) A 6x floor (1.8 mm) is still enforced when all angles use their
+    // available tangent room. A long 45-degree corner opens beyond the floor
+    // rather than stopping at the former 5x width cap and falsely flagging.
     const gentle = optimizer.NetRule{ .width = 0.3, .rf = .{ .max_freq_hz = 12e9, .min_bend_ratio = 6 } };
     try testing.expectApproxEqAbs(1.8, minBendRadius(gentle, 0.127), 1e-12);
     const long = [_]router.Track{
@@ -1887,8 +1869,7 @@ test "min-bend-radius raises the aim above the cap and lowers the flag threshold
     const g = try apply(arena, .{ .placement = fixturePlacement(&fixture_nets, &.{gentle}), .params = .{}, .tracks = &long });
     try testing.expectEqual(@as(usize, 1), g.arcs.len);
     try testing.expectEqual(@as(usize, 0), g.sharp.len);
-    // The arc reached the 6x floor (1.8 mm) — the aim lifted above the 5x cap.
-    try testing.expectApproxEqAbs(1.8, arcLength(g.arcs[0]) / (std.math.pi / 4.0), 1e-6);
+    try testing.expect(arcLength(g.arcs[0]) / (std.math.pi / 4.0) >= 1.8);
 
     // (b) A floor BELOW the default (2x width): a 0.7 mm-leg corner opens to
     // r ≈ 0.7 mm. Against the 2x floor (0.6 mm) that is compliant — arc, no
@@ -2009,12 +1990,13 @@ test "45-degree bend arc geometry is correct" {
     const arc = res.arcs[0];
     // Every point of the arc stays within the tangent length of the apex —
     // with a wrong center distance the mid/samples wander far outside.
-    const t = 1.5 * @tan(std.math.pi / 8.0);
+    const t = 3.7; // four-mm incoming leg, retaining a trace-width straight
     for (try tessellate(arena, arc, 0.005)) |ch| {
         try testing.expect(std.math.hypot(ch.x2 - 4.0, ch.y2 - 0.0) <= t + 1e-6);
     }
-    // And the arc's own radius (from its three points) is the full 5W cap.
-    try testing.expectApproxEqAbs(1.5 * std.math.pi / 4.0, arcLength(arc), 1e-6);
+    // Rotation does not impose a 5W cap: use nearly all available tangent room.
+    const radius = arcLength(arc) / (std.math.pi / 4.0);
+    try testing.expect(radius > 8.8 and radius < 9.0);
 }
 
 // spec: placement/bend-smooth - consecutive corners share a leg fairly and both smooth

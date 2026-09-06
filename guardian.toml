@@ -238,6 +238,11 @@ command = ["node", "--check", "src/serve/assets/board_review.js"]
 inputs = ["src/serve/assets/board_review.js"]
 
 [[external]]
+name = "board-review-card-js-syntax"
+command = ["node", "--check", "src/serve/assets/board_review_card.js"]
+inputs = ["src/serve/assets/board_review_card.js"]
+
+[[external]]
 name = "pcb-step-worker-js-syntax"
 command = ["node", "--check", "src/serve/assets/pcb_step_worker.js"]
 inputs = ["src/serve/assets/pcb_step_worker.js"]
@@ -1258,6 +1263,11 @@ parity_test = "returns the same body as the fence endpoint"
 name = "pcb-describe"
 surfaces = ["http:/api/pcb-describe", "mcp:describe_pcb_layout"]
 parity_test = "returns the same facts document as the pcb-describe endpoint"
+
+[[twin]]
+name = "review-card"
+surfaces = ["http:/api/review-card", "mcp:review_card"]
+parity_test = "review_card is registered read-only and shares the endpoint body"
 
 [[twin]]
 name = "layout-progress"

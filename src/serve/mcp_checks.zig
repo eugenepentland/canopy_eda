@@ -345,7 +345,7 @@ fn runChecks(allocator: std.mem.Allocator, args: RunChecksArgs, w: anytype) !boo
     const assertion_errors = try writeAssertions(w, &eval, args.severity);
     const erc = try runErcForNamedBlock(allocator, nb, args.project_dir);
     const erc_errors = try writeErcResults(w, erc, args.severity, changes);
-    const report = try preflight.run(allocator, &eval, nb.block, args.project_dir, args.profile);
+    const report = try preflight.runFor(allocator, &eval, nb.block, args.project_dir, args.profile, args.name);
     defer report.deinit(allocator);
     try writeFindings(w, report, args.severity, changes);
     const preflight_ok = erc_errors == 0 and assertion_errors == 0 and report.errors == 0;

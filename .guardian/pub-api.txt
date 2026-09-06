@@ -248,6 +248,26 @@ src/bom_resolve.zig::entryMatchesSource | fn entryMatchesSource(entry: bom_mod.B
 src/bom_resolve.zig::existingSidecarMatches | fn existingSidecarMatches( allocator: std.mem.Allocator, block: *const DesignBlock, bom_path: []const u8, project_dir: []const u8, ) ResolveError!bool
 src/bom_resolve.zig::resolveIdentities | fn resolveIdentities( allocator: std.mem.Allocator, block: *const DesignBlock, bom_path: []const u8, project_dir: []const u8, ) ResolveError!void
 src/bom_resolve.zig::setBomProperty | fn setBomProperty( allocator: std.mem.Allocator, bom_path: []const u8, ref_des: []const u8, key: []const u8, value: []const u8, ) SetPropertyError!void
+src/brief_checks.zig::Derating struct_
+src/brief_checks.zig::Mapping struct_
+src/brief_checks.zig::Observation struct_
+src/brief_checks.zig::Plan struct_
+src/brief_checks.zig::Result enum_
+src/brief_checks.zig::Window struct_
+src/brief_checks.zig::analyzeGoverned | fn analyzeGoverned( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, design_name: []const u8, override_c: ?f64, ) std.mem.Allocator.Error!thermal.BoardThermal
+src/brief_checks.zig::declaredGrade | fn declaredGrade(inst: Instance) ?system_review.TemperatureGrade
+src/brief_checks.zig::deratingFor | fn deratingFor(declared: ?[]const u8) ?Derating
+src/brief_checks.zig::deratingForBoard | fn deratingForBoard( allocator: std.mem.Allocator, project_dir: []const u8, design_name: []const u8, ) ?Derating
+src/brief_checks.zig::id_esd_protection value
+src/brief_checks.zig::id_input_power value
+src/brief_checks.zig::id_operating_range value
+src/brief_checks.zig::id_temperature_grade value
+src/brief_checks.zig::observe | fn observe( allocator: std.mem.Allocator, block: *const DesignBlock, project_dir: []const u8, plan: Plan, ) std.mem.Allocator.Error![]const Observation
+src/brief_checks.zig::parseGrade | fn parseGrade(word: []const u8) ?system_review.TemperatureGrade
+src/brief_checks.zig::planFor | fn planFor( allocator: std.mem.Allocator, project_dir: []const u8, design_name: []const u8, ) Plan
+src/brief_checks.zig::planOf | fn planOf(system: []const u8, brief: Brief) Plan
+src/brief_checks.zig::scenarioFor | fn scenarioFor(cooling: system_review.Cooling) Mapping
+src/brief_checks.zig::sealed_conduction_note value
 src/build_id.zig::current | fn current() []const u8
 src/build_id.zig::load | fn load( io: std.Io, allocator: std.mem.Allocator, repo_root: []const u8, ) []const u8
 src/canonical_module_check.zig::Finding struct_
@@ -270,6 +290,7 @@ src/commands.zig::cmdImportKicadLayout | fn cmdImportKicadLayout( allocator: std
 src/commands.zig::cmdInspectKicad | fn cmdInspectKicad( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdMergeLayout | fn cmdMergeLayout( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdReviewAudit | fn cmdReviewAudit(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
+src/commands.zig::cmdReviewCard | fn cmdReviewCard(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdRouteKicadReference | fn cmdRouteKicadReference( allocator: std.mem.Allocator, args: []const []const u8, ) InspectCommandError!void
 src/commands.zig::cmdSyncKicadSch | fn cmdSyncKicadSch(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
 src/commands.zig::cmdSystemCheck | fn cmdSystemCheck(allocator: std.mem.Allocator, args: []const []const u8) CommandError!void
@@ -712,6 +733,7 @@ src/eval/env.zig::VariantRuleKind enum_
 src/eval/env.zig::VariantScope struct_
 src/eval/env.zig::Verification struct_
 src/eval/env.zig::ViaRules struct_
+src/eval/env.zig::VoltageDrop struct_
 src/eval/env.zig::activeName | fn activeName(self: VariantScope) []const u8
 src/eval/env.zig::asBool | fn asBool(self: Value) ?bool
 src/eval/env.zig::asNumber | fn asNumber(self: Value) ?f64
@@ -737,6 +759,7 @@ src/eval/env.zig::parseNoteRef | fn parseNoteRef(node: ast.Node) ?NoteRef
 src/eval/env.zig::put | fn put(self: *Env, name: []const u8, value: Value) std.mem.Allocator.Error!void
 src/eval/env.zig::requirementIdForText | fn requirementIdForText(allocator: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error![]const u8
 src/eval/env.zig::sourceName | fn sourceName(self: NetPredicate) []const u8
+src/eval/env.zig::valid | fn valid(self: VoltageDrop) bool
 src/eval/evaluator.zig::AltFunc struct_
 src/eval/evaluator.zig::AuthoredRef struct_
 src/eval/evaluator.zig::BusDef struct_
@@ -1006,6 +1029,7 @@ src/eval/test_point.zig::EvalContext struct_
 src/eval/test_point.zig::evalForm | fn evalForm( self: *Evaluator, form_children: []const Node, env: *Env, ctx: EvalContext, ) EvalError!?Instance
 src/eval/test_point.zig::parse | fn parse( allocator: std.mem.Allocator, form_children: []const Node, ) std.mem.Allocator.Error!?TestPoint
 src/eval/thermal.zig::AmbientLimit struct_
+src/eval/thermal.zig::AmbientSource struct_
 src/eval/thermal.zig::BoardThermal struct_
 src/eval/thermal.zig::PartCounts struct_
 src/eval/thermal.zig::PartLimits struct_
@@ -1244,7 +1268,7 @@ src/fab_readiness.zig::openNets | fn openNets( arena: std.mem.Allocator, placeme
 src/fab_readiness.zig::openNetsAmong | fn openNetsAmong( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, names: ?[]const []const u8, ) std.mem.Allocator.Error![]const OpenNet
 src/fab_readiness.zig::openNetsPrepared | fn openNetsPrepared( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, prep: BoardPrep, ) std.mem.Allocator.Error![]const OpenNet
 src/fab_readiness.zig::outlineDrift | fn outlineDrift( arena: std.mem.Allocator, declared: outline_mod.Declared, saved: ?outline_mod.Saved, ) std.mem.Allocator.Error!?Item
-src/fab_readiness.zig::ratingReport | fn ratingReport( arena: std.mem.Allocator, placement: optimizer.Placement, keep_dnp: bool, ) std.mem.Allocator.Error!Report
+src/fab_readiness.zig::ratingReport | fn ratingReport( arena: std.mem.Allocator, placement: optimizer.Placement, keep_dnp: bool, derating: ?brief_checks.Derating, ) std.mem.Allocator.Error!Report
 src/fab_readiness.zig::root | fn root(self: NetGraph, node: usize) usize
 src/fab_readiness.zig::routableTally | fn routableTally( arena: std.mem.Allocator, placement: optimizer.Placement, copper: export_gerber.Copper, ) std.mem.Allocator.Error!Tally
 src/fab_readiness.zig::savedOutline | fn savedOutline(placement: optimizer.Placement) ?outline_mod.Saved
@@ -1975,6 +1999,7 @@ src/part_review.zig::Verdict enum_
 src/part_review.zig::add | fn add(self: *Counts, verdict: Verdict) void
 src/part_review.zig::chip | fn chip(self: PartReview) Chip
 src/part_review.zig::collect | fn collect( arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) CollectError!Board
+src/part_review.zig::collectFor | fn collectFor( arena: std.mem.Allocator, eval: *Evaluator, block: *const env.DesignBlock, project_dir: []const u8, name: []const u8, options: Options, ) CollectError!Board
 src/part_review.zig::collectWith | fn collectWith( arena: std.mem.Allocator, eval: *Evaluator, project_dir: []const u8, name: []const u8, options: Options, ) CollectError!Board
 src/part_review.zig::find | fn find(self: Board, ref: []const u8) ?PartReview
 src/part_review.zig::key | fn key(self: Verdict) []const u8
@@ -2212,6 +2237,9 @@ src/placement/copper_topology.zig::redundantSections | fn redundantSections( are
 src/placement/copper_topology.zig::repairableJoins | fn repairableJoins( arena: std.mem.Allocator, tracks: []const Track, ) std.mem.Allocator.Error![]const ImplicitJoin
 src/placement/copper_topology.zig::viaUseCount | fn viaUseCount( terminals: []const Terminal, tracks: []const Track, via: Via, pour_layers: u64, plane_contacts: u8, ) usize
 src/placement/copper_topology.zig::viaUseCounts | fn viaUseCounts( arena: std.mem.Allocator, terminals: []const Terminal, tracks: []const Track, vias: []const Via, pour_layers: []const u64, plane_contacts: []const u8, ) std.mem.Allocator.Error![]const usize
+src/placement/copper_window.zig::Result struct_
+src/placement/copper_window.zig::Window struct_
+src/placement/copper_window.zig::remove | fn remove( alloc: std.mem.Allocator, saved: sidecar.SavedRoutes, nets: *const std.StringHashMapUnmanaged(void), window: Window, ) (std.mem.Allocator.Error || error{ProtectedRf})!Result
 src/placement/courtyard_close.zig::Rect struct_
 src/placement/courtyard_close.zig::Settings struct_
 src/placement/courtyard_close.zig::close | fn close( comptime Part: type, parts: []Part, settings: Settings, comptime courtyardFn: *const fn (*const Part) Rect, comptime overlapsFn: *const fn ([]const Part, *const Part) bool, ) void
@@ -2393,6 +2421,7 @@ src/placement/drc_pour.zig::checkAudited | fn checkAudited( arena: std.mem.Alloc
 src/placement/drc_pour.zig::padShapes | fn padShapes(arena: std.mem.Allocator, placement: optimizer.Placement) std.mem.Allocator.Error!PadShapes
 src/placement/drc_power_via.zig::check | fn check( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), placement: optimizer.Placement, routed: router.RouteResult, prepared: ?drc.PreparedCopper, fills: ?pour.FillMemo, ) std.mem.Allocator.Error!void
 src/placement/drc_power_via.zig::report | fn report( arena: std.mem.Allocator, out: *std.ArrayList(drc.Violation), routed: router.RouteResult, requirements: []const ?power_integrity.ViaCurrent, ) std.mem.Allocator.Error!void
+src/placement/drc_power_voltage.zig::report | fn report( alloc: std.mem.Allocator, out: *std.ArrayList(drc.Violation), placement: optimizer.Placement, assessments: []const power_voltage.Assessment, ) std.mem.Allocator.Error!void
 src/placement/drc_power_width.zig::Duty struct_
 src/placement/drc_power_width.zig::LocalWidth value
 src/placement/drc_power_width.zig::Shortfall struct_
@@ -3219,7 +3248,6 @@ src/placement/power_branch_width.zig::NetLimits struct_
 src/placement/power_branch_width.zig::boardTargets | fn boardTargets( board: router.CleanupBoard, limits: []const NetLimits, ) std.mem.Allocator.Error![]f64
 src/placement/power_branch_width.zig::margin value
 src/placement/power_branch_width.zig::netLimits | fn netLimits(board: router.CleanupBoard) std.mem.Allocator.Error![]const NetLimits
-src/placement/power_branch_width.zig::solveLocalWidths | fn solveLocalWidths( alloc: std.mem.Allocator, placement: optimizer.Placement, tracks: []const router.Track, vias: []const router.Via, ) std.mem.Allocator.Error![]const ?LocalWidth
 src/placement/power_branch_width.zig::solve_passes value
 src/placement/power_branch_width.zig::targetFor | fn targetFor(limits: Limits, local: ?LocalWidth) f64
 src/placement/power_branch_width.zig::trackLimits | fn trackLimits(limits: []const NetLimits, track: router.Track) ?Limits
@@ -3285,6 +3313,10 @@ src/placement/power_integrity.zig::via_plating_mm value
 src/placement/power_route_width.zig::adaptiveFloorWidth | fn adaptiveFloorWidth(placement: optimizer.Placement, net_i: usize, base_width: f64) f64
 src/placement/power_route_width.zig::adaptiveTargetWidth | fn adaptiveTargetWidth( zones: []const route_policy.ExistingZone, placement: optimizer.Placement, net_i: usize, authored: f64, ) ?f64
 src/placement/power_route_width.zig::exactWidth | fn exactWidth( zones: []const route_policy.ExistingZone, placement: optimizer.Placement, net_i: usize, authored: f64, ) f64
+src/placement/power_voltage.zig::Assessment struct_
+src/placement/power_voltage.zig::exceeded | fn exceeded(self: Assessment) bool
+src/placement/power_voltage.zig::knownDrop | fn knownDrop(self: Assessment) f64
+src/placement/power_voltage.zig::scale | fn scale(self: Assessment) f64
 src/placement/progress.zig::Inputs struct_
 src/placement/progress.zig::Item struct_
 src/placement/progress.zig::NetConn struct_
@@ -3305,6 +3337,7 @@ src/placement/return_path.zig::returnPathViolations | fn returnPathViolations(pl
 src/placement/return_path.zig::returnPathViolationsForNets | fn returnPathViolationsForNets( placement: optimizer.Placement, routed: RouteResult, radius: f64, selected_names: []const []const u8, ) usize
 src/placement/return_path.zig::return_path_radius_mm value
 src/placement/rf_pad_adapt.zig::apply | fn apply( arena: std.mem.Allocator, parts: anytype, nets: []const flat_netlist.FlatNet, rules: []const net_rules.NetRule, ) std.mem.Allocator.Error!void
+src/placement/rf_pad_route.zig::attempt | fn attempt(run: direct.DirectRun, pts: []const pad_exit.NetPt) std.mem.Allocator.Error!bool
 src/placement/rf_path_solver.zig::EndSection struct_
 src/placement/rf_path_solver.zig::FrameFit struct_
 src/placement/rf_path_solver.zig::Input struct_
@@ -3842,6 +3875,7 @@ src/placement/router_direct.zig::tryGuidedRoute | fn tryGuidedRoute( run: Direct
 src/placement/router_direct.zig::tryGuidedTree | fn tryGuidedTree( run: DirectRun, pts: []const NetPt, branches: []const route_policy.GuideBranch, ) std.mem.Allocator.Error!bool
 src/placement/router_direct.zig::tryMazeGuidedTree | fn tryMazeGuidedTree( run: DirectRun, pts: []const NetPt, waypoints: []const route_policy.Waypoint, ) std.mem.Allocator.Error!bool
 src/placement/router_direct.zig::trySharedGuidedTree | fn trySharedGuidedTree( run: DirectRun, pts: []const NetPt, waypoints: []const route_policy.Waypoint, ) std.mem.Allocator.Error!bool
+src/placement/router_direct.zig::tryStraightOneVia | fn tryStraightOneVia(run: DirectRun, from: NetPt, to: NetPt) std.mem.Allocator.Error!bool
 src/placement/router_direct.zig::tryTwoViaSeededMaze | fn tryTwoViaSeededMaze(run: DirectRun, from: NetPt, to: NetPt) std.mem.Allocator.Error!bool
 src/placement/router_gap_close.zig::GapState value
 src/placement/router_gap_close.zig::buildGapCtx | fn buildGapCtx( arena: std.mem.Allocator, placement: optimizer.Placement, params: RouteParams, divisor: f64, window: ?GapWindow, ) std.mem.Allocator.Error!CtxResult
@@ -4128,6 +4162,7 @@ src/power_integrity_json.zig::Inputs struct_
 src/power_integrity_json.zig::write | fn write(w: *std.Io.Writer, allocators: Allocators, in: Inputs) std.Io.Writer.Error!void
 src/power_integrity_json.zig::writeAcResponse | fn writeAcResponse(w: *std.Io.Writer, allocators: Allocators, in: Inputs, rev: i64) std.Io.Writer.Error!void
 src/power_integrity_json.zig::writeFlow | fn writeFlow(w: *std.Io.Writer, flow: power_integrity.Flow) std.Io.Writer.Error!void
+src/preflight.zig::Cache struct_
 src/preflight.zig::Finding struct_
 src/preflight.zig::FindingKind enum_
 src/preflight.zig::FindingStatus enum_
@@ -4136,12 +4171,14 @@ src/preflight.zig::Report struct_
 src/preflight.zig::deinit | fn deinit(self: Report, allocator: std.mem.Allocator) void
 src/preflight.zig::deinitFindings | fn deinitFindings(allocator: std.mem.Allocator, findings: []const Finding) void
 src/preflight.zig::evalWarningSeverity | fn evalWarningSeverity(message: []const u8) checks.Severity
+src/preflight.zig::get | fn get( self: *Cache, allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, ) std.mem.Allocator.Error!Report
 src/preflight.zig::isStrict | fn isStrict(profile: Profile) bool
 src/preflight.zig::parseProfile | fn parseProfile(word: ?[]const u8) ?Profile
 src/preflight.zig::profileSeverity | fn profileSeverity(profile: Profile) checks.Severity
 src/preflight.zig::required_review_categories value
 src/preflight.zig::requirementSeverity | fn requirementSeverity(status: req_checks.Status, profile: Profile) checks.Severity
 src/preflight.zig::run | fn run( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, project_dir: []const u8, profile: Profile, ) std.mem.Allocator.Error!Report
+src/preflight.zig::runFor | fn runFor( allocator: std.mem.Allocator, eval: *Evaluator, block: *const DesignBlock, project_dir: []const u8, profile: Profile, design_name: []const u8, ) std.mem.Allocator.Error!Report
 src/query.zig::Listing struct_
 src/query.zig::QueryError value
 src/query.zig::cmdDescribe | fn cmdDescribe(allocator: std.mem.Allocator, args: []const []const u8) QueryError!void
@@ -4265,6 +4302,7 @@ src/render_svg/context.zig::LonePinRole enum_
 src/render_svg/context.zig::MergeAwareSplit struct_
 src/render_svg/context.zig::PinGroup struct_
 src/render_svg/context.zig::RenderCtx struct_
+src/render_svg/context.zig::RenderedRowSpan struct_
 src/render_svg/context.zig::Side enum_
 src/render_svg/context.zig::adjAppend | fn adjAppend(self: *RenderCtx, ref_des: []const u8, entry: AdjEntry) std.mem.Allocator.Error!void
 src/render_svg/context.zig::buildAdjacency | fn buildAdjacency(self: *RenderCtx) std.mem.Allocator.Error!void
@@ -4301,6 +4339,8 @@ src/render_svg/draw.zig::isFunctionalSignalNet | fn isFunctionalSignalNet(net: [
 src/render_svg/draw.zig::isGroundNet | fn isGroundNet(name: []const u8) bool
 src/render_svg/draw.zig::isHub | fn isHub(inst: FlatInst) bool
 src/render_svg/draw.zig::isHubRef | fn isHubRef(ref_des: []const u8) bool
+src/render_svg/draw.zig::isRailOutputPinLabel | fn isRailOutputPinLabel(label: []const u8) bool
+src/render_svg/draw.zig::isSupplyLikeNet | fn isSupplyLikeNet(net: []const u8) bool
 src/render_svg/draw.zig::net_label_gap value
 src/render_svg/draw.zig::passive_bh value
 src/render_svg/draw.zig::passive_bw value
@@ -4318,6 +4358,7 @@ src/render_svg/hub.zig::estimateBranchCount | fn estimateBranchCount(self: *Rend
 src/render_svg/hub.zig::groupHeights | fn groupHeights(self: *RenderCtx, groups: []const PinGroup, hub_ref: []const u8) RenderError![]f64
 src/render_svg/hub.zig::groupHubPins | fn groupHubPins( self: *RenderCtx, pins: []const []const u8, adj_entries: []const AdjEntry, pin_names: *const std.StringHashMapUnmanaged([]const u8), ) RenderError![]const PinGroup
 src/render_svg/hub.zig::groupHubPinsFunctional | fn groupHubPinsFunctional( self: *RenderCtx, pins: []const []const u8, adj_entries: []const AdjEntry, pin_names: *const std.StringHashMapUnmanaged([]const u8), ) RenderError![]const PinGroup
+src/render_svg/hub.zig::groupProducesRail | fn groupProducesRail(group: PinGroup) bool
 src/render_svg/hub.zig::groupsSharePassiveAnchor | fn groupsSharePassiveAnchor(self: *const RenderCtx, a: PinGroup, b: PinGroup) bool
 src/render_svg/hub.zig::groupsSharePassiveSignalPath | fn groupsSharePassiveSignalPath(self: *RenderCtx, hub_ref: []const u8, source: PinGroup, target: PinGroup) RenderError!bool
 src/render_svg/hub.zig::splitGroupsByHeight | fn splitGroupsByHeight( self: *RenderCtx, all_groups: []const PinGroup, hub_ref: []const u8, ) RenderError!SplitGroups
@@ -4418,9 +4459,27 @@ src/review_audit.zig::RenderError value
 src/review_audit.zig::Schematic struct_
 src/review_audit.zig::StageRow struct_
 src/review_audit.zig::collectFacts | fn collectFacts( arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) RenderError!Facts
+src/review_audit.zig::collectFactsFor | fn collectFactsFor( arena: std.mem.Allocator, eval: *Evaluator, block: *const env.DesignBlock, project_dir: []const u8, name: []const u8, options: Options, ) RenderError!Facts
 src/review_audit.zig::mergeDispositions | fn mergeDispositions( allocator: std.mem.Allocator, rendered: []const u8, previous: []const u8, ) std.mem.Allocator.Error![]u8
 src/review_audit.zig::render | fn render( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) RenderError![]u8
-src/review_audit.zig::renderFacts | fn renderFacts(allocator: std.mem.Allocator, facts: Facts) std.mem.Allocator.Error![]u8
+src/review_audit.zig::renderCard | fn renderCard(allocator: std.mem.Allocator, card: review_card.Card) std.mem.Allocator.Error![]u8
+src/review_card.zig::Card struct_
+src/review_card.zig::Category struct_
+src/review_card.zig::CollectError value
+src/review_card.zig::Options struct_
+src/review_card.zig::Overall struct_
+src/review_card.zig::PartRow struct_
+src/review_card.zig::Row struct_
+src/review_card.zig::Stripe struct_
+src/review_card.zig::Verdict value
+src/review_card.zig::add | fn add(self: *Stripe, verdict: Verdict) void
+src/review_card.zig::collect | fn collect( arena: std.mem.Allocator, project_dir: []const u8, name: []const u8, options: Options, ) CollectError!Card
+src/review_card.zig::collectWith | fn collectWith( arena: std.mem.Allocator, eval: *Evaluator, project_dir: []const u8, name: []const u8, options: Options, ) CollectError!Card
+src/review_card.zig::find | fn find(self: Card, key: registry.Category) ?Category
+src/review_card.zig::row | fn row(self: Card, id: []const u8) ?Row
+src/review_card.zig::total | fn total(self: Stripe) usize
+src/review_card.zig::worst | fn worst(self: Stripe) Verdict
+src/review_card.zig::writeCardJson | fn writeCardJson(w: anytype, card: Card) json_writer.WriteError!void
 src/review_datasheet_inventory.zig::CollectError value
 src/review_datasheet_inventory.zig::Row struct_
 src/review_datasheet_inventory.zig::Status enum_
@@ -4460,6 +4519,7 @@ src/review_registry.zig::Policy enum_
 src/review_registry.zig::Row struct_
 src/review_registry.zig::Scope enum_
 src/review_registry.zig::Verdict enum_
+src/review_registry.zig::briefCheckId | fn briefCheckId(code: []const u8) ?[]const u8
 src/review_registry.zig::checkPrimitiveId | fn checkPrimitiveId(keyword: []const u8) ?[]const u8
 src/review_registry.zig::drcId | fn drcId(kind: drc.Kind) []const u8
 src/review_registry.zig::ercId | fn ercId(kind: erc.ViolationKind) []const u8
@@ -4483,6 +4543,7 @@ src/review_thermal.zig::ScenarioCells struct_
 src/review_thermal.zig::cells | fn cells( allocator: std.mem.Allocator, row: thermal.PartThermal, ) std.mem.Allocator.Error!Cells
 src/review_thermal.zig::dash value
 src/review_thermal.zig::headlineVerdict | fn headlineVerdict( bt: thermal.BoardThermal, scenarios: thermal_scenarios.Answer, ) thermal.Verdict
+src/review_thermal.zig::provenanceLine | fn provenanceLine( allocator: std.mem.Allocator, bt: thermal.BoardThermal, ) std.mem.Allocator.Error![]const u8
 src/review_thermal.zig::scenarioCells | fn scenarioCells( allocator: std.mem.Allocator, ladder: thermal_scenarios.Ladder, row: thermal_scenarios.Row, ) std.mem.Allocator.Error!ScenarioCells
 src/review_thermal.zig::scenarioNote | fn scenarioNote(answer: thermal_scenarios.Answer) []const u8
 src/review_thermal.zig::summaryLines | fn summaryLines( allocator: std.mem.Allocator, bt: thermal.BoardThermal, scenarios: thermal_scenarios.Answer, ) std.mem.Allocator.Error!Lines
@@ -5580,6 +5641,7 @@ src/serve/read_cache.zig::Store | fn Store(comptime cfg: Config) type
 src/serve/read_cache.zig::erc value
 src/serve/read_cache.zig::kicad_sch value
 src/serve/read_cache.zig::part_review value
+src/serve/read_cache.zig::review_card value
 src/serve/read_cache.zig::schematic_pdf value
 src/serve/read_cache.zig::thermal_facts value
 src/serve/read_cache.zig::thermal_page value
@@ -5607,6 +5669,15 @@ src/serve/request_log.zig::stages | fn stages(self: *const StageTimer) []const S
 src/serve/request_log.zig::stampServerMs | fn stampServerMs(req: *httpz.Request, res: *httpz.Response, started_ns: i128) void
 src/serve/request_log.zig::start | fn start() StageTimer
 src/serve/request_log.zig::totalMs | fn totalMs(self: *const StageTimer) f64
+src/serve/review_card_api.zig::CardError value
+src/serve/review_card_api.zig::HandlerError value
+src/serve/review_card_api.zig::cardApi | fn cardApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) HandlerError!void
+src/serve/review_card_api.zig::mcpReviewCard | fn mcpReviewCard( alloc: std.mem.Allocator, project_dir: []const u8, args_val: ?std.json.Value, out: *std.ArrayList(u8), ) std.mem.Allocator.Error!bool
+src/serve/review_card_page.zig::HandlerError value
+src/serve/review_card_page.zig::render | fn render(res: *httpz.Response, name: []const u8, layout: ?[]const u8) HandlerError!void
+src/serve/review_card_page.zig::writeDesignHref | fn writeDesignHref( w: *std.Io.Writer, path: []const u8, name: []const u8, layout: ?[]const u8, view_3d: bool, ) std.Io.Writer.Error!void
+src/serve/review_card_page.zig::writeReviewNav | fn writeReviewNav(w: *std.Io.Writer, name: []const u8, layout: ?[]const u8) std.Io.Writer.Error!void
+src/serve/review_card_page.zig::writeUrlEncoded | fn writeUrlEncoded(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void
 src/serve/rework_guide.zig::Guide struct_
 src/serve/rework_guide.zig::loadAll | fn loadAll( allocator: std.mem.Allocator, project_dir: []const u8, name: []const u8, ) []const Guide
 src/serve/rough_best.zig::bestRoughApi | fn bestRoughApi(ctx: *Server, req: *httpz.Request, res: *httpz.Response) pcb_layout_page.HandlerError!void
@@ -6093,10 +6164,12 @@ src/svg2pdf.zig::translate | fn translate(gpa: Allocator, svg: []const u8, opts:
 src/svg2pdf.zig::translateAll | fn translateAll(gpa: Allocator, markup: []const u8, opts: Options, diag: ?*Diagnostic) Error![]Document
 src/system_brief.zig::BoardReports struct_
 src/system_brief.zig::Evaluation struct_
+src/system_brief.zig::Governing struct_
 src/system_brief.zig::Verdict enum_
 src/system_brief.zig::blocks | fn blocks(evaluations: []const Evaluation) bool
 src/system_brief.zig::briefForBoard | fn briefForBoard( allocator: std.mem.Allocator, project_dir: []const u8, design_name: []const u8, ) ?system_review.Brief
 src/system_brief.zig::evaluate | fn evaluate( allocator: std.mem.Allocator, goals: []const GoalSpec, boards: []const BoardReports, ) std.mem.Allocator.Error![]const Evaluation
+src/system_brief.zig::governingBrief | fn governingBrief( allocator: std.mem.Allocator, project_dir: []const u8, design_name: []const u8, ) ?Governing
 src/system_interface_check.zig::Endpoint struct_
 src/system_interface_check.zig::Finding struct_
 src/system_interface_check.zig::Kind enum_

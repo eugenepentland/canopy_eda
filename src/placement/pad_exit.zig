@@ -214,6 +214,9 @@ pub const NetPt = struct {
     ref_des: []const u8 = "",
     pin: []const u8 = "",
     out: [2]f64 = .{ 0, 0 },
+    /// RF launch axis from the land pattern, including passive end-to-end
+    /// orientation. Kept separate from the maze's component-radial heuristic.
+    rf_out: ?[2]f64 = null,
 };
 
 /// Project a resolved router terminal onto the straight-escape rule's record.
@@ -247,9 +250,52 @@ pub fn netPoints(
             .ref_des = pin.ref_des,
             .pin = pin.pin,
             .out = out,
+            .rf_out = rfExit(part, pad, out),
         });
     }
     return list.toOwnedSlice(arena);
+}
+
+fn rfExit(part: optimizer.Part, pad: geometry.Pad, radial: [2]f64) [2]f64 {
+    const centre = optimizer.worldPadCenter(&part, pad.x, pad.y);
+    // Two-terminal passives launch along their electrical axis, independent
+    // of an asymmetric footprint origin or the individual land's aspect ratio.
+    if (part.kind == .passive and part.pads.len == 2) {
+        for (part.pads) |other| {
+            if (std.mem.eql(u8, pad.number, other.number)) continue;
+            const far = optimizer.worldPadCenter(&part, other.x, other.y);
+            const len = std.math.hypot(centre[0] - far[0], centre[1] - far[1]);
+            if (len > 1e-9) return .{ (centre[0] - far[0]) / len, (centre[1] - far[1]) / len };
+        }
+    }
+    // A peripheral IC/connector land has its own axis. The component radial
+    // vector chooses the outward sign, not an angle along the row of pins.
+    if (@max(pad.w, pad.h) < 1.5 * @min(pad.w, pad.h)) return radial;
+    const angle = (pad.rot + (if (pad.h > pad.w) @as(f64, 90) else 0)) * std.math.pi / 180;
+    const tip = optimizer.worldPadCenter(&part, pad.x + @cos(angle), pad.y + @sin(angle));
+    var axis = [2]f64{ tip[0] - centre[0], tip[1] - centre[1] };
+    if (axis[0] * radial[0] + axis[1] * radial[1] < 0) axis = .{ -axis[0], -axis[1] };
+    return axis;
+}
+
+// spec: placement/router - RF passive launch direction follows its two pads through rotation and mirroring, independent of footprint origin
+test "RF launch direction rotates with an asymmetric two-pad passive" {
+    const pads = [_]geometry.Pad{
+        .{ .number = "1", .x = 1, .y = 0, .w = 0.3, .h = 0.5 },
+        .{ .number = "2", .x = 2, .y = 0, .w = 0.3, .h = 0.5 },
+    };
+    var part = optimizer.Part{ .ref_des = "C1", .kind = .passive, .hw = 1, .hh = 0.5, .pads = &pads, .fallback = false, .x = 5, .y = 5, .rot = 45 };
+    const s = @sqrt(@as(f64, 0.5));
+    const a = rfExit(part, pads[0], .{ 1, 0 });
+    const b = rfExit(part, pads[1], .{ 1, 0 });
+    try std.testing.expectApproxEqAbs(-s, a[0], 1e-9);
+    try std.testing.expectApproxEqAbs(-s, a[1], 1e-9);
+    try std.testing.expectApproxEqAbs(s, b[0], 1e-9);
+    try std.testing.expectApproxEqAbs(s, b[1], 1e-9);
+    part.side = .bottom;
+    const mirrored = rfExit(part, pads[1], .{ 1, 0 });
+    try std.testing.expectApproxEqAbs(-s, mirrored[0], 1e-9);
+    try std.testing.expectApproxEqAbs(-s, mirrored[1], 1e-9);
 }
 
 fn padOf(part: optimizer.Part, pin: []const u8) ?geometry.Pad {

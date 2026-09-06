@@ -9,7 +9,6 @@ const std = @import("std");
 const source_transaction = @import("infra/source_transaction.zig");
 const json_writer = @import("json_writer.zig");
 const env_mod = @import("eval/env.zig");
-const rails_mod = @import("eval/rails.zig");
 const parser_mod = @import("sexpr/parser.zig");
 const infra_fs = @import("infra/fs.zig");
 const ast = @import("sexpr/ast.zig");
@@ -684,13 +683,7 @@ pub fn setupRenderCtx(allocator: Allocator, block: *const DesignBlock) std.mem.A
     return ctx;
 }
 
-fn isSupplyLikeSchematicNet(net: []const u8) bool {
-    if (draw.isGroundNet(net)) return true;
-    for (rails_mod.schematic_supply_prefixes) |prefix| {
-        if (std.ascii.startsWithIgnoreCase(net, prefix)) return true;
-    }
-    return false;
-}
+const isSupplyLikeSchematicNet = draw.isSupplyLikeNet;
 
 fn appendSvgAdjacency(ctx: *RenderCtx, ref_des: []const u8, entry: AdjEntry) !void {
     const gop = try ctx.adjacency.getOrPut(ctx.allocator, ref_des);
@@ -1361,7 +1354,7 @@ fn pinGroupCanonicalNet(ctx: *RenderCtx, hub_ref: []const u8, group: PinGroup) !
 
 /// Lift `items[from]` out and re-seat it at `after + 1`, sliding everything in
 /// between one slot later. Generic over the element type so the pin groups and
-/// their parallel canonical-net cache are permuted by the same call and cannot
+/// their parallel per-position caches are permuted by the same call and cannot
 /// drift out of sync.
 fn moveGroupAfter(comptime T: type, items: []T, from: usize, after: usize) void {
     std.debug.assert(from > after + 1);
@@ -1369,6 +1362,43 @@ fn moveGroupAfter(comptime T: type, items: []T, from: usize, after: usize) void 
     std.mem.copyBackwards(T, items[after + 2 .. from + 1], items[after + 1 .. from]);
     items[after + 1] = moved;
 }
+
+/// The mirror of `moveGroupAfter`: lift `items[from]` out and re-seat it at
+/// `before - 1`, sliding everything in between one slot earlier. The group at
+/// `before` keeps its own position, which is the point — a regulator's output
+/// row must not be dragged back toward the pull-up that hangs off it.
+fn moveGroupBefore(comptime T: type, items: []T, from: usize, before: usize) void {
+    std.debug.assert(before > from + 1);
+    const moved = items[from];
+    std.mem.copyForwards(T, items[from .. before - 1], items[from + 1 .. before]);
+    items[before - 1] = moved;
+}
+
+/// The pin groups being ordered plus the per-position state that has to travel
+/// with them: the canonical net of each group (computed once per hub) and its
+/// single forward-move budget. One move call permutes all three, so they can
+/// never drift apart.
+const GroupOrder = struct {
+    groups: []PinGroup,
+    canonical_nets: [][]const u8,
+    forward_moved: []bool,
+
+    fn moveAfter(self: GroupOrder, from: usize, after: usize) void {
+        moveGroupAfter(PinGroup, self.groups, from, after);
+        moveGroupAfter([]const u8, self.canonical_nets, from, after);
+        moveGroupAfter(bool, self.forward_moved, from, after);
+    }
+
+    fn moveBefore(self: GroupOrder, from: usize, before: usize) void {
+        moveGroupBefore(PinGroup, self.groups, from, before);
+        moveGroupBefore([]const u8, self.canonical_nets, from, before);
+        moveGroupBefore(bool, self.forward_moved, from, before);
+    }
+};
+
+/// One functional relation: the group a source belongs beside, and whether it
+/// got there by hanging off a rail this hub PRODUCES on that group.
+const RelatedTarget = struct { index: usize, produced_rail: bool };
 
 fn isFeedbackPinGroup(group: PinGroup) bool {
     for (group.stub_labels) |label| {
@@ -1388,18 +1418,17 @@ fn isFeedbackPinLabel(label: []const u8) bool {
         std.ascii.startsWithIgnoreCase(label, "VSENSE_(");
 }
 
-/// `canonical_nets` is the per-position canonical net of `groups`, computed once
-/// per hub by the caller and permuted alongside it. Deriving it here instead
-/// cost an `allocPrint` per (source conn × candidate) pair — O(n²) arena
-/// garbage per hub, on a page that renders every hub of every section.
+/// `order.canonical_nets` is the per-position canonical net of `order.groups`,
+/// computed once per hub by the caller and permuted alongside it. Deriving it
+/// here instead cost an `allocPrint` per (source conn × candidate) pair — O(n²)
+/// arena garbage per hub, on a page that renders every hub of every section.
 fn relatedTargetIndex(
     ctx: *RenderCtx,
     hub_ref: []const u8,
-    groups: []const PinGroup,
-    canonical_nets: []const []const u8,
+    order: GroupOrder,
     source_idx: usize,
-) !?usize {
-    const source = groups[source_idx];
+) !?RelatedTarget {
+    const source = order.groups[source_idx];
     const accepts_supply = isFeedbackPinGroup(source);
     for (source.conns) |conn| {
         const spoke = switch (conn.endpoint) {
@@ -1408,10 +1437,20 @@ fn relatedTargetIndex(
         };
         if (!ctx.spoke_set.contains(spoke.ref_des)) continue;
         const terminal = draw.baseNetName(try connection.getConnTerminal(ctx, conn.endpoint, hub_ref, conn.pin));
-        if (!accepts_supply and !connection.functionalLayoutNet(ctx, terminal)) continue;
-        for (canonical_nets, 0..) |candidate_net, candidate_idx| {
+        const joins_groups = accepts_supply or connection.functionalLayoutNet(ctx, terminal);
+        for (order.canonical_nets, 0..) |candidate_net, candidate_idx| {
             if (candidate_idx == source_idx) continue;
-            if (std.mem.eql(u8, terminal, candidate_net)) return candidate_idx;
+            if (!std.mem.eql(u8, terminal, candidate_net)) continue;
+            if (joins_groups) return .{ .index = candidate_idx, .produced_rail = false };
+            // Fallback for the nets the rule above rejects: a supply shared
+            // with the rest of the board still relates the two rows when the
+            // hub PRODUCES it on the candidate. An LDO's PG pull-up hangs off
+            // the output node, so it reads as part of the output rather than
+            // as one more consumer of the rail. Feedback and signal returns
+            // never reach here — they qualified already, and keep the ordering
+            // they have always had.
+            if (hub_mod.groupProducesRail(order.groups[candidate_idx]))
+                return .{ .index = candidate_idx, .produced_rail = true };
         }
     }
 
@@ -1420,9 +1459,10 @@ fn relatedTargetIndex(
     // still follows passive-only signal paths across the boundary: a
     // differential termination between two AC-coupled inputs is one functional
     // unit and must be ordered together before the hub is split into columns.
-    for (groups, 0..) |candidate, candidate_idx| {
+    for (order.groups, 0..) |candidate, candidate_idx| {
         if (candidate_idx == source_idx) continue;
-        if (try hub_mod.groupsSharePassiveSignalPath(ctx, hub_ref, source, candidate)) return candidate_idx;
+        if (try hub_mod.groupsSharePassiveSignalPath(ctx, hub_ref, source, candidate))
+            return .{ .index = candidate_idx, .produced_rail = false };
     }
     return null;
 }
@@ -1432,6 +1472,13 @@ fn relatedTargetIndex(
 /// unrelated pins retain their relative order. This covers feedback dividers
 /// and non-supply signal returns such as OSCINP/OSCINM, RFOUTBM/RFOUTBP, and
 /// CPOUT/VTUNE without pulling ordinary VDD/VCC bias networks out of sequence.
+///
+/// The one relation that moves the SOURCE instead is a pull-up onto a rail this
+/// hub produces (`relatedTargetIndex`'s `produced_rail`): the pull-up walks
+/// forward to sit immediately before the output row, which keeps its own place.
+/// Moving the output row up to the pull-up instead would drag a regulator's
+/// OUT/OUTS off the output side of the box, which is where the reader looks
+/// for it.
 fn orderFunctionalPinGroups(
     ctx: *RenderCtx,
     hub_ref: []const u8,
@@ -1443,6 +1490,13 @@ fn orderFunctionalPinGroups(
     // Canonical net per position, permuted in lockstep with `ordered` below.
     const canonical_nets = try ctx.allocator.alloc([]const u8, ordered.items.len);
     for (ordered.items, canonical_nets) |group, *net| net.* = try pinGroupCanonicalNet(ctx, hub_ref, group);
+    const forward_moved = try ctx.allocator.alloc(bool, ordered.items.len);
+    @memset(forward_moved, false);
+    const order: GroupOrder = .{
+        .groups = ordered.items,
+        .canonical_nets = canonical_nets,
+        .forward_moved = forward_moved,
+    };
 
     // Each group is considered as a source exactly once, in position order.
     // `source_idx` must therefore only ever advance: an earlier revision reset
@@ -1454,15 +1508,36 @@ fn orderFunctionalPinGroups(
     // Nothing is lost by not rewinding: a backward move only shifts groups
     // that already had their turn as a source.
     var source_idx: usize = 0;
-    while (source_idx < ordered.items.len) : (source_idx += 1) {
-        const target_idx = try relatedTargetIndex(ctx, hub_ref, ordered.items, canonical_nets, source_idx) orelse continue;
-        if (target_idx > source_idx + 1) {
-            moveGroupAfter(PinGroup, ordered.items, target_idx, source_idx);
-            moveGroupAfter([]const u8, canonical_nets, target_idx, source_idx);
-        } else if (source_idx > target_idx + 1) {
-            moveGroupAfter(PinGroup, ordered.items, source_idx, target_idx);
-            moveGroupAfter([]const u8, canonical_nets, source_idx, target_idx);
+    while (source_idx < ordered.items.len) {
+        const rel = try relatedTargetIndex(ctx, hub_ref, order, source_idx) orelse {
+            source_idx += 1;
+            continue;
+        };
+        // A forward move vacates `source_idx`, so the group that slides into it
+        // has not had its turn yet and is examined next — WITHOUT rewinding,
+        // which is what spun the loop above. Termination: every pass either
+        // advances `source_idx` (at most `len` times) or spends one group's
+        // single forward-move budget, and `forward_moved` is permuted with its
+        // group, so at most `len` forward moves can ever happen — at most
+        // 2 × `len` passes in all. The budget is what rules out the mirrored
+        // hang: two pull-ups onto the SAME producer would otherwise take turns
+        // claiming the slot before it, each kicking the other back to
+        // `source_idx`, forever.
+        if (rel.produced_rail and rel.index > source_idx + 1) {
+            if (order.forward_moved[source_idx]) {
+                source_idx += 1;
+                continue;
+            }
+            order.forward_moved[source_idx] = true;
+            order.moveBefore(source_idx, rel.index);
+            continue;
         }
+        if (rel.index > source_idx + 1) {
+            order.moveAfter(rel.index, source_idx);
+        } else if (source_idx > rel.index + 1) {
+            order.moveAfter(source_idx, rel.index);
+        }
+        source_idx += 1;
     }
     return ordered.toOwnedSlice(ctx.allocator);
 }
@@ -2722,6 +2797,97 @@ test "functional pin order terminates with two pins related to the same earlier 
     try std.testing.expectEqualStrings("5", ordered[2].pin_numbers);
     try std.testing.expectEqualStrings("4", ordered[3].pin_numbers);
     try std.testing.expectEqualStrings("3", ordered[4].pin_numbers);
+}
+
+// spec: render_html - A pull-up onto a rail the hub itself produces is ordered directly in front of the producing group, which keeps its own place
+test "functional pin order seats a produced-rail pull-up in front of the output group" {
+    // An LT3045-shaped LDO. PG (pin 3) is pulled up through R_PG to this hub's
+    // OWN output rail, and U2/U3 also sit on V_5V — so the rail is shared with
+    // the rest of the board and the "signal or hub-private supply" rule rejects
+    // it. Before the produced-rail relation PG stayed four rows away from the
+    // OUT/OUTS pins it hangs off, on the far column of the box.
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "ldo", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "U2", .component = "mcu", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "U3", .component = "adc", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "R_PG", .component = "res-0402", .value = "100k", .footprint = "", .symbol = "generic-res" },
+        .{ .ref_des = "R_SET", .component = "res-0402", .value = "49.9k", .footprint = "", .symbol = "generic-res" },
+        .{ .ref_des = "C_IN", .component = "cap-0402", .value = "4.7uF", .footprint = "", .symbol = "generic-cap" },
+        .{ .ref_des = "C_OUT", .component = "cap-0402", .value = "10uF", .footprint = "", .symbol = "generic-cap" },
+    };
+    const v_in = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "C_IN", .pin = "1" } };
+    const en = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "2" }, .{ .ref_des = "U2", .pin = "2" } };
+    const pg = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "3" }, .{ .ref_des = "R_PG", .pin = "1" } };
+    const gnd = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "4" },
+        .{ .ref_des = "C_IN", .pin = "2" },
+        .{ .ref_des = "R_SET", .pin = "2" },
+        .{ .ref_des = "C_OUT", .pin = "2" },
+    };
+    const set = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "5" }, .{ .ref_des = "R_SET", .pin = "1" } };
+    const v_5v = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "6" },
+        .{ .ref_des = "U1", .pin = "7" },
+        .{ .ref_des = "R_PG", .pin = "2" },
+        .{ .ref_des = "C_OUT", .pin = "1" },
+        .{ .ref_des = "U2", .pin = "1" },
+        .{ .ref_des = "U3", .pin = "1" },
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "V_5V7_F", .pins = &v_in },
+        .{ .name = "EN_CTL", .pins = &en },
+        .{ .name = "ldo/PG", .pins = &pg },
+        .{ .name = "GND", .pins = &gnd },
+        .{ .name = "ldo/SET", .pins = &set },
+        .{ .name = "V_5V", .pins = &v_5v },
+    };
+    const block: env_mod.DesignBlock = .{
+        .name = "produced-rail-pullup",
+        .instances = &instances,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    var ctx = RenderCtx.init(allocator);
+    try ctx.setup(&block);
+    ctx.render_scratch.functional_layout = true;
+
+    var pin_names: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try pin_names.put(allocator, "1", "IN");
+    try pin_names.put(allocator, "2", "EN");
+    try pin_names.put(allocator, "3", "PG");
+    try pin_names.put(allocator, "4", "GND");
+    try pin_names.put(allocator, "5", "SET");
+    try pin_names.put(allocator, "6", "OUT");
+    try pin_names.put(allocator, "7", "OUTS");
+    const pins = [_][]const u8{ "1", "2", "3", "4", "5", "6", "7" };
+    const groups = try hub_mod.groupHubPinsFunctional(&ctx, &pins, ctx.adjacency.get("U1").?.items, &pin_names);
+    // Physical order: IN, EN, PG, GND, SET, OUT+OUTS.
+    try std.testing.expectEqual(@as(usize, 6), groups.len);
+    try std.testing.expectEqualStrings("6,7", groups[5].pin_numbers);
+
+    const ordered = try orderFunctionalPinGroups(&ctx, "U1", groups);
+    // PG walks forward to the row before OUT; the output row keeps its place
+    // and every other group holds its relative order.
+    try std.testing.expectEqual(@as(usize, 6), ordered.len);
+    try std.testing.expectEqualStrings("1", ordered[0].pin_numbers);
+    try std.testing.expectEqualStrings("2", ordered[1].pin_numbers);
+    try std.testing.expectEqualStrings("4", ordered[2].pin_numbers);
+    try std.testing.expectEqualStrings("5", ordered[3].pin_numbers);
+    try std.testing.expectEqualStrings("3", ordered[4].pin_numbers);
+    try std.testing.expectEqualStrings("6,7", ordered[5].pin_numbers);
+
+    // …and the column split may not come between them: PG sits directly above
+    // OUT at the bottom of the same column.
+    const split = try hub_mod.splitGroupsByHeight(&ctx, ordered, "U1");
+    try std.testing.expectEqualStrings("3", split.right[split.right.len - 2].pin_numbers);
+    try std.testing.expectEqualStrings("6,7", split.right[split.right.len - 1].pin_numbers);
 }
 
 test "loadPinoutNames rejects a top list whose head is not pinout" {

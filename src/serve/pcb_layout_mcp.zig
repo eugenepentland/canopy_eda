@@ -54,6 +54,7 @@ const saved_zone = @import("saved_zone.zig");
 const rf_path_solver = @import("../placement/rf_path_solver.zig");
 const export_kicad = @import("../export_kicad.zig");
 const geometry = @import("../placement/geometry.zig");
+const copper_window = @import("../placement/copper_window.zig");
 
 const jsonNum = sidecar_json.jsonNum;
 const jsonSide = sidecar_json.jsonSide;
@@ -1460,6 +1461,11 @@ pub fn mcpClearRoutes(
     const near_y = mcpArgNumOpt(args_val, "y");
     const radius_arg = mcpArgNumOpt(args_val, "radius");
     const has_near = near_x != null or near_y != null or radius_arg != null;
+    const include_tracks = mcpArgBool(args_val, "include_tracks");
+    if (args_val.?.object.get("include_tracks")) |value| {
+        if (value != .bool) return mcpFail(out, alloc, "include_tracks must be a boolean");
+    }
+    if (include_tracks and !has_near) return mcpFail(out, alloc, "include_tracks requires x/y coordinate scoping");
 
     if (!mcpBlockExists(alloc, project_dir, name)) return mcpFail(out, alloc, mcp_err_no_design);
     const working = mcpReadWorking(alloc, project_dir, name, layout_arg) orelse
@@ -1492,9 +1498,12 @@ pub fn mcpClearRoutes(
     var cleared: usize = 0;
     var new_routes: ?SavedRoutes = null;
     if (has_near) {
-        const res = try mcpDropViasNear(alloc, working.routes, &drop, near_x.?, near_y.?, near_radius);
+        const res = dropNear(alloc, working.routes, &drop, .{ .x = near_x.?, .y = near_y.?, .radius = near_radius }, include_tracks) catch |err| switch (err) {
+            error.ProtectedRf => return mcpFail(out, alloc, "window clearing cannot split swept RF paths; use a whole-net clear"),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
         if (res.dropped == 0)
-            return mcpFail(out, alloc, "no selected via found within radius of x/y");
+            return mcpFail(out, alloc, "no selected copper found within radius of x/y");
         new_routes = res.routes;
         cleared = res.dropped;
     } else if (scoped) {
@@ -1510,17 +1519,10 @@ pub fn mcpClearRoutes(
         new_routes = mcpClearAllRoutedCopper(sr);
     }
 
-    const entry = SavedLayout{
-        .name = working.name,
-        .kind = kind_manual,
-        .ts = 0,
-        .score = working.score,
-        .parts = working.parts,
-        .routes = new_routes,
-        .outline = working.outline,
-        .texts = working.texts,
-        .dimensions = working.dimensions,
-    };
+    var entry = working;
+    entry.routes = new_routes;
+    entry.kind = kind_manual;
+    entry.ts = 0;
     try mcpPersistWorking(alloc, project_dir, name, entry, false);
 
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -1530,6 +1532,19 @@ pub fn mcpClearRoutes(
     try w.print(",\"cleared\":{d}}}", .{cleared});
     try out.appendSlice(alloc, aw.written());
     return true;
+}
+
+fn dropNear(
+    alloc: std.mem.Allocator,
+    saved: ?SavedRoutes,
+    nets: *const std.StringHashMapUnmanaged(void),
+    window: copper_window.Window,
+    include_tracks: bool,
+) (std.mem.Allocator.Error || error{ProtectedRf})!McpDroppedRoutes {
+    if (!include_tracks) return mcpDropViasNear(alloc, saved, nets, window.x, window.y, window.radius);
+    const routes = saved orelse return .{ .routes = null, .dropped = 0 };
+    const result = try copper_window.remove(alloc, routes, nets, window);
+    return .{ .routes = result.routes, .dropped = result.dropped };
 }
 
 /// One requested polyline of agent-authored copper: a net, a signal-layer NAME ("F.Cu"),
@@ -3448,6 +3463,49 @@ test "coordinate-scoped via clearing is surgical" {
     try std.testing.expectEqual(@as(usize, 2), kept.vias.len);
     try std.testing.expectApproxEqAbs(@as(f64, 1.2), kept.vias[0].x, 1e-9);
     try std.testing.expectEqualStrings("VCC", kept.vias[1].net);
+}
+
+// spec: Web Server - clear_routes preserves complete layout metadata and rejects malformed track-window requests without persistence
+test "copper window clear preserves saved assembly and rejects malformed requests" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const project = try tmp.dir.realPathFileAlloc(std.testing.io, ".", alloc);
+    try writeFabSelectionFixture(tmp.dir);
+    var working = mcpReadWorking(alloc, project, "fabsel", "routed").?;
+    working.heatsink = .{ .x = 5, .y = 5, .w = 3, .h = 2 };
+    working.fan = .{ .model = "test-fan", .rect = .{ .x = 2, .y = 3, .w = 4, .h = 4 }, .curve = .{ .free_air_flow_m3_s = 0.001, .max_static_pressure_pa = 10 } };
+    working.fabrication_layers = &.{.{ .name = "Backer", .regions = &.{&.{ .{ 1, 1 }, .{ 2, 1 }, .{ 2, 2 }, .{ 1, 2 } }} }};
+    working.dimensions = &.{.{ .ref = "C1", .axis = "x", .edge_id = 1, .offset = 5 }};
+    try mcpPersistWorking(alloc, project, "fabsel", working, false);
+    working = mcpReadWorking(alloc, project, "fabsel", "routed").?;
+    const args = try std.json.parseFromSliceLeaky(std.json.Value, alloc,
+        \\{"name":"fabsel","layout":"routed","nets":["SIG"],"x":4.52,"y":4,"radius":0.1,"include_tracks":true}
+    , .{});
+    var output: std.ArrayList(u8) = .empty;
+    try std.testing.expect(try mcpClearRoutes(alloc, project, args, &output));
+    const after = mcpReadWorking(alloc, project, "fabsel", "routed").?;
+    try std.testing.expectEqualDeep(working.routes.?.tracks[1..], after.routes.?.tracks);
+    try std.testing.expectEqualDeep(working.heatsink, after.heatsink);
+    try std.testing.expectEqualDeep(working.fan, after.fan);
+    try std.testing.expectEqualDeep(working.fabrication_layers, after.fabrication_layers);
+    try std.testing.expectEqualDeep(working.dimensions, after.dimensions);
+    try std.testing.expect(after.default);
+    const invalid = [_][]const u8{
+        \\{"name":"fabsel","include_tracks":true}
+        ,
+        \\{"name":"fabsel","include_tracks":"true"}
+        ,
+        \\{"name":"fabsel","x":4.52,"y":4,"include_tracks":true}
+    };
+    for (invalid) |json| {
+        const bad = try std.json.parseFromSliceLeaky(std.json.Value, alloc, json, .{});
+        output.clearRetainingCapacity();
+        try std.testing.expect(!try mcpClearRoutes(alloc, project, bad, &output));
+    }
+    try std.testing.expectEqualDeep(after, mcpReadWorking(alloc, project, "fabsel", "routed").?);
 }
 
 // Regression: zone replacement validates the complete set before persistence.

@@ -258,9 +258,12 @@ candidate for deployment.
 - The library-fact envelope rules remain claimed by the shard manifest
 - The saved-pose identity tests remain claimed by the shard manifest
 - The per-part review tests remain claimed by the shard manifest
+- The Board Review Card tests remain claimed by the shard manifest
+- The Board Review Card page tests remain claimed by the shard manifest
 - The review-check registry tests remain claimed by the shard manifest
 - Panelization export tests remain claimed by the shard manifest
 - The system brief and goal evaluations remain claimed by the shard manifest
+- The brief-driven unit-check tests remain claimed by the shard manifest
 - The anonymous-wiring tests remain claimed by exactly one shard
 - Bridges every test-bearing module into the shard import graph so filters alone decide a shard's contents
 - Rejects a shard filter that no longer names a test in the tree
@@ -407,6 +410,8 @@ Public functions: solve
 - a part bound only to a supply rail follows its private chain to the pad that anchors it
 - a series part across two package edges takes its signal end, and the busier node when both are signals
 - an authored group's unbindable members join the edge its bound members hold, and a bypass bank is untouched
+- rough chains prefer local signal connections over sparse supplies and obey authored net classes
+- a precise signal pad outranks a sparse supply target while authored adjacency remains authoritative
 - a chain child hangs off a ring-bound entry on its chain's home edge, spreading over the entries there
 - a 2-pad part with a precise partner on each leg turns its pad axis to face them
 - authored rough groups map to a per-part grouping, first membership winning
@@ -517,6 +522,11 @@ Public functions: route, perNetRouted, returnPathViolations, canonicalizeTraceJu
 - the router's fence-corridor width agrees with the via-fence generator's outermost resolved row
 - routes corners as 45° diagonals rather than 90° bends
 - straightEscapePair accepts an axis-aligned pad pair that faces along the hop, rejecting a diagonal, a perpendicular-facing, a coincident, or a cross-layer pair
+- facing cross-layer RF pads use two collinear segments and one via before the escape maze
+- RF launch rays construct a straight, a forward elbow, a rotated elbow or one offset bridge without raster jogs
+- pad-stub cleanup preserves RF arc tangent points inside a terminal land
+- RF passive launch direction follows its two pads through rotation and mirroring, independent of footprint origin
+- the straight one-via quality probe refuses obstacles, forbidden transitions and non-collinear terminals
 - LoopRouter measures a real per-leg trace length that detours foreign pads
 - counts signal vias lacking a nearby ground stitching via as return-path discontinuities
 - stitches each signal via's return path with a nearby GND plane via
@@ -3709,6 +3719,30 @@ Public functions: analyze, classifyNetName, isInductor
 - exports the detected policy as an editable (module-policy …) block
 
 ## placement/power-routing
+
+- the autorouter widens a thermally adequate supply and return loop until the final copper meets its voltage budget
+
+- the voltage budget scales copper resistance to its declared conductor temperature without taking credit for cold copper
+
+- the destination class voltage budget overrides the child budget as one policy including its return reference
+
+Power classes may declare `(voltage-drop VOLTS [(return-net "GND")])`.
+The limit allocates DC copper loss from source supply to load supply and back
+through the return conductor at annotated maximum current. It is separate from
+regulator tolerance, ripple, transient impedance and the load voltage rating.
+The voltage budget scales the 20 C copper model to `(copper-temperature C)`
+(default 35 C, from 25 C ambient plus the 10 C rise screen). It does not take
+credit for colder copper. Trace/via-only,
+single-rail loops can be verified; equipotential sheets, shared returns and
+ambiguous terminal ownership explicitly remain unverified. A declared budget
+never implies that an unmodeled return has zero resistance. The router proposes
+bounded widening with 10% voltage margin, respects clearance and existing wider
+copper, and the final DRC re-solves the achieved geometry.
+
+- a voltage budget measures the complete maximum-current supply and return path, so individually acceptable series segments can fail together and wider copper can pass
+- missing maximum current, missing source terminals, disconnected return copper and unmodeled sheets produce an unverified voltage budget instead of a pass
+- voltage loss uses the actual foil on each routed layer and refuses shared returns whose other rail currents were not modeled
+- voltage-driven widening can exceed the thermal rail target and never shrinks existing copper
 - a branch whose end lands inside the trunk's copper joins the trunk even when its centreline misses the trunk's by less than the copper half-width
 - a via joins every track whose copper its barrel overlaps, not only tracks ending exactly at its centre
 - an explicit copper-contact junction joins a branch that overlaps the trunk's copper but whose centreline misses it by more than the branch half-width
@@ -5553,6 +5587,7 @@ Public functions: parseSchematicView, renderToHtml, setupRenderCtx, renderHubSvg
 - A passive bridging two single-hub-pin nets has no anchor and keeps default placement
 - Schematic pages expose a URL-backed Sequential and Functional slider with Functional as the default a bare URL renders
 - Functional pin ordering terminates when several pins share one earlier partner
+- A pull-up onto a rail the hub itself produces is ordered directly in front of the producing group, which keeps its own place
 - The schematic page renders no thermal panel, linking out to /thermal/:name instead, so the page reads nothing but the design's own .sexp
 - Each sub circuit card links out to its PCB layout in a new tab rather than embedding one, so no sub circuit opens a layout from the schematic page
 - A sub circuit backed by a reusable module links to that module's own layout editor, and a path- or inline-sourced one to the design-scoped view of its slice
@@ -5726,9 +5761,16 @@ Public functions: renderSchematic
 - A parallel passive island reserves one grouped hub entry so its outer bus stops at the last visible branch
 - A Functional turned series return shares the destination rail's x-coordinate so VTUNE closes straight down without an outside detour
 - A sub-block's path-qualified supply rail is still a supply, not a signal return
-- Pull-ups between neighbouring pin groups turn vertical on the pin-stub column and land on the destination group's nearest stub
+- Pull-ups between neighbouring pin groups turn vertical on the bus column and run straight into the destination group's bus
+- A return to a shared rail turns onto the pin group where this hub produces that rail
+- A feedback divider's upper leg turns onto the regulator's own output stub instead of an outside lane
+- Two turned returns land on the rail's first and last rows and neither writes the rail's name
 - An outside direct-return lane is pushed past any net label drawn on a row it spans
 - Group heights follow render order: a spoke shared with an earlier group is counted there, and the own net's row is reserved once an earlier group draws a spoke on it
+- A turned return runs down the bus column into the rail's own row, which alone names the net at the end of its wire
+- A pin named OUT / OUTS / VOUT marks its hub as the producer of the rail on it
+- A pin group produces its rail when any of its pins is an output pin
+- A pull-up onto a rail the hub produces is functionally linked to the producing group, so the column split cannot separate the two
 - A vertical passive labels away from its hub: left of left-side parts and right of right-side parts
 - Functional pin rows put the pin's own net before a ground shunt so the shunt draws below the pin; Original remains alphabetical
 - Identical decoupling capacitors each render as their own labeled schematic symbol
@@ -5906,6 +5948,8 @@ Public functions: analyze
 - completeness-waiver: integer overflow (no arithmetic on design-supplied numbers; the only counter is the 1..1000-bounded name-disambiguation ordinal)
 
 ## eval/design_block
+
+- a net-class voltage-drop form parses volts and its return net, and invalid limits remain declared but unverified
 
 - two instances authored with one ref-des are an error naming both source locations
 - a repeat body that mints one ref-des twice is a duplicate like any other
@@ -6229,6 +6273,8 @@ own column headers are free to use the Greek letter.
 - with a cooling ladder the ambient window's hot end is the governing scenario's ceiling and names the cooling it assumes, adding the still-air ceiling whenever passive operation is not viable
 - the shared JSON body carries the board-coupled verdict as its own additive key, null when there is no ladder, while the package-level verdict key keeps its meaning untouched
 - the shared JSON body carries the scenario ladder as absolute degrees per rung, including its physical heatsink interface, shared-plate temperature and directional package path, or a null ladder beside the sentence saying why there is none
+- the provenance line names the governing system brief, its ambient window and the scenario its cooling case is read at, says outright when nothing declared one, and marks a caller-dialled ambient as a what-if
+- the shared JSON body carries the ambient provenance as its own object, null-valued in every field when nothing declared one
 - completeness-waiver: empty inputs (a board with no rows renders prose and no table, and an unknown figure is a dash or a JSON null, both covered by the bullets above)
 - completeness-waiver: large inputs (one linear pass over the already-computed rows; a bigger board only lengthens the slice it formats)
 - completeness-waiver: unauthorized access (pure formatting over a value the caller already holds; it opens nothing and exposes no surface of its own)
@@ -6445,6 +6491,14 @@ Public functions: parse, renderMarkdown, renderMarkdownAlloc, renderHtml, render
 - the generated brief and goals sections render the declared envelope and every goal's verdict, and say so plainly when the system declares neither
 - the system workspace page renders the brief panel and the goals table above its document list
 - the brief governing a board is the first system by name that declares it, and a board no system declares has none
+- a board with no governing brief keeps the bench ambient and produces no brief-driven observation
+- the screening plan takes the brief's ambient maximum and maps its declared cooling case to a solver scenario
+- a sealed-conduction brief is screened in still air and every surface is told the scenario is a conservative stand-in
+- a named derating standard selects its published factors while the house default and an unknown standard change nothing
+- temperature grades are ordered so a stricter grade satisfies a looser demand
+- an active part whose rated ambient range does not cover the brief window fails, and one declaring none is not-declared rather than passing
+- the brief's input-power window is bound to a board net by (feeds "NET") or by an interface named after a board port, and an envelope narrower than the window fails
+- a declared ESD class demands a protection-class part on every interface net the brief names
 - a contract declaring no status, brief or goal hashes exactly as it did before those forms existed, so adopting them re-attests only the systems that use them
 - an identity-only parse drops an (auto) interface it has no evaluator for instead of refusing the contract, so a listing surface never pays a board evaluation per workspace
 - approving a workspace whose contract is a (system …) source and approving the JSON manifest it converts from leave the identical spec, so an attestation does not depend on which manifest spelling a workspace keeps
@@ -7144,6 +7198,12 @@ design-sibling .review.json sidecar.
 - the PCB header exposes Review only for board designs and preserves a selected saved layout
 - the Review page carries the selected saved layout through every physical-board link
 - the supplied review catalog retains all 13 sections and 258 discrete decisions
+- the Review tab answers the Board Review Card by default and the 258-item catalogue only at view=reference
+- the card view renders a shell that fetches the Board Review Card, the seven-verdict filters and a link to the reference checklist
+- the card view carries the selected saved layout into every board link, the card request and the reference view
+- the card page escapes a hostile design name everywhere it appears
+- every registry id the generated assessment names resolves to a registered review check, so a reference item links to a card row that exists
+- a generated item carries the registry rows that prove it and the assessment JSON publishes them
 - the page reports ready, static pass, agent queue, human/measurement, blocked and open totals, and supports search plus generated-work filters
 - generated applicability closes an absent component or interface family only from evaluated board inventory, while present or uncertain families remain queued unless an analyzer proves the complete criterion
 - generated Pass and Fail decisions cite current ERC, power-budget, layout, fabrication, BOM, identity, test-point, or board-declaration evidence rather than the saved sidecar
@@ -7627,7 +7687,13 @@ is what makes the predicate exact rather than approximately right.
 
 ## Web Server
 
+- coordinate-scoped clear_routes can remove intersecting selected tracks and vias while preserving distant copper and foreign nets
+- clear_routes preserves complete layout metadata and rejects malformed track-window requests without persistence
+- coordinate-scoped track clearing refuses selected swept RF paths without partial deletion
+- coordinate-scoped track clearing tests actual arc copper rather than its chord or a bounding box
+
 - GET /api/part-review/:name answers one chip per placed part and /:ref answers that part's sheet or 404
+- GET /api/review-card/:name answers the composed Board Review Card and 404s an unknown design
 - The schematic BOM card carries a Review column whose cell names the group's ref-deses so the viewer can fill one verdict chip per row
 - Saving from an explicit source project creates a separate review candidate, retains complete layout metadata, refuses name collisions, and preserves the destination star
 
@@ -8500,6 +8566,7 @@ Public functions: check, writeJson, savedOutline, declaredOutline, outlineDrift
 - a series element is charged the branch its own rail data declares, and the whole rail's worst case only when the design declared no branch
 - a rail with no per-branch declaration still charges every series element its whole worst-case load
 - a zero-ohm configuration strap to ground carries no rail current, while a jumper any rail reaches or a ground-to-ground link stays unproven
+- a derating standard named by the system brief screens applied stress against a fraction of each rating, and the house default screens exactly as before
 - a series magnetic sealed inside a module inherits that module's declared input current, and keeps none of it on a leg the declaration never covered
 - a net a ferrite bead ties to a rail is that rail's node for current as well as voltage, so a module-internal series element behind the bead is charged the rail
 - saved rounded outlines must exactly match authored dimensions, radius, polygon, and native arcs
@@ -9055,6 +9122,25 @@ export never invents them.
 - completeness-waiver: concurrent access (collection owns its evaluator and arena; nothing is written)
 - completeness-waiver: malformed encoding (readiness and ladder JSON that fails to parse leaves those sections unavailable)
 - completeness-waiver: integer overflow (counts are tallied from bounded slices with no input-derived arithmetic)
+- completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
+
+## review-card
+
+- the card carries all twelve review categories in registry order and every row cites a registered check
+- a rail whose consumers carry no (i-max …) reports a not-declared power-budget row naming the missing form
+- the composer names the reason it could not review instead of answering an empty card
+- the stripe tallies every verdict and reports the worst one
+- a governing system brief sets the ambient the card screens at and turns its brief-driven checks into rows
+- review_card is a registered read-only CLI tool answering with the endpoint's own bytes
+- the review-card CLI parses its flags and names the error a card it cannot compose failed with
+- the composer runs one release preflight for the facts and the per-part sheet instead of repeating it
+- completeness-waiver: empty inputs (a design that declares no rail, no analysis form and no layout still gets a row per category saying so, rather than an empty card)
+- completeness-waiver: large inputs (every category is built from slices the evaluation already bounded; no fixed-size output buffer)
+- completeness-waiver: unauthorized access (the card reads the caller's project directory through the same evaluator, gate and check run the CLI already exposes, and writes nothing)
+- completeness-waiver: i/o failure (an unavailable fabrication gate or ladder leaves those rows unproven instead of aborting the composition)
+- completeness-waiver: concurrent access (composition owns its arena and its evaluator; the retained body is validated against the read-set it was computed from)
+- completeness-waiver: malformed encoding (every string is written through json_writer's escaper, and the audit form clips and neutralizes each Markdown cell)
+- completeness-waiver: integer overflow (verdict counts are tallied from bounded slices with no input-derived arithmetic)
 - completeness-waiver: panic-free (panic-freedom is enforced repo-wide by guardian's panic-budget snapshot, not restated per section)
 
 ## part-review

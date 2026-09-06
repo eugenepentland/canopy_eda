@@ -163,7 +163,31 @@ fn writeReportJson(w: *std.Io.Writer, report: Report) WriteError!void {
         first = false;
         try writeRailJson(w, report, net);
     }
+    try w.writeAll("],\"voltage_budgets\":[");
+    first = true;
+    for (report.required.voltage) |v| {
+        if (!voltageSelected(report, v.net)) continue;
+        if (!first) try w.writeByte(',');
+        first = false;
+        try w.print("{{\"net_index\":{d},\"limit_v\":{d},\"copper_temperature_c\":{d},\"supply_drop_v\":", .{ v.net, v.budget.limit_v, v.budget.copper_temperature_c });
+        try writeOptionalNumber(w, v.supply_drop_v);
+        try w.writeAll(",\"return_drop_v\":");
+        try writeOptionalNumber(w, v.return_drop_v);
+        try w.writeAll(",\"load\":");
+        try json_writer.writeString(w, v.load);
+        try w.writeAll(",\"reason\":");
+        try json_writer.writeString(w, v.reason);
+        try w.print(",\"exceeded\":{s}}}", .{boolWord(v.exceeded())});
+    }
     try w.writeAll("]}\n");
+}
+
+fn voltageSelected(report: Report, index: usize) bool {
+    if (report.args.net == null) return true;
+    for (report.analysis.nets) |net| {
+        if (net.index == index) return selected(report.args, net.name);
+    }
+    return false;
 }
 
 fn writeRailJson(w: *std.Io.Writer, report: Report, net: power_integrity.Net) WriteError!void {
@@ -266,6 +290,13 @@ fn writeText(w: *std.Io.Writer, report: Report) WriteError!void {
             });
         }
         for (net.flow.loads) |load| try writeLoadText(w, load);
+        for (report.required.voltage) |v| {
+            if (v.net != net.index) continue;
+            try w.print("  voltage {s}: modeled {d:.3} mV / {d:.3} mV budget at {d} C — {s}{s}\n", .{
+                v.load,                                 v.knownDrop() * 1000,                                             v.budget.limit_v * 1000, v.budget.copper_temperature_c,
+                if (v.exceeded()) "EXCEEDED; " else "", if (v.reason.len > 0) v.reason else "supply and return verified",
+            });
+        }
         try writeConductorsText(w, report, net);
     }
 }

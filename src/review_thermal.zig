@@ -49,6 +49,12 @@ pub const Lines = struct {
     /// Which forms to add when there is nothing to judge. Empty otherwise, so
     /// a board with real data is never lectured about the grammar.
     hint: []const u8,
+    /// WHERE the screening ambient came from, e.g.
+    /// `Screened at 60 C, governed by the "barracuda" system brief (ambient
+    /// -10...60 C, cooling sealed-conduction ...)`. Never empty: a board whose
+    /// system states no envelope says so, so a reader can tell a met target
+    /// from a bench default nobody chose.
+    provenance: []const u8,
 };
 
 /// Build every summary line for `bt`, reconciled against `scenarios`. The
@@ -73,6 +79,7 @@ pub fn summaryLines(
         .ambient = try ambientLine(allocator, bt),
         .coverage = try coverageLine(allocator, bt),
         .hint = if (bt.verdict == .insufficient_data) data_hint else "",
+        .provenance = try provenanceLine(allocator, bt),
     };
     return .{
         .verdict = try boardSentence(allocator, ladder),
@@ -80,6 +87,7 @@ pub fn summaryLines(
         .ambient = try boardAmbientLine(allocator, bt, ladder),
         .coverage = try coverageLine(allocator, bt),
         .hint = if (headlineVerdict(bt, scenarios) == .insufficient_data) data_hint else "",
+        .provenance = try provenanceLine(allocator, bt),
     };
 }
 
@@ -256,6 +264,71 @@ fn verdictSentence(
             .{},
         ),
     };
+}
+
+/// Where the screening ambient came from, as one sentence every thermal
+/// surface prints under the verdict.
+///
+/// The two states a reader must be able to tell apart are "this board was
+/// screened at the temperature its product is specified to" and "this board
+/// was screened at 25 C because nobody said otherwise". Both are stated
+/// outright; neither is implied by silence. A brief whose cooling case the
+/// solver cannot model says so in the same sentence, because a scenario name
+/// that is an approximation and one that is a solve look identical otherwise.
+///
+/// ASCII only, deliberately: the PDF composer draws this line through a
+/// base-14 font, which is why the degree sign is spelled `C` here as it is in
+/// the coverage line.
+pub fn provenanceLine(
+    allocator: std.mem.Allocator,
+    bt: thermal.BoardThermal,
+) std.mem.Allocator.Error![]const u8 {
+    const source = bt.ambient_source;
+    if (source.system.len == 0) return std.fmt.allocPrint(
+        allocator,
+        "Screened at {d:.0} C - the bench default. No system brief declares an ambient for this board, so the operating envelope is not-declared rather than met.",
+        .{bt.ambient_c},
+    );
+    if (source.overridden) return std.fmt.allocPrint(
+        allocator,
+        "Screened at {d:.0} C - a caller-supplied ambient, NOT the \"{s}\" system brief's{s}.",
+        .{ bt.ambient_c, source.system, try briefWindow(allocator, source) },
+    );
+    return std.fmt.allocPrint(
+        allocator,
+        "Screened at {d:.0} C, governed by the \"{s}\" system brief{s}{s}",
+        .{ bt.ambient_c, source.system, try briefWindow(allocator, source), try coolingClause(allocator, source) },
+    );
+}
+
+/// ` (ambient -10...60 C)` — the window the brief states, or empty when it
+/// states none.
+fn briefWindow(
+    allocator: std.mem.Allocator,
+    source: thermal.AmbientSource,
+) std.mem.Allocator.Error![]const u8 {
+    const low = source.ambient_min_c orelse return "";
+    const high = source.ambient_max_c orelse return "";
+    return std.fmt.allocPrint(allocator, " (ambient {d:.0}...{d:.0} C)", .{ low, high });
+}
+
+/// The declared cooling case, the scenario it is read at, and — when the two
+/// are not the same thing — why.
+fn coolingClause(
+    allocator: std.mem.Allocator,
+    source: thermal.AmbientSource,
+) std.mem.Allocator.Error![]const u8 {
+    if (source.cooling.len == 0) return ". The brief declares no cooling case, so the ladder is read as usual.";
+    if (source.note.len == 0) return std.fmt.allocPrint(
+        allocator,
+        ", cooling {s}, read at the {s} scenario.",
+        .{ source.cooling, source.scenario },
+    );
+    return std.fmt.allocPrint(
+        allocator,
+        ", cooling {s}, read at the {s} scenario - {s}.",
+        .{ source.cooling, source.scenario, source.note },
+    );
 }
 
 /// The board's rated ambient window, each end attributed to the part that sets
@@ -492,6 +565,8 @@ pub fn writeFactsJson(
         ",\"counts\":{{\"with_power\":{d},\"with_thermal\":{d},\"unknown_power\":{d}}}",
         .{ bt.counts.with_power, bt.counts.with_thermal, bt.counts.unknown_power },
     );
+    try w.writeAll(",\"ambient_source\":");
+    try writeAmbientSource(w, bt.ambient_source);
     try w.writeAll(",\"scenarios\":");
     if (scenarios.ladder) |ladder| try writeLadder(w, ladder) else try w.writeAll("null");
     try w.writeAll(",\"scenarios_unavailable\":");
@@ -502,6 +577,26 @@ pub fn writeFactsJson(
         try writePart(w, row);
     }
     try w.writeAll("]}");
+}
+
+/// Where the screening ambient came from. `system` is null when nothing
+/// declared one — the shape a client reads as `not-declared` — and `note` is
+/// non-null only when the screened scenario is a conservative stand-in for a
+/// cooling case the solver cannot model.
+fn writeAmbientSource(w: anytype, source: thermal.AmbientSource) json_writer.WriteError!void {
+    try w.writeAll("{\"system\":");
+    try writeStringOrNull(w, source.system);
+    try w.writeAll(",\"ambient_min_c\":");
+    try writeFloatOrNull(w, source.ambient_min_c);
+    try w.writeAll(",\"ambient_max_c\":");
+    try writeFloatOrNull(w, source.ambient_max_c);
+    try w.writeAll(",\"cooling\":");
+    try writeStringOrNull(w, source.cooling);
+    try w.writeAll(",\"scenario\":");
+    try writeStringOrNull(w, source.scenario);
+    try w.writeAll(",\"note\":");
+    try writeStringOrNull(w, source.note);
+    try w.print(",\"overridden\":{s}}}", .{boolText(source.overridden)});
 }
 
 /// The scenario ladder as a JSON array, in `Scenario` enum order. Every
@@ -1089,4 +1184,65 @@ test "the JSON body nulls unknowns and keeps flags boolean" {
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, out, .{});
     try testing.expectEqual(@as(usize, 1), parsed.object.get("parts").?.array.items.len);
     try testing.expectEqualStrings("U5", parsed.object.get("limiting_ref").?.string);
+}
+
+// spec: review_thermal - the provenance line names the governing system brief, its ambient window and the scenario its cooling case is read at, says outright when nothing declared one, and marks a caller-dialled ambient as a what-if
+test "the provenance line states where the screening ambient came from" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const bench = try provenanceLine(a, .{ .ambient_c = 25 });
+    try testing.expect(std.mem.indexOf(u8, bench, "bench default") != null);
+    try testing.expect(std.mem.indexOf(u8, bench, "not-declared") != null);
+
+    const governed = try provenanceLine(a, .{ .ambient_c = 60, .ambient_source = .{
+        .system = "barracuda",
+        .ambient_min_c = -10,
+        .ambient_max_c = 60,
+        .cooling = "sealed-conduction",
+        .scenario = "natural",
+        .note = "no solver model",
+    } });
+    try testing.expect(std.mem.indexOf(u8, governed, "barracuda") != null);
+    try testing.expect(std.mem.indexOf(u8, governed, "ambient -10...60 C") != null);
+    try testing.expect(std.mem.indexOf(u8, governed, "natural scenario") != null);
+    try testing.expect(std.mem.indexOf(u8, governed, "no solver model") != null);
+
+    const dialled = try provenanceLine(a, .{ .ambient_c = 85, .ambient_source = .{
+        .system = "barracuda",
+        .ambient_min_c = -10,
+        .ambient_max_c = 60,
+        .overridden = true,
+    } });
+    try testing.expect(std.mem.indexOf(u8, dialled, "caller-supplied") != null);
+}
+
+// spec: review_thermal - the shared JSON body carries the ambient provenance as its own object, null-valued in every field when nothing declared one
+test "the facts JSON carries the ambient provenance" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    var undeclared: std.Io.Writer.Allocating = .init(a);
+    try writeFactsJson(&undeclared.writer, .{ .ambient_c = 25 }, .{});
+    const bench = try std.json.parseFromSliceLeaky(std.json.Value, a, undeclared.written(), .{});
+    const bench_source = bench.object.get("ambient_source").?.object;
+    try testing.expect(bench_source.get("system").? == .null);
+    try testing.expect(bench_source.get("scenario").? == .null);
+    try testing.expectEqual(false, bench_source.get("overridden").?.bool);
+
+    var governed: std.Io.Writer.Allocating = .init(a);
+    try writeFactsJson(&governed.writer, .{ .ambient_c = 60, .ambient_source = .{
+        .system = "barracuda",
+        .ambient_min_c = -10,
+        .ambient_max_c = 60,
+        .cooling = "fan",
+        .scenario = "fan",
+    } }, .{});
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, governed.written(), .{});
+    const source = parsed.object.get("ambient_source").?.object;
+    try testing.expectEqualStrings("barracuda", source.get("system").?.string);
+    try testing.expectEqualStrings("fan", source.get("cooling").?.string);
+    try testing.expect(source.get("note").? == .null);
 }

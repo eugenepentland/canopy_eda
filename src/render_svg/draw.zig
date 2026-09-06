@@ -352,12 +352,74 @@ pub fn isGroundNet(name: []const u8) bool {
 /// One implementation: `connection`, `hub` and `render_html` each carried a
 /// copy of this loop, and every copy had the same blind spot.
 pub fn isFunctionalSignalNet(net: []const u8) bool {
+    return net_name.leaf(net).len != 0 and !isSupplyLikeNet(net);
+}
+
+/// Whether a net is a ground or supply rail for schematic layout purposes,
+/// judged on its LEAF name so a sub-block's rail (`dsa/VDD_F`) is one too.
+/// `render_html`'s local-island attachment held a fourth copy of the prefix
+/// loop with the same blind spot; it asks here now.
+pub fn isSupplyLikeNet(net: []const u8) bool {
     const local = net_name.leaf(net);
-    if (local.len == 0 or isGroundNet(local)) return false;
+    if (isGroundNet(local)) return true;
     for (rails_mod.schematic_supply_prefixes) |prefix| {
-        if (std.ascii.startsWithIgnoreCase(local, prefix)) return false;
+        if (std.ascii.startsWithIgnoreCase(local, prefix)) return true;
     }
-    return true;
+    return false;
+}
+
+/// Whether a hub pin's function name says the hub PRODUCES the rail on it: a
+/// regulator's OUT / OUTS / VOUT / OUT1 / OUTA / OUTPUT. Separators are
+/// stripped and the comparison is case-insensitive, like `pin_roles.isGroundFn`.
+/// A pull-up from another pin of the same hub to such a rail is drawn into the
+/// output node — an LDO's PG pull-up, a buck's feedback divider — where a
+/// pull-up to a rail the hub merely consumes keeps the rail's label.
+pub fn isRailOutputPinLabel(label: []const u8) bool {
+    var buf: [32]u8 = undefined;
+    var n: usize = 0;
+    for (label) |c| switch (c) {
+        '_', '-', '/', '.', ' ', '#' => {},
+        else => {
+            if (n >= buf.len) return false;
+            buf[n] = std.ascii.toUpper(c);
+            n += 1;
+        },
+    };
+    var s: []const u8 = buf[0..n];
+    while (s.len > 0 and std.ascii.isDigit(s[s.len - 1])) s = s[0 .. s.len - 1];
+    const rest = if (std.mem.startsWith(u8, s, "VOUT"))
+        s[4..]
+    else if (std.mem.startsWith(u8, s, "OUT"))
+        s[3..]
+    else
+        return false;
+    if (rest.len == 0 or std.mem.eql(u8, rest, "PUT")) return true;
+    return rest.len == 1 and std.ascii.isAlphabetic(rest[0]);
+}
+
+// spec: render_svg - A pin named OUT / OUTS / VOUT marks its hub as the producer of the rail on it
+test "rail output pin labels" {
+    const testing = std.testing;
+    const cases = [_]struct { label: []const u8, produces: bool }{
+        .{ .label = "OUT", .produces = true },
+        .{ .label = "OUTS", .produces = true },
+        .{ .label = "VOUT", .produces = true },
+        .{ .label = "VOUT_2", .produces = true },
+        .{ .label = "out_1", .produces = true },
+        .{ .label = "OUTPUT", .produces = true },
+        .{ .label = "OUTA", .produces = true },
+        .{ .label = "Vout", .produces = true },
+        .{ .label = "OUT_EN", .produces = false },
+        .{ .label = "VDD", .produces = false },
+        .{ .label = "VIN", .produces = false },
+        .{ .label = "SW", .produces = false },
+        .{ .label = "PGOOD", .produces = false },
+        .{ .label = "FB", .produces = false },
+        .{ .label = "PG", .produces = false },
+        .{ .label = "OUTFB", .produces = false },
+        .{ .label = "", .produces = false },
+    };
+    for (cases) |case| try testing.expectEqual(case.produces, isRailOutputPinLabel(case.label));
 }
 
 // spec: render_svg - A sub-block's path-qualified supply rail is still a supply, not a signal return
@@ -372,6 +434,10 @@ test "functional signal classification sees through a sub-block path" {
     try testing.expect(!isFunctionalSignalNet("dsa/GND"));
     try testing.expect(!isFunctionalSignalNet(""));
     try testing.expect(!isFunctionalSignalNet("dsa/"));
+    try testing.expect(isSupplyLikeNet("mix/VCC"));
+    try testing.expect(isSupplyLikeNet("amp1/GND"));
+    try testing.expect(!isSupplyLikeNet("mix/OUTP"));
+    try testing.expect(!isSupplyLikeNet("boost5/SW"));
 }
 
 /// Strip the "subblock/" path from a ref-des — turns "ldo/U1" into "U1"

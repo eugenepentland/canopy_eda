@@ -1,6 +1,7 @@
 //! One strict manufacturing verdict shared by HTTP and MCP release surfaces.
 
 const std = @import("std");
+const brief_checks = @import("brief_checks.zig");
 const bom = @import("bom.zig");
 const drc = @import("placement/drc.zig");
 const env = @import("eval/env.zig");
@@ -356,6 +357,10 @@ pub fn check(arena: std.mem.Allocator, input: Input) std.mem.Allocator.Error!Res
             .composed_drc = composed.effective,
             .composed_drc_complete = composed.complete,
             .authored_outline = fab_readiness.declaredOutline(input.release.board),
+            // The rating screen derates against the standard the governing
+            // system brief names, resolved HERE because this is the layer that
+            // knows which design the placement is.
+            .derating = brief_checks.deratingForBoard(arena, input.project_dir, input.name),
         },
     });
     const block = input.block orelse {

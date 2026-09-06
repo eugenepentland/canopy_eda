@@ -127,6 +127,11 @@ pub const InputPower = struct {
     transient_v: ?f64 = null,
     /// Maximum input current the product may draw (A).
     current_max_a: ?f64 = null,
+    /// The board net this input power lands on, when the brief names it
+    /// outright. Empty ⇒ the binding falls back to matching an
+    /// `(interface "NAME" …)` against a board port name — see
+    /// `src/brief_checks.zig`, which is the only reader.
+    feeds: []const u8 = "",
 };
 
 /// Compliance regimes the product is designed against. Each is free text
@@ -1317,6 +1322,7 @@ fn hashCanonicalBrief(hash: *Sha256, maybe_brief: ?Brief) void {
         hashNumber(hash, power.voltage_max_v);
         hashOptionalNumber(hash, power.transient_v);
         hashOptionalNumber(hash, power.current_max_a);
+        hashField(hash, power.feeds);
     }
     hashOptionalField(hash, if (brief.temperature_grade) |grade| @tagName(grade) else null);
     hashOptionalField(hash, brief.derating);

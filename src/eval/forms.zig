@@ -933,7 +933,7 @@ pub const scope_form_docs = blk: {
             "end in `.gbr`; JLCPCB tape names conventionally use `pst_` for top and `psb_` for bottom.",
     } };
     t[@backingInt(ScopeForm.net_class)] = .{ .scope = tl, .doc = .{
-        .syntax = "(net-class \"name\" [(width MM)] [(power-branch-width MM)] [(clearance MM)] " ++
+        .syntax = "(net-class \"name\" [(width MM)] [(power-branch-width MM)] [(voltage-drop VOLTS [(return-net \"GND\")] [(copper-temperature C)])] [(clearance MM)] " ++
             "[(pad-escape-width MM)] [(pad-escape-max-length MM)] [(taper-length MM)] " ++
             "[(via DIA DRILL)] [(priority 0-7)] [(diff-pair [GAP_MM])] [(max-freq HZ)] " ++
             "[(band MIN_HZ MAX_HZ)] [(return-loss DB)] " ++
@@ -945,6 +945,7 @@ pub const scope_form_docs = blk: {
             "[(keepout MM [(escape MM)])] [(mask-relief MM)] [(nets \"A\" \"B\"…)])",
         .summary = "Routing geometry + routing order profile and/or membership for named nets: " ++
             "trace width, copper clearance, " ++
+            "an optional voltage-drop limit in volts for maximum-load copper loss including return (default GND, or an exact flattened return-net name; copper-temperature defaults to 35 C and scales resistance above 20 C); missing data and unmodeled sheet/shared-return resistance remain explicitly unverified, " ++
             "an optional power-branch-width that starts plane-backed rail fanouts narrow and is the authored FLOOR under every branch of the rail (post-route DRC solves each segment's OWN current and reports only the branches that must grow; where a solve exists it — not the class width — is the rule, so a leaf carrying a few milliamps is never charged against the trunk, and where the per-branch solve fails the whole-rail envelope is reported as an explained power_width_envelope WARNING instead of a fab error), " ++
             "an optional short pad-local neck width/maximum length/linear taper back to the class width " ++
             "(applied only where the land's span across the actual launch is narrower than the trace), " ++
@@ -1834,6 +1835,14 @@ pub const system_form_docs = requireWellFormedSubForms(&[_]SubFormDoc{
         .within = "input-power",
         .syntax = "(current-max 1.2)",
         .summary = "Maximum input current the product may draw, in amps.",
+    },
+    .{
+        .name = "feeds",
+        .within = "input-power",
+        .syntax = "(feeds \"V_12V\")",
+        .summary = "Board net the input power lands on. Binds the (voltage LO HI) window to that net's " ++
+            "proven envelope for the unit checks; without it the binding falls back to the first " ++
+            "(interface \"NAME\") whose name matches a board port.",
     },
     .{
         .name = "temperature-grade",

@@ -44,6 +44,7 @@ test {
     _ = @import("board_theme.zig");
     _ = @import("bom.zig");
     _ = @import("bom_resolve.zig");
+    _ = @import("brief_checks.zig");
     _ = @import("build_id.zig");
     _ = @import("canonical_module_check.zig");
     _ = @import("commands.zig");
@@ -328,6 +329,7 @@ test {
     _ = @import("placement/power_branch_width.zig");
     _ = @import("placement/power_capacity.zig");
     _ = @import("placement/power_current.zig");
+    _ = @import("placement/power_voltage_regression.zig");
     _ = @import("placement/port_escape.zig");
     _ = @import("placement/pose_math.zig");
     _ = @import("placement/pose_snapshot.zig");
@@ -336,6 +338,7 @@ test {
     _ = @import("placement/progress.zig");
     _ = @import("placement/rf_path_solver.zig");
     _ = @import("placement/rf_port_finish.zig");
+    _ = @import("placement/rf_pad_route.zig");
     _ = @import("placement/rf_port_frames.zig");
     _ = @import("placement/rf_shadow.zig");
     _ = @import("placement/rf_taper_paths.zig");
@@ -389,6 +392,7 @@ test {
     _ = @import("review_datasheet_inventory.zig");
     _ = @import("review_audit.zig");
     _ = @import("part_review.zig");
+    _ = @import("review_card.zig");
     _ = @import("review_profiles.zig");
     _ = @import("review_registry.zig");
     _ = @import("waiver_register.zig");
@@ -491,6 +495,7 @@ test {
     _ = @import("route_cleanup_gate.zig");
     _ = @import("serve/mcp_connector_pinout.zig");
     _ = @import("serve/mcp_escape_assign.zig");
+    _ = @import("placement/copper_window.zig");
     _ = @import("serve/mcp_flatten.zig");
     _ = @import("serve/mcp_import_tools.zig");
     _ = @import("serve/mcp_kicad_sch.zig");
@@ -552,6 +557,8 @@ test {
     _ = @import("serve/schematic_page.zig");
     _ = @import("serve/schematic_pdf.zig");
     _ = @import("serve/part_review_api.zig");
+    _ = @import("serve/review_card_api.zig");
+    _ = @import("serve/review_card_page.zig");
     _ = @import("serve/thermal_api.zig");
     _ = @import("serve/thermal_cache.zig");
     _ = @import("serve/thermal_page.zig");

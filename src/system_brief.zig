@@ -470,11 +470,34 @@ pub fn briefForBoard(
     project_dir: []const u8,
     design_name: []const u8,
 ) ?system_review.Brief {
+    const governing = governingBrief(allocator, project_dir, design_name) orelse return null;
+    return governing.brief;
+}
+
+/// The governing brief together with the system that wrote it.
+pub const Governing = struct {
+    /// Workspace directory name under `src/systems`, as a finding quotes it.
+    system: []const u8,
+    brief: system_review.Brief,
+};
+
+/// `briefForBoard`, plus the name of the system the brief came from — what a
+/// unit check needs to say WHOSE target a board missed. Same first-by-name
+/// selection rule, so both answers always describe the same brief.
+pub fn governingBrief(
+    allocator: std.mem.Allocator,
+    project_dir: []const u8,
+    design_name: []const u8,
+) ?Governing {
     const names = systemNames(allocator, project_dir) catch return null;
     for (names) |name| {
         const spec = contractSpec(allocator, project_dir, name) orelse continue;
         if (!declaresBoard(spec, design_name)) continue;
-        return spec.brief;
+        // The FIRST system that declares the board answers, brief or not: a
+        // board shared between two products must not silently pick up the
+        // second one's envelope because the first wrote no brief.
+        const brief = spec.brief orelse return null;
+        return .{ .system = name, .brief = brief };
     }
     return null;
 }

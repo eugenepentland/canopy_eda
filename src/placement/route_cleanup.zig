@@ -2786,6 +2786,12 @@ pub fn snapPadStubs(board: Board, legs: bypass_intent.Legs) std.mem.Allocator.Er
         if (land.paddle()) continue;
         const net_i: usize = @intCast(pad.net);
         if (!board.enabled(net_i)) continue;
+        // Inline RF arcs own their tangent points, including those inside a
+        // pad. Moving a chord endpoint to the land centre would sever that
+        // tangent and leave the saved arc and taper profile on the old path.
+        if (ctx.rf.net_smooth.get(pad.net)) |smooth| {
+            if (smooth.arcs.len > 0) continue;
+        }
         // The snap is a per-PAD transaction over every end parked on this land,
         // so it is refused whole when one of those ends belongs to an authored
         // bypass leg. The rest of an exact rail — the reservoir cap's escape,
@@ -3473,4 +3479,31 @@ test "a fill-credited deletion plan consumes a doubled pad stub joined through i
     const kept = try arena.alloc(copper_topology.Track, list.items.len);
     const after = try copper_support.assemble(arena, placement, &lands, fillTopologyTracks(kept, list.items), &vias, &zones);
     try testing.expect(!try dropRedundantSections(arena, &lands, after.branch, &list, &.{}, .{}));
+}
+
+// spec: placement/router - pad-stub cleanup preserves RF arc tangent points inside a terminal land
+test "RF launch tangent survives final pad-stub snapping" {
+    const ctx_mod = @import("router_ctx.zig");
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const pads = [_]PadObs{.{ .x0 = -0.3, .y0 = -0.3, .x1 = 0.3, .y1 = 0.3, .net = 0, .layer = 0 }};
+    var ctx = ctx_mod.Ctx{ .arena = arena, .grid = .{ .ox = -2, .oy = -2, .g = 0.1, .nx = 60, .ny = 60 }, .obs = &pads, .reach = 0.25, .occ = try ctx_mod.allocLayerGrids(arena, 2, 3600), .resv = try ctx_mod.allocLayerGrids(arena, 2, 3600), .params = .{}, .base = .{} };
+    const placement = optimizer.Placement{ .parts = &.{}, .links = &.{}, .loops = &.{}, .stubs = &.{}, .instances = &.{}, .nets = &.{.{ .name = "RF", .pins = &.{} }}, .score = .{ .hpwl_mm = 0, .loop_mm = 0, .loop_caps = 0 }, .minx = -2, .miny = -2, .maxx = 4, .maxy = 4, .generated = true };
+    const tangent = [2]f64{ 0.2, 0 };
+    const chord = Track{ .x1 = tangent[0], .y1 = tangent[1], .x2 = 0.6, .y2 = 0.15, .width = 0.2, .layer = 0, .net = 0 };
+    var tracks: std.ArrayList(Track) = .empty;
+    try tracks.appendSlice(arena, &.{ .{ .x1 = 0, .y1 = 0, .x2 = tangent[0], .y2 = tangent[1], .width = 0.2, .layer = 0, .net = 0 }, chord });
+    var vias: std.ArrayList(Via) = .empty;
+    const arc = [_]router.Arc{.{ .p1 = tangent, .pm = .{ 0.6, 0.15 }, .p2 = .{ 0.9, 0.5 }, .width = 0.2, .layer = 0, .net = 0 }};
+    const board = Board{ .ctx = &ctx, .placement = placement, .tracks = &tracks, .vias = &vias };
+    try ctx.rf.net_smooth.put(arena, 0, .{ .arcs = &arc, .sharp = &.{} });
+    try snapPadStubs(board, .{});
+    try testing.expectEqual(@as(usize, 2), tracks.items.len);
+    try testing.expectEqualDeep(chord, tracks.items[1]);
+    // Without an owned arc, the same offending stub is still simplified.
+    ctx.rf.net_smooth.clearRetainingCapacity();
+    try snapPadStubs(board, .{});
+    try testing.expectEqual(@as(usize, 1), tracks.items.len);
+    try testing.expectEqual(@as(f64, 0), tracks.items[0].x1);
 }

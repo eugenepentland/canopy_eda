@@ -9342,6 +9342,7 @@ function drcMsg(d){
  // the client cannot re-derive it. Print the server's own sentence when it
  // ships one. Its field name is the server's to pick, so read the three
  // plausible spellings rather than losing the reason to a rename.
+ if(d.k&&d.k.indexOf("power voltage")===0)return tag+d.k+on+" — "+(drcReason(d)||"unable to verify voltage budget");
  if(d.k&&d.k.indexOf("via current")===0)return tag+d.k+on+
   (drcReason(d)?(" — "+drcReason(d)):" — fewer vias than the solved current needs");
  if(d.k&&d.k.indexOf("power width")===0)return tag+d.k+on+" — "+drcMm(d.gap)+" mm < "+drcMm(d.clr)+
@@ -11004,7 +11005,7 @@ function drcGateRun(tracks,vias,parts,rfPaths,includeFenceVias){
 // deferral list that had to be edited every time a qualifier was added would
 // leak an unprovable finding into the fast tier the first time it fell behind.
 function drcPowerKindDeferred(k){k=String(k||"");
- return k.indexOf("power width")===0||k.indexOf("via current")===0;}
+ return k.indexOf("power width")===0||k.indexOf("power voltage")===0||k.indexOf("via current")===0;}
 function drcGateDefersPowerWidth(d){if(!d)return false;
  if(drcPowerKindDeferred(d.k))return true;
  if(d.k!=="track width"||!d.a||!d.a.net)return false;

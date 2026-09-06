@@ -133,11 +133,13 @@ pub fn renderHubAllPins(
     ctx.render_scratch.functional_left_pin_y.clearRetainingCapacity();
     ctx.render_scratch.functional_right_pin_y.clearRetainingCapacity();
     ctx.render_scratch.functional_inline_nets.clearRetainingCapacity();
+    ctx.render_scratch.rendered_row_spans.clearRetainingCapacity();
     defer {
         ctx.render_scratch.functional_layout = previous_functional_layout;
         ctx.render_scratch.functional_left_pin_y.clearRetainingCapacity();
         ctx.render_scratch.functional_right_pin_y.clearRetainingCapacity();
         ctx.render_scratch.functional_inline_nets.clearRetainingCapacity();
+        ctx.render_scratch.rendered_row_spans.clearRetainingCapacity();
     }
 
     const split = try hub_mod.splitGroupsByHeight(ctx, groups, hub.ref_des);
@@ -276,11 +278,16 @@ fn rememberFunctionalPinRows(ctx: *RenderCtx, layout: FunctionalRowLayout) !void
                 };
                 const stubs = @as(f64, @floatFromInt(@max(group.stub_labels.len, 1) - 1));
                 const half_span = stubs / half_divisor * per_conn_spacing;
+                // `groupHeights`: base 40 plus one `per_conn_spacing` per extra row.
+                const row_half_span = @max(layout.heights[i] - hub_vpad, 0) / half_divisor;
                 try rows.put(ctx.allocator, baseNetName(net), .{
                     .cy = cy,
                     .first_stub_y = cy - half_span,
                     .last_stub_y = cy + half_span,
                     .stub_x = layout.stub_x,
+                    .first_row_y = cy - row_half_span,
+                    .last_row_y = cy + row_half_span,
+                    .produces_rail = hub_mod.groupProducesRail(group),
                 });
             }
         }
@@ -428,7 +435,7 @@ test "long passive chain expands side padding beyond the fixed minimum" {
     try testing.expect(pad > default_side_pad);
 }
 
-// spec: render_svg - Pull-ups between neighbouring pin groups turn vertical on the pin-stub column and land on the destination group's nearest stub
+// spec: render_svg - Pull-ups between neighbouring pin groups turn vertical on the bus column and run straight into the destination group's bus
 test "functional pull-ups to a neighbouring group turn onto its pin stubs" {
     const testing = std.testing;
     // A sub-block's attenuator: C16 pulled up to the module-local filtered
@@ -496,18 +503,21 @@ test "functional pull-ups to a neighbouring group turn onto its pin stubs" {
     try renderHubAllPins(&ctx, &got.writer, ctx.inst_map.get("U1").?, groups, true);
     const svg = got.written();
 
-    // Pin 1 (y=80) is its own group; R1 hangs off its stub end on the
-    // pin-stub column (x=312) and the lane runs straight down to VDD's first
-    // stub, pin 6 at y=176 — no jog onto the group's bus at x=302.
-    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 312.0 100.0)\"") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "points=\"312.0,120.0 312.0,120.0 312.0,176.0 312.0,176.0\"") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"312.0\" y1=\"176.0\" x2=\"352.0\"") != null);
+    // Pin 1 (y=80) is its own group: a short step from its stub end (312)
+    // onto the bus column (302), R1 down that column, and a straight lane on
+    // into the top of VDD's connection bus (its first row, y=156).
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"312.0\" y1=\"80.0\" x2=\"302.0\" y2=\"80.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 302.0 100.0)\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "points=\"302.0,120.0 302.0,120.0 302.0,156.0 302.0,156.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"302.0\" y1=\"156.0\" x2=\"302.0\" y2=\"236.0\"") != null);
     // The rail's rows: bypass, bead to the shared V_3V3 (labelled), and the
     // pull-up to the parallel bus LAST, nearest the bus's group below. R2
-    // steps from the bus (302) back onto the column and turns down to pin 15.
-    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"302.0\" y1=\"236.0\" x2=\"312.0\" y2=\"236.0\"") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 312.0 256.0)\"") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "points=\"312.0,276.0 312.0,276.0 312.0,312.0 312.0,312.0\"") != null);
+    // continues the bus straight down; the parallel-bus group drew no row of
+    // its own, so the lane meets its first pin stub with the same short step.
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"302.0\" y1=\"236.0\" x2=\"312.0\" y2=\"236.0\"") == null);
+    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 302.0 256.0)\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "points=\"302.0,276.0 302.0,276.0 302.0,312.0 302.0,312.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"302.0\" y1=\"312.0\" x2=\"312.0\" y2=\"312.0\"") != null);
     try testing.expect(std.mem.indexOf(u8, svg, "x1=\"312.0\" y1=\"312.0\" x2=\"352.0\"") != null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, svg, ">V_3V3</text>"));
     // Neither hub-private net earns a label, and nothing runs on the outside
@@ -515,4 +525,174 @@ test "functional pull-ups to a neighbouring group turn onto its pin stubs" {
     try testing.expect(std.mem.indexOf(u8, svg, ">dsa/VDD_F</text>") == null);
     try testing.expect(std.mem.indexOf(u8, svg, ">dsa/PAR_CTRL</text>") == null);
     try testing.expect(std.mem.indexOf(u8, svg, "188.0,") == null);
+}
+
+// spec: render_svg - A return to a shared rail turns onto the pin group where this hub produces that rail
+test "functional pull-ups to the hub's own output rail turn onto its pin stubs" {
+    const testing = std.testing;
+    // An LDO's power-good pull-up. V_5V is a SHARED rail — U2 sits on it too,
+    // so it keeps a label — but pins 2/3 are this hub's OUTS/OUT, where the
+    // rail is MADE, so the pull-up draws into the output node instead of
+    // spending an outside lane. IN and GND balance the column split so PG and
+    // the output group stay on one side, as they do on a real LDO.
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "lt3045edd#pbf", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "U2", .component = "mcu", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "R1", .component = "res-0402", .value = "100k", .footprint = "", .symbol = "generic-res" },
+        .{ .ref_des = "C1", .component = "cap-0402", .value = "10uF", .footprint = "", .symbol = "generic-cap" },
+        .{ .ref_des = "C2", .component = "cap-0402", .value = "10uF", .footprint = "", .symbol = "generic-cap" },
+    };
+    const pg = [_]env_mod.PinRef{ .{ .ref_des = "U1", .pin = "1" }, .{ .ref_des = "R1", .pin = "1" } };
+    const v_5v = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "2" },
+        .{ .ref_des = "U1", .pin = "3" },
+        .{ .ref_des = "R1", .pin = "2" },
+        .{ .ref_des = "C1", .pin = "1" },
+        .{ .ref_des = "U2", .pin = "1" },
+    };
+    const v_in = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "4" },
+        .{ .ref_des = "C2", .pin = "1" },
+        .{ .ref_des = "U2", .pin = "2" },
+    };
+    const gnd = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "5" },
+        .{ .ref_des = "C1", .pin = "2" },
+        .{ .ref_des = "C2", .pin = "2" },
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "PG_5V", .pins = &pg },
+        .{ .name = "V_5V", .pins = &v_5v },
+        .{ .name = "V_IN", .pins = &v_in },
+        .{ .name = "GND", .pins = &gnd },
+    };
+    const block: env_mod.DesignBlock = .{
+        .name = "own-rail-pull-up",
+        .instances = &instances,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = RenderCtx.init(a);
+    try ctx.setup(&block);
+    var pin_names: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try pin_names.put(a, "1", "PG");
+    try pin_names.put(a, "2", "OUTS");
+    try pin_names.put(a, "3", "OUT");
+    try pin_names.put(a, "4", "IN");
+    try pin_names.put(a, "5", "GND");
+    const pins = [_][]const u8{ "1", "2", "3", "4", "5" };
+    const groups = try hub_mod.groupHubPinsFunctional(&ctx, &pins, ctx.adjacency.get("U1").?.items, &pin_names);
+    try testing.expectEqual(@as(usize, 4), groups.len);
+
+    var got: std.Io.Writer.Allocating = .init(a);
+    try renderHubAllPins(&ctx, &got.writer, ctx.inst_map.get("U1").?, groups, true);
+    const svg = got.written();
+
+    // PG (y=80) is the row above the OUTS/OUT group, so R1 stands on the
+    // pin-stub column (x=312) and the lane runs from its far end straight down
+    // to OUTS, the output group's first stub at y=136.
+    // PG steps onto the bus column, R1 runs down it, and the lane continues
+    // straight into the top of the OUT group's bus: its own V_5V row, which
+    // is what names the rail — with a wire out to the label, not bare text.
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"312.0\" y1=\"80.0\" x2=\"302.0\" y2=\"80.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 302.0 100.0)\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "points=\"302.0,120.0 302.0,120.0 302.0,136.0 302.0,136.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"302.0\" y1=\"136.0\" x2=\"212.0\" y2=\"136.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "x=\"194.0\" y=\"140.0\" text-anchor=\"end\"") != null);
+    // The rail is shared with U2, so it is named — once, beside the turned
+    // part — and nothing runs on the outside lane at term_x - 24 any more.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, svg, ">V_5V</text>"));
+    try testing.expect(std.mem.indexOf(u8, svg, "points=\"188.0,") == null);
+}
+
+// spec: render_svg - A feedback divider's upper leg turns onto the regulator's own output stub instead of an outside lane
+test "functional feedback dividers turn their upper leg onto the output stubs" {
+    const testing = std.testing;
+    // A buck's feedback divider: R1 down to ground, R2 up to the buck's OWN
+    // VOUT rail, which the rest of the board shares. EN, IN and GND balance
+    // the column split, as they do on a real buck module.
+    const instances = [_]env_mod.Instance{
+        .{ .ref_des = "U1", .component = "tpsm84338rcjr", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "U2", .component = "mcu", .value = "", .footprint = "", .symbol = "" },
+        .{ .ref_des = "R1", .component = "res-0402", .value = "10k", .footprint = "", .symbol = "generic-res" },
+        .{ .ref_des = "R2", .component = "res-0402", .value = "84.5k", .footprint = "", .symbol = "generic-res" },
+        .{ .ref_des = "C1", .component = "cap-0402", .value = "22uF", .footprint = "", .symbol = "generic-cap" },
+        .{ .ref_des = "C2", .component = "cap-0402", .value = "10uF", .footprint = "", .symbol = "generic-cap" },
+    };
+    const fb = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "1" },
+        .{ .ref_des = "R1", .pin = "1" },
+        .{ .ref_des = "R2", .pin = "1" },
+    };
+    const v_out = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "2" },
+        .{ .ref_des = "R2", .pin = "2" },
+        .{ .ref_des = "C1", .pin = "1" },
+        .{ .ref_des = "U2", .pin = "1" },
+    };
+    const v_in = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "3" },
+        .{ .ref_des = "C2", .pin = "1" },
+        .{ .ref_des = "U2", .pin = "2" },
+    };
+    const gnd = [_]env_mod.PinRef{
+        .{ .ref_des = "U1", .pin = "4" },
+        .{ .ref_des = "R1", .pin = "2" },
+        .{ .ref_des = "C1", .pin = "2" },
+        .{ .ref_des = "C2", .pin = "2" },
+    };
+    const nets = [_]env_mod.Net{
+        .{ .name = "BUCK_FB", .pins = &fb },
+        .{ .name = "V_OUT", .pins = &v_out },
+        .{ .name = "V_IN", .pins = &v_in },
+        .{ .name = "GND", .pins = &gnd },
+    };
+    const block: env_mod.DesignBlock = .{
+        .name = "feedback-divider",
+        .instances = &instances,
+        .nets = &nets,
+        .ports = &.{},
+        .notes = &.{},
+        .groups = &.{},
+        .sub_blocks = &.{},
+    };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = RenderCtx.init(a);
+    try ctx.setup(&block);
+    var pin_names: std.StringHashMapUnmanaged([]const u8) = .empty;
+    try pin_names.put(a, "1", "FB");
+    try pin_names.put(a, "2", "VOUT");
+    try pin_names.put(a, "3", "VIN");
+    try pin_names.put(a, "4", "GND");
+    const pins = [_][]const u8{ "1", "2", "3", "4" };
+    const groups = try hub_mod.groupHubPinsFunctional(&ctx, &pins, ctx.adjacency.get("U1").?.items, &pin_names);
+    try testing.expectEqual(@as(usize, 4), groups.len);
+
+    var got: std.Io.Writer.Allocating = .init(a);
+    try renderHubAllPins(&ctx, &got.writer, ctx.inst_map.get("U1").?, groups, true);
+    const svg = got.written();
+
+    // The FB group's rows are R1 to ground (y=80) then R2 to V_OUT (y=120):
+    // a return heading below sits on the bottom edge, so R2 is the one that
+    // turns, onto the column at x=312, and its lane lands on VOUT's stub.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, svg, "transform=\"rotate(90"));
+    // R2 continues the FB bus straight down the bus column into the top of
+    // the VOUT group's bus — its own labelled V_OUT row, wired out to the text.
+    try testing.expect(std.mem.indexOf(u8, svg, "transform=\"rotate(90 302.0 140.0)\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "points=\"302.0,160.0 302.0,160.0 302.0,176.0 302.0,176.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "x1=\"302.0\" y1=\"176.0\" x2=\"212.0\" y2=\"176.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "x=\"194.0\" y=\"180.0\" text-anchor=\"end\"") != null);
+    // One name for the shared rail, and no outside feedback-loop lane.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, svg, ">V_OUT</text>"));
+    try testing.expect(std.mem.indexOf(u8, svg, "points=\"188.0,") == null);
 }

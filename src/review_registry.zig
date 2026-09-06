@@ -325,6 +325,105 @@ pub const rows: []const Row = &.{
         .closes_with = "fix the evaluator warning at the source span it names",
     },
     .{
+        .id = "source-tree-clean",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = screened,
+        .asserts = "The project tree carries no uncommitted change when the release evidence is taken.",
+        .engine = "fab_readiness.zig - project_status",
+        .closes_with = "commit or revert the working tree, then take the evidence again",
+    },
+    .{
+        .id = "layout-frozen",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = screened,
+        .asserts = "The reviewed layout is frozen: its parts are placed and locked and every sub-block layout is starred.",
+        .engine = "serve/pcb_describe.zig - completion ladder placement and sub_circuits rungs",
+        .closes_with = "lock the placement and star each sub-block's layout",
+    },
+    .{
+        .id = "release-gate-clear",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = screened,
+        .asserts = "The fabrication-readiness gate reports no blocking error for the reviewed layout.",
+        .engine = "serve/fab_release_service.zig - readiness errors",
+        .closes_with = "close every gate error the readiness run names",
+    },
+    .{
+        .id = "design-notes-closed",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .advisory,
+        .verdicts = binary,
+        .asserts = "Every design note raised against the board is closed.",
+        .engine = "serve/notes.zig - open tasks in <design>.notes.md",
+        .closes_with = "close the note, or restate it as a checklist item",
+    },
+    .{
+        .id = "release-differential-reviewed",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .advisory,
+        .verdicts = judged,
+        .asserts = "The fabrication package is diffed against the previous release and every change is intended.",
+        .engine = "gerber-dump --digest and netlist-dump on both commits (human)",
+        .closes_with = "record the differential in the audit's Disposition cell",
+    },
+    .{
+        .id = "source-revision-unavailable",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "The release can read the source revision the package is cut from.",
+        .engine = "fab_release.zig - source-revision-unavailable",
+        .closes_with = "run the release from a checkout whose revision the tool can read",
+    },
+    .{
+        .id = "source-worktree-dirty",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = binary,
+        .asserts = "The worktree the package is cut from carries no uncommitted change.",
+        .engine = "fab_release.zig - source-worktree-dirty",
+        .closes_with = "commit or revert the working tree, then cut the package again",
+    },
+    .{
+        .id = "source-snapshot-changed",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = binary,
+        .asserts = "The source did not change under the release while the package was being cut.",
+        .engine = "fab_release.zig - source-snapshot-changed",
+        .closes_with = "re-cut the package from a settled tree",
+    },
+    .{
+        .id = "source-bundle-ambiguous",
+        .layer = .unit,
+        .category = .identity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = binary,
+        .asserts = "Exactly one source bundle describes the release.",
+        .engine = "fab_release.zig - source-bundle-ambiguous",
+        .closes_with = "leave one source bundle beside the release and delete the others",
+    },
+    .{
         .id = "system-identity-complete",
         .layer = .system,
         .category = .identity,
@@ -392,6 +491,17 @@ pub const rows: []const Row = &.{
     },
 
     // ── Connectivity ──────────────────────────────────────────────
+    .{
+        .id = "erc-clean",
+        .layer = .unit,
+        .category = .connectivity,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = binary,
+        .asserts = "The electrical-rule check reports no error and no warning on the board.",
+        .engine = "erc.zig - runErc totals",
+        .closes_with = "close every violation the check reports, kind by kind",
+    },
     .{
         .id = "net-not-floating",
         .layer = .unit,
@@ -679,6 +789,18 @@ pub const rows: []const Row = &.{
         .closes_with = "(requirement \"…\" (check (pins-on-same-net (pins \"A\" \"B\" …))))",
     },
 
+    .{
+        .id = "interface-esd-protection",
+        .layer = .unit,
+        .category = .connectivity,
+        .scope = .net,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "Every externally exposed interface the system brief names carries a protection-class part when the brief declares an ESD class.",
+        .engine = "brief_checks.zig - Observation interface-esd-protection, via preflight FindingKind.brief",
+        .closes_with = "place a TVS/ESD part on the interface net, or a part with (class protection)",
+    },
+
     // ── Supply voltages ───────────────────────────────────────────
     .{
         .id = "rail-voltage-consistent",
@@ -769,6 +891,18 @@ pub const rows: []const Row = &.{
         .closes_with = "(requirement \"…\" (check (voltage-not-above (pin \"A\") (pin \"B\") (margin M))))",
     },
 
+    .{
+        .id = "brief-input-power-envelope",
+        .layer = .unit,
+        .category = .supply_voltages,
+        .scope = .net,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "The board net the system brief's input power feeds proves an envelope covering the brief's (voltage LO HI) window and any (transient V) it must survive.",
+        .engine = "brief_checks.zig - Observation brief-input-power-envelope, via preflight FindingKind.brief",
+        .closes_with = "(port … (rated LO HI)) or (net-envelope \"NET\" (rated LO HI)) on the input net, and (input-power … (feeds \"NET\")) in the brief",
+    },
+
     // ── Power budget and copper ───────────────────────────────────
     .{
         .id = "rail-budget-margin",
@@ -824,6 +958,28 @@ pub const rows: []const Row = &.{
         .asserts = "A classed part's supply pins carry the current annotations the budget needs.",
         .engine = "review_profiles.zig - supply-current; preflight profile_incomplete",
         .closes_with = "(i-typ A) and (i-max A) on the instance's supply pin forms",
+    },
+    .{
+        .id = "power-voltage-drop",
+        .layer = .unit,
+        .category = .power_budget,
+        .scope = .net,
+        .policy = .blocking,
+        .verdicts = binary,
+        .asserts = "Maximum-current copper loop loss stays within the authored voltage budget.",
+        .engine = "placement/drc_power_voltage.zig",
+        .closes_with = "widen or shorten the supply and return path, or correct the load model",
+    },
+    .{
+        .id = "power-voltage-unverified",
+        .layer = .unit,
+        .category = .power_budget,
+        .scope = .net,
+        .policy = .waivable,
+        .verdicts = declared_screened,
+        .asserts = "The voltage budget has complete maximum loads, source terminals and resistive supply and return models.",
+        .engine = "placement/drc_power_voltage.zig",
+        .closes_with = "supply the missing model named by the finding; unmodeled sheet resistance cannot prove a pass",
     },
     .{
         .id = "power-width",
@@ -1085,6 +1241,29 @@ pub const rows: []const Row = &.{
         .closes_with = "(requirement \"…\" (check (cap-rating (pin \"A\") (pin \"B\") (min-ratio X))))",
     },
 
+    .{
+        .id = "part-temperature-grade",
+        .layer = .unit,
+        .category = .component_ratings,
+        .scope = .part,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "Every placed part's declared temperature grade meets or exceeds the grade the system brief requires.",
+        .engine = "brief_checks.zig - Observation part-temperature-grade, via preflight FindingKind.brief",
+        .closes_with = "(temperature-grade industrial) on the component, the call site, or the parts-table row",
+    },
+    .{
+        .id = "component-derating-standard",
+        .layer = .unit,
+        .category = .component_ratings,
+        .scope = .part,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "Applied stress stays inside the fraction of each part's rating that the derating standard named by the system brief allows.",
+        .engine = "fab_readiness.zig - component-derating (ceramic voltage, resistor power, inductor current)",
+        .closes_with = "select a higher-rated part, or state the programme's own standard in (derating \"…\")",
+    },
+
     // ── Thermal ───────────────────────────────────────────────────
     .{
         .id = "thermal-dissipation-known",
@@ -1131,6 +1310,29 @@ pub const rows: []const Row = &.{
         .closes_with = "(board (heatsink …)) or the airflow the release assumes",
     },
 
+    .{
+        .id = "thermal-brief-ambient",
+        .layer = .unit,
+        .category = .thermal,
+        .scope = .board,
+        .policy = .advisory,
+        .verdicts = declared,
+        .asserts = "The thermal screen runs at the ambient the governing system brief states, in the scenario its declared cooling case maps to.",
+        .engine = "brief_checks.zig - Plan/AmbientSource, rendered by review_thermal.zig on all six thermal surfaces",
+        .closes_with = "(brief (environment (ambient MIN MAX) (cooling …))) on the system that owns the board",
+    },
+    .{
+        .id = "part-operating-range",
+        .layer = .unit,
+        .category = .thermal,
+        .scope = .part,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "Every placed part's rated ambient range covers the whole ambient window the system brief states.",
+        .engine = "brief_checks.zig - Observation part-operating-range, via preflight FindingKind.brief",
+        .closes_with = "(thermal (operating MIN MAX)) in the component body, or a part rated over the brief window",
+    },
+
     // ── Datasheet compliance ──────────────────────────────────────
     .{
         .id = "datasheet-declared",
@@ -1175,6 +1377,28 @@ pub const rows: []const Row = &.{
         .asserts = "Every active part carries at least one cited datasheet requirement.",
         .engine = "erc.zig - missing_requirements; review_profiles.zig requirements",
         .closes_with = "(requirement \"…\" (ref …) (check …)) or (ignore-requirements) for an inert part",
+    },
+    .{
+        .id = "verification-evidence-incomplete",
+        .layer = .unit,
+        .category = .datasheet_compliance,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "The release carries the verification evidence its lock names.",
+        .engine = "fab_gate.zig - verification-evidence-incomplete",
+        .closes_with = "attach the verification evidence the release lock asks for",
+    },
+    .{
+        .id = "class-profile-items-met",
+        .layer = .unit,
+        .category = .datasheet_compliance,
+        .scope = .part,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "Every active part meets every item of the component-class profile it was judged under.",
+        .engine = "review_profiles.zig - evaluate; preflight.zig profile_incomplete",
+        .closes_with = "author the declaration each unmet item names, or (class …) the part correctly",
     },
     .{
         .id = "requirement-check",
@@ -1298,6 +1522,39 @@ pub const rows: []const Row = &.{
         .asserts = "A placement's typed attributes agree with the parts-table row it resolves to.",
         .engine = "erc.zig - attribute_row_mismatch; parts.zig",
         .closes_with = "edit the attributes or the parts-table row so they agree",
+    },
+    .{
+        .id = "bom-selection-drift",
+        .layer = .unit,
+        .category = .bom,
+        .scope = .part,
+        .policy = .blocking,
+        .verdicts = binary,
+        .asserts = "Every placement's fitted identity still matches the selection the BOM sidecar recorded.",
+        .engine = "fab_schematic_gate.zig - bom-selection-drift",
+        .closes_with = "rebuild the BOM, or restore the selection the design authored",
+    },
+    .{
+        .id = "bom-evidence-incomplete",
+        .layer = .unit,
+        .category = .bom,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "The release carries the BOM evidence its lock names.",
+        .engine = "fab_gate.zig - bom-evidence-incomplete",
+        .closes_with = "attach the BOM evidence the release lock asks for",
+    },
+    .{
+        .id = "bom-lifecycle-stock-dated",
+        .layer = .unit,
+        .category = .bom,
+        .scope = .part,
+        .policy = .waivable,
+        .verdicts = judged,
+        .asserts = "Every purchasable placement is a lifecycle-active part with a dated stock check.",
+        .engine = "resolve_mpn and check_stock, read by a reviewer",
+        .closes_with = "record the lifecycle and stock date, or replace the part",
     },
     .{
         .id = "centroid-parity",
@@ -1652,6 +1909,39 @@ pub const rows: []const Row = &.{
         .asserts = "Every net's drawn copper forms one connected island.",
         .engine = "placement/drc.zig - net_open; placement/net_open.zig via serve/drc_rules.zig",
         .closes_with = "route the missing link between the islands",
+    },
+    .{
+        .id = "layout-evidence-incomplete",
+        .layer = .unit,
+        .category = .layout,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = declared,
+        .asserts = "The release carries the layout evidence its lock names.",
+        .engine = "fab_gate.zig - layout-evidence-incomplete",
+        .closes_with = "attach the layout evidence the release lock asks for",
+    },
+    .{
+        .id = "layout-ladder-complete",
+        .layer = .unit,
+        .category = .layout,
+        .scope = .board,
+        .policy = .blocking,
+        .verdicts = screened,
+        .asserts = "Every rung of the layout completion ladder is done on the reviewed layout.",
+        .engine = "placement/progress.zig - completion ladder",
+        .closes_with = "finish the open items the rung lists",
+    },
+    .{
+        .id = "assembly-fiducials-present",
+        .layer = .unit,
+        .category = .layout,
+        .scope = .board,
+        .policy = .waivable,
+        .verdicts = waivable_population,
+        .asserts = "The board carries the global fiducials an assembler needs, plus local ones beside fine-pitch and BGA placements.",
+        .engine = "review_audit.zig - evaluated fiducial population",
+        .closes_with = "place fiducial parts on the board, or waive the row for a hand-assembled build",
     },
     .{
         .id = "drc",
@@ -2043,6 +2333,8 @@ pub fn drcId(kind: drc.Kind) []const u8 {
         .min_drill => "drc-min-drill",
         .track_width => "drc-track-width",
         .power_width => "power-width",
+        .power_voltage_drop => "power-voltage-drop",
+        .power_voltage_unverified => "power-voltage-unverified",
         .power_width_envelope => "power-width-envelope",
         .via_current => "via-current",
         .via_current_envelope => "via-current-envelope",
@@ -2076,12 +2368,15 @@ pub fn drcId(kind: drc.Kind) []const u8 {
 /// schematic gate can emit. Each is registered under its own name, so the
 /// gate's id IS the registry id; the test below proves it.
 pub const fab_finding_ids: []const []const u8 = &.{
+    "bom-evidence-incomplete",
     "bom-identity",
+    "bom-selection-drift",
     "bom-spec-library-missing",
     "bom-spec-missing",
     "bom-spec-unmatched",
     "cache-layout",
     "centroid-parity",
+    "component-derating-standard",
     "component-rating-invalid",
     "component-rating-margin",
     "component-rating-missing",
@@ -2098,6 +2393,7 @@ pub const fab_finding_ids: []const []const u8 = &.{
     "fabrication-identity-incomplete",
     "footprint-geometry-unresolved",
     "hairline-gap",
+    "layout-evidence-incomplete",
     "malformed-outline",
     "missing-identity",
     "no-outline",
@@ -2106,16 +2402,27 @@ pub const fab_finding_ids: []const []const u8 = &.{
     "revision-missing",
     "reviewed-input-evidence-incomplete",
     "schematic-check-failed",
+    "source-bundle-ambiguous",
+    "source-revision-unavailable",
+    "source-snapshot-changed",
+    "source-worktree-dirty",
     "unresolvable-pin",
     "unrouted-net",
+    "verification-evidence-incomplete",
     "via-no-drill",
 };
 
 /// The registry id a fabrication finding belongs to, or null when the id is
 /// not one the registry knows.
+///
+/// Most gate findings carry the gate's own id, which IS the registry id. The
+/// schematic half of the gate instead folds the release check run in under the
+/// check KIND's name (`requirement`, `assertion`, …), so those spellings are
+/// aliased onto the rows that already carry those checks rather than being
+/// registered a second time.
 pub fn fabFindingId(finding_id: []const u8) ?[]const u8 {
-    const row = lookup(finding_id) orelse return null;
-    return row.id;
+    if (lookup(finding_id)) |row| return row.id;
+    return keyedId(fab_alias_table, finding_id);
 }
 
 /// A string key of an engine vocabulary paired with the registry row it means.
@@ -2133,6 +2440,17 @@ fn keyedId(table: []const KeyedId, key: []const u8) ?[]const u8 {
     }
     return null;
 }
+
+/// Check-run kind names the fabrication gate emits as finding ids, each paired
+/// with the registry row that already carries that check.
+const fab_alias_table: []const KeyedId = &.{
+    .{ .key = "requirement", .id = "requirement-check" },
+    .{ .key = "assertion", .id = "design-assertion" },
+    .{ .key = "profile_incomplete", .id = "class-profile-items-met" },
+    .{ .key = "datasheet_review", .id = "datasheet-review-complete" },
+    .{ .key = "eval_warning", .id = "build-warning-free" },
+    .{ .key = "erc", .id = "erc-clean" },
+};
 
 /// The eight class-profile item codes `review_profiles.evaluate` can push,
 /// each paired with the registry row it fills.
@@ -2152,15 +2470,32 @@ pub fn profileItemId(code: []const u8) ?[]const u8 {
     return keyedId(profile_item_table, code);
 }
 
+/// The four brief-driven check ids `brief_checks.observe` can produce. A
+/// `.brief` finding carries its id in `requirement.id`, so the join is a
+/// membership test rather than a second spelling of the vocabulary.
+const brief_check_table: []const KeyedId = &.{
+    .{ .key = "part-operating-range", .id = "part-operating-range" },
+    .{ .key = "part-temperature-grade", .id = "part-temperature-grade" },
+    .{ .key = "brief-input-power-envelope", .id = "brief-input-power-envelope" },
+    .{ .key = "interface-esd-protection", .id = "interface-esd-protection" },
+};
+
+/// The registry id a brief-driven check code belongs to, or null when the code
+/// is not one `brief_checks` can emit.
+pub fn briefCheckId(code: []const u8) ?[]const u8 {
+    return keyedId(brief_check_table, code);
+}
+
 /// The registry id a strict-preflight finding belongs to. `code` is the
-/// `profile_incomplete` item code and is ignored for the other kinds; an
-/// unregistered item code yields null.
+/// `profile_incomplete` item code or the `brief` check id and is ignored for
+/// the other kinds; an unregistered code yields null.
 pub fn preflightId(kind: preflight.FindingKind, code: []const u8) ?[]const u8 {
     return switch (kind) {
         .requirement => "requirement-check",
         .datasheet_review => "datasheet-review-complete",
         .eval_warning => "build-warning-free",
         .profile_incomplete => profileItemId(code),
+        .brief => briefCheckId(code),
     };
 }
 
@@ -2395,11 +2730,30 @@ fn categoryHasRow(category: Category) bool {
     return false;
 }
 
-/// Every preflight finding kind resolves, using the profile item codes for
-/// the one kind that carries them.
+/// The code a finding of this kind carries, for the resolution walk below.
+/// The two kinds that carry one are checked against their whole table by the
+/// helpers beneath; this only has to hand each kind something it accepts.
+fn sampleCode(kind: preflight.FindingKind) []const u8 {
+    return switch (kind) {
+        .profile_incomplete => "requirements",
+        .brief => "part-operating-range",
+        .requirement, .datasheet_review, .eval_warning => "",
+    };
+}
+
+/// Every preflight finding kind resolves, using each kind's own code space.
 fn preflightKindsResolve() bool {
     for (std.enums.values(preflight.FindingKind)) |kind| {
-        const id = preflightId(kind, "requirements") orelse return false;
+        const id = preflightId(kind, sampleCode(kind)) orelse return false;
+        if (lookup(id) == null) return false;
+    }
+    return true;
+}
+
+/// Every brief-driven check code resolves to a registered row.
+fn briefCodesResolve() bool {
+    for (brief_check_table) |entry| {
+        const id = briefCheckId(entry.key) orelse return false;
         if (lookup(id) == null) return false;
     }
     return true;
@@ -2475,6 +2829,8 @@ test "every check primitive and net-rule predicate maps to a registered row" {
 test "every preflight kind and profile item code maps to a registered row" {
     try std.testing.expect(preflightKindsResolve());
     try std.testing.expect(profileCodesResolve());
+    try std.testing.expect(briefCodesResolve());
+    try std.testing.expectEqual(@as(?[]const u8, null), briefCheckId("no-such-brief-check"));
 }
 
 // spec: review-audit - every rail, thermal, loop and interface-contract verdict maps to a registered review check
