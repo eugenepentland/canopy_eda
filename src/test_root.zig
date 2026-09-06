@@ -440,6 +440,7 @@ test {
     _ = @import("tool_cli.zig");
     _ = @import("render_thermal_png.zig");
     _ = @import("serve.zig");
+    _ = @import("serve_args.zig");
     _ = @import("serve/assembly_debug.zig");
     _ = @import("serve/assembly_page_cache.zig");
     _ = @import("serve/api.zig");

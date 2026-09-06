@@ -36,6 +36,25 @@ full contract are in [CONTRIBUTING.md](CONTRIBUTING.md) § 4.
 - completeness-waiver: integer overflow (a single forward pass over argv with no arithmetic on its length)
 - completeness-waiver: panic-free (an allocation failure returns the unfiltered argv rather than failing the run)
 
+## Serve CLI
+
+- help is answered without opening logs or a socket
+- a malformed port is rejected instead of silently serving the default
+- a value-taking flag with no value is an error, not a default
+- an unrecognised flag or stray positional is rejected
+- a valid command line still produces the same options as before
+- the no-argument defaults are unchanged
+- NETLISP_AUTH_DIR is the fallback and --auth-dir overrides it
+- every rejection renders a diagnostic naming the argument
+- completeness-waiver: empty inputs (an empty argv is the documented default command line and is accepted as `.run`)
+- completeness-waiver: large inputs (argv is bounded by the operating system's own limit and every entry is borrowed, never copied)
+- completeness-waiver: unauthorized access (the parser grants nothing; `--allow-remote` is passed through to the server, which owns the auth decision)
+- completeness-waiver: i/o failure (the parser touches no filesystem — that is the point of deciding the command line before anything is opened)
+- completeness-waiver: concurrent access (the command line is parsed once, in `main`, before any thread or socket exists)
+- completeness-waiver: malformed encoding (arguments are compared as bytes; only `--port` is decoded, and a non-numeric value is a reported rejection)
+- completeness-waiver: integer overflow (the sole conversion is a checked `parseInt(u16, ...)` whose overflow is the `bad_port` rejection)
+- completeness-waiver: panic-free (the parser allocates nothing and returns a value on every path; `describe` truncates rather than failing)
+
 ## CLI allocation lifetime
 
 - one-shot CLI commands keep process-lifetime evaluation storage on the automatically cleaned process arena

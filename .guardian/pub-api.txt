@@ -5998,6 +5998,13 @@ src/serve/warm_sched.zig::sinceStartUs | fn sinceStartUs() i64
 src/serve/warm_sched.zig::workerCount | fn workerCount(cap: usize) usize
 src/serve/warm_sched.zig::yieldToInteractive | fn yieldToInteractive() void
 src/serve/warmup.zig::spawn | fn spawn(ctx: *Server) void
+src/serve_args.zig::Invalid struct_
+src/serve_args.zig::Kind enum_
+src/serve_args.zig::Parsed union_
+src/serve_args.zig::default_port value
+src/serve_args.zig::describe | fn describe(self: Invalid, buf: []u8) []const u8
+src/serve_args.zig::parse | fn parse(args: []const []const u8, auth_dir_env: ?[]const u8) Parsed
+src/serve_args.zig::usage_text value
 src/sexp_form_bounds.zig::closeIndex | fn closeIndex(text: []const u8, open: usize) ?usize
 src/sexp_form_bounds.zig::endIndex | fn endIndex(text: []const u8, open: usize) ?usize
 src/sexpr/ast.zig::Node struct_

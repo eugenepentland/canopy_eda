@@ -15,6 +15,7 @@ const footprint_conv = @import("convert/footprint.zig");
 const symbol_conv = @import("convert/symbol.zig");
 const alt_functions = @import("convert/alt_functions.zig");
 const serve_mod = @import("serve.zig");
+const serve_args = @import("serve_args.zig");
 const warm_sched = @import("serve/warm_sched.zig");
 const commands = @import("commands.zig");
 const elmer_thermal_command = @import("elmer_thermal_command.zig");
@@ -42,8 +43,6 @@ pub var process_environ_map: ?*const std.process.Environ.Map = null;
 pub var process_build_id: []const u8 = "unknown";
 
 // ── Constants ─────────────────────────────────────────────────────
-const default_serve_port: u16 = 7050;
-const parse_port_radix: u8 = 10;
 const filter_flag = "--filter";
 const convert_error_fmt = "Convert error: {}\n";
 const error_reading_fmt = "Error reading {s}: {}\n";
@@ -461,21 +460,22 @@ fn cmdGenLanguageDocs(allocator: std.mem.Allocator, out_path: []const u8, check_
 /// Resolve and start the web server (`serve` command). Extracted from
 /// `main`'s dispatch chain to keep that chain's cognitive complexity under the
 /// Guardian cap.
+/// Decide the whole `serve` command line before anything is opened, then hand
+/// the accepted options to the server.
+///
+/// The decision lives in `serve_args.zig` as a pure function so that `--help`
+/// and every rejection are answered without creating the interaction log or
+/// binding the port — `serve` is the only subcommand where a typo used to
+/// start a long-running service instead of printing a diagnostic.
 fn dispatchServe(io: std.Io, allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, args: []const []const u8, arena: std.mem.Allocator, environ: *const std.process.Environ.Map) !void {
-    const project_dir = optionalArg(args, "--project-dir") orelse ".";
-    const port: u16 = if (optionalArg(args, "--port")) |p|
-        std.fmt.parseInt(u16, p, parse_port_radix) catch default_serve_port
-    else
-        default_serve_port;
-    const auth_dir_override = optionalArg(args, "--auth-dir") orelse readAuthDirEnv(arena, environ);
-    try serve_mod.serve(io, allocator, scratch_allocator, .{
-        .port = port,
-        .bind = optionalArg(args, "--bind") orelse serve_mod.default_bind_address,
-        .project_dir = project_dir,
-        .auth_dir = auth_dir_override,
-        .skip_warmup = hasFlag(args, "--skip-warmup"),
-        .allow_remote = hasFlag(args, "--allow-remote"),
-    });
+    switch (serve_args.parse(args, readAuthDirEnv(arena, environ))) {
+        .help => try writeStdout(serve_args.usage_text),
+        .invalid => |invalid| {
+            var buf: [512]u8 = undefined;
+            exit.fatal("{s}\n", .{invalid.describe(&buf)});
+        },
+        .run => |options| try serve_mod.serve(io, allocator, scratch_allocator, options),
+    }
 }
 
 /// Print the runtime build id (the deployment-provided netlisp commit from
