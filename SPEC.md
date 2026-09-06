@@ -7687,6 +7687,11 @@ is what makes the predicate exact rather than approximately right.
 
 ## Web Server
 
+- coordinate-scoped clear_routes can remove intersecting selected tracks and vias while preserving distant copper and foreign nets
+- clear_routes preserves complete layout metadata and rejects malformed track-window requests without persistence
+- coordinate-scoped track clearing refuses selected swept RF paths without partial deletion
+- coordinate-scoped track clearing tests actual arc copper rather than its chord or a bounding box
+
 - GET /api/part-review/:name answers one chip per placed part and /:ref answers that part's sheet or 404
 - GET /api/review-card/:name answers the composed Board Review Card and 404s an unknown design
 - The schematic BOM card carries a Review column whose cell names the group's ref-deses so the viewer can fill one verdict chip per row

@@ -1112,6 +1112,16 @@ no priority edit reopens it"), no amount of DSL/priority iteration can close it;
 the loop is closed. **`add_tracks`** is the write seam that breaks it — the
 mutation counterpart of `clear_routes`:
 
+For a local repair, `clear_routes` accepts `x`, `y`, `radius`, a `nets` or
+`groups` scope, and `include_tracks:true`. This removes selected track/arc
+records whose copper intersects the circular window, plus selected vias whose
+centres lie inside it. Records are atomic: a long crossing track is removed in
+full. Distant records, foreign nets, pours and mechanical/fabrication metadata
+are preserved. Swept RF paths require whole-net clearing and are refused in
+this mode. Omitting `include_tracks` keeps the existing via-only operation.
+Use this on a separate candidate, then `close_open_nets` to reconnect both the
+original target and every displaced net before accepting the repair.
+
 ```jsonc
 add_tracks {
   "name": "barracuda",

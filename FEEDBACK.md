@@ -956,3 +956,8 @@ New from the wave:
 - **friction:** My first comparison watcher launched the staging executable as soon as `build.status` passed, before `prepare-release.sh` stripped it. That caused `strip` to fail with Text file busy and required another release run. This was a comparison-setup error; copying the executable to a task-owned path avoids holding the packaging target open.
 - **idea:** Document that staging candidates remain mutable until `verified` exists; functional comparison tools should use an independent executable copy, while deployment must still require the completed release gate.
 - **status:** open
+
+
+## 2026-09-06 · codex · RF fanout review counts and release evidence
+- **friction:** The review prose manually summed `describe_pcb_layout.routed.drc_list` categories as 461 warnings; the native result contains 462. Independent live/frozen equality exposed the typo after a 595-second release verification (including one automatic browser timing retry), requiring a corrected commit and its release gate.
+- **idea:** Add a native review-table export with explicit error/warning counts, saved versus physical copper counts, and the source-layout identity. Generate review tables directly from that witness so manually maintained totals cannot trigger extra verification cycles or disagree with the viewer.
