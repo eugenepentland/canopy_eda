@@ -4,6 +4,11 @@ zig-out/
 .deploy/
 # Debug-binary side installs (zig build -p zig-out-dbg); a 200 MB Debug
 # netlisp was once committed from here by a path-scoped commit sweep.
+# The glob matches EVERY side prefix, not just the two that happened to be
+# named here: CLAUDE.md tells you to "give a side build its own prefix", so the
+# set is open-ended by design, and an unlisted one dirties the worktree —
+# which `prepare-release.sh` then refuses, several minutes into a release.
+zig-out-*/
 zig-out-dbg/
 zig-out-browser-perf/
 .zig-cache
